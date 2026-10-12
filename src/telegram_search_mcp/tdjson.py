@@ -1440,6 +1440,9 @@ class TDLibClient:
                     raise MessageSendNotAttempted('formatted text revalidation failed') from error
                 return self._send_message_content(chat_id, content, 'messageText',
                     attempt_id=attempt_id, outgoing_entities=frozen,
+                    # TDLib may project an ordinary self-send into the account's
+                    # Saved Messages topic. This is receipt identity, not routing.
+                    saved_messages_topic_id=expected_account_id if chat_id == expected_account_id else None,
                     pre_transport_guard=current_authority)
         content = {
             "@type": "inputMessageText",
@@ -1718,6 +1721,7 @@ class TDLibClient:
         self, chat_id: int, content: dict[str, Any], expected_type: str,
         *, attempt_id: str | None = None, reply_anchor: tuple[int,int] | None = None, artifact_reply: bool = False, pre_transport_guard: Callable[[],bool] | None = None,
         forum_topic_id: int | None = None, outgoing_entities: FrozenOutgoingEntities = (),
+        saved_messages_topic_id: int | None = None,
     ) -> int:
         sending_id = secrets.randbelow((1 << 31) - 1) + 1
         for _ in range(8):
@@ -1750,6 +1754,7 @@ class TDLibClient:
                     if expected_type == "messageText" else None, reply_anchor=reply_anchor,
                     **({'forum_topic_id': forum_topic_id} if forum_topic_id is not None else {}),
                     **({'outgoing_entities': outgoing_entities} if outgoing_entities else {}),
+                    **({'saved_messages_topic_id': saved_messages_topic_id} if saved_messages_topic_id is not None else {}),
                     **({'caption_sha256':hashlib.sha256(content['caption']['text'].encode('utf-8')).hexdigest(),
                         'voice_duration':content['voice_note']['duration'] if expected_type=='messageVoiceNote' else None,
                         'waveform_sha256':hashlib.sha256(base64.b64decode(content['voice_note']['waveform'],validate=True)).hexdigest() if expected_type=='messageVoiceNote' else None,

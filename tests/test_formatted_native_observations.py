@@ -93,6 +93,61 @@ class FormattedNativeTests(unittest.TestCase):
   s=next(r for r in raw.sent if r['@type']=='sendMessage');self.assertEqual(s['input_message_content'],payload([])['input_message_content']);self.assertIsNone(s['topic_id']);self.assertIsNone(s['reply_to']);self.assertEqual([r['@type'] for r in raw.sent],['sendMessage'])
 def RawMessage():
  r=Raw();r.send({'@type':'getMessage','@extra':'x'});return r.events.popleft()
+
+class SavedMessagesRaw(Raw):
+ def __init__(self, chat_id=7):
+  super().__init__();self.chat_id=chat_id;self.topic={'@type':'messageTopicSavedMessages','saved_messages_topic_id':7}
+ def send(self,p):
+  if p['@type']=='getChat':
+   self.sent.append(copy.deepcopy(p));self.events.append({'@type':'chat','id':self.chat_id,'title':self.title,'type':{'@type':'chatTypePrivate','user_id':self.chat_id},'@extra':p['@extra']});return
+  super().send(p)
+  if p['@type']=='sendMessage':
+   for event in self.events:
+    m=event.get('message',event);m['chat_id']=self.chat_id;m['topic_id']=copy.deepcopy(self.topic)
+
+class SavedMessagesNativeTests(unittest.TestCase):
+ def sender(self,chat_id=7):
+  raw=SavedMessagesRaw(chat_id);p=TDLibClient(raw=raw);p._ready=True;self.addCleanup(p.close);return raw,p
+ def send(self,p):
+  return p.send_text_message(p._raw.chat_id,TEXT,attempt_id='saved',outgoing_entities=FROZEN,expected_account_id=7,expected_recipient_title='Synthetic forum',pre_send_guard=lambda:True)
+ def test_formatted_self_send_confirms_saved_topic_without_changing_wire_target(self):
+  raw,p=self.sender();self.assertEqual(self.send(p),701)
+  sends=[r for r in raw.sent if r['@type']=='sendMessage'];self.assertEqual(len(sends),1)
+  self.assertEqual(sends[0]['chat_id'],7);self.assertIsNone(sends[0]['topic_id']);self.assertIsNone(sends[0]['reply_to'])
+  self.assertEqual(sends[0]['input_message_content']['text']['entities'],NATIVE)
+  self.assertEqual((p._send_observations.snapshot('saved').status,p._send_observations.snapshot('saved').message_id),('sent',701))
+ def test_null_topic_on_formatted_self_send_still_confirms(self):
+  raw,p=self.sender();raw.topic=None;self.assertEqual(self.send(p),701)
+ def test_saved_topic_may_appear_only_on_the_final_correlated_message(self):
+  raw,p=self.sender();original=raw.send
+  def send(payload):
+   original(payload)
+   if payload['@type']=='sendMessage':raw.events[0]['topic_id']=None
+  raw.send=send;self.assertEqual(self.send(p),701)
+ def test_foreign_or_malformed_saved_topic_never_confirms_or_retries(self):
+  for topic in [{'@type':'messageTopicSavedMessages','saved_messages_topic_id':8},{'@type':'messageTopicSavedMessages','saved_messages_topic_id':True},{'@type':'messageTopicSavedMessages','saved_messages_topic_id':7,'extra':1},{'@type':'messageTopicSavedMessages'},TOPIC]:
+   with self.subTest(topic=topic):
+    raw,p=self.sender();raw.topic=topic
+    with self.assertRaises(MessageSendOutcomeUnknown):self.send(p)
+    self.assertEqual(sum(r['@type']=='sendMessage' for r in raw.sent),1)
+    self.assertEqual((p._send_observations.snapshot('saved').status,p._send_observations.snapshot('saved').temporary_id),('registered',None))
+ def test_saved_topic_in_another_private_chat_never_confirms(self):
+  raw,p=self.sender(8)
+  with self.assertRaises(MessageSendOutcomeUnknown):self.send(p)
+  self.assertEqual(sum(r['@type']=='sendMessage' for r in raw.sent),1)
+ def test_saved_confirmation_still_requires_exact_styles_and_final_event(self):
+  for mutate,loss in [(lambda m:m['content']['text'].update(entities=[]),False),(lambda m:m['content']['text'].update(text='Different'),False),(None,True)]:
+   with self.subTest(loss=loss,mutate=mutate):
+    raw,p=self.sender();raw.mutate=mutate;raw.loss=loss
+    with self.assertRaises(MessageSendOutcomeUnknown):self.send(p)
+    self.assertEqual(sum(r['@type']=='sendMessage' for r in raw.sent),1)
+    self.assertEqual(p._send_observations.snapshot('saved').status,'pending')
+ def test_saved_expectation_cannot_change_destination_or_enable_reply_routes(self):
+  base={'text_sha256':hashlib.sha256(TEXT.encode()).hexdigest(),'outgoing_entities':FROZEN,'saved_messages_topic_id':7}
+  for change in [{'saved_messages_topic_id':True},{'saved_messages_topic_id':8},{'saved_messages_topic_id':2**53},{'outgoing_entities':()},{'reply_anchor':(7,55)},{'forum_topic_id':41}]:
+   with self.subTest(change=change),self.assertRaises(ObservationUnavailable):
+    SendObservations().register('a','x',12,7,'messageText',**{**base,**change})
+
 class FormattedReducerTests(unittest.TestCase):
  def register(self,topic=None,anchor=None):
   self.assertIn('outgoing_entities',inspect.signature(SendObservations.register).parameters,'FEATURE ABSENT: immutable expected styles')

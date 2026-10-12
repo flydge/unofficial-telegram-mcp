@@ -112,6 +112,25 @@ class DocumentReaderTests(unittest.TestCase):
         self.assertEqual(result.processed_bytes, 0)
         self.assertEqual(result.text, "")
 
+    def test_png_with_bad_idat_crc_returns_error_without_image(self) -> None:
+        path = self.base / "broken.png"
+        Image.new("RGB", (1, 1), "red").save(path, format="PNG")
+        data = bytearray(path.read_bytes())
+        offset = 8
+        while data[offset + 4:offset + 8] != b"IDAT":
+            offset += 12 + int.from_bytes(data[offset:offset + 4], "big")
+        crc = offset + 8 + int.from_bytes(data[offset:offset + 4], "big")
+        data[crc] ^= 1
+        path.write_bytes(data)
+
+        result = read_document(path)
+
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.processed_bytes, 0)
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.image_paths, ())
+        self.assertTrue(result.error)
+
     def test_missing_file_is_explicit_error(self) -> None:
         result = read_document(self.base / "missing.txt")
 

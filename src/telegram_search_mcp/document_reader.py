@@ -191,5 +191,5 @@ def read_document(
         if kind == "pdf":
             return _read_pdf(path, total, max_chars, max_pages)
         return _read_image(path, total, name or path.name, mime_type)
-    except (OSError, UnicodeError, ValueError, RuntimeError, zipfile.BadZipFile, fitz.FileDataError) as exc:
+    except (OSError, UnicodeError, ValueError, RuntimeError, SyntaxError, zipfile.BadZipFile, fitz.FileDataError) as exc:
         return DocumentReadResult(status="error", error=type(exc).__name__)

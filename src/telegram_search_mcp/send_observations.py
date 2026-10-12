@@ -38,6 +38,7 @@ class SendObservation:
     waveform_size: int | None = None
     forum_topic_id: int | None = None
     outgoing_entities: FrozenOutgoingEntities = ()
+    saved_messages_topic_id: int | None = None
 
 
 def integer(value, *, positive=False):
@@ -141,7 +142,7 @@ class SendObservations:
         with self._lock:
             self._entries.clear()
 
-    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = ()):
+    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None):
         if type(outgoing_entities) is not tuple or len(outgoing_entities) > 32:
             raise ObservationUnavailable('invalid frozen outgoing expectation')
         if outgoing_entities:
@@ -171,6 +172,11 @@ class SendObservations:
         if reply_anchor is not None and (type(reply_anchor) is not tuple or len(reply_anchor)!=2 or
                 not integer(reply_anchor[0]) or reply_anchor[0]!=chat_id or not integer(reply_anchor[1],positive=True)):
             raise ObservationUnavailable("invalid reply observation")
+        if saved_messages_topic_id is not None and (
+                not integer(saved_messages_topic_id, positive=True) or saved_messages_topic_id != chat_id or
+                not outgoing_entities or content_type != 'messageText' or
+                reply_anchor is not None or forum_topic_id is not None or caption_sha256 is not None):
+            raise ObservationUnavailable('invalid saved messages observation')
         if caption_sha256 is not None:
             if (reply_anchor is None or content_type not in {'messageDocument','messagePhoto','messageVoiceNote'}
                 or type(caption_sha256) is not str or len(caption_sha256)!=64
@@ -185,7 +191,7 @@ class SendObservations:
             if (attempt_id in self._entries or len(self._entries) >= self._capacity or
                     any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
-            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities)
+            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id)
 
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
@@ -269,7 +275,9 @@ class SendObservations:
             and SendObservations._text_matches(value["content"], observation.text_sha256, observation.outgoing_entities)
             and SendObservations._reply_matches(value, observation.reply_anchor, observation.forum_topic_id)
             and (not observation.outgoing_entities or observation.reply_anchor is not None or value.get('reply_to') is None)
-            and (not observation.outgoing_entities or observation.forum_topic_id is not None or value.get('topic_id') is None)
+            and (not observation.outgoing_entities or observation.forum_topic_id is not None or value.get('topic_id') is None or (
+                observation.saved_messages_topic_id is not None and strict_shape(value.get('topic_id'),
+                    {'@type': 'messageTopicSavedMessages', 'saved_messages_topic_id': observation.saved_messages_topic_id})))
             and (observation.forum_topic_id is None or (
                 strict_shape(value.get('topic_id'), {'@type': 'messageTopicForum',
                     'forum_topic_id': observation.forum_topic_id}) and

@@ -14,9 +14,13 @@ Version 0.51.0 retains contract version 1, private IPC version 2 and 43 tools. T
 
 Release preparation diagnostics now include environment pin checks, evidence/preflight inspection, and an installed SDK probe. Their reports use `acceptance: false`; they do not run or replace consumer/provider acceptance. See [release-preflight](release-preflight.md).
 
+Acceptance found two defects addressed by bounded regression fixes: corrupt PNG checksums return an explicit reader error, and formatted ordinary self-sends can correlate TDLib's own Saved Messages topic with the revalidated account. The outgoing request still uses `topic_id=null`; this adds no topic selector or reply route. Exact content, entities and pending-to-final correlation remain required. An earlier uncertain attempt remains uncertain and must not be replayed.
+
 ## Evidence and remaining gates
 
-Historical unit, synthetic SDK and Inspector checks establish bounded technical properties only. This document does not claim native Codex, live Telegram delivery, persistent Inspector lifecycle, clean-user installation or unattended operation were accepted for this exact candidate. The end-to-end owner must bind fresh independent review, package/build/install checks and each applicable real consumer/provider scenario to the final public commit and package digests. Missing access or failed scenarios remain open gates.
+The initial candidate underwent installed SDK, persistent Inspector and native Codex checks against a live broker. Two separately approved test messages were observed by the owner: the forum send had a correlated provider receipt; the Saved Messages attempt retained an unknown machine outcome despite separate visibility evidence. These facts do not upgrade an uncertain receipt or prove visual rendering of each style. Local image blocks do not prove Telegram attachment download.
+
+Historical and initial-candidate evidence is supporting evidence only after these fixes. The end-to-end owner must bind fresh independent review, package/build/install checks and each applicable real consumer/provider scenario to the final public commit and package digests. Missing access or failed scenarios remain open gates. Clean-user provisioning and unattended operation are not claimed.
 
 The existing installation gap remains: Apple Silicon macOS, pinned TDLib, trusted Keychain provisioning and an already authorized dedicated TDLib session are required. There is no first-time login wizard or reproducible TDLib provisioning script. A clone of today's public `main` installs 0.35.0, not this unpublished candidate.
 
@@ -24,4 +28,4 @@ Project-license selection, dependency notices/provenance review and explicit pub
 
 ## Public presentation
 
-The public name, banner, install guide and repository links remain **Unofficial Telegram MCP**. Compatibility identifiers remain `telegram-search-mcp`, `telegram_search`, the Python namespace, CLI names and `TelegramSearchMCP` runtime paths. The changes made while exporting the 0.51.0 implementation are branding strings, public documentation, package documentation inclusion and matching test expectations; no new behavior or dependency upgrade is introduced by this preparation step.
+The public name, banner, install guide and repository links remain **Unofficial Telegram MCP**. Compatibility identifiers remain `telegram-search-mcp`, `telegram_search`, the Python namespace, CLI names and `TelegramSearchMCP` runtime paths. The export preserves branding strings, public documentation, package documentation inclusion and matching test expectations. Subsequent acceptance fixes are limited to the two failures described above; no new feature or dependency upgrade is introduced.
