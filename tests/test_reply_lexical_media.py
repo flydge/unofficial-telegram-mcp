@@ -182,7 +182,7 @@ class LexicalMediaSourceTests(unittest.TestCase):
                 span = entity('Hashtag'); span[field] = value
                 bads.append(caption_source(text='#x', spans=[span]))
         for update in ({'extra': None}, {'@type': 'other'}, {'type': None}, {'type': {'@type': True}},
-                       {'type': {'@type': 'textEntityTypeUrl'}},
+                       {'type': {'@type': 'textEntityTypeUrl', 'extra': None}},
                        {'type': {'@type': 'textEntityTypeCustomEmoji'}}, {'type': {'@type': 'textEntityTypeDateTime'}}):
             bads.append(caption_source(text='#x', spans=[{**entity('Hashtag'), **update}]))
         for level in ('content', 'caption'):

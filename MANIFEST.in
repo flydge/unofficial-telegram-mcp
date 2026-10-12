@@ -2,9 +2,7 @@ include README.md
 include .gitignore
 include .codex/config.toml.example
 include docs/security.md
-include docs/install.md
-include docs/reference.md
-include docs/assets/unofficial-telegram-mcp-header.png
+include docs/release-preflight.md
 include skills/telegram-search/SKILL.md
 recursive-include src/telegram_search_mcp *.py
 recursive-include tests *.py
@@ -14,3 +12,16 @@ global-exclude __pycache__ *.py[cod] .DS_Store
 include tests/fixtures/legacy_0_16_tool_hashes.json
 include tests/fixtures/legacy_0_17_tool_hashes.json
 include tests/fixtures/reply_source_v1_v7.json
+include tests/fixtures/reply_email_legacy_goldens.json
+include tests/fixtures/reply_email_v17_goldens.json
+include tests/fixtures/reply_phone_v18_goldens.json
+include tests/fixtures/reply_phone_v19_goldens.json
+include tests/fixtures/reply_bank_card_v20_goldens.json
+include tests/fixtures/reply_bank_card_v21_goldens.json
+include tests/fixtures/reply_text_url_v22_goldens.json
+include docs/install.md
+include docs/reference.md
+include docs/release-notes-0.51.0.md
+include docs/assets/unofficial-telegram-mcp-header.png
+include CHANGELOG.md
+include docs/third-party-notices.md

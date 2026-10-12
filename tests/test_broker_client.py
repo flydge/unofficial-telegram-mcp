@@ -14,6 +14,7 @@ from telegram_search_mcp.broker_protocol import (
     receive_request as receive_wire_request,
     send_frame,
 )
+from telegram_search_mcp.config import RuntimePolicy
 from telegram_search_mcp.schemas import (
     DiscoverTargetsRequest,
     ResolveTargetRequest,
@@ -25,7 +26,6 @@ from telegram_search_mcp.schemas import (
 def receive_request(connection):
     """Simulated broker transport performs the real contract exchange first."""
     from telegram_search_mcp.contract import contract_descriptor
-    from telegram_search_mcp.config import RuntimePolicy
     hello = receive_wire_request(connection)
     assert hello["operation"] == "handshake"
     descriptor = {**contract_descriptor(RuntimePolicy()), "broker_generation": "broker_" + "a" * 32}
@@ -65,6 +65,7 @@ class BrokerClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "570"):
             module.BrokerClient(
                 socket_path=Path("/unused/test.sock"),
+                policy=RuntimePolicy(),
                 request_timeout=570.001,
             )
 
@@ -98,6 +99,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=lambda _path: proxy_socket,
         )
         response = invoke(client)
@@ -134,6 +136,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=lambda _path: proxy_socket,
         )
 
@@ -230,6 +233,7 @@ class BrokerClientTests(unittest.TestCase):
         module = importlib.import_module("telegram_search_mcp.broker_client")
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=unavailable,
             restart_callback=lambda: None,
             retry_backoff_seconds=0,
@@ -321,6 +325,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=connector,
             restart_callback=lambda: restarts.append("restart"),
             retry_backoff_seconds=0.25,
@@ -354,6 +359,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=connector,
             restart_callback=lambda: restarts.append("restart"),
             retry_backoff_seconds=0.25,
@@ -395,6 +401,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=connector,
             request_timeout=0.05,
             restart_callback=lambda: restarts.append("restart"),
@@ -432,6 +439,7 @@ class BrokerClientTests(unittest.TestCase):
         thread.start()
         client = module.BrokerClient(
             socket_path=Path("/unused/test.sock"),
+            policy=RuntimePolicy(),
             connector=lambda _path: proxy_socket,
         )
 

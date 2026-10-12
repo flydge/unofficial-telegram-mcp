@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable
 from .reply_drafts import LINK_OPTIONS, strict_shape
+from .outgoing_formatting import FrozenOutgoingEntities, freeze_outgoing_entities
 
 RETENTION_SECONDS = 900
 MAX_OBSERVATIONS = 4096
@@ -35,6 +36,8 @@ class SendObservation:
     voice_duration: int | None = None
     waveform_sha256: str | None = None
     waveform_size: int | None = None
+    forum_topic_id: int | None = None
+    outgoing_entities: FrozenOutgoingEntities = ()
 
 
 def integer(value, *, positive=False):
@@ -138,7 +141,33 @@ class SendObservations:
         with self._lock:
             self._entries.clear()
 
-    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None):
+    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = ()):
+        if type(outgoing_entities) is not tuple or len(outgoing_entities) > 32:
+            raise ObservationUnavailable('invalid frozen outgoing expectation')
+        if outgoing_entities:
+            styles = {'textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
+                      'textEntityTypeStrikethrough', 'textEntityTypeSpoiler'}
+            if (content_type != 'messageText' or caption_sha256 is not None or
+                    type(text_sha256) is not str or len(text_sha256) != 64 or
+                    any(c not in '0123456789abcdef' for c in text_sha256) or
+                    any(type(row) is not tuple or len(row) != 3 or
+                        type(row[0]) is not int or type(row[1]) is not int or
+                        not 0 <= row[0] < 8192 or not 0 < row[1] <= 8192 or
+                        row[0] + row[1] > 8192 or type(row[2]) is not str or row[2] not in styles
+                        for row in outgoing_entities)):
+                raise ObservationUnavailable('invalid formatted text expectation')
+            if tuple(sorted(outgoing_entities, key=lambda row: (row[0], -row[1], row[2]))) != outgoing_entities:
+                raise ObservationUnavailable('noncanonical outgoing expectation')
+            for index, (offset, length, kind) in enumerate(outgoing_entities):
+                for other_offset, other_length, other_kind in outgoing_entities[index + 1:]:
+                    if ((kind == other_kind and other_offset <= offset + length) or
+                            offset < other_offset < offset + length < other_offset + other_length):
+                        raise ObservationUnavailable('invalid overlapping expectation')
+        if forum_topic_id is not None and (not _number(forum_topic_id, 2**31-1, 1) or
+                content_type != 'messageText' or caption_sha256 is not None or
+                type(text_sha256) is not str or len(text_sha256) != 64 or
+                any(c not in '0123456789abcdef' for c in text_sha256)):
+            raise ObservationUnavailable('invalid topic observation')
         if reply_anchor is not None and (type(reply_anchor) is not tuple or len(reply_anchor)!=2 or
                 not integer(reply_anchor[0]) or reply_anchor[0]!=chat_id or not integer(reply_anchor[1],positive=True)):
             raise ObservationUnavailable("invalid reply observation")
@@ -156,7 +185,7 @@ class SendObservations:
             if (attempt_id in self._entries or len(self._entries) >= self._capacity or
                     any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
-            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size)
+            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities)
 
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
@@ -180,7 +209,7 @@ class SendObservations:
             return self._entries.get(attempt_id)
 
     @staticmethod
-    def _text_matches(content, expected_sha256):
+    def _text_matches(content, expected_sha256, outgoing_entities=()):
         if expected_sha256 is None:
             return True
         formatted = content.get("text")
@@ -193,14 +222,34 @@ class SendObservations:
             encoded = text.encode("utf-8")
         except UnicodeError:
             return False
-        return hashlib.sha256(encoded).hexdigest() == expected_sha256
+        if hashlib.sha256(encoded).hexdigest() != expected_sha256:
+            return False
+        if outgoing_entities:
+            if set(formatted) != {'@type', 'text', 'entities'}:
+                return False
+            rows = formatted.get('entities')
+            if type(rows) is not list or len(rows) > 32:
+                return False
+            caller = []
+            for row in rows:
+                if (type(row) is not dict or set(row) != {'@type', 'offset', 'length', 'type'} or
+                        row.get('@type') != 'textEntity'):
+                    return False
+                caller.append({key: row[key] for key in ('offset', 'length', 'type')})
+            try:
+                return freeze_outgoing_entities(text, caller) == outgoing_entities
+            except (ValueError, TypeError, UnicodeError):
+                return False
+        return True
 
     @staticmethod
-    def _reply_matches(value, anchor):
+    def _reply_matches(value, anchor, forum_topic_id=None):
         if anchor is None:
             return True
         reply=value.get("reply_to")
-        return (value.get("topic_id") is None and isinstance(reply,dict)
+        return ((value.get("topic_id") is None if forum_topic_id is None else
+                strict_shape(value.get('topic_id'), {'@type': 'messageTopicForum',
+                    'forum_topic_id': forum_topic_id})) and isinstance(reply,dict)
             and not set(reply)-{"@type","chat_id","message_id","quote","checklist_task_id","poll_option_id","origin","origin_send_date","content"}
             and reply.get("@type")=="messageReplyToMessage"
             and type(reply.get("chat_id")) is int and reply["chat_id"]==anchor[0]
@@ -217,13 +266,19 @@ class SendObservations:
             and integer(value.get("id"),positive=final) and value.get("is_outgoing") is True
             and isinstance(value.get("content"),dict)
             and value["content"].get("@type") == observation.content_type
-            and SendObservations._text_matches(value["content"], observation.text_sha256)
-            and SendObservations._reply_matches(value, observation.reply_anchor)
+            and SendObservations._text_matches(value["content"], observation.text_sha256, observation.outgoing_entities)
+            and SendObservations._reply_matches(value, observation.reply_anchor, observation.forum_topic_id)
+            and (not observation.outgoing_entities or observation.reply_anchor is not None or value.get('reply_to') is None)
+            and (not observation.outgoing_entities or observation.forum_topic_id is not None or value.get('topic_id') is None)
+            and (observation.forum_topic_id is None or (
+                strict_shape(value.get('topic_id'), {'@type': 'messageTopicForum',
+                    'forum_topic_id': observation.forum_topic_id}) and
+                (observation.reply_anchor is not None or value.get('reply_to') is None)))
             and (observation.caption_sha256 is None or _artifact_matches(value['content'],observation))
-            and (observation.reply_anchor is None or observation.caption_sha256 is not None or (
+            and ((observation.reply_anchor is None and observation.forum_topic_id is None and not observation.outgoing_entities) or observation.caption_sha256 is not None or (
                 isinstance(value["content"].get("text"),dict)
                 and set(value["content"]["text"])=={"@type","text","entities"}
-                and value["content"]["text"].get("entities")==[]
+                and (bool(observation.outgoing_entities) or value["content"]["text"].get("entities")==[])
                 and value["content"].get("link_preview") is None
                 and (value["content"].get("link_preview_options") is None or
                     strict_shape(value["content"]["link_preview_options"],LINK_OPTIONS))))

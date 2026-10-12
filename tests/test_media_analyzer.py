@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -100,13 +101,13 @@ class MediaAnalyzerTests(unittest.TestCase):
         model = self.base / "synthetic-model.bin"
         model.write_bytes(b"generated fixture")
         cli = self.base / "synthetic-whisper-cli"
-        cli.write_text(
-            f"#!{sys.executable}\n"
+        code = (
             "import json, pathlib, sys\n"
             "base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])\n"
             f"data = {{'result': {({'language': 'en'} if result is None else result)!r}, 'transcription': {transcription!r}}}\n"
             "base.with_suffix('.json').write_text(json.dumps(data))\n"
         )
+        cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n')
         cli.chmod(0o700)
         return cli, model
 
@@ -166,8 +167,7 @@ class MediaAnalyzerTests(unittest.TestCase):
         model = self.base / "synthetic-model.bin"
         model.write_bytes(b"generated fixture")
         cli = self.base / "synthetic-whisper-cli"
-        cli.write_text(
-            f"#!{sys.executable}\n"
+        code = (
             "import json, pathlib, sys\n"
             "base = pathlib.Path(sys.argv[sys.argv.index('-of') + 1])\n"
             "data = {'result': {'language': 'en'}, 'transcription': ["
@@ -175,6 +175,7 @@ class MediaAnalyzerTests(unittest.TestCase):
             "{'timestamps': {'from': '00:00:01,250', 'to': '00:00:02,000'}, 'text': '[unintelligible]'}]}\n"
             "base.with_suffix('.json').write_text(json.dumps(data))\n"
         )
+        cli.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n')
         cli.chmod(0o700)
 
         result = analyze_media(path, kind="voice_note", start_seconds=2.0,

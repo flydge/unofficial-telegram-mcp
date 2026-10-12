@@ -140,7 +140,8 @@ class LexicalSourceTests(unittest.TestCase):
                 span = entity('Hashtag'); span[field] = value
                 bads.append(lexical('#x', [span]))
         for update in ({'extra': None}, {'@type': 'other'}, {'type': None}, {'type': {'@type': True}},
-                       {'type': {'@type': 'textEntityTypeMention'}}, {'type': {'@type': 'textEntityTypeUrl'}},
+                       {'type': {'@type': 'textEntityTypeUnknown'}},
+                       {'type': {'@type': 'textEntityTypeMention', 'user_id': 8}}, {'type': {'@type': 'textEntityTypeUrl', 'url': 'hidden'}},
                        {'type': {'@type': 'textEntityTypeCustomEmoji'}}, {'type': {'@type': 'textEntityTypeDateTime'}}):
             bads.append(lexical('#x', [{**entity('Hashtag'), **update}]))
         for level in ('content', 'text'):

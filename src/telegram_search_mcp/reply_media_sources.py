@@ -75,7 +75,7 @@ def _thumbnail(value):
         and _number(value['width'],16384,1) and _number(value['height'],16384,1) and _file(value['file']))
 
 
-def _caption(value, *, styled=None, lexical=False, identity=False, datetime=False):
+def _caption(value, *, styled=None, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
     if not (_shape(value,'formattedText',('text','entities')) and type(value['text']) is str
             and len(value['text'])<=1024 and type(value['entities']) is list
             and not any(unicodedata.category(c).startswith('C') and c not in '\n\t' for c in value['text'])):
@@ -84,16 +84,24 @@ def _caption(value, *, styled=None, lexical=False, identity=False, datetime=Fals
         raise ValueError('reply caption version disagrees with styles')
     value['text'].encode('utf-8')
     if value['entities']:
-        from .reply_formatted_sources import formatted_text, LEXICAL, IDENTITY, DATETIME
-        result=formatted_text(value,lexical=lexical,identity=identity,datetime=datetime)
+        from .reply_formatted_sources import formatted_text, LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE, BANK_CARD
+        result=formatted_text(value,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
         if lexical and not any(e['type']['@type'] in LEXICAL for e in result['entities']):
             raise ValueError('reply caption version disagrees with lexical entities')
         if identity and not any(e['type']['@type'] in IDENTITY for e in result['entities']):
             raise ValueError('reply caption version disagrees with identity entities')
         if datetime and not any(e['type']['@type'] in DATETIME for e in result['entities']):
             raise ValueError('reply caption version disagrees with date time entities')
+        if url and not any(e['type']['@type'] in URL for e in result['entities']):
+            raise ValueError('reply caption version disagrees with URL entities')
+        if email and not any(e['type']['@type'] in EMAIL for e in result['entities']):
+            raise ValueError('reply caption version disagrees with EmailAddress entities')
+        if phone and not any(e['type']['@type'] in PHONE for e in result['entities']):
+            raise ValueError('reply caption version disagrees with PhoneNumber entities')
+        if bank_card and not any(e['type']['@type'] in BANK_CARD for e in result['entities']):
+            raise ValueError('reply caption version disagrees with BankCardNumber entities')
         return result
-    if lexical or identity or datetime:
+    if lexical or identity or datetime or url or email or phone or bank_card:
         raise ValueError('reply caption version disagrees with entities')
     return {'@type':'formattedText','text':value['text'],'entities':[]}
 
@@ -108,11 +116,11 @@ def _variant_key(value):
     return value['type'],value['width'],value['height'],value['unique_id_sha256']
 
 
-def media_content(content, *, lexical=False, identity=False, datetime=False):
+def media_content(content, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
     """Validate bounded pinned provider shapes and return only stable fresh facts."""
     if type(content) is not dict:
         raise ValueError('reply media is unavailable')
-    caption = _caption(content.get('caption'),lexical=lexical,identity=identity,datetime=datetime)
+    caption = _caption(content.get('caption'),lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
     kind = content.get('@type')
     if kind == 'messageDocument':
         doc = content.get('document')
@@ -154,7 +162,7 @@ def media_content(content, *, lexical=False, identity=False, datetime=False):
     else:
         raise ValueError('reply media kind is unavailable')
     result={'kind':source_kind,'caption':caption,'media':media}
-    validate_content(result,styled=bool(caption['entities']),lexical=lexical,identity=identity,datetime=datetime)
+    validate_content(result,styled=bool(caption['entities']),lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
     return result
 
 
@@ -164,11 +172,11 @@ def _stable_identity(value):
             and all(c in '0123456789abcdef' for c in sha))
 
 
-def validate_content(content, *, styled=False, lexical=False, identity=False, datetime=False):
-    """Strictly validate stored v2/v4/v6/v8/v10 facts and their caption-version boundary."""
+def validate_content(content, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+    """Strictly validate stored v2/v4/v6/v8/v10/v12/v14/v16/v18/v20/v22 facts and their caption-version boundary."""
     if type(content) is not dict or set(content)!={'kind','caption','media'}:
         raise ValueError('invalid media projection')
-    if _caption(content['caption'],styled=styled or lexical or identity or datetime,lexical=lexical,identity=identity,datetime=datetime)!=content['caption']:
+    if _caption(content['caption'],styled=styled or lexical or identity or datetime or url or email or phone or bank_card,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)!=content['caption']:
         raise ValueError('noncanonical reply caption entities')
     kind,media=content['kind'],content['media']
     if type(kind) is not str or type(media) is not dict:
@@ -192,8 +200,8 @@ def validate_content(content, *, styled=False, lexical=False, identity=False, da
         raise ValueError('invalid media projection')
 
 
-def render_content(content, marker, *, styled=False, lexical=False, identity=False, datetime=False):
-    validate_content(content,styled=styled,lexical=lexical,identity=identity,datetime=datetime)
+def render_content(content, marker, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+    validate_content(content,styled=styled,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
     changed=False
     def safe(value):
         nonlocal changed
@@ -207,9 +215,9 @@ def render_content(content, marker, *, styled=False, lexical=False, identity=Fal
             return [safe(v) for v in value]
         return value
     caption=content['caption']['text']
-    if styled or lexical or identity or datetime:
+    if styled or lexical or identity or datetime or url or email or phone or bank_card:
         from .reply_formatted_sources import render_formatted_text
-        caption,changed=render_formatted_text(content['caption'],lexical=lexical,identity=identity,datetime=datetime)
+        caption,changed=render_formatted_text(content['caption'],lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
     record=safe({'kind':content['kind'],'caption':caption,'media':content['media']})
     display=marker+'Media target: '+json.dumps(record,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
     if len(display)>4096 or sanitize_telegram_text(display,max_length=4097)!=display:

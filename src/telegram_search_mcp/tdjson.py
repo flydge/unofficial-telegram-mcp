@@ -147,6 +147,49 @@ def _is_search_topic(value: object) -> bool:
         and _is_integer_in_range(value.get("forum_topic_id"), 1, 2**31 - 1))
 
 
+from .outgoing_formatting import FrozenOutgoingEntities, freeze_outgoing_entities, native_outgoing_entities
+
+
+def _validated_frozen_outgoing_entities(text, entities):
+    if (type(entities) is not tuple or len(entities) > 32 or
+            any(type(row) is not tuple or len(row) != 3 for row in entities)):
+        raise ValueError('invalid frozen outgoing entities')
+    from .outgoing_drafts import _safe_message_text
+    if _safe_message_text(text) != text:
+        raise ValueError('outgoing text is not final normalized text')
+    frozen = freeze_outgoing_entities(text, [
+        {'offset': offset, 'length': length, 'type': {'@type': kind}}
+        for offset, length, kind in entities])
+    if frozen != entities:
+        raise ValueError('outgoing entities are not canonical')
+    return frozen
+
+
+def _native_outgoing_entity_expectation(text, entities):
+    if type(entities) is not list or len(entities) > 32:
+        raise ValueError('invalid native outgoing entities')
+    caller = []
+    for entity in entities:
+        if (type(entity) is not dict or set(entity) != {'@type', 'offset', 'length', 'type'}
+                or entity.get('@type') != 'textEntity'):
+            raise ValueError('invalid native outgoing entity')
+        caller.append({key: entity[key] for key in ('offset', 'length', 'type')})
+    return freeze_outgoing_entities(text, caller)
+
+
+def _bounded_text_entities(formatted):
+    entities = formatted.get('entities')
+    if entities == []:
+        return True
+    try:
+        from .outgoing_drafts import _safe_message_text
+        return (_safe_message_text(formatted['text']) == formatted['text'] and
+            native_outgoing_entities(_native_outgoing_entity_expectation(
+                formatted['text'], entities)) == entities)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+
+
 def _validate_bounded_request(payload: dict[str, Any]) -> None:
     request_type = payload.get("@type")
     if request_type == "getForumTopicHistory" and (
@@ -219,7 +262,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and content["text"].get("@type") == "formattedText"
             and isinstance(content["text"].get("text"), str)
             and 0 < len(content["text"]["text"]) <= 4096
-            and content["text"].get("entities") == []
+            and _bounded_text_entities(content["text"])
         )
         reply_to=payload.get("reply_to")
         valid_reply=(reply_to is None or (isinstance(reply_to,dict)
@@ -280,10 +323,18 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
         if (
             set(payload) != {"@type", "chat_id", "topic_id", "reply_to", "options", "reply_markup", "input_message_content"}
             or not _is_strict_nonzero_integer(payload.get("chat_id"))
-            or payload.get("topic_id") is not None or not valid_reply
+            or not valid_reply
+            or (payload.get('topic_id') is not None and not (
+                type(payload['topic_id']) is dict and
+                set(payload['topic_id']) == {'@type', 'forum_topic_id'} and
+                payload['topic_id'].get('@type') == 'messageTopicForum' and
+                _is_integer_in_range(payload['topic_id'].get('forum_topic_id'), 1, 2**31-1) and
+                _is_forum_chat_id(payload.get('chat_id')) and valid_text and
+                strict_shape(content['link_preview_options'], LINK_OPTIONS)))
             or payload.get("reply_markup") is not None
             or not isinstance(options, dict) or options != expected_options
-            or (reply_to is not None and (not strict_shape(options,expected_options) or not _is_forum_chat_id(payload.get("chat_id"))))
+            or ((reply_to is not None or payload.get('topic_id') is not None) and
+                (not strict_shape(options,expected_options) or not _is_forum_chat_id(payload.get("chat_id"))))
             or type(sending_id) is not int or not 0 < sending_id <= (1 << 31) - 1
             or not (valid_text or valid_document or valid_photo or valid_voice)
         ):
@@ -1358,8 +1409,38 @@ class TDLibClient:
         }
         return self._send_message_content(chat_id, content, "messageDocument", attempt_id=attempt_id)
 
-    def send_text_message(self, chat_id: int, text: str, *, attempt_id: str | None = None) -> int:
-        """Send plain text without entities, link previews, replies, or scheduling."""
+    def send_text_message(self, chat_id: int, text: str, *, attempt_id: str | None = None,
+                          outgoing_entities: FrozenOutgoingEntities = (),
+                          expected_account_id=None, expected_recipient_title=None,
+                          pre_send_guard=None) -> int:
+        """One text attempt; nonempty styles require reviewed current authority."""
+        if outgoing_entities != ():
+            from .sanitize import sanitize_telegram_text
+            with self._serialized_reply_call():
+                def current_authority():
+                    if (type(expected_account_id) is not int or expected_account_id <= 0 or
+                            type(expected_recipient_title) is not str or
+                            type(attempt_id) is not str or not attempt_id or
+                            not callable(pre_send_guard) or pre_send_guard() is not True or
+                            self.get_account_id() != expected_account_id):
+                        return False
+                    chat = self.resolve_target(chat_id)
+                    title = sanitize_telegram_text(chat.get('title'), max_length=255) or str(chat_id)
+                    return (title == expected_recipient_title and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                try:
+                    frozen = _validated_frozen_outgoing_entities(text, outgoing_entities)
+                    if not current_authority():
+                        raise ValueError('formatted text authority changed')
+                    content = {'@type': 'inputMessageText',
+                        'text': {'@type': 'formattedText', 'text': text,
+                                 'entities': native_outgoing_entities(frozen)},
+                        'link_preview_options': dict(LINK_OPTIONS), 'clear_draft': False}
+                except Exception as error:
+                    raise MessageSendNotAttempted('formatted text revalidation failed') from error
+                return self._send_message_content(chat_id, content, 'messageText',
+                    attempt_id=attempt_id, outgoing_entities=frozen,
+                    pre_transport_guard=current_authority)
         content = {
             "@type": "inputMessageText",
             "text": {"@type": "formattedText", "text": text, "entities": []},
@@ -1372,8 +1453,73 @@ class TDLibClient:
         }
         return self._send_message_content(chat_id, content, "messageText", attempt_id=attempt_id)
 
-    def read_reply_source(self, chat_id: int, message_id: int) -> ReplySource:
-        return source_from_message(self.get_message(chat_id,message_id),chat_id,message_id)
+    def read_reply_source(self, chat_id: int, message_id: int, *,
+                          expected_forum_topic_id: int | None = None,
+                          require_reply_eligibility: bool = False) -> ReplySource:
+        if type(require_reply_eligibility) is not bool:
+            raise ValueError('reply eligibility selector is invalid')
+        if expected_forum_topic_id is None and not require_reply_eligibility:
+            return source_from_message(self.get_message(chat_id,message_id),chat_id,message_id)
+        if expected_forum_topic_id is not None and not _is_integer_in_range(expected_forum_topic_id, 1, 2**31 - 1):
+            raise ValueError('reply topic is unavailable')
+        with self._serialized_provider_call(getattr(self._request_context, 'deadline', None)):
+            source = source_from_message(self.get_message(chat_id, message_id), chat_id, message_id,
+                expected_forum_topic_id=expected_forum_topic_id)
+            properties = self._call({'@type': 'getMessageProperties', 'chat_id': chat_id,
+                'message_id': message_id})
+            if (properties.get('@type') != 'messageProperties' or
+                    properties.get('can_be_replied') is not True):
+                raise TDLibError('reply eligibility is unavailable')
+            return source
+
+    def read_topic_snapshot(self, chat_id: int, topic_id: int, *, expected_account_id: int,
+                            expected_recipient_title: str):
+        from .topic_models import snapshot_from_provider
+        from .sanitize import sanitize_telegram_text
+        with self._serialized_provider_call(getattr(self._request_context, 'deadline', None)):
+            if type(expected_account_id) is not int or self.get_account_id() != expected_account_id:
+                raise TDLibError('topic account is unavailable')
+            chat = self.resolve_forum_chat(chat_id)
+            title = sanitize_telegram_text(chat.get('title'), max_length=255) or str(chat_id)
+            if title != expected_recipient_title:
+                raise TDLibError('topic recipient changed')
+            topic = snapshot_from_provider(expected_account_id, chat_id, topic_id,
+                chat, self.get_forum_topic(chat_id, topic_id))
+            if self.get_account_id() != expected_account_id:
+                raise TDLibError('topic account changed')
+            return topic
+
+    def send_topic_text_message(self, chat_id: int, text: str, *, topic,
+                               expected_account_id: int, expected_recipient_title: str,
+                               attempt_id: str, pre_send_guard: Callable[[], bool],
+                               outgoing_entities: FrozenOutgoingEntities = ()) -> int:
+        """Recheck one exact reviewed topic and correlate its final native message."""
+        from .topic_models import TopicSnapshot
+        with self._serialized_reply_call():
+            def current_authority():
+                return (isinstance(topic, TopicSnapshot) and topic.account_id == expected_account_id and
+                    topic.chat_id == chat_id and pre_send_guard() is True and
+                    self.read_topic_snapshot(chat_id, topic.forum_topic_id,
+                        expected_account_id=expected_account_id,
+                        expected_recipient_title=expected_recipient_title) == topic and
+                    pre_send_guard() is True)
+            try:
+                frozen = (_validated_frozen_outgoing_entities(text, outgoing_entities)
+                          if outgoing_entities != () else ())
+                if frozen and (type(attempt_id) is not str or not attempt_id or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        type(expected_recipient_title) is not str or not callable(pre_send_guard)):
+                    raise ValueError('formatted send authority is unavailable')
+                if not current_authority():
+                    raise ValueError('topic authority changed')
+                content = {'@type': 'inputMessageText',
+                    'text': {'@type': 'formattedText', 'text': text, 'entities': native_outgoing_entities(frozen)},
+                    'link_preview_options': dict(LINK_OPTIONS), 'clear_draft': False}
+            except Exception as error:
+                raise MessageSendNotAttempted('topic revalidation failed') from error
+            return self._send_message_content(chat_id, content, 'messageText', attempt_id=attempt_id,
+                forum_topic_id=topic.forum_topic_id, pre_transport_guard=current_authority,
+                **({'outgoing_entities': frozen} if frozen else {}))
 
     @contextmanager
     def _serialized_reply_call(self):
@@ -1391,7 +1537,8 @@ class TDLibClient:
 
     def send_reply_text_message(self, chat_id: int, text: str, *, reply_source: ReplySource,
                                 expected_account_id: int, expected_recipient_title: str,
-                                attempt_id: str, pre_send_guard: Callable[[], bool]) -> int:
+                                attempt_id: str, pre_send_guard: Callable[[], bool], topic=None,
+                                outgoing_entities: FrozenOutgoingEntities = ()) -> int:
         """Revalidate cached/offline TDLib evidence under one local provider lock.
 
         Remote edits may still race these reads; exact output reply correlation is
@@ -1399,6 +1546,78 @@ class TDLibClient:
         """
         from .sanitize import sanitize_telegram_text
         with self._serialized_reply_call():
+            if topic is not None:
+                from .topic_models import TopicSnapshot
+                def current_authority():
+                    if (not isinstance(topic, TopicSnapshot) or
+                            not isinstance(reply_source, ReplySource) or
+                            type(expected_account_id) is not int or
+                            topic.account_id != expected_account_id or topic.chat_id != chat_id or
+                            reply_source.anchor[0] != chat_id or
+                            reply_source.forum_topic_id != topic.forum_topic_id or
+                            pre_send_guard() is not True):
+                        return False
+                    current_topic = self.read_topic_snapshot(chat_id, topic.forum_topic_id,
+                        expected_account_id=expected_account_id,
+                        expected_recipient_title=expected_recipient_title)
+                    if current_topic != topic or pre_send_guard() is not True:
+                        return False
+                    current_source = self.read_reply_source(*reply_source.anchor,
+                        expected_forum_topic_id=topic.forum_topic_id)
+                    return (current_source.source_sha256 == reply_source.source_sha256 and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                try:
+                    frozen = (_validated_frozen_outgoing_entities(text, outgoing_entities)
+                              if outgoing_entities != () else ())
+                    if frozen and (type(attempt_id) is not str or not attempt_id or
+                            type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                            type(expected_recipient_title) is not str or not callable(pre_send_guard)):
+                        raise ValueError('formatted send authority is unavailable')
+                    if not current_authority():
+                        raise ValueError('topic reply authority changed')
+                    content = {'@type': 'inputMessageText',
+                        'text': {'@type': 'formattedText', 'text': text, 'entities': native_outgoing_entities(frozen)},
+                        'link_preview_options': dict(LINK_OPTIONS), 'clear_draft': False}
+                except Exception as error:
+                    raise MessageSendNotAttempted('topic reply revalidation failed') from error
+                return self._send_message_content(chat_id, content, 'messageText', attempt_id=attempt_id,
+                    reply_anchor=reply_source.anchor, forum_topic_id=topic.forum_topic_id,
+                    pre_transport_guard=current_authority,
+                    **({'outgoing_entities': frozen} if frozen else {}))
+            if outgoing_entities != ():
+                def current_formatted_reply_authority():
+                    if (not isinstance(reply_source, ReplySource) or reply_source.anchor[0] != chat_id or
+                            reply_source.forum_topic_id is not None or type(expected_account_id) is not int or
+                            pre_send_guard() is not True or self.get_account_id() != expected_account_id):
+                        return False
+                    chat = self.resolve_target(chat_id)
+                    title = sanitize_telegram_text(chat.get('title'), max_length=255) or str(chat_id)
+                    if title != expected_recipient_title:
+                        return False
+                    current = self.read_reply_source(*reply_source.anchor)
+                    properties = self._call({'@type': 'getMessageProperties', 'chat_id': chat_id,
+                        'message_id': reply_source.anchor[1]})
+                    return (current.source_sha256 == reply_source.source_sha256 and
+                        properties.get('@type') == 'messageProperties' and
+                        properties.get('can_be_replied') is True and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                try:
+                    frozen = _validated_frozen_outgoing_entities(text, outgoing_entities)
+                    if (type(attempt_id) is not str or not attempt_id or
+                            type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                            type(expected_recipient_title) is not str or not callable(pre_send_guard)):
+                        raise ValueError('formatted send authority is unavailable')
+                    if not current_formatted_reply_authority():
+                        raise ValueError('formatted reply authority changed')
+                    content = {'@type': 'inputMessageText',
+                        'text': {'@type': 'formattedText', 'text': text,
+                                 'entities': native_outgoing_entities(frozen)},
+                        'link_preview_options': dict(LINK_OPTIONS), 'clear_draft': False}
+                except Exception as error:
+                    raise MessageSendNotAttempted('formatted reply revalidation failed') from error
+                return self._send_message_content(chat_id, content, 'messageText', attempt_id=attempt_id,
+                    reply_anchor=reply_source.anchor, outgoing_entities=frozen,
+                    pre_transport_guard=current_formatted_reply_authority)
             try:
                 if (not isinstance(reply_source,ReplySource) or reply_source.anchor[0]!=chat_id
                         or type(expected_account_id) is not int or self.get_account_id()!=expected_account_id):
@@ -1498,6 +1717,7 @@ class TDLibClient:
     def _send_message_content(
         self, chat_id: int, content: dict[str, Any], expected_type: str,
         *, attempt_id: str | None = None, reply_anchor: tuple[int,int] | None = None, artifact_reply: bool = False, pre_transport_guard: Callable[[],bool] | None = None,
+        forum_topic_id: int | None = None, outgoing_entities: FrozenOutgoingEntities = (),
     ) -> int:
         sending_id = secrets.randbelow((1 << 31) - 1) + 1
         for _ in range(8):
@@ -1507,7 +1727,9 @@ class TDLibClient:
         else:
             raise MessageSendNotAttempted("send correlation is unavailable")
         payload = {
-            "@type": "sendMessage", "chat_id": chat_id, "topic_id": None,
+            "@type": "sendMessage", "chat_id": chat_id,
+            "topic_id": ({'@type': 'messageTopicForum', 'forum_topic_id': forum_topic_id}
+                         if forum_topic_id is not None else None),
             "reply_to": ({"@type":"inputMessageReplyToMessage","message_id":reply_anchor[1],
                 "quote":None,"checklist_task_id":0,"poll_option_id":""} if reply_anchor is not None else None), "reply_markup": None,
             "options": {**SEND_OPTIONS,"sending_id":sending_id},
@@ -1520,12 +1742,14 @@ class TDLibClient:
             extra = f"telegram-search-mcp-{next(self._ids)}"
             attempt_id = attempt_id if attempt_id is not None else extra
             aggregate_deadline = getattr(self._request_context, "deadline", None)
-            if reply_anchor is not None and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+            if (reply_anchor is not None or forum_topic_id is not None or outgoing_entities) and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
                 raise MessageSendNotAttempted("reply request deadline expired before send")
             try:
                 self._send_observations.register(attempt_id, extra, sending_id, chat_id, expected_type,
                     text_sha256=hashlib.sha256(content["text"]["text"].encode("utf-8")).hexdigest()
                     if expected_type == "messageText" else None, reply_anchor=reply_anchor,
+                    **({'forum_topic_id': forum_topic_id} if forum_topic_id is not None else {}),
+                    **({'outgoing_entities': outgoing_entities} if outgoing_entities else {}),
                     **({'caption_sha256':hashlib.sha256(content['caption']['text'].encode('utf-8')).hexdigest(),
                         'voice_duration':content['voice_note']['duration'] if expected_type=='messageVoiceNote' else None,
                         'waveform_sha256':hashlib.sha256(base64.b64decode(content['voice_note']['waveform'],validate=True)).hexdigest() if expected_type=='messageVoiceNote' else None,
@@ -1539,7 +1763,7 @@ class TDLibClient:
                 except Exception as error:
                     self._send_observations.discard_unattempted(attempt_id)
                     raise MessageSendNotAttempted("reply scope changed before transport") from error
-            if reply_anchor is not None and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+            if (reply_anchor is not None or forum_topic_id is not None or outgoing_entities) and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
                 self._send_observations.discard_unattempted(attempt_id)
                 raise MessageSendNotAttempted("reply request deadline expired before transport")
             try:

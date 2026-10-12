@@ -1,3 +1,3 @@
-"""Unofficial Telegram MCP package."""
+"""Unofficial Telegram MCP MCP package."""
 
-__version__ = "0.35.0"
+__version__ = "0.51.0"

@@ -21,6 +21,8 @@ from .outgoing_media import PHOTO_LIMIT
 from .outgoing_voice import MAX_VOICE_BYTES
 from .sanitize import sanitize_telegram_text
 from .reply_drafts import ReplySource
+from .topic_models import TopicSnapshot
+from .outgoing_formatting import FrozenOutgoingEntities, freeze_outgoing_entities
 
 DRAFT_TTL_SECONDS = 15 * 60
 DEFAULT_CAPACITY = 4096
@@ -99,6 +101,12 @@ class OutgoingDraft:
     source_display_name: str | None = None
     converted: bool = False
     reply_source: ReplySource | None = None
+    topic: TopicSnapshot | None = None
+    topic_provider: object | None = None
+    topic_provider_epoch: object | None = None
+    outgoing_entities: FrozenOutgoingEntities = ()
+    formatting_provider: object | None = None
+    formatting_provider_epoch: object | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +165,18 @@ class OutgoingDraftRegistry:
             return (entry is not None and entry.owner.client_id==client_id
                     and entry.draft.reply_source is not None and entry.draft.kind!='text')
 
+    def is_owned_topic(self, draft_id: str, *, client_id: str) -> bool:
+        """Private budget routing only; never exposes draft/account facts."""
+        with self._lock:
+            entry = self._entries.get(draft_id)
+            return entry is not None and entry.owner.client_id == client_id and entry.draft.topic is not None
+
+    def is_owned_formatted(self, draft_id: str, *, client_id: str) -> bool:
+        """Private budget routing only; no account or draft disclosure."""
+        with self._lock:
+            entry = self._entries.get(draft_id)
+            return bool(entry is not None and entry.owner.client_id == client_id and entry.draft.outgoing_entities)
+
     def prepare(
         self,
         *,
@@ -190,7 +210,8 @@ class OutgoingDraftRegistry:
         if not isinstance(caption, str) or len(caption) > 1024 or "\x00" in caption:
             raise ValueError("caption must be text of at most 1024 characters")
         safe_caption = _safe_caption(caption)
-        if reply_source is not None and (not isinstance(reply_source, ReplySource) or reply_source.anchor[0] != recipient):
+        if reply_source is not None and (not isinstance(reply_source, ReplySource) or
+                reply_source.anchor[0] != recipient or reply_source.forum_topic_id is not None):
             raise DraftError("draft is unavailable")
         try:
             artifact = self._store.lookup(artifact_id)
@@ -237,13 +258,33 @@ class OutgoingDraftRegistry:
                                             artifact_expires_at=artifact.expires_at)
             return draft
 
-    def prepare_text(self, *, owner: DraftOwner, recipient: int, text: str, recipient_title: str = "", reply_source: ReplySource | None = None) -> OutgoingDraft:
+    def prepare_text(self, *, owner: DraftOwner, recipient: int, text: str, recipient_title: str = "", reply_source: ReplySource | None = None,
+                     topic: TopicSnapshot | None = None, topic_provider: object | None = None,
+                     topic_provider_epoch: object | None = None, outgoing_entities: list | None = None,
+                     formatting_provider: object | None = None, formatting_provider_epoch: object | None = None) -> OutgoingDraft:
         self._validate_owner(owner)
         if type(recipient) is not int or recipient == 0:
             raise ValueError("recipient must be a nonzero numeric chat ID")
         if reply_source is not None and (not isinstance(reply_source, ReplySource) or reply_source.anchor[0] != recipient):
             raise DraftError("draft is unavailable")
+        if topic is not None and (not isinstance(topic, TopicSnapshot) or
+                topic.account_id != owner.account_id or topic.chat_id != recipient or
+                topic_provider is None or topic_provider_epoch is None):
+            raise DraftError("topic draft is unavailable")
+        if topic is None and (topic_provider is not None or topic_provider_epoch is not None):
+            raise DraftError("plain draft contains topic authority")
+        if reply_source is not None and reply_source.forum_topic_id != (
+                topic.forum_topic_id if topic is not None else None):
+            raise DraftError("reply source and topic identity disagree")
         safe_text = _safe_message_text(text)
+        entities = freeze_outgoing_entities(safe_text, [] if outgoing_entities is None else outgoing_entities)
+        if entities and (formatting_provider is None or formatting_provider_epoch is None):
+            raise DraftError('formatting authority is unavailable')
+        if not entities and (formatting_provider is not None or formatting_provider_epoch is not None):
+            raise DraftError('plain text contains formatting authority')
+        if entities and topic is not None and (formatting_provider is not topic_provider or
+                formatting_provider_epoch is not topic_provider_epoch):
+            raise DraftError('text provider authority is inconsistent')
         now = self._clock()
         with self._lock:
             self._prune_locked(now)
@@ -257,6 +298,9 @@ class OutgoingDraftRegistry:
                 size_bytes=len(safe_text.encode("utf-8")), display_name="Text message", mime_type="text/plain",
                 caption="", recipient=recipient, expires_at=now + self._max_ttl_seconds,
                 kind="text", text=safe_text, recipient_title=recipient_title, reply_source=reply_source,
+                topic=topic, topic_provider=topic_provider, topic_provider_epoch=topic_provider_epoch,
+                outgoing_entities=entities, formatting_provider=formatting_provider,
+                formatting_provider_epoch=formatting_provider_epoch,
             )
             self._entries[draft_id] = _Entry(draft=draft, owner=owner)
             return draft
@@ -264,6 +308,8 @@ class OutgoingDraftRegistry:
     def revise(self, draft_id: str, *, owner: DraftOwner, recipient_title: str,
                text: str | None = None, caption: str | None = None,
                reply: bool = False, reply_source: ReplySource | None = None,
+               outgoing_entities: list | None = None, formatting_provider: object | None = None,
+               formatting_provider_epoch: object | None = None,
                local_admission_guard: Callable[[], None] | None = None) -> OutgoingDraft:
         """Replace one live revision atomically against claim/cancel/replacement.
 
@@ -278,7 +324,9 @@ class OutgoingDraftRegistry:
                 raise DraftError("draft is unavailable")
             changes = {}
             if reply_source is not None:
-                if not reply or reply_source.anchor != old.reply_source.anchor:
+                if (not reply or not isinstance(reply_source, ReplySource) or
+                        reply_source.anchor != old.reply_source.anchor or
+                        reply_source.forum_topic_id != (old.topic.forum_topic_id if old.topic is not None else None)):
                     raise DraftError("draft is unavailable")
                 changes["reply_source"] = reply_source
             if text is not None:
@@ -287,6 +335,18 @@ class OutgoingDraftRegistry:
                 safe_text = _safe_message_text(text)
                 data = safe_text.encode("utf-8")
                 changes.update(text=safe_text, sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data))
+                entities = freeze_outgoing_entities(safe_text, [] if outgoing_entities is None else outgoing_entities)
+                if entities:
+                    if formatting_provider is None or formatting_provider_epoch is None:
+                        raise DraftError('formatting authority is unavailable')
+                    if old.outgoing_entities and (old.formatting_provider is not formatting_provider or
+                            old.formatting_provider_epoch is not formatting_provider_epoch):
+                        raise DraftError('formatting authority changed')
+                changes.update(outgoing_entities=entities,
+                    formatting_provider=formatting_provider if entities else None,
+                    formatting_provider_epoch=formatting_provider_epoch if entities else None)
+            elif outgoing_entities is not None:
+                raise DraftError('formatting revision requires complete text')
             if caption is not None:
                 if old.kind == "text" or not isinstance(caption, str) or len(caption) > 1024 or "\x00" in caption:
                     raise DraftError("draft is unavailable")
@@ -340,6 +400,12 @@ class OutgoingDraftRegistry:
             if entry.state != "pending":
                 raise DraftError("draft has already been used")
             path = self._pending_locked(entry)
+            if (entry.draft.topic is not None and entry.draft.reply_source is not None and
+                    (entry.draft.topic_provider is not provider or entry.draft.topic_provider_epoch is not provider_epoch)):
+                raise DraftError("topic reply provider authority changed")
+            if entry.draft.outgoing_entities and (entry.draft.formatting_provider is not provider or
+                    entry.draft.formatting_provider_epoch is not provider_epoch):
+                raise DraftError('formatting provider authority changed')
             entry.state = "claimed"
             entry.attempted_at = self._attempt_clock()
             entry.provider = provider
@@ -362,15 +428,56 @@ class OutgoingDraftRegistry:
         with self._lock:
             return self._get(draft_id,owner).draft.reply_source is not None
 
+    def is_topic(self, draft_id: str, *, owner: DraftOwner) -> bool:
+        with self._lock:
+            return self._get(draft_id, owner).draft.topic is not None
+
+    def is_formatted(self, draft_id: str, *, owner: DraftOwner) -> bool:
+        with self._lock:
+            return bool(self._get(draft_id, owner).draft.outgoing_entities)
+
+    def formatting_claim_current(self, draft_id: str, *, owner: DraftOwner,
+                                 provider: object, provider_epoch: object) -> bool:
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (entry.state == 'claimed' and bool(entry.draft.outgoing_entities) and
+                self._clock() < entry.draft.expires_at and entry.provider is provider and
+                entry.provider_epoch is provider_epoch and entry.draft.formatting_provider is provider and
+                entry.draft.formatting_provider_epoch is provider_epoch)
+
+    def topic_claim_current(self, draft_id: str, *, owner: DraftOwner,
+                            provider: object, provider_epoch: object) -> bool:
+        """Final local prewire check; expiry never turns into send authority."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (entry.state == 'claimed' and entry.draft.topic is not None and
+                self._clock() < entry.draft.expires_at and entry.provider is provider and
+                entry.provider_epoch is provider_epoch and entry.draft.topic_provider is provider and
+                entry.draft.topic_provider_epoch is provider_epoch)
+
     def source_required_capabilities(self, draft_id: str, *, owner: DraftOwner,
                                    provider: object | None = None, provider_epoch: object | None = None) -> tuple[str, ...]:
         """Classify gated sources under the owner/account, lifetime and epoch lock."""
         with self._lock:
             entry=self._get(draft_id,owner)
             source=entry.draft.reply_source
-            capabilities=source.required_capabilities if source is not None else ()
+            if entry.draft.topic is not None:
+                capabilities = tuple(dict.fromkeys(('topic_text_send',
+                    *(('reply_text_send', *source.required_capabilities) if source is not None else ()))))
+            else:
+                capabilities = source.required_capabilities if source is not None else ()
+            if entry.draft.outgoing_entities:
+                capabilities = tuple(dict.fromkeys(('formatted_text_send',
+                    *(('reply_text_send',) if source is not None else ()), *capabilities)))
+                if (provider is not None or provider_epoch is not None) and (
+                        entry.draft.formatting_provider is not provider or
+                        entry.draft.formatting_provider_epoch is not provider_epoch):
+                    raise DraftError('formatting provider authority changed')
             if not capabilities:
                 return ()  # Preserve the existing plain-source replay semantics.
+            if entry.draft.topic is not None and (provider is not None or provider_epoch is not None):
+                if entry.draft.topic_provider is not provider or entry.draft.topic_provider_epoch is not provider_epoch:
+                    raise DraftError('topic provider authority changed')
             if (self._clock() >= entry.draft.expires_at if entry.attempted_at is None
                     else self._attempt_clock() >= entry.attempted_at + 900):
                 raise DraftError("draft is unavailable")

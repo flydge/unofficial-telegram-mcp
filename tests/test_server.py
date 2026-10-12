@@ -254,8 +254,8 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target_types[0]["pattern"], r"^@[A-Za-z0-9_]+$")
         self.assertEqual(target_types[0]["minLength"], 6)
         self.assertEqual(target_types[0]["maxLength"], 33)
-        self.assertEqual(target_types[1]["minimum"], -(2**63))
-        self.assertEqual(target_types[1]["maximum"], 2**63 - 1)
+        self.assertEqual(target_types[1]["minimum"], -(2**53 - 1))
+        self.assertEqual(target_types[1]["maximum"], 2**53 - 1)
         self.assertEqual(properties["date_from"]["anyOf"][0]["format"], "date-time")
         self.assertEqual(properties["require_complete"]["type"], "boolean")
         query_schema = search_tool.input_schema["$defs"]["SearchQuery"]

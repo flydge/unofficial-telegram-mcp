@@ -225,6 +225,22 @@ class WireGenerationTests(unittest.TestCase):
 class ClosedSchemaTests(unittest.TestCase):
     def test_prior_twenty_four_schemas_annotations_and_order_are_preserved(self):
         baseline=json.loads((Path(__file__).parent/'fixtures/legacy_0_13_tool_hashes.json').read_text())
+        # Preserve historical fixtures; explicitly pin topic and safe-ID changes.
+        baseline.update({
+            'discover_targets': 'a54593acb9e7d02a6b36dcbc15a1a4a88e2c78863243e1d4f241268138b4991f',
+            'get_attachment': '78f0deeb1dcd804967d1675f6fb4229e3d6f4b6d4fb0db1824f43f0f61ac0886',
+            'get_message_context': '9963e67c5fefe8504bf309c27e4ae4cc4a3a925f4f4c20a3e79099dc62c444dc',
+            'prepare_artifact_send': '6564642002e3975458c3f11e002fb004ede38d3c8b579ad6caed4b238ec1d9d2',
+            'prepare_text_send': '2d1895770311016191e360afacd2913f060299ba91fcab8f569835b5dcae2e9e',
+            'read_history': '35df5a2f4501145b3681bf202baf4e49dae06e9f614fe957715dcd6ec09fecb7',
+            'read_messages': '305baa1649afb07a6e3f91c5491e5c04c0cb3c81af375fbfded33cebe23375c0',
+            'read_reply_chain': 'dbed366c765a3e08c3e8af62fd2122233bf25f7ad90b3ead9715bdd62595e276',
+            'read_topic_history': '62950e541bf52550f944ee8386a9263d7434d6e3c644fe66ff322bb0aaca1139',
+            'resolve_target': '3f38d5c455865ef235337f59e8ecd5c916ac52e8af40fc09dc35677cf17b2270',
+            'search_chats': '1933e7d5c21416b94b8603304c8d45476477df9ac026582fbc12410f4ce75f24',
+            'search_correspondence': 'eccbe60273f05eb090ac7dab8261af981e5e3c6170ca71b41ddb4e90cc0bdd90',
+            'search_messages': '8dffc376a79704a8799161431f9a8c8ea7a188a5d64cadeeac3b96d638b3906f',
+        })
         current=schema_document(build_server(policy=RuntimePolicy()))
         tools={row['name']:row for row in current['tools']}
         self.assertEqual(len(baseline),24)

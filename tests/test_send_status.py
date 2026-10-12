@@ -82,6 +82,7 @@ class SendStatusTests(unittest.TestCase):
         self.approvals = []
         self.broker = Broker(socket_path=self.root / "broker.sock",
             artifact_store=ArtifactStore(cache_dir=self.root / "cache"),
+            policy=RuntimePolicy(),
             client_factory=lambda: self.provider, verify_peer_uid=False,
             approval_prompt=lambda **kw: self.approvals.append(kw) or True)
         self.preview = self.broker._prepare_text_send(

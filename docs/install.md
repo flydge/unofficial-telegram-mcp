@@ -24,6 +24,8 @@ A logged-in Telegram Desktop app does **not** supply this TDLib session. If you 
 
 ## 2. Install the package and broker
 
+**Version scope:** the public clone commands below describe repository setup. Public `main` was 0.35.0 on 2026-10-12; they do not fetch this unpublished 0.51.0 candidate. To evaluate 0.51.0, use the separately supplied reviewed local candidate checkout and confirm `telegram_search_mcp.__version__` before installing or changing a broker. After an approved publication, pin the reviewed public commit. The runtime-policy example below is for 0.51.0 only.
+
 Use a stable, owner-only checkout. Select a supported Python interpreter if your `python3` is outside the supported range.
 
 ```bash
@@ -80,7 +82,7 @@ For a read-only starting configuration, create or carefully edit:
 
 ```toml
 config_version = 1
-expected_package_version = "0.35.0"
+expected_package_version = "0.51.0"
 expected_contract_version = 1
 enabled_capabilities = ["read", "artifacts"]
 ```
@@ -94,6 +96,8 @@ The containing directory must be owned by you with mode `0700`; the regular poli
 | Reuse a verified chat | `verified_targets` |
 | Document pages, spreadsheets, presentations | `attachment_pages`, `spreadsheets`, `presentations` |
 | Approved sending | `send` |
+| Exact forum-topic text sends/replies | `send`, `topic_text_send`, and `reply_text_send` for replies |
+| Explicit outgoing text styles | `send`, `formatted_text_send`, and `reply_text_send` for replies |
 | Text or attachment replies | `send` plus `reply_text_send` or `reply_artifact_send` respectively |
 
 Replying to media or formatted sources can require additional source capabilities. Use the [reply reference](reference.md#prepared-same-chat-text-replies) for the exact combinations; do not enable every capability as a shortcut.

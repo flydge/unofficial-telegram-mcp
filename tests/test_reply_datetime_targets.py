@@ -180,11 +180,11 @@ class ProjectionTests(unittest.TestCase):
                 self.assertFalse(absent.is_media)
 
     def test_timestamp_and_format_type_are_strict_closed_provider_data(self):
-        # Break: int coercion, accepting non-null display semantics, or unknown type fields.
+        # Break: int coercion, accepting unsupported/open display constructors, or unknown type fields.
         for stamp in (True, False, 1.0, "1", None, -2147483649, 2147483648):
             with self.subTest(stamp=stamp), self.assertRaises(ValueError):
                 text_source(message(entities=[entity(unix_time=stamp)]))
-        for formatting in (False, 0, "null", {}, {"@type": "dateTimeFormattingTypeRelative"},
+        for formatting in (False, 0, "null", {}, {"@type": "dateTimeFormattingTypeRelative", "extra": None},
                 {"@type": "dateTimeFormattingTypeAbsolute", "format": "yyyy"}):
             with self.subTest(formatting=formatting), self.assertRaises(ValueError):
                 text_source(message(entities=[entity(formatting_type=formatting)]))
@@ -271,9 +271,36 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ReplySource(encoded(value))
 
-    def test_media_caption_datetime_remains_unavailable(self):
-        # Break: accidentally passing the DateTime validator through media source admission.
+    def test_media_caption_datetime_omitted_and_null_select_canonical_v10(self):
+        # Break: losing caption DateTime facts, using old authority, or distinguishing omitted null.
+        media = {"file_name": "fixture.txt", "mime_type": "text/plain", "size": 4,
+            "unique_id_sha256": hashlib.sha256(b"unique-73").hexdigest()}
         for formatting in (OMITTED, None):
+            raw = message()
+            raw["content"] = document_content({"@type": "formattedText", "text": "Date",
+                "entities": [entity(formatting_type=formatting)]})
+            with self.subTest(formatting=formatting):
+                source = text_source(raw)
+                caption = {"@type": "formattedText", "text": "Date",
+                    "entities": [entity(formatting_type=None)]}
+                expected_message = {**raw, "content": {"kind": "document", "caption": caption, "media": media}}
+                expected = encoded({"version": 10, "anchor": {"chat_id": CHAT, "message_id": MESSAGE},
+                    "message": expected_message})
+                self.assertEqual(source.projection_json, expected)
+                self.assertEqual(ReplySource(expected), source)
+                self.assertTrue(source.is_media)
+                self.assertEqual(set(source.required_capabilities), {
+                    "reply_media_targets", "reply_formatted_targets", "reply_datetime_targets"})
+                self.assertEqual(source.target().text, EVIDENCE_MARKER + "Media target: " + encoded({
+                    "kind": "document", "caption": {"text": "Date",
+                        "offset_basis": "original source UTF-16 code units", "entities": [{
+                            "type": "date_time", "provider_type": DATE, "offset": 0, "length": 4,
+                            "text": "Date", "unix_time": 1700000000, "formatting_type": None}]}, "media": media}))
+
+    def test_media_caption_datetime_unsupported_formatting_still_refuses(self):
+        # Break: admitting unsupported DateTime formatting semantics at the media boundary.
+        for formatting in (False, 0, "null", {}, {"@type": "dateTimeFormattingTypeRelative", "extra": None},
+                {"@type": "dateTimeFormattingTypeAbsolute", "format": "yyyy"}):
             raw = message()
             raw["content"] = document_content({"@type": "formattedText", "text": "Date",
                 "entities": [entity(formatting_type=formatting)]})

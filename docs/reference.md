@@ -1,6 +1,6 @@
-# Unofficial Telegram MCP technical reference
+[← Overview](../README.md) · [Installation](install.md) · [Security](security.md)
 
-[← Back to the overview](../README.md) · [Installation](install.md)
+# Unofficial Telegram MCP: tool reference
 
 Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
 
@@ -19,8 +19,8 @@ The public surface contains forty-three tools:
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
-- `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat plain-text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt.
-- `prepare_text_send` and `send_prepared_text` preview the full normalized plain text and make one approved send attempt.
+- `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
+- `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
 - `prepare_artifact_send` fixes the recipient, file hash, size, name, MIME, caption, and `kind=document|photo|voice_note` in an unsent draft. Document is the compatible default. Photos are decoded and validated; voice sources are converted locally to verified OGG/Opus mono.
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
@@ -58,7 +58,7 @@ For free-form intent, Codex supplies two to five unique normalized hypotheses an
 
 ## Runtime contract and compatibility
 
-Version 0.35.0 uses contract version 1 and private IPC version 2. It adds null-format DateTime captions on supported document, static-photo and OGG-voice-note reply sources through private v10. These sources require default-off reply_media_targets, reply_formatted_targets and reply_datetime_targets, adding lexical and identity source capabilities exactly when those entities coexist. The exact provider caption, original UTF-16 spans, signed int32 timestamp and stable media facts enter immutable owner evidence and are revalidated before a plain outgoing reply. Private v1–v9 retain their canonical bytes and authority. Public schemas and annotations remain unchanged. Non-null DateTime formats, links/custom entities, outgoing entities and topics remain unavailable in this slice.
+Package version 0.51.0 retains contract version 1, private IPC version 2 and the same forty-three tools. Optional exact-topic replies and explicit outgoing text styles extend the schemas and require a fresh schema fingerprint; this version declaration does not establish release or live-provider acceptance. Refresh tool schemas and deploy matching proxy/broker versions together. Topic sending is off by default; existing sends and private reply evidence versions v1–v23 retain their behavior. Validated TextUrl messageText targets still require `reply_formatted_targets`, `reply_text_url_targets` and every other applicable target capability. TextUrl captions, CustomEmoji and MediaTimestamp remain closed. Outgoing replies remain plain unless explicit outgoing styles are supplied under their separate capability; provider strings trigger no lookup, payment or navigation. Synthetic evidence does not establish live Telegram delivery or F18 consumer readiness.
 
 Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
@@ -69,7 +69,8 @@ Capabilities are trusted local policy, not permissions granted by an MCP caller 
 ```toml
 config_version = 1
 enabled_capabilities = ["read", "artifacts", "send"]
-expected_package_version = "0.35.0"
+# Candidate example only; use the version from the reviewed installed manifest.
+expected_package_version = "0.51.0"
 expected_contract_version = 1
 max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
@@ -82,6 +83,57 @@ Every operation performs a fresh handshake on its own owner-authenticated Unix c
 ## Codex skill
 
 The matching Codex skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
+
+## Explicit outgoing text styles
+
+The four text preparation/revision tools accept optional `outgoing_entities`.
+Enable the separate default-off `formatted_text_send` capability together with
+`send`, the selected topic/reply capability and every required reply-source
+capability. Incoming source styles never enable or populate outgoing styles.
+
+Pass an actual list of at most 32 closed records, for example
+`[{"offset":0,"length":5,"type":{"@type":"textEntityTypeBold"}}]` for `Hello`.
+The five fieldless types are `textEntityTypeBold`, `textEntityTypeItalic`,
+`textEntityTypeUnderline`, `textEntityTypeStrikethrough` and `textEntityTypeSpoiler`.
+Offsets and lengths are strict integers in UTF-16 code units of the **complete
+final normalized text** (NFKC, CRLF/CR converted to LF), on whole Unicode scalar
+boundaries. Normalize and recalculate spans before preparation; no parser or
+automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
+and overlapping or adjacent spans of the same style are rejected. Distinct styles
+may nest or cover the same range. Hidden links, mentions, custom emoji, quotes,
+code and formatted attachment captions are outside this outgoing subset.
+
+Review the full text, every style/range/covered substring including spoilers,
+account, recipient, optional exact topic and complete reply evidence, expiry and
+one approval digest. Ordinary/topic formatted previews use v2; formatted replies
+use one outer v3 digest with no inner digest. Empty lists preserve existing plain
+preview and wire behavior. A text update replaces the complete text and style
+list; omitted or empty lists clear styles. Entity-only updates are rejected.
+Ordinary refresh preserves styles; topic refresh requires fresh preparation.
+Every revision has a new draft ID and requires fresh approval.
+
+The same prepared provider/session and the full capability union must remain
+current through preview, revision, owner confirmation, claim, native registration,
+final transport, status and receipt replay. Provider evidence must match the exact
+text and style facts; only entity ordering may differ. Missing, added, shifted or
+merged styles leave delivery uncertain, with no automatic retry. This technical
+contract does not establish actual Telegram rendering or live consumer readiness.
+
+## Text in one exact forum topic
+
+Enable both `send` and `topic_text_send` in trusted runtime policy, then restart matching components. Prepare with `prepare_text_send(recipient=-100123, text="Reviewed text", topic={"kind":"forum","id":41})` using observed IDs instead of these synthetic examples. Verified forum supergroups and topics-enabled bot private chats are supported. Closed, hidden, unavailable or malformed topics are refused conservatively; this does not establish the user's full Telegram permissions.
+
+Show the complete account, recipient, topic name/ID/state, text, expiry, text hash and complete `preview_sha256` before requesting approval. Telegram names are marked as untrusted evidence. The local owner dialog reviews the same immutable preview. Apply accepts only the draft ID and explicit approval; it cannot replace the topic. Account, provider session, topic identity/name/state and policy are rechecked before the single transport attempt. A changed topic requires fresh preparation. `update_draft(text=...)` preserves the selected topic and creates a new draft requiring new approval; `refresh_draft` is unavailable for topic drafts.
+
+This route sends text with normal notifications and no reply anchor, link preview, schedule or draft clearing. Explicit outgoing styles require the separate formatting capability described above. It never falls back to another topic or chat. Exact topic membership is required in pending, recovered and final provider evidence; missing or conflicting confirmation stays unknown and must not be retried. Status and receipt replay retain current account/session/capability checks. Disable `topic_text_send` to roll back this route. Actual owner-approved Telegram delivery and consumer readiness remain separate acceptance gates.
+
+### Reply inside the selected forum topic
+
+Use `prepare_reply_text_send` with the same exact `recipient`, an observed committed `reply_to` anchor and `topic={"kind":"forum","id":41}` (synthetic ID). Enable `send`, `reply_text_send`, `topic_text_send` and every capability required by the source evidence. The source must currently belong to that exact topic and be eligible for a reply. Omitting the topic preserves the ordinary reply route.
+
+Review the complete topic and reply-source evidence, normalized outgoing text, expiry and the single outer `preview_sha256`. Approval covers all of these facts together. Apply only the approved draft ID through `send_prepared_text`; changed account, session, policy, topic or source evidence requires a new reviewed preparation. `update_reply_draft` preserves both snapshots and creates a new ID and digest requiring fresh approval. `refresh_reply_draft` is unavailable for topic replies.
+
+Outgoing text uses only explicitly supplied styles under the separate formatting capability; no source formatting, media, quote or link preview is copied. Pending, recovered and final observations must match both the exact topic and reply anchor. Missing or conflicting evidence remains uncertain and never authorizes a retry. Disable `topic_text_send` to turn off both topic send routes. Synthetic checks do not establish actual Telegram delivery or native consumer readiness.
 
 ## Inspect a send outcome
 
@@ -212,11 +264,30 @@ Video and video-note searches use TDLib's matching-media index instead of walkin
 
 TDLib owns its session/database/cache directories and may update them. Unofficial Telegram MCP does not mark messages read. Selected transfers and generated artifacts use an owner-only cache with 64 MiB document, 256 MiB media, 1 GiB total, and 12-hour retention bounds. The local media analyzer uses ffmpeg and a verified multilingual Whisper model; it does not call a cloud STT service. Sending requires an unchanged draft, explicit approval in the task, and a local macOS confirmation dialog; an uncertain provider result is never retried automatically.
 
-No Keychain value is printed by the program. See [`docs/security.md`](security.md) for the complete request allowlist, retention boundary, TDLib cache effects, historical-data policy, acceptance evidence, and rollback procedure.
+No Keychain value is printed by the program. See [`security.md`](security.md) for the complete request allowlist, retention boundary, TDLib cache effects, historical-data policy, acceptance evidence, and rollback procedure.
 
 ## Install and check
 
-See the [installation guide](install.md) for runtime preparation, package installation, Codex setup, capability opt-ins and troubleshooting. First-time Telegram login is manual in 0.35.0.
+Supported runtime: macOS on Apple ARM64. These steps install the Python package into an already prepared local runtime. They do not create Telegram API credentials or authorize a new Telegram session.
+
+Before installing the broker, provision the exact Homebrew TDLib keg `HEAD-d1085f9` (library `1.8.67`, legacy ABI) at `/opt/homebrew/opt/tdlib/lib/libtdjson.dylib`, store the two Keychain accounts listed above, and authorize a dedicated TDLib session in `~/Library/Application Support/TelegramSearchMCP/tdlib` through a trusted local setup. Never put credentials or login codes in MCP arguments, shell history, or project files. Automated first-time login is not included. The runtime check rejects another TDLib keg; a current unpinned Homebrew install is not equivalent to the validated version.
+
+Local media analysis additionally requires the fixed executables and verified Whisper model described in [security.md](security.md). Text search and document reads do not require a speech model. Missing media dependencies return a bounded unavailable or error result.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/telegram-search-broker install
+.venv/bin/telegram-search-mcp --check
+```
+
+`telegram-search-broker install` performs the pinned TDLib and Keychain preflight, atomically writes an owner-only LaunchAgent, and uses argument-list `launchctl` calls to bootstrap the Aqua-session background broker. The generated plist contains no credentials or request data. Use `telegram-search-broker status` to query launchd and `telegram-search-broker uninstall` to boot out the service and remove only a validated plist generated by this package.
+
+Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO/unofficial-telegram-mcp` placeholders in the config example with its actual absolute path; neither shell variables nor `~` are expanded by the example. Runtime data lives under the signed-in user’s `~/Library/Application Support/TelegramSearchMCP`, and the local service names derive from that home directory’s final component.
+
+The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`.
+
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the forty-three tools.
 
 ## Selected full messages
 
@@ -892,6 +963,12 @@ lease across publication or an exactly-once guarantee through a crash.
 
 ## Prepared same-chat text replies
 
+The source-target sections below retain the v1–v23 source admission rules and
+historical batch evidence. Statements about then-unchanged public schemas,
+capability totals or acceptance describe those batches, not current acceptance.
+Source opt-ins never enable or copy outgoing styles. Optional text styles use
+the separate `formatted_text_send` rules above; attachment captions remain plain.
+
 Enable `reply_text_send` **and** `send` in the trusted runtime policy; this opt-in
 is absent from legacy defaults. Add the four reply tools to the consumer allowlist
 and reconnect matching components after the additive schema fingerprint changes.
@@ -933,8 +1010,9 @@ reply-bearing drafts. `list_drafts` remains content-free with `kind=text`;
 
 The base text-target path supports outgoing plain text and ordinary settled same-chat
 `messageText` targets with no formatted entities, topic, link preview, embedded
-reply/forward/import/markup, ephemeral, self-destruct or auto-delete state. It does
-not support topics, outgoing formatting, embedded reply quotes,
+reply/forward/import/markup, ephemeral, self-destruct or auto-delete state. Omitting `topic` and `outgoing_entities` preserves this plain route;
+selected topics and the five explicit outgoing text styles require their separate
+opt-ins described above. It does not support embedded reply quotes,
 external-chat replies, scheduling, stories, checklists, polls or additional options.
 Targets with custom link preview options are unavailable; only absent/null or the
 exact disabled no-URL option shape is supported. Unsupported/malformed targets
@@ -1071,8 +1149,8 @@ Enable `reply_formatted_targets` in the trusted runtime policy alongside `send`
 and the outgoing workflow's `reply_text_send` or `reply_artifact_send`. It is off
 by default. The same eight lifecycle tools accept settled same-chat `messageText`
 sources with only Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre,
-PreCode, BlockQuote and ExpandableBlockQuote entities. Outgoing text and captions
-remain plain with entities=[]; source styling never changes the outgoing payload.
+PreCode, BlockQuote and ExpandableBlockQuote entities. Source styling never changes outgoing content. Explicit caller-supplied text
+styles require `formatted_text_send`; attachment captions keep entities=[].
 Public schemas, all 43 tools, contract 1 and IPC 2 are unchanged.
 
 Inspect the complete `Formatted target:` JSON record in the marked
@@ -1093,9 +1171,12 @@ must be disjoint from all other entities and block quote entities must be disjoi
 from each other. Adjacent spans are allowed. The entire marked display is at most
 4096 characters and is never truncated; expansion beyond that bound is unavailable.
 This style-only projection excludes lexical types; the separate lexical text
-opt-in below admits three provider labels; identity and null-format DateTime text
-sources use their separate boundaries below. Links, custom emoji, media timestamps,
-non-null DateTime formats remain unsupported; DateTime captions use private v10 below.
+opt-in below admits three provider labels; identity and DateTime text
+sources use their separate boundaries below, including fieldless URL text v15 and supported media captions v16.
+TextUrl messageText uses private v23 below; TextUrl captions, custom emoji, media timestamps
+and unknown/open DateTime formats remain unsupported. Exact fieldless Relative
+uses text v11 or caption v12; explicitly specified Absolute uses text v13 or
+caption v14 below. Null-only DateTime captions retain private v10.
 
 Opt-in remains required for preparation, stored inspection/update, both stored
 and refreshed source types, owner confirmation, final guards and terminal receipt
@@ -1131,8 +1212,8 @@ overlap rules apply; styled captions must be nonblank and at most 1024 Unicode
 characters. Raw caption/spans and media facts bind the source hash before display
 sanitation. The entire marked record is at most 4096 characters and never
 truncated. All existing document, static-photo and OGG voice restrictions remain
-in force, and preparation downloads no source attachment. Outgoing entities remain
-empty. Public schemas, 43 tools, contract 1 and IPC 2 are unchanged. Synthetic
+in force, and preparation downloads no source attachment. Source evidence never populates outgoing entities; explicit text styles require
+`formatted_text_send`, and outgoing attachment captions keep empty entities. Public schemas, 43 tools, contract 1 and IPC 2 are unchanged. Synthetic
 checks establish technical behavior; live Telegram delivery and owner-dialog
 approval remain unverified.
 
@@ -1145,7 +1226,8 @@ alongside `send` and the outgoing workflow's `reply_text_send` or
 v5 requires a text source with at least one fieldless Hashtag, Cashtag or BotCommand
 entity, optionally mixed with the ten supported source styles. Supported lexical
 media captions use the separate v6 projection and triple authority below.
-Outgoing text and captions still have `entities=[]`.
+Text has `entities=[]` unless explicit caller-supplied styles are approved under
+`formatted_text_send`; attachment captions always have `entities=[]`.
 
 Inspect the full marked `Formatted target:` JSON and raw source digest. Labels
 `hashtag`, `cashtag` and `bot_command` accompany exact covered source spans using
@@ -1164,7 +1246,8 @@ coincide with lexical spans. Code/Pre/PreCode remain disjoint from all entities.
 Both source capabilities are required at preparation, inspection/update, both
 sides of refresh, owner confirmation, final transport guards and terminal replay.
 Refresh or source edits require fresh approval; uncertain attempts are never
-resent. Topics, links and custom emoji remain unsupported; identity text uses the
+resent. Topics, TextUrl captions and custom emoji remain unsupported; TextUrl messageText uses v23 below;
+fieldless URL text uses v15 and supported URL captions v16 below, identity text uses the
 separate v7 boundary and null-format DateTime text uses v9 below. V1–v4
 canonical/display bytes and public schemas stay unchanged. Disable
 `reply_lexical_targets` to roll back. Synthetic technical evidence does not establish
@@ -1239,7 +1322,8 @@ All required source capabilities are checked during preparation, pending
 inspection/revision, both sides of refresh, before/after owner confirmation,
 after fresh provider checks, after observation registration before raw transport,
 and on terminal replay. Source ID edits observed during provider revalidation
-refuse the send. Outgoing text and captions remain plain with empty entity lists;
+refuse the send. Explicit text styles require `formatted_text_send`; attachment captions retain
+empty entity lists;
 the same original recipient and anchor are used. Unknown outcomes never authorize
 resending. Disable `reply_identity_targets` or revert this local batch to roll
 back. Contract 1, IPC 2 and all 43 public schemas/annotations are preserved.
@@ -1274,8 +1358,8 @@ registration-before-wire guards, and terminal replay. A user-ID-only edit or a
 stable media identity edit invalidates the source digest. An already changed
 source can still reach the immutable stored owner preview before the final source
 validation refuses transport. The final source read and raw send are not atomic.
-Identity evidence never resolves users or changes the original recipient; outgoing
-text and captions retain empty entity lists. Denial and uncertain outcomes never
+Identity evidence never resolves users or changes the original recipient; explicit outgoing text styles require `formatted_text_send`, while
+attachment captions retain empty entity lists. Denial and uncertain outcomes never
 authorize an automatic resend. Disable `reply_identity_targets` or revert this
 local batch to roll back. V1–v7 canonical bytes, displays, source authority and all
 43 public schemas/annotations remain unchanged. Synthetic technical evidence does
@@ -1287,67 +1371,358 @@ consumer skill remains unchanged F18 debt.
 
 Enable both default-off `reply_formatted_targets` and `reply_datetime_targets`
 in the trusted runtime policy, alongside `send` and the chosen `reply_text_send`
-or `reply_artifact_send` workflow. Private v9 admits only `messageText` containing
-at least one pinned `textEntityTypeDateTime` with a strict signed int32 `unix_time`
-(-2147483648 through 2147483647) and absent or null `formatting_type`. Both forms
-canonicalize to explicit null. Booleans, floats, strings, unknown type fields and
-non-null relative/absolute formats refuse. The provider specifies that null means
-the original text must not be changed; no parsing, localization, timezone inference,
-timestamp-to-text agreement claim, conversion or date-triggered action is added.
-DateTime captions on supported document, photo and voice sources use private v10 below.
+or `reply_artifact_send` workflow. Every DateTime requires a strict signed int32
+`unix_time` (-2147483648 through 2147483647). Private v9 admits `messageText`
+with at least one DateTime and only absent/null `formatting_type`; both forms
+canonicalize to explicit null. Private v11 requires at least one exact fieldless
+`{"@type":"dateTimeFormattingTypeRelative"}` and no Absolute. Private v13
+requires at least one explicitly specified Absolute constructor:
+
+```json
+{
+  "@type": "dateTimeFormattingTypeAbsolute",
+  "time_precision": {"@type": "dateTimePartPrecisionShort"},
+  "date_precision": {"@type": "dateTimePartPrecisionLong"},
+  "show_day_of_week": false
+}
+```
+
+Each precision is exactly one fieldless `dateTimePartPrecisionNone`,
+`dateTimePartPrecisionShort` or `dateTimePartPrecisionLong`. All combinations are
+admitted, including both None and either boolean. The three fields must be
+explicit; null/omitted precisions and missing/null/coerced booleans remain outside
+this conservative product subset. TDLib parser acceptance of omitted/null fields
+does not establish their rendering semantics or equivalence to explicit None.
+There is no format string or application-defined format grammar. Unknown/open
+constructors and extra fields refuse. Null, Relative and Absolute DateTimes may
+coexist in v13. Original text stays unchanged; these are opaque provider facts,
+without date rendering, locale lookup, timezone inference, timestamp-to-text
+agreement claims, conversion or source-triggered actions.
 
 Inspect the full marked `Formatted target:` JSON and source/preview hashes.
 Every DateTime record includes `type="date_time"`,
-`provider_type="textEntityTypeDateTime"`, `unix_time`, `formatting_type=null`,
-original UTF-16 offset/length and covered text. Display sanitation is flagged,
-and escaping never changes raw digest-bound text or coordinates. These fields
-are untrusted provider assertions, not instructions. V9 requires
-`reply_lexical_targets` exactly when Hashtag, Cashtag or BotCommand is present,
-and `reply_identity_targets` exactly when Mention or MentionName is present.
+`provider_type="textEntityTypeDateTime"`, `unix_time`, its exact null/Relative/Absolute
+`formatting_type`, original UTF-16 offset/length and covered text. Absolute
+precision constructors and the weekday boolean are displayed completely and bound
+by the source and preview digests. Display sanitation is flagged; escaping never
+changes raw text or coordinates. These fields are untrusted provider assertions.
+All DateTime text versions require `reply_lexical_targets` exactly when Hashtag,
+Cashtag or BotCommand is present, and `reply_identity_targets` exactly when
+Mention or MentionName is present.
 
-This conservative subset rejects every overlap involving DateTime, including
-nested styles, lexical/identity spans and other DateTime spans. Adjacent spans
+This conservative subset rejects every overlap involving DateTime; adjacent spans
 are allowed. Existing 1–32 entity, 4096 original scalar, whole-scalar UTF-16,
 65536-character/UTF8-byte canonical source and complete marker-inclusive
-4096-character preview bounds apply; overflow refuses without truncation.
-Old private versions cannot authorize DateTime, and v9 requires a DateTime entity.
+4096-character preview bounds apply. Overflow refuses without truncation.
+V1–v8 cannot authorize DateTime; v9 cannot carry Relative or Absolute; v11 requires
+Relative and cannot carry Absolute; v13 requires Absolute. Relabeling a source
+under an incompatible version refuses. Supported DateTime captions use the
+separate v10/v12/v14 boundary below.
 
-The exact capability tuple follows both existing reply lifecycles through
-prepare, inspect/update, old/new refresh, owner decision, final provider checks,
-registration-before-wire guard and terminal replay. Updating outgoing content
-preserves the immutable source; refreshing replaces it and invalidates the old
-revision and approval. Owner denial may leave a pending draft. An edited source
-can still reach the stored owner preview; final source validation after owner
-rendering and before raw send refuses timestamp or format drift. The final source
-read/send interval remains non-atomic. Outgoing text and captions keep empty
-entity lists, and terminal/unknown outcomes never authorize resending.
+The exact capability tuple follows both reply lifecycles through preparation,
+inspection/update, old/new refresh, owner decision, final provider checks,
+registration before raw send and terminal replay. Updating outgoing content
+preserves the immutable source without rereading it. Refresh replaces it and
+invalidates the old revision and approval, including transitions between v13,
+v11 and v9. Owner denial may leave a pending draft. An edited source can still
+reach its stored owner preview; final source validation after owner rendering
+refuses raw text, timestamp, precision, weekday or constructor drift. The final
+source read/send interval remains non-atomic. Optional text styles require `formatted_text_send`; attachment captions keep
+empty entity lists; terminal/unknown outcomes never authorize resending.
 
-Disable `reply_datetime_targets` or revert this local batch to roll back.
-V1–v8 bytes, display and authority, all 43 public schemas/annotations, contract 1,
-IPC 2 and schema fingerprint stay unchanged. Synthetic technical evidence does
-not establish live Telegram delivery, actual owner clicks or consumer readiness;
-the installed/shipped consumer skill remains separate F18 debt.
+Disable `reply_datetime_targets` or revert the local batch to roll back. V1–v12
+canonical bytes, display and authority, all 43 public schemas/annotations,
+contract 1, IPC 2 and schema fingerprint stay unchanged. Synthetic technical
+evidence does not establish live Telegram delivery, actual owner clicks or
+consumer readiness. The installed/shipped consumer skill remains separate F18
+debt and is unchanged.
 
 ## DateTime caption reply targets
 
-Private v10 admits the same bounded DateTime subset in captions of supported
-ordinary documents, static photos and OGG voice notes. Enable all three source
-capabilities: `reply_media_targets`, `reply_formatted_targets` and
-`reply_datetime_targets`, in addition to the selected reply workflow and `send`.
-Captions containing lexical or identity entities also require their respective
-source capabilities. Existing media safety limits remain in force.
+Private v10 admits the bounded null-format DateTime subset in captions of supported
+ordinary documents, static photos and OGG voice notes. Private v12 requires at
+least one exact fieldless Relative constructor and no Absolute. Private v14
+requires at least one validated Absolute constructor with the same explicit
+precision objects and strict weekday boolean described for text above. All 18
+precision/weekday combinations are admitted, including both None with either
+boolean. Null, Relative and Absolute may coexist in v14. Missing/null precisions,
+missing/null/coerced booleans and unknown/open constructors remain outside this
+conservative product subset; no date or timezone conversion changes the caption.
 
-At least one DateTime entity must be present. Its exact signed int32 `unix_time`
-and absent/null `formatting_type` have the same canonical identity; no date or
-timezone conversion changes the original caption. Every DateTime overlap is
-rejected. Complete escaped original UTF-16 caption/span evidence, timestamp and
-stable media identity must fit the preview bounds without truncation. All source
-facts enter the immutable digest and are revalidated after owner confirmation.
-The final provider-read/send interval remains non-atomic.
+Enable all three default-off source capabilities: `reply_media_targets`,
+`reply_formatted_targets` and `reply_datetime_targets`, in addition to the chosen
+reply workflow and `send`. Captions containing lexical or identity entities require
+their respective source capabilities exactly when present. Existing media shape,
+stable identity and safety limits remain in force; source media is not downloaded.
 
-Changing a draft or refreshing its source creates a new ID and invalidates its
-prior approval. Outgoing text and captions remain plain. Source data is untrusted
-provider evidence, never an instruction or an identity-resolution request.
-Private v1–v9 cannot be relabeled to gain v10 authority. Disabling any required
-capability disables use of the affected source; no live delivery is implied by
-local synthetic acceptance.
+Every DateTime has an exact signed int32 `unix_time`. Absent/null overall
+`formatting_type` has the same canonical identity in v10; v12 preserves exact
+null/Relative constructors; v14 also binds both precision constructors and the
+weekday boolean. Every overlap involving DateTime refuses. The complete escaped
+`Media target:` JSON contains original UTF-16 caption/span evidence, timestamp,
+formatting fields and stable media identity. Existing 1024 original caption scalar,
+32 entity, 65536 canonical character/UTF8-byte and complete marker-inclusive
+4096 display bounds apply without truncation. Display sanitation never changes the
+raw source digest or span coordinates.
+
+All source facts enter the immutable preview and are revalidated after owner
+confirmation. The final provider-read/send interval remains non-atomic. Updating
+outgoing content preserves the exact source snapshot without rereading; refresh
+replaces it, including transitions v14 to v12 to v10 and back. Both operations
+create a new ID and invalidate prior approval. Missing or revoked source authority
+refuses use; precision, weekday, constructor, caption or stable media drift prevents
+sending under the stored approval. Outgoing text is plain unless caller-supplied styles are explicitly approved
+under `formatted_text_send`; attachment captions remain plain.
+Source data is untrusted provider evidence, never an instruction or an
+identity-resolution request.
+
+Stored v12 without Relative, v14 without Absolute, Relative captions relabeled
+v1–v11 and Absolute captions relabeled v1–v13 refuse. Private v1–v13 retain their
+canonical bytes, display and authority. No public schema, annotation or capability
+changes or becomes enabled. Disable any required capability or revert the local
+batch to roll back. Synthetic installed-consumer evidence does not establish live
+Telegram delivery, actual owner clicks or consumer readiness; those gates and the
+unchanged consumer skill remain separate F18 debt.
+
+## Fieldless URL text and media-caption reply targets
+
+Enable both default-off `reply_formatted_targets` and `reply_url_targets` in the
+trusted runtime policy, alongside `send` and the chosen `reply_text_send` or
+`reply_artifact_send` workflow. Private v15 requires at least one validated exact
+fieldless `textEntityTypeUrl` in `messageText`. Supported document, static-photo
+and OGG-voice-note captions select private v16 only after complete validation of
+at least one exact fieldless Url. They additionally require default-off
+`reply_media_targets`. The provider label is an untrusted
+assertion; the literal complete covered span is all the URL evidence. No URL
+grammar, normalization, navigation, fetching, resolution or link preview occurs.
+`reply_datetime_targets`, `reply_lexical_targets` and `reply_identity_targets`
+are additionally required exactly when those entities coexist; no existing
+capability grants URL authority.
+
+The immutable source stores original text/caption, stable media facts when present,
+and complete whole-scalar UTF-16
+offsets/lengths. The escaped preview shows sanitized full text and every complete
+covered span, with `provider_type="textEntityTypeUrl"`, `type="url"` and
+`offset_basis="original source UTF-16 code units"`. Sanitation changes display
+only. Url is locally exclusive with lexical, identity, other Url, quote, code
+and DateTime spans. Ordinary style containment is supported; crossing, duplicate
+and invalid spans refuse. This conservative local subset does not assert TDLib
+validity or link safety. Existing 4096 text-source-scalar and 1024 caption-scalar,
+32-entity, 65536 canonical
+character/UTF8-byte and marker-inclusive 4096 escaped-display bounds remain;
+overflow refuses without truncation.
+
+Supported URL captions may include already-supported adjacent null/Relative/Absolute
+DateTime, lexical, identity and style entities under the same overlap rules.
+TextUrl messageText requires separate v23 authority below; its captions,
+CustomEmoji and MediaTimestamp remain closed. BankCardNumber messageText uses
+v21; supported captions use v22 with media authority. PhoneNumber messageText requires the separate v19 authority below;
+Supported PhoneNumber captions require the separate v20 authority below. EmailAddress caption evidence uses separate v18 authority; messageText
+EmailAddress evidence retains v17 authority described below. V1–v14 cannot authorize Url; v15 cannot authorize
+URL captions. V15/v16 without Url refuse. Previous snapshot bytes, display and
+authority remain unchanged. Media helper URL parsing, validation and rendering
+remain default-off with `url=False`. No source media is downloaded.
+
+The full capability conjunction applies to preparation, stored inspection/update,
+both old and new refresh sources, owner confirmation, final source/properties
+guards, the immediate prewire boundary and terminal replay. Update preserves
+the source without rereading; refresh replaces the snapshot and invalidates old
+IDs and approvals, including transitions to/from older supported sources.
+Authority already absent or revoked in the owner callback refuses before claim
+and staging. Revocation detected later at final properties or immediate prewire
+guards refuses before raw transport, after claim and, for artifact replies,
+temporary staging; the draft terminal-fails and staged data is retired. Original
+source text/caption/span/type or stable media drift after the owner decision likewise refuses before raw
+transport and may follow claim/staging. There is no stronger atomicity or
+pre-staging guarantee for these later checks. Caller false and owner denial
+do not send or stage.
+
+Source evidence never adds outgoing styles. Only explicitly approved text styles
+under `formatted_text_send` may add entities; attachment captions remain plain.
+Both routes preserve the same recipient, anchor and options. No source-directed work is performed. Disable
+`reply_url_targets` or revert this isolated batch to roll back. Synthetic
+technical evidence does not establish native TDLib/live Telegram delivery,
+actual owner clicks or consumer readiness. Those gates, product completion and
+the unchanged consumer skill's F18 validation remain open.
+
+
+## Fieldless EmailAddress text and media-caption reply targets
+
+Enable both default-off `reply_formatted_targets` and `reply_email_targets` in
+trusted runtime policy, alongside `send` and the chosen `reply_text_send` or
+`reply_artifact_send` workflow. Private v17 is selected only after complete
+messageText validation containing an exact fieldless
+`{"@type":"textEntityTypeEmailAddress"}`. The provider label is an untrusted
+assertion. Its complete covered text is inert evidence: no grammar or
+deliverability claim, address resolution, mailto/navigation, contact action or
+email sending occurs. Supported document/static-photo/OGG-voice-note captions
+select private v18 only after complete caption and media validation containing
+EmailAddress, and also require default-off `reply_media_targets`. The formatter
+and media parser/validator/renderer retain internal `email=False` defaults.
+
+The immutable source keeps the original complete text and whole-scalar UTF-16
+coordinates. The escaped complete preview displays `type="email_address"`,
+`provider_type="textEntityTypeEmailAddress"`, offset, length and the entire
+sanitized covered span beside full sanitized text. Sanitation changes display
+only. `reply_url_targets`, `reply_datetime_targets`, `reply_lexical_targets` and
+`reply_identity_targets` are additionally required exactly when their validated
+entities coexist. EmailAddress is locally exclusive with other EmailAddress,
+URL, lexical, identity, DateTime, quote and code spans. Ordinary style containment
+is allowed; crossing, duplicate, split-surrogate, malformed or extra-field
+entities refuse. These local constraints make no claim of TDLib validity.
+
+Captions preserve original raw text plus stable media identity; no source
+download occurs. V18 requires media, formatted and email authorities, followed
+by URL, DateTime, lexical and identity authorities exactly when present.
+TextUrl messageText requires separate v23 authority below; its captions,
+CustomEmoji and MediaTimestamp remain closed. BankCardNumber messageText uses
+v21; supported captions use v22 with media authority.
+PhoneNumber messageText requires separate v19 authority; Supported PhoneNumber captions require the separate v20 authority below. Older v1–v16 cannot authorize EmailAddress; v17 remains messageText
+only. Forged older tags and v17/v18 without EmailAddress refuse. Earlier
+v1–v17 canonical/display bytes and authority, 4096 text/1024 caption-scalar,
+32-entity, 65536 projection character/UTF8-byte and complete
+marker-inclusive 4096 display bounds are preserved; overflow refuses without
+truncation. Public schemas, annotations, operation mappings, contract 1, IPC 2
+and schema fingerprint remain unchanged.
+
+The existing complete authority conjunction applies through prepare, get/update,
+both old/new refresh sources, owner confirmation, final source/properties checks,
+immediate prewire checks and terminal replay. Get/update use stored evidence
+without rereading the provider; refresh binds a new source and invalidates the
+old ID and approval. Missing authority or owner-callback revocation refuses
+before claim/staging. Later properties/prewire revocation or source drift can
+follow claim and temporary artifact staging, but refuses raw transport,
+terminal-fails and retires staging. No stronger atomicity is claimed. Optional text styles require `formatted_text_send`; attachment
+captions remain plain with empty entities. Both reply families preserve the
+approved recipient, anchor and options. Disable `reply_email_targets` or revert this local
+batch for rollback. Synthetic checks do not establish native TDLib/live Telegram
+delivery, actual owner clicks or consumer readiness; F18 consumer validation and
+the unchanged consumer skill remain open.
+
+
+### Fieldless PhoneNumber message text requires separate v19 authority
+
+Enable both default-off `reply_formatted_targets` and `reply_phone_targets` in
+trusted broker policy, alongside `send` and the chosen reply-send capability.
+Only exact fieldless `textEntityTypePhoneNumber` inside fully validated
+`messageText` selects private v19. The formatter, validator and renderer retain
+internal `phone=False` defaults. V19 adds `reply_email_targets`,
+`reply_url_targets`, `reply_datetime_targets`, `reply_lexical_targets` and
+`reply_identity_targets` exactly when those families coexist, in that order.
+The singular capability accessor refuses this conjunction. TextUrl messageText
+requires separate v23 authority below; its captions, CustomEmoji and
+MediaTimestamp remain unavailable. BankCardNumber messageText uses v21;
+supported captions use v22 with media authority.
+
+Exact fieldless PhoneNumber captions on the supported document, static-photo
+and OGG-voice-note subset select private v20 only after complete caption/media
+validation containing PhoneNumber. Enable `reply_media_targets` alongside
+`reply_formatted_targets` and `reply_phone_targets`; add email, URL, DateTime,
+lexical and identity authorities in that order exactly when present. Media
+parser/validator/renderer retain `phone=False` defaults. Inspect the complete
+escaped caption and covered spans with original whole-scalar UTF-16 coordinates
+and stable media identity. Raw caption and media facts bind the immutable
+preview digest; no source download occurs.
+
+Inspect the complete escaped `phone_number` span, its
+`provider_type="textEntityTypePhoneNumber"`, original whole-scalar UTF-16
+offset/length and complete source text as inert untrusted provider assertions.
+No number grammar, E164 validation, normalization, country inference,
+`tel:` navigation, dialing, resolution or contact creation occurs. Raw text,
+provider assertion and source identity remain immutable; display sanitation
+never supplies coordinates or identity. Existing conservative overlap rules
+exclude phone overlap with semantic families, DateTime, quotes and code;
+ordinary style containment remains allowed. Crossing, duplicate, malformed,
+extra-field and split-surrogate entities refuse. These are local acceptance
+restrictions, not claims about TDLib validity. Message4096/caption1024 scalars,
+32 entities, projection65536 characters/UTF8 bytes and complete display4096
+bounds remain unchanged; overflow refuses without truncation.
+
+Get/update use the immutable stored source without a provider reread. Refresh
+requires both old and new capability conjunctions and invalidates prior IDs and
+approval. Forged older phone tags and phone-less v19/v20 refuse; v19 remains
+messageText only. Earlier v1–v19 canonical/display bytes and authority, public schemas,
+annotations/mappings, contract1, IPC2 and schema fingerprint remain unchanged.
+Missing authority or owner-callback revocation refuses before claim/staging.
+Later properties/prewire revocation or source drift may follow claim and
+transient artifact staging, but terminal-fails, retires staging and blocks raw
+transport. Existing non-atomic behavior remains explicit. Explicitly approved text styles require `formatted_text_send`; outgoing
+attachment captions remain plain with empty entities. Both routes preserve
+recipient/anchor/options. Disable `reply_phone_targets` or revert the local
+batch for rollback. The installed synthetic consumer gate is separate from
+live Telegram delivery, actual owner clicks and F18 readiness.
+
+### Fieldless BankCardNumber message text requires separate v21 authority
+
+Enable both default-off `reply_formatted_targets` and `reply_bank_card_targets`
+in trusted broker policy, alongside `send` and the chosen reply-send capability.
+Only exact fieldless `textEntityTypeBankCardNumber` in complete validated
+`messageText` selects private v21. Formatter, validator and renderer retain
+internal `bank_card=False` defaults. V21 adds `reply_phone_targets`,
+`reply_email_targets`, `reply_url_targets`, `reply_datetime_targets`,
+`reply_lexical_targets` and `reply_identity_targets` exactly when present, in
+that order. The singular accessor refuses this conjunction. Supported
+document/static-photo/OGG-voice-note BankCardNumber captions select private v22
+after complete caption/media validation, additionally requiring
+`reply_media_targets`; caption helpers retain `bank_card=False`. TextUrl
+messageText uses v23 below; its captions, CustomEmoji and MediaTimestamp remain closed.
+
+Inspect the complete escaped `bank_card_number` span,
+`provider_type="textEntityTypeBankCardNumber"`, original whole-scalar UTF-16
+offset/length and full source text as inert untrusted provider assertions.
+Admission does not require numeric text: no grammar, Luhn/PAN check,
+normalization, `getBankCardInfo`, payment, links, navigation, contact/action
+resolution or source download occurs. Raw text, span and provider facts bind
+immutable source identity and the review digest; sanitation changes display
+only. Conservative overlap excludes BankCardNumber with semantic families,
+DateTime, quotes and code; ordinary style containment is allowed. Duplicate,
+crossing, malformed, extra-field and split-surrogate entities refuse. Existing
+message4096/caption1024 scalar,32entity,projection65536 character/UTF8-byte and
+complete display4096 bounds remain; overflow refuses without truncation.
+
+The full present-family conjunction is enforced at preparation, immutable
+get/update, both old/new refresh sources, owner confirmation, final source/
+properties guards, immediate prewire and terminal replay. Missing authority or
+owner-callback revocation refuses before claim/staging. Later properties/prewire
+revocation or source drift may claim and transiently stage an artifact, but
+blocks raw transport, terminal-fails and retires staging. No stronger atomicity
+is claimed. Refresh invalidates previous IDs and approval; update preserves
+stored evidence without rereading. Forged older tags, BankCardNumber-less v21
+and media-as-v21 refuse. Private v1–v20 canonical/display bytes and authority,
+public schemas/annotations/mappings, contract1, IPC2 and fingerprint remain
+unchanged. Explicit text styles require `formatted_text_send`; attachment captions retain
+empty entities. Both routes preserve exact recipient, reply anchor and options. Disable `reply_bank_card_targets` or revert this local
+batch for rollback. Synthetic evidence leaves native/live delivery, actual
+owner clicks, product outcome and F18 consumer readiness unverified.
+
+### TextUrl message text retains exact inert evidence under private v23 authority
+
+Enable both default-off `reply_formatted_targets` and `reply_text_url_targets`
+for selected TextUrl messageText evidence. V23 additionally requires every
+present BankCardNumber, PhoneNumber, EmailAddress, fieldless URL, DateTime,
+lexical and identity capability, in that order. TextUrl alone does not require
+`reply_url_targets` or media authority. Formatter/validator/renderer entry
+points retain `text_url=False`; captions remain closed.
+
+The exact hidden `url` is an opaque provider string: empty, whitespace, controls,
+bidi, arbitrary schemes and markup-looking values can be retained as inert data.
+Admission requires an exact built-in string of at most 4096 Unicode scalars and
+strict UTF-8, with no parsing, normalization, resolution or navigation. V23's
+single JSON display layer retains full original text, covered text, original
+UTF-16 coordinates, `provider_type` and `provider_url`. Every string-value scalar
+outside ASCII letters/digits/underscore/hyphen uses lowercase JSON Unicode
+escapes, including two escapes for astral scalars. Parsing that one layer
+recovers the exact originals; no action or renderer unescapes them. `sanitized`
+compares this encoding with ordinary JSON for original provider strings,
+excluding fixed labels. The complete marked display must fit 4096 characters;
+overflow refuses without dropping or truncating the hidden string. Existing
+32-entity and projection character/UTF-8-byte bounds remain.
+
+Hidden-only changes alter source identity and the immutable preview digest;
+refresh invalidates prior IDs and approval. Existing plural guards enforce the
+whole conjunction through owner return, prewire and terminal replay. Late
+revocation or drift can claim and transiently stage before local failure; staging
+retirement is best effort with TTL fallback. No source evidence adds outgoing entities; optional text styles require
+`formatted_text_send`, and attachment captions retain empty entities.
+Disable `reply_text_url_targets` to roll back. Synthetic evidence leaves native/
+live provider behavior, actual owner approval and F18 outcome unverified.

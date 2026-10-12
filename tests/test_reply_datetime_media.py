@@ -274,7 +274,7 @@ class RejectionTests(unittest.TestCase):
         # Catches accepting identity/style/link data merely because v10 was chosen.
         for adjacent in (entity(8, 4, 'textEntityTypeMentionName', user_id=True),
                          entity(8, 4, 'textEntityTypeMentionName', user_id=0),
-                         entity(8, 4, 'textEntityTypeUrl'),
+                         entity(8, 4, 'textEntityTypeUrl', extra=None),
                          entity(8, 4, 'textEntityTypeCustomEmoji', custom_emoji_id=1),
                          entity(8, 4, 'textEntityTypeBold', ignored=True)):
             with self.subTest(adjacent=adjacent):

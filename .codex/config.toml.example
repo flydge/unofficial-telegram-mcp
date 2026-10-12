@@ -17,8 +17,21 @@ enabled_tools = ["_manifest", "resolve_target", "discover_targets", "search_corr
 # also require reply_media_targets on supported document/static-photo/voice sources.
 # DateTime messageText sources need both default-off reply_formatted_targets and
 # reply_datetime_targets, adding lexical/identity capabilities when present.
-# Only signed int32 unix_time with absent/null formatting_type is supported;
-# DateTime overlaps and non-null formats are unsupported in 0.35.0.
-# Absent/null DateTime captions on documents, static photos and voice notes also
-# require reply_media_targets and reply_formatted_targets.
+# DateTime supports signed int32 unix_time with null, exact fieldless Relative or
+# closed explicit Absolute precision/weekday evidence; media captions additionally
+# require reply_media_targets. Every DateTime overlap remains unsupported.
+# Fieldless Url text sources require reply_formatted_targets and reply_url_targets;
+# supported Url media captions additionally require reply_media_targets.
+# Exact fieldless EmailAddress messageText requires both default-off
+# reply_formatted_targets and reply_email_targets; URL/DateTime/lexical/identity
+# authority is added exactly when present. Supported EmailAddress media captions
+# also require reply_media_targets; v18 reuses reply_email_targets (no new cap).
+# Complete escaped covered text is inert evidence; no mailto or email action.
 # enabled_tools never grants source or send authority.
+# Exact fieldless PhoneNumber messageText requires both default-off
+# reply_formatted_targets and reply_phone_targets; add email/URL/DateTime/lexical/
+# identity authorities exactly when present. V19 remains messageText only.
+# Supported document/static-photo/OGG-voice-note PhoneNumber captions use v20
+# and additionally require reply_media_targets; no new capability is added.
+# Media helpers retain phone=False. Complete escaped caption spans and stable
+# media identity are inert evidence; no dialing, source download or phone action.

@@ -107,8 +107,9 @@ class FormattedSourceTests(unittest.TestCase):
                 source_from_message(styled(entities=[entity(offset=off,length=length)]),123,55)
     def test_unknown_closed_fields_types_languages_and_controls_refuse(self):
         invalid=[{},entity(extra=1),entity(type={'@type':'textEntityTypeBold','language':''}),
-            entity(type={'@type':'textEntityTypeTextUrl','url':'https://example.invalid'}),
-            entity(type={'@type':'textEntityTypeMention'}),entity(type={'@type':[]}),
+            entity(type={'@type':'textEntityTypeTextUrl','url':'https://example.invalid','extra':None}),
+            entity(type={'@type':'textEntityTypeUnknown'}),
+            entity(type={'@type':'textEntityTypeMention','user_id':8}),entity(type={'@type':[]}),
             entity(type={'@type':'textEntityTypePreCode'}),entity(type={'@type':'textEntityTypePreCode','language':False}),
             entity(type={'@type':'textEntityTypePreCode','language':'a'*65}),
             entity(type={'@type':'textEntityTypePreCode','language':'😀'*33}),

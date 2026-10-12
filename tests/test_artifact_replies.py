@@ -110,6 +110,20 @@ class ArtifactSendTests(ArtifactSendFixture, unittest.TestCase):
         for key,val in [('source_sha256','0'*64),('text','[untrusted Telegram evidence] Other'),('sanitized',True)]:
             bad=copy.deepcopy(preview);bad['reply_target'][key]=val
             with self.subTest(key=key),self.assertRaises(ValidationError):ReplyArtifactDraftPreview.model_validate(bad)
+        # Shared ReplyTarget admits the field; outgoing artifact replies do not.
+        # Rehash independently so only the artifact-topic contract rejects it.
+        from telegram_search_mcp.reply_drafts import ReplyTarget
+        self.assertEqual(ReplyArtifactDraftPreview.model_validate(preview).model_dump(mode='json'),preview)
+        bad=copy.deepcopy(preview);bad['reply_target']['forum_topic_id']=41
+        shared=ReplyTarget.model_validate(bad['reply_target'])
+        self.assertEqual(shared.forum_topic_id,41)
+        self.assertEqual(shared.model_dump(mode='json'),bad['reply_target'])
+        forged_facts=copy.deepcopy(expected)
+        forged_facts['draft']=bad['draft'];forged_facts['reply_target']=bad['reply_target']
+        bad['preview_sha256']=hashlib.sha256(json.dumps(forged_facts,sort_keys=True,
+            separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()).hexdigest()
+        with self.assertRaises(ValidationError):ReplyArtifactDraftPreview.model_validate(bad)
+        self.assertEqual(self.sends(),[])
     def test_lifecycle_variants_and_foreign_owner_refuse(self):
         preview=self.prepare();did=preview['draft']['draft_id'];self.raw.source=target('edited')
         for op,extra in [('get_draft',{}),('get_reply_draft',{}),('update_draft',{'caption':'x'}),('update_reply_draft',{'text':'x'}),('refresh_draft',{}),('refresh_reply_draft',{})]:

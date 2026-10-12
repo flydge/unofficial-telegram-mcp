@@ -63,7 +63,7 @@ from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, sen
 from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareReplyArtifactSendResponse,
     GetReplyArtifactDraftRequest, GetReplyArtifactDraftResponse, UpdateReplyArtifactDraftRequest,
     RefreshReplyArtifactDraftRequest, ReviseReplyArtifactDraftResponse, ReplyArtifactDraftPreview)
-from .reply_drafts import (ReplyDraftPreview, PrepareReplyTextSendRequest, PrepareReplyTextSendResponse,
+from .reply_drafts import (ReplyDraftPreview, ReplyTextDraftPreview, PrepareReplyTextSendRequest, PrepareReplyTextSendResponse,
     GetReplyDraftRequest, GetReplyDraftResponse, UpdateReplyDraftRequest, RefreshReplyDraftRequest,
     ReviseReplyDraftResponse, PREPARED as REPLY_PREPARED, PENDING as REPLY_PENDING,
     REVISED as REPLY_REVISED, UNAVAILABLE as REPLY_UNAVAILABLE)
@@ -490,7 +490,7 @@ class Broker:
                 return self._revise_reply_draft(model,client_id=client_id).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
-            return self._prepare_text_send(model, client_id=client_id).model_dump(mode="json")
+            return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
         if operation == "send_prepared_artifact":
             model = SendPreparedArtifactRequest.model_validate(payload)
             return self._send_prepared_artifact(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
@@ -780,13 +780,69 @@ class Broker:
             recipient_title=draft.recipient_title, kind=draft.kind,
             expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
             approval_required=draft.approval_required,
+            topic=draft.topic,
         )
+
+    def _require_topic_policy(self, draft_id: str, owner: DraftOwner) -> None:
+        if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
+            return
+        require_current(self._policy)
+        if 'send' not in self._policy.enabled_capabilities:
+            raise CompatibilityError('capability_disabled')
+        provider = self._shared_client()
+        capabilities = self._drafts.source_required_capabilities(draft_id, owner=owner,
+            provider=provider, provider_epoch=provider.send_observation_epoch)
+        if any(capability not in self._policy.enabled_capabilities for capability in capabilities):
+            raise CompatibilityError('capability_disabled')
+
+    def _require_formatting_capability(self):
+        require_current(self._policy)
+        if not {'send', 'formatted_text_send'} <= set(self._policy.enabled_capabilities):
+            raise CompatibilityError('capability_disabled')
+
+    @staticmethod
+    def _draft_entity_rows(draft):
+        return [{'offset': offset, 'length': length, 'type': {'@type': kind}}
+                for offset, length, kind in draft.outgoing_entities]
+
+    def _text_revision_guard(self, old, provider, epoch, *, new_formatted=False, source=None):
+        if not (old.topic is not None or old.outgoing_entities or new_formatted):
+            return None
+        required = {'send'}
+        if old.topic is not None:
+            required.add('topic_text_send')
+        if old.outgoing_entities or new_formatted:
+            required.add('formatted_text_send')
+        for selected_source in (old.reply_source, source):
+            if selected_source is not None:
+                required.update(('reply_text_send', *selected_source.required_capabilities))
+        def guard():
+            # Called under registry lock: captured immutable/local facts only.
+            require_current(self._policy)
+            if (self._client is not provider or provider.send_observation_epoch is not epoch or
+                    not required <= set(self._policy.enabled_capabilities) or
+                    (old.topic is not None and (old.topic_provider is not provider or old.topic_provider_epoch is not epoch)) or
+                    (old.outgoing_entities and (old.formatting_provider is not provider or old.formatting_provider_epoch is not epoch))):
+                raise DraftError('text draft authority changed')
+            self._reply_budget_check(provider)
+        return guard
+
+    @staticmethod
+    def _topic_digest(draft, owner: DraftOwner) -> str:
+        from .topic_models import topic_preview_digest
+        return topic_preview_digest(draft_id=draft.draft_id, account_id=owner.account_id,
+            recipient=draft.recipient, recipient_title=draft.recipient_title,
+            expires_at=datetime.fromtimestamp(draft.expires_at, timezone.utc), text=draft.text,
+            sha256=draft.sha256, size_bytes=draft.size_bytes, topic=draft.topic,
+            outgoing_entities=Broker._draft_entity_rows(draft))
 
     def _list_drafts(self, request: ListDraftsRequest, *, client_id: str) -> ListDraftsResponse:
         try:
             owner = self._draft_owner(client_id)
             pending, has_more = self._drafts.list_pending(owner=owner, limit=request.limit,
                                                         after_draft_id=request.after_draft_id)
+            for draft in pending:
+                self._require_topic_policy(draft.draft_id, owner)
             summaries = [self._draft_summary(draft, owner) for draft in pending]
             return ListDraftsResponse(status="listed", drafts=summaries, has_more=has_more,
                                       next_after_draft_id=pending[-1].draft_id if has_more else None,
@@ -797,12 +853,17 @@ class Broker:
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
         if draft.reply_source is not None:
             raise DraftError("draft is unavailable")
+        self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
 
     def _plain_draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
         content = dict(sha256=draft.sha256, size_bytes=draft.size_bytes)
         if draft.kind == "text":
             content["text"] = draft.text
+            if draft.outgoing_entities:
+                content['outgoing_entities'] = self._draft_entity_rows(draft)
+            if draft.topic is not None or draft.outgoing_entities:
+                content['preview_sha256'] = self._topic_digest(draft, owner)
         else:
             content.update(artifact_id=draft.artifact_id, display_name=draft.display_name,
                            mime_type=draft.mime_type, caption=draft.caption,
@@ -821,6 +882,7 @@ class Broker:
             client = self._shared_client()
             with client.request_budget(budget):
                 owner = self._draft_owner(client_id)
+                self._require_topic_policy(request.draft_id, owner)
                 state, receipt, provider, attempted_at, provider_epoch = self._drafts.status_snapshot(request.draft_id, owner=owner)
                 result = send_status(request.draft_id)
                 if state == "pending":
@@ -863,6 +925,7 @@ class Broker:
                     if current is None or current != observation:
                         return send_status(request.draft_id)
                 require_current(self._policy)
+                self._require_topic_policy(request.draft_id, owner)
                 if "send" not in self._policy.enabled_capabilities or time.monotonic() >= budget:
                     return send_status(request.draft_id)
                 return result
@@ -882,17 +945,36 @@ class Broker:
     def _revise_draft(self, request: UpdateDraftRequest | RefreshDraftRequest,
                       *, client_id: str) -> ReviseDraftResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            if isinstance(request, UpdateDraftRequest) and request.outgoing_entities:
+                self._require_formatting_capability()
             owner = self._draft_owner(client_id)
             old = self._drafts.peek(request.draft_id, owner=owner)
             self._draft_preview(old, owner)
-            chat = self._shared_client().resolve_target(old.recipient)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            if old.topic is not None and isinstance(request, RefreshDraftRequest):
+                raise DraftError('topic refresh is unavailable; prepare a fresh topic draft')
+            chat = provider.resolve_target(old.recipient)
             title = sanitize_telegram_text(chat.get("title"), max_length=255) or str(old.recipient)
+            if (old.topic is not None or old.outgoing_entities) and title != old.recipient_title:
+                raise DraftError('topic recipient changed; prepare a fresh topic draft')
             if self._draft_owner(client_id) != owner:
                 raise DraftError("draft is unavailable")
+            rows = (caller_outgoing_entities(request.outgoing_entities) if isinstance(request, UpdateDraftRequest)
+                    else self._draft_entity_rows(old))
+            if rows:
+                self._require_formatting_capability()
+            self._require_topic_policy(old.draft_id, owner)
+            guard = self._text_revision_guard(old, provider, epoch, new_formatted=bool(rows))
             revised = self._drafts.revise(
                 request.draft_id, owner=owner, recipient_title=title,
-                text=request.text if isinstance(request, UpdateDraftRequest) else None,
+                text=request.text if isinstance(request, UpdateDraftRequest) else old.text if old.outgoing_entities else None,
                 caption=request.caption if isinstance(request, UpdateDraftRequest) else None,
+                outgoing_entities=rows if (isinstance(request, UpdateDraftRequest) and request.text is not None) or old.outgoing_entities else None,
+                formatting_provider=provider if rows else None,
+                formatting_provider_epoch=epoch if rows else None,
+                local_admission_guard=guard,
             )
             with self._state_lock:
                 known = self._drafts.known_ids()
@@ -911,6 +993,7 @@ class Broker:
     def _cancel_draft(self, request: CancelDraftRequest, *, client_id: str) -> CancelDraftResponse:
         try:
             owner = self._draft_owner(client_id)
+            self._require_topic_policy(request.draft_id, owner)
             self._drafts.cancel(request.draft_id, owner=owner)
             return CancelDraftResponse(status="cancelled", draft_id=request.draft_id,
                                        detail="pending draft cancelled; cached artifacts retained")
@@ -1085,7 +1168,11 @@ class Broker:
         if draft.reply_source is None or draft.kind != "text":
             raise DraftError("reply draft is unavailable")
         self._require_reply_source_policy(draft.reply_source)
-        return ReplyDraftPreview.create(self._plain_draft_preview(draft,owner),draft.reply_source)
+        self._require_topic_policy(draft.draft_id, owner)
+        content = ReplyTextDraftPreview(**self._draft_summary(draft, owner).model_dump(),
+            sha256=draft.sha256, size_bytes=draft.size_bytes, text=draft.text,
+            outgoing_entities=self._draft_entity_rows(draft))
+        return ReplyDraftPreview.create(content, draft.reply_source)
 
     def _remember_draft_title(self, draft):
         with self._state_lock:
@@ -1096,18 +1183,43 @@ class Broker:
 
     def _prepare_reply_text_send(self, request: PrepareReplyTextSendRequest, *, client_id: str) -> PrepareReplyTextSendResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            if request.outgoing_entities:
+                self._require_formatting_capability()
+            if request.topic is not None:
+                require_current(self._policy)
+                if not {'send', 'reply_text_send', 'topic_text_send'} <= set(self._policy.enabled_capabilities):
+                    raise CompatibilityError('capability_disabled')
             owner=self._reply_owner(client_id)
             if request.reply_to.chat_id!=request.recipient:
                 raise DraftError("reply draft is unavailable")
             provider=self._shared_client()
+            epoch = provider.send_observation_epoch if request.topic is not None or request.outgoing_entities else None
             chat=provider.resolve_target(request.recipient)
             title=sanitize_telegram_text(chat.get("title"),max_length=255) or str(request.recipient)
-            source=provider.read_reply_source(request.reply_to.chat_id,request.reply_to.message_id)
+            topic = None
+            if request.topic is not None:
+                topic = provider.read_topic_snapshot(request.recipient, request.topic.id,
+                    expected_account_id=owner.account_id, expected_recipient_title=title)
+            source=provider.read_reply_source(request.reply_to.chat_id,request.reply_to.message_id,
+                **({'expected_forum_topic_id': topic.forum_topic_id} if topic is not None else {}))
             self._require_reply_source_policy(source)
-            if self._reply_owner(client_id)!=owner or self._shared_client() is not provider:
+            if (self._reply_owner(client_id)!=owner or self._shared_client() is not provider or
+                    ((topic is not None or request.outgoing_entities) and provider.send_observation_epoch is not epoch)):
                 raise DraftError("reply draft is unavailable")
+            self._require_reply_source_policy(source)
+            if topic is not None and not {'send', 'reply_text_send', 'topic_text_send'} <= set(self._policy.enabled_capabilities):
+                raise CompatibilityError('capability_disabled')
+            if request.outgoing_entities:
+                self._require_formatting_capability()
+                self._reply_budget_check(provider)
             draft=self._drafts.prepare_text(owner=owner,recipient=request.recipient,text=request.text,
-                                           recipient_title=title,reply_source=source)
+                recipient_title=title,reply_source=source,
+                outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                formatting_provider=provider if request.outgoing_entities else None,
+                formatting_provider_epoch=epoch if request.outgoing_entities else None,
+                **({'topic': topic, 'topic_provider': provider, 'topic_provider_epoch': epoch}
+                   if topic is not None else {}))
             preview=self._reply_preview(draft,owner)
             self._remember_draft_title(draft)
             return PrepareReplyTextSendResponse(status="prepared",reply=preview,detail=REPLY_PREPARED)
@@ -1124,13 +1236,21 @@ class Broker:
 
     def _revise_reply_draft(self, request: UpdateReplyDraftRequest | RefreshReplyDraftRequest, *, client_id: str) -> ReviseReplyDraftResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            if isinstance(request, UpdateReplyDraftRequest) and request.outgoing_entities:
+                self._require_formatting_capability()
             owner=self._reply_owner(client_id)
             old=self._drafts.peek(request.draft_id,owner=owner)
             self._reply_preview(old,owner)
             provider=self._shared_client()
+            epoch = provider.send_observation_epoch
             if isinstance(request,RefreshReplyDraftRequest):
+                if old.topic is not None:
+                    raise DraftError('topic reply refresh is unavailable')
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get("title"),max_length=255) or str(old.recipient)
+                if old.outgoing_entities and title != old.recipient_title:
+                    raise DraftError('formatted reply recipient changed')
                 source=provider.read_reply_source(*old.reply_source.anchor)
             else:
                 title=old.recipient_title
@@ -1138,22 +1258,71 @@ class Broker:
             if self._reply_owner(client_id)!=owner or self._shared_client() is not provider:
                 raise DraftError("reply draft is unavailable")
             self._require_reply_source_policy(source)
+            rows = (caller_outgoing_entities(request.outgoing_entities) if isinstance(request, UpdateReplyDraftRequest)
+                    else self._draft_entity_rows(old))
+            if rows:
+                self._require_formatting_capability()
+            self._require_topic_policy(old.draft_id, owner)
+            local_admission_guard = self._text_revision_guard(old, provider, epoch,
+                new_formatted=bool(rows), source=source)
             revised=self._drafts.revise(request.draft_id,owner=owner,recipient_title=title,reply=True,
-                reply_source=source,text=request.text if isinstance(request,UpdateReplyDraftRequest) else None)
+                reply_source=source,text=request.text if isinstance(request,UpdateReplyDraftRequest) else old.text if old.outgoing_entities else None,
+                outgoing_entities=rows if isinstance(request, UpdateReplyDraftRequest) or old.outgoing_entities else None,
+                formatting_provider=provider if rows else None,
+                formatting_provider_epoch=epoch if rows else None,
+                local_admission_guard=local_admission_guard)
             self._remember_draft_title(revised)
             return ReviseReplyDraftResponse(status="revised",previous_draft_id=request.draft_id,
                 reply=self._reply_preview(revised,owner),detail=REPLY_REVISED)
         except (DraftError,TDLibError,ValueError,CompatibilityError,AttributeError,TimeoutError):
             return ReviseReplyDraftResponse(status="unavailable",detail=REPLY_UNAVAILABLE)
 
-    def _prepare_text_send(self, request: PrepareTextSendRequest, *, client_id: str) -> PrepareTextSendResponse:
+    def _prepare_text_send(self, request: PrepareTextSendRequest, *, client_id: str,
+                           deadline: float | None = None) -> PrepareTextSendResponse:
+        if request.topic is not None or request.outgoing_entities:
+            try:
+                require_current(self._policy)
+                required = {'send'} | ({'topic_text_send'} if request.topic is not None else set()) | ({'formatted_text_send'} if request.outgoing_entities else set())
+                if not required <= set(self._policy.enabled_capabilities):
+                    raise CompatibilityError('capability_disabled')
+                with self._shared_client().request_budget(min(deadline if deadline is not None else float('inf'), time.monotonic()+30)):
+                    return self._prepare_text_send_impl(request, client_id=client_id)
+            except (TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+                return PrepareTextSendResponse(status='error', detail='topic draft could not be prepared safely')
+        return self._prepare_text_send_impl(request, client_id=client_id)
+
+    def _prepare_text_send_impl(self, request: PrepareTextSendRequest, *, client_id: str) -> PrepareTextSendResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
             client = self._shared_client()
             client.ensure_ready()
+            epoch = client.send_observation_epoch if request.outgoing_entities else None
             owner = self._draft_owner(client_id)
             chat = client.resolve_target(request.recipient)
             title = sanitize_telegram_text(chat.get("title"), max_length=255) or str(request.recipient)
-            draft = self._drafts.prepare_text(owner=owner, recipient=request.recipient, text=request.text, recipient_title=title)
+            topic = None
+            if request.topic is not None:
+                if epoch is None:
+                    epoch = client.send_observation_epoch
+                topic = client.read_topic_snapshot(request.recipient, request.topic.id,
+                    expected_account_id=owner.account_id, expected_recipient_title=title)
+                if (self._draft_owner(client_id) != owner or self._shared_client() is not client or
+                        client.send_observation_epoch is not epoch):
+                    raise DraftError('topic authority changed')
+            if request.outgoing_entities:
+                if (self._draft_owner(client_id) != owner or self._shared_client() is not client or
+                        client.send_observation_epoch is not epoch):
+                    raise DraftError('formatting authority changed')
+                self._require_formatting_capability()
+                self._reply_budget_check(client)
+            draft = self._drafts.prepare_text(owner=owner, recipient=request.recipient, text=request.text, recipient_title=title,
+                topic=topic, topic_provider=client if topic is not None else None,
+                topic_provider_epoch=epoch if topic is not None else None,
+                outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                formatting_provider=client if request.outgoing_entities else None,
+                formatting_provider_epoch=epoch if request.outgoing_entities else None)
+            if topic is not None or request.outgoing_entities:
+                self._require_topic_policy(draft.draft_id, owner)
             with self._state_lock:
                 known = self._drafts.known_ids()
                 for old_id in list(self._draft_recipient_titles):
@@ -1165,6 +1334,9 @@ class Broker:
                 recipient_title=title, text=draft.text, sha256=draft.sha256,
                 expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
                 detail="immutable text draft prepared; explicit approval is required before sending",
+                outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                **({'account_id': owner.account_id, 'topic': topic, 'preview_sha256': self._topic_digest(draft, owner)}
+                   if topic is not None or request.outgoing_entities else {}),
             )
         except AuthorizationBlocked:
             return PrepareTextSendResponse(status="blocked", detail="TDLib authorization is not ready")
@@ -1178,7 +1350,9 @@ class Broker:
         return SendPreparedTextResponse.model_validate(result.model_dump())
 
     def _send_prepared_artifact(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
-        if not text_only and self._drafts.is_owned_artifact_reply(request.draft_id,client_id=client_id):
+        if ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id,client_id=client_id)) or
+                (text_only and (self._drafts.is_owned_topic(request.draft_id, client_id=client_id) or
+                    self._drafts.is_owned_formatted(request.draft_id, client_id=client_id)))):
             provider=self._shared_client()
             # Capture once: nested provider budgets must not renew time consumed
             # by account reads, owner confirmation or local staging.
@@ -1196,6 +1370,7 @@ class Broker:
             if (self._drafts.kind(request.draft_id, owner=owner) == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
+            self._require_topic_policy(request.draft_id, owner)
             # Receipt replay remains bound to the reply capability as well.
             if self._drafts.is_reply(request.draft_id,owner=owner):
                 (self._reply_owner if text_only else self._reply_artifact_owner)(client_id)
@@ -1224,12 +1399,42 @@ class Broker:
             chat = self._shared_client().resolve_target(entry.recipient)
             current_title = sanitize_telegram_text(chat.get("title"), max_length=255) or str(entry.recipient)
             if current_title != expected_title:
+                if entry.topic is not None or entry.outgoing_entities:
+                    raise DraftError("draft is unavailable")
                 return SendPreparedArtifactResponse(status="recipient_changed", draft_id=request.draft_id,
                                                     recipient=entry.recipient, detail="recipient title changed; prepare a new draft")
             provider_before_dialog=self._shared_client()
             epoch_before_dialog=provider_before_dialog.send_observation_epoch
+            if entry.topic is not None:
+                current = provider_before_dialog.read_topic_snapshot(entry.recipient, entry.topic.forum_topic_id,
+                    expected_account_id=owner.account_id, expected_recipient_title=expected_title)
+                if entry.reply_source is not None:
+                    current_source = provider_before_dialog.read_reply_source(*entry.reply_source.anchor,
+                        expected_forum_topic_id=entry.topic.forum_topic_id)
+                    if current_source != entry.reply_source:
+                        raise DraftError('reply evidence changed; prepare a fresh draft')
+                self._require_topic_policy(request.draft_id, owner)
+                if (current != entry.topic or self._draft_owner(client_id) != owner or
+                        self._shared_client() is not provider_before_dialog or
+                        provider_before_dialog.send_observation_epoch is not epoch_before_dialog or
+                        self._drafts.peek(request.draft_id, owner=owner) != entry):
+                    raise DraftError('topic evidence changed; prepare a fresh draft')
+            if entry.outgoing_entities:
+                if entry.reply_source is not None and entry.topic is None:
+                    current_source = provider_before_dialog.read_reply_source(*entry.reply_source.anchor,
+                        require_reply_eligibility=True)
+                    if current_source != entry.reply_source:
+                        raise DraftError('reply evidence changed; prepare a fresh draft')
+                if (self._draft_owner(client_id) != owner or self._shared_client() is not provider_before_dialog or
+                        provider_before_dialog.send_observation_epoch is not epoch_before_dialog or
+                        self._drafts.peek(request.draft_id, owner=owner) != entry):
+                    raise DraftError('formatting authority changed')
+                self._require_topic_policy(request.draft_id, owner)
+                self._reply_budget_check(provider_before_dialog)
             reply_preview=((self._reply_preview if text_only else self._reply_artifact_preview)(entry,owner).model_dump(mode="json") if entry.reply_source is not None else None)
             reply_confirmation={("reply_preview" if text_only else "reply_artifact_preview"):reply_preview} if reply_preview is not None else {}
+            if (entry.topic is not None or entry.outgoing_entities) and entry.reply_source is None:
+                reply_confirmation['topic_preview'] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
             if not self._approval_prompt(
                 recipient_title=expected_title, recipient=entry.recipient,
                 display_name=entry.display_name, size_bytes=entry.size_bytes,
@@ -1238,35 +1443,74 @@ class Broker:
                 source_display_name=entry.source_display_name, **reply_confirmation,
             ):
                 return SendPreparedArtifactResponse(status="not_approved", draft_id=request.draft_id,
-                                                    recipient=entry.recipient,
+                                                    recipient=entry.recipient if entry.topic is None and not entry.outgoing_entities else None,
                                                     detail="local owner confirmation was declined or unavailable")
             # The local dialog may remain open while cancellation/account/policy changes.
             if self._draft_owner(client_id) != owner:
                 raise DraftError("draft is unavailable")
             provider = self._shared_client()
+            self._require_topic_policy(request.draft_id, owner)
             if entry.reply_source is not None:
                 (self._reply_owner if text_only else self._reply_artifact_owner)(client_id)
                 self._require_reply_source_policy(entry.reply_source)
                 if provider is not provider_before_dialog or provider.send_observation_epoch is not epoch_before_dialog:
                     raise DraftError("draft is unavailable")
+            if entry.outgoing_entities:
+                self._reply_budget_check(provider)
+                if provider is not provider_before_dialog or provider.send_observation_epoch is not epoch_before_dialog:
+                    raise DraftError('formatting authority changed')
             claim = self._drafts.claim(request.draft_id, owner=owner, approved=True, provider=provider,
                                        provider_epoch=provider.send_observation_epoch)
             if claim.draft.kind == "text":
                 failure_detail = "TDLib rejected the send"
                 try:
+                    def formatting_guard():
+                        require_current(self._policy)
+                        return (not claim.draft.outgoing_entities or (
+                            {'send', 'formatted_text_send'} <= set(self._policy.enabled_capabilities)
+                            and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog
+                            and self._drafts.formatting_claim_current(request.draft_id, owner=owner,
+                                provider=provider, provider_epoch=epoch_before_dialog)))
+                    style_kwargs = {'outgoing_entities': claim.draft.outgoing_entities} if claim.draft.outgoing_entities else {}
                     if claim.draft.reply_source is not None:
                         def reply_guard():
                             require_current(self._policy)
                             return ("send" in self._policy.enabled_capabilities and "reply_text_send" in self._policy.enabled_capabilities
                                     and all(capability in self._policy.enabled_capabilities for capability in claim.draft.reply_source.required_capabilities)
-                                    and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog)
+                                    and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog
+                                    and formatting_guard()
+                                    and (claim.draft.topic is None or (
+                                        'topic_text_send' in self._policy.enabled_capabilities and
+                                        self._drafts.topic_claim_current(request.draft_id, owner=owner,
+                                            provider=provider, provider_epoch=epoch_before_dialog))))
                         reply_sender=getattr(provider,"send_reply_text_message",None)
                         if reply_sender is None:
                             raise MessageSendNotAttempted("reply provider is unavailable")
                         with provider.request_budget(min(deadline if deadline is not None else float("inf"),time.monotonic()+330)):
                             message_id=reply_sender(claim.draft.recipient,claim.draft.text,
                                 reply_source=claim.draft.reply_source,expected_account_id=owner.account_id,
-                                expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=reply_guard)
+                                expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=reply_guard,
+                                **({'topic': claim.draft.topic} if claim.draft.topic is not None else {}), **style_kwargs)
+                    elif claim.draft.topic is not None:
+                        def topic_guard():
+                            require_current(self._policy)
+                            return ({'send', 'topic_text_send'} <= set(self._policy.enabled_capabilities)
+                                and formatting_guard()
+                                and self._shared_client() is provider
+                                and provider.send_observation_epoch is epoch_before_dialog
+                                and self._drafts.topic_claim_current(request.draft_id, owner=owner,
+                                    provider=provider, provider_epoch=epoch_before_dialog))
+                        sender = getattr(provider, 'send_topic_text_message', None)
+                        if sender is None:
+                            raise MessageSendNotAttempted('topic provider is unavailable')
+                        message_id = sender(claim.draft.recipient, claim.draft.text,
+                            topic=claim.draft.topic, expected_account_id=owner.account_id,
+                            expected_recipient_title=expected_title, attempt_id=request.draft_id,
+                            pre_send_guard=topic_guard, **style_kwargs)
+                    elif claim.draft.outgoing_entities:
+                        message_id = provider.send_text_message(claim.draft.recipient, claim.draft.text,
+                            attempt_id=request.draft_id, expected_account_id=owner.account_id,
+                            expected_recipient_title=expected_title, pre_send_guard=formatting_guard, **style_kwargs)
                     else:
                         message_id = provider.send_text_message(claim.draft.recipient, claim.draft.text, attempt_id=request.draft_id)
                     receipt = self._drafts.finish(request.draft_id, owner=owner, status="sent", message_id=message_id)
@@ -1278,8 +1522,20 @@ class Broker:
                     receipt = self._drafts.finish(request.draft_id, owner=owner, status="failed")
                 except Exception:
                     receipt = self._drafts.finish(request.draft_id, owner=owner, status="outcome_unknown")
+                if (claim.draft.topic is not None or claim.draft.outgoing_entities) and receipt.evidence != 'local_failed':
+                    # Keep observed evidence internally; disclose it only to the
+                    # same current account/provider/session and enabled policy.
+                    # Receipt retention, not the pending draft TTL, governs this.
+                    try:
+                        if self._draft_owner(client_id) != owner:
+                            raise DraftError('topic receipt owner changed')
+                        self._require_topic_policy(request.draft_id, owner)
+                    except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                        return SendPreparedArtifactResponse(status='outcome_unknown', draft_id=request.draft_id,
+                            detail='current receipt authority is unavailable; do not retry automatically')
                 return SendPreparedArtifactResponse(
-                    status=receipt.status, draft_id=receipt.draft_id, recipient=claim.draft.recipient,
+                    status=receipt.status, draft_id=receipt.draft_id,
+                    recipient=None if (claim.draft.topic is not None or claim.draft.outgoing_entities) and receipt.evidence == 'local_failed' else claim.draft.recipient,
                     message_id=receipt.message_id,
                     detail=("TDLib confirmed delivery" if receipt.status == "sent" else
                             failure_detail if receipt.status == "failed" else

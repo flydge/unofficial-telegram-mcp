@@ -5,11 +5,15 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, model_validator
-from .draft_models import _Closed, DraftId, DraftPreview, DraftText, Hash
-from .schemas import ChatId, SelectedMessageAnchor
+from pydantic import ConfigDict, Field, field_validator, model_validator, model_serializer
+from .draft_models import _Closed, AccountId, DraftId, DraftPreview, DraftText, Hash
+from .schemas import ArtifactId, ChatId, SelectedMessageAnchor
+from .topic_models import ForumTopicReference, TopicId, TopicSnapshot
+from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entities, caller_outgoing_entities
+from .outgoing_formatting import freeze_outgoing_entities, native_outgoing_entities
 from .sanitize import sanitize_telegram_text
 
 EVIDENCE_MARKER = '[untrusted Telegram evidence] '
@@ -45,6 +49,16 @@ def integer(value: object, *, positive: bool = False) -> bool:
     return type(value) is int and -(2**53) < value < 2**53 and (value > 0 if positive else value != 0)
 
 
+def _retained_forum_topic_id(value: object) -> int | None:
+    if value is None:
+        return None
+    if (type(value) is not dict or set(value) != {'@type', 'forum_topic_id'} or
+            type(value['@type']) is not str or value['@type'] != 'messageTopicForum' or
+            type(value['forum_topic_id']) is not int or not 0 < value['forum_topic_id'] < 2**31):
+        raise ValueError('reply source topic is unavailable')
+    return value['forum_topic_id']
+
+
 @dataclass(frozen=True)
 class ReplySource:
     """Canonical serialized projection prevents nested mutable provider state escaping."""
@@ -67,26 +81,52 @@ class ReplySource:
                 type(value['anchor']) is not dict or set(value['anchor'])!={'chat_id','message_id'} or
                 type(value['message']) is not dict):
             raise ValueError('invalid reply projection')
-        if value['version'] in (2,4,6,8,10):
+        topic_id = _retained_forum_topic_id(value['message'].get('topic_id'))
+        if value['version'] in (2,4,6,8,10,12,14,16,18,20,22):
             from .reply_media_sources import validate_content
-            from .reply_formatted_sources import LEXICAL, IDENTITY
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE
             content=value['message'].get('content')
             caption=content.get('caption') if type(content) is dict else None
             entities=caption.get('entities') if type(caption) is dict else None
-            lexical=value['version']==6 or (value['version'] in (8,10) and type(entities) is list and any(
+            lexical=value['version']==6 or (value['version'] in (8,10,12,14,16,18,20,22) and type(entities) is list and any(
                 type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
                 and e['type']['@type'] in LEXICAL for e in entities))
-            identity=value['version']==8 or (value['version']==10 and type(entities) is list and any(
+            identity=value['version']==8 or (value['version'] in (10,12,14,16,18,20,22) and type(entities) is list and any(
                 type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
                 and e['type']['@type'] in IDENTITY for e in entities))
-            validate_content(content,styled=value['version']==4,lexical=lexical,identity=identity,datetime=value['version']==10)
+            datetime=value['version'] in (10,12,14) or (value['version'] in (16,18,20,22) and type(entities) is list and any(
+                type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
+                and e['type']['@type'] in DATETIME for e in entities))
+            validate_content(content,styled=value['version']==4,lexical=lexical,identity=identity,
+                datetime=datetime,datetime_relative=value['version'] in (12,14,16,18,20,22),
+                datetime_absolute=value['version'] in (14,16,18,20,22),
+                url=value['version']==16 or (value['version'] in (18,20,22) and type(entities) is list and any(
+                    type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
+                    and e['type']['@type'] in URL for e in entities)),
+                email=value['version']==18 or (value['version'] in (20,22) and type(entities) is list and any(
+                    type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
+                    and e['type']['@type'] in EMAIL for e in entities)),
+                phone=value['version']==20 or (value['version']==22 and type(entities) is list and any(
+                    type(e) is dict and type(e.get('type')) is dict and type(e['type'].get('@type')) is str
+                    and e['type']['@type'] in PHONE for e in entities)),bank_card=value['version']==22)
+            # Only validated Relative caption evidence may select the new authority.
+            if value['version']==12 and not any(e['type']['@type']=='textEntityTypeDateTime'
+                    and e['type']['formatting_type'] is not None for e in entities):
+                raise ValueError('reply caption version disagrees with Relative date time entities')
+            # Absolute authority is selected only after complete caption validation.
+            if value['version']==14 and not any(e['type']['@type']=='textEntityTypeDateTime'
+                    and e['type']['formatting_type'] is not None
+                    and e['type']['formatting_type']['@type']=='dateTimeFormattingTypeAbsolute' for e in entities):
+                raise ValueError('reply caption version disagrees with Absolute date time entities')
             surrogate={**value['message'],'content':{'@type':'messageText','text':{'@type':'formattedText','text':'validation','entities':[]}}}
-            shell=_projection_from_message(surrogate,value['anchor']['chat_id'],value['anchor']['message_id'])['message']
+            shell=_projection_from_message(surrogate,value['anchor']['chat_id'],value['anchor']['message_id'],
+                expected_forum_topic_id=topic_id)['message']
             shell['content']=value['message']['content']
             if canonical(shell)!=canonical(value['message']):
                 raise ValueError('invalid reply projection')
-        elif value['version'] in (1,3,5,7,9):
-            rebuilt=_projection_from_message(value['message'],value['anchor']['chat_id'],value['anchor']['message_id'])
+        elif value['version'] in (1,3,5,7,9,11,13,15,17,19,21,23):
+            rebuilt=_projection_from_message(value['message'],value['anchor']['chat_id'],value['anchor']['message_id'],
+                expected_forum_topic_id=topic_id)
             if canonical(rebuilt)!=self.projection_json:
                 raise ValueError('invalid reply projection')
         else:
@@ -110,15 +150,74 @@ class ReplySource:
 
     @property
     def is_media(self) -> bool:
-        return json.loads(self.projection_json)['version'] in (2,4,6,8,10)
+        return json.loads(self.projection_json)['version'] in (2,4,6,8,10,12,14,16,18,20,22)
+
+    @property
+    def forum_topic_id(self) -> int | None:
+        value = self._validate_projection()
+        return _retained_forum_topic_id(value['message'].get('topic_id'))
 
     @property
     def required_capabilities(self) -> tuple[str, ...]:
+        capabilities = self._content_required_capabilities
+        return (*capabilities, 'topic_text_send') if self.forum_topic_id is not None else capabilities
+
+    @property
+    def _content_required_capabilities(self) -> tuple[str, ...]:
         value=self._validate_projection()
-        if value['version'] in (9,10):
+        if value['version']==23:
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE, BANK_CARD
+            entities=value['message']['content']['text']['entities']
+            return ('reply_formatted_targets','reply_text_url_targets',
+                *(('reply_bank_card_targets',) if any(e['type']['@type'] in BANK_CARD for e in entities) else ()),
+                *(('reply_phone_targets',) if any(e['type']['@type'] in PHONE for e in entities) else ()),
+                *(('reply_email_targets',) if any(e['type']['@type'] in EMAIL for e in entities) else ()),
+                *(('reply_url_targets',) if any(e['type']['@type'] in URL for e in entities) else ()),
+                *(('reply_datetime_targets',) if any(e['type']['@type'] in DATETIME for e in entities) else ()),
+                *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
+                *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
+        if value['version'] in (21,22):
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE
+            entities=value['message']['content']['caption' if value['version']==22 else 'text']['entities']
+            return (*(('reply_media_targets',) if value['version']==22 else ()),
+                'reply_formatted_targets','reply_bank_card_targets',
+                *(('reply_phone_targets',) if any(e['type']['@type'] in PHONE for e in entities) else ()),
+                *(('reply_email_targets',) if any(e['type']['@type'] in EMAIL for e in entities) else ()),
+                *(('reply_url_targets',) if any(e['type']['@type'] in URL for e in entities) else ()),
+                *(('reply_datetime_targets',) if any(e['type']['@type'] in DATETIME for e in entities) else ()),
+                *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
+                *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
+        if value['version'] in (19,20):
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL, EMAIL
+            entities=value['message']['content']['caption' if value['version']==20 else 'text']['entities']
+            return (*(('reply_media_targets',) if value['version']==20 else ()),
+                'reply_formatted_targets','reply_phone_targets',
+                *(('reply_email_targets',) if any(e['type']['@type'] in EMAIL for e in entities) else ()),
+                *(('reply_url_targets',) if any(e['type']['@type'] in URL for e in entities) else ()),
+                *(('reply_datetime_targets',) if any(e['type']['@type'] in DATETIME for e in entities) else ()),
+                *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
+                *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
+        if value['version'] in (17,18):
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL
+            entities=value['message']['content']['caption' if value['version']==18 else 'text']['entities']
+            return (*(('reply_media_targets',) if value['version']==18 else ()),
+                'reply_formatted_targets','reply_email_targets',
+                *(('reply_url_targets',) if any(e['type']['@type'] in URL for e in entities) else ()),
+                *(('reply_datetime_targets',) if any(e['type']['@type'] in DATETIME for e in entities) else ()),
+                *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
+                *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
+        if value['version'] in (15,16):
+            from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME
+            entities=value['message']['content']['caption' if value['version']==16 else 'text']['entities']
+            return (*(('reply_media_targets',) if value['version']==16 else ()),
+                'reply_formatted_targets','reply_url_targets',
+                *(('reply_datetime_targets',) if any(e['type']['@type'] in DATETIME for e in entities) else ()),
+                *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
+                *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
+        if value['version'] in (9,10,11,12,13,14):
             from .reply_formatted_sources import LEXICAL, IDENTITY
-            entities=value['message']['content']['caption' if value['version']==10 else 'text']['entities']
-            return (*(('reply_media_targets',) if value['version']==10 else ()),
+            entities=value['message']['content']['caption' if value['version'] in (10,12,14) else 'text']['entities']
+            return (*(('reply_media_targets',) if value['version'] in (10,12,14) else ()),
                 'reply_formatted_targets','reply_datetime_targets',
                 *(('reply_lexical_targets',) if any(e['type']['@type'] in LEXICAL for e in entities) else ()),
                 *(('reply_identity_targets',) if any(e['type']['@type'] in IDENTITY for e in entities) else ()))
@@ -146,28 +245,65 @@ class ReplySource:
 
     def target(self) -> 'ReplyTarget':
         value=self._validate_projection()
-        if value['version'] in (2,3,4,5,6,7,8,9,10):
-            if value['version'] in (2,4,6,8,10):
+        topic_id = _retained_forum_topic_id(value['message'].get('topic_id'))
+        if value['version']==23:
+            from .reply_formatted_sources import render_content
+            capabilities=self.required_capabilities
+            display,changed=render_content(value['message']['content'],EVIDENCE_MARKER,
+                text_url=True,bank_card='reply_bank_card_targets' in capabilities,
+                phone='reply_phone_targets' in capabilities,email='reply_email_targets' in capabilities,
+                url='reply_url_targets' in capabilities,datetime='reply_datetime_targets' in capabilities,
+                lexical='reply_lexical_targets' in capabilities,identity='reply_identity_targets' in capabilities,
+                datetime_relative=True,datetime_absolute=True)
+            return ReplyTarget(anchor=SelectedMessageAnchor(chat_id=self.anchor[0],message_id=self.anchor[1]),
+                text=display,source_sha256=self.source_sha256,sanitized=changed,truncated=False,forum_topic_id=topic_id)
+        if value['version'] in (2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22):
+            if value['version'] in (2,4,6,8,10,12,14,16,18,20,22):
                 from .reply_media_sources import render_content
             else:
                 from .reply_formatted_sources import render_content
             display,changed=render_content(value['message']['content'],EVIDENCE_MARKER,
-                **({'datetime':True,'identity':'reply_identity_targets' in self.required_capabilities,
-                    'lexical':'reply_lexical_targets' in self.required_capabilities} if value['version'] in (9,10) else
+                **({'bank_card':True,'phone':'reply_phone_targets' in self.required_capabilities,
+                    'email':'reply_email_targets' in self.required_capabilities,
+                    'url':'reply_url_targets' in self.required_capabilities,
+                    'datetime':'reply_datetime_targets' in self.required_capabilities,
+                    'identity':'reply_identity_targets' in self.required_capabilities,
+                    'lexical':'reply_lexical_targets' in self.required_capabilities,
+                    'datetime_relative':True,'datetime_absolute':True} if value['version'] in (21,22) else
+                   {'phone':True,'email':'reply_email_targets' in self.required_capabilities,
+                    'url':'reply_url_targets' in self.required_capabilities,
+                    'datetime':'reply_datetime_targets' in self.required_capabilities,
+                    'identity':'reply_identity_targets' in self.required_capabilities,
+                    'lexical':'reply_lexical_targets' in self.required_capabilities,
+                    'datetime_relative':True,'datetime_absolute':True} if value['version'] in (19,20) else
+                   {'email':True,'url':'reply_url_targets' in self.required_capabilities,
+                    'datetime':'reply_datetime_targets' in self.required_capabilities,
+                    'identity':'reply_identity_targets' in self.required_capabilities,
+                    'lexical':'reply_lexical_targets' in self.required_capabilities,
+                    'datetime_relative':True,'datetime_absolute':True} if value['version'] in (17,18) else
+                   {'url':True,'datetime':'reply_datetime_targets' in self.required_capabilities,
+                    'identity':'reply_identity_targets' in self.required_capabilities,
+                    'lexical':'reply_lexical_targets' in self.required_capabilities,
+                    'datetime_relative':True,'datetime_absolute':True} if value['version'] in (15,16) else
+                   {'datetime':True,'identity':'reply_identity_targets' in self.required_capabilities,
+                    'lexical':'reply_lexical_targets' in self.required_capabilities,
+                    **({'datetime_relative':True} if value['version'] in (11,12,13,14) else {}),
+                    **({'datetime_absolute':True} if value['version'] in (13,14) else {})} if value['version'] in (9,10,11,12,13,14) else
                    {'identity':True,'lexical':'reply_lexical_targets' in self.required_capabilities} if value['version'] in (7,8) else
                    {'styled':True} if value['version']==4 else {'lexical':True} if value['version'] in (5,6) else {}))
             return ReplyTarget(anchor=SelectedMessageAnchor(chat_id=self.anchor[0],message_id=self.anchor[1]),
-                text=display,source_sha256=self.source_sha256,sanitized=changed,truncated=False)
+                text=display,source_sha256=self.source_sha256,sanitized=changed,truncated=False,forum_topic_id=topic_id)
         raw=self.raw_text
         # No truncation: expansion outside the full preview bound fails closed.
         safe=sanitize_telegram_text(raw, max_length=4096*18+1)
         if len(safe)>4096:
             raise ValueError('reply evidence exceeds preview bound')
         return ReplyTarget(anchor=SelectedMessageAnchor(chat_id=self.anchor[0],message_id=self.anchor[1]),
-            text=EVIDENCE_MARKER+safe,source_sha256=self.source_sha256,sanitized=safe!=raw,truncated=False)
+            text=EVIDENCE_MARKER+safe,source_sha256=self.source_sha256,sanitized=safe!=raw,truncated=False,forum_topic_id=topic_id)
 
 
-def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict:
+def _projection_from_message(raw: object, chat_id: int, message_id: int, *,
+                             expected_forum_topic_id: int | None = None) -> dict:
     """Validate only the immutable relevant subset, never volatile whole-message hashes.
 
     TDLib omits nullable object fields in JSON. Required scalar safety fields must
@@ -192,16 +328,24 @@ def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict
             raise ValueError('reply source is unavailable')
     nulls=('sending_state','scheduling_state','topic_id','self_destruct_type','ephemeral_content',
            'receiver_id','reply_to','forward_info','import_info','reply_markup')
-    if any(raw.get(key) is not None for key in nulls):raise ValueError('reply source is unavailable')
+    if any(raw.get(key) is not None for key in nulls if key != 'topic_id'):
+        raise ValueError('reply source is unavailable')
+    topic_id = _retained_forum_topic_id(raw.get('topic_id'))
+    if expected_forum_topic_id is None:
+        if topic_id is not None:
+            raise ValueError('reply source topic was not selected')
+    elif (type(expected_forum_topic_id) is not int or not 0 < expected_forum_topic_id < 2**31 or
+            topic_id != expected_forum_topic_id):
+        raise ValueError('reply source topic differs from selection')
     if (type(raw.get('ephemeral_message_id')) is not int or raw['ephemeral_message_id']!=0 or
         type(raw.get('is_from_offline')) is not bool):
         raise ValueError('reply source is unavailable')
     content=raw.get('content')
-    text='';link_options=None;entities=[];lexical=False;identity=False;datetime=False
+    text='';link_options=None;entities=[];lexical=False;identity=False;datetime=False;relative=False;absolute=False;url=False;email=False;phone=False;bank_card=False;text_url=False
     media=type(content) is dict and content.get('@type') in ('messageDocument','messagePhoto','messageVoiceNote')
     if media:
         from .reply_media_sources import media_content
-        from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME
+        from .reply_formatted_sources import LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE, BANK_CARD
         caption=content.get('caption')
         if type(caption) is dict and type(caption.get('entities')) is list and len(caption['entities'])<=32:
             lexical=any(type(e) is dict and type(e.get('type')) is dict and
@@ -213,7 +357,29 @@ def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict
             datetime=any(type(e) is dict and type(e.get('type')) is dict and
                 type(e['type'].get('@type')) is str and e['type']['@type'] in DATETIME
                 for e in caption['entities'])
-        projected_content=media_content(content,lexical=lexical,identity=identity,datetime=datetime)
+            url=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in URL
+                for e in caption['entities'])
+            email=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in EMAIL
+                for e in caption['entities'])
+            phone=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in PHONE
+                for e in caption['entities'])
+            bank_card=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in BANK_CARD
+                for e in caption['entities'])
+        projected_content=media_content(content,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=True,datetime_absolute=True,url=url,email=email,phone=phone,bank_card=bank_card)
+        # Select v22/v20/v18/v16 only from the complete validated caption, never a raw constructor hint.
+        bank_card=any(e['type']['@type'] in BANK_CARD for e in projected_content['caption']['entities'])
+        phone=any(e['type']['@type'] in PHONE for e in projected_content['caption']['entities'])
+        email=any(e['type']['@type'] in EMAIL for e in projected_content['caption']['entities'])
+        url=any(e['type']['@type'] in URL for e in projected_content['caption']['entities'])
+        relative=any(e['type']['@type'] in DATETIME and e['type']['formatting_type'] is not None
+            for e in projected_content['caption']['entities'])
+        absolute=any(e['type']['@type'] in DATETIME and e['type']['formatting_type'] is not None
+            and e['type']['formatting_type']['@type']=='dateTimeFormattingTypeAbsolute'
+            for e in projected_content['caption']['entities'])
     else:
         if (not isinstance(content,dict) or content.get('@type')!='messageText' or content.get('link_preview') is not None or
             set(content)-{'@type','text','link_preview','link_preview_options'}):
@@ -227,7 +393,7 @@ def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict
         if formatted['entities']:
             if len(formatted['entities'])>32:
                 raise ValueError('invalid formatted reply source')
-            from .reply_formatted_sources import formatted_text, LEXICAL, IDENTITY, DATETIME
+            from .reply_formatted_sources import formatted_text, LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE, BANK_CARD, TEXT_URL
             lexical=any(type(e) is dict and type(e.get('type')) is dict and
                 type(e['type'].get('@type')) is str and e['type']['@type'] in LEXICAL
                 for e in formatted['entities'])
@@ -237,7 +403,30 @@ def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict
             datetime=any(type(e) is dict and type(e.get('type')) is dict and
                 type(e['type'].get('@type')) is str and e['type']['@type'] in DATETIME
                 for e in formatted['entities'])
-            entities=formatted_text(formatted,lexical=lexical,identity=identity,datetime=datetime)['entities']
+            url=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in URL
+                for e in formatted['entities'])
+            email=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in EMAIL
+                for e in formatted['entities'])
+            phone=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in PHONE
+                for e in formatted['entities'])
+            bank_card=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in BANK_CARD
+                for e in formatted['entities'])
+            text_url=any(type(e) is dict and type(e.get('type')) is dict and
+                type(e['type'].get('@type')) is str and e['type']['@type'] in TEXT_URL
+                for e in formatted['entities'])
+            entities=formatted_text(formatted,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=True,datetime_absolute=True,url=url,email=email,phone=phone,bank_card=bank_card,text_url=text_url)['entities']
+            # Select v23/v21/v19/v17 only from complete validated messageText, never a raw hint.
+            text_url=any(e['type']['@type'] in TEXT_URL for e in entities)
+            bank_card=any(e['type']['@type'] in BANK_CARD for e in entities)
+            phone=any(e['type']['@type'] in PHONE for e in entities)
+            email=any(e['type']['@type'] in EMAIL for e in entities)
+            relative=any(e['type']['@type'] in DATETIME and e['type']['formatting_type'] is not None for e in entities)
+            absolute=any(e['type']['@type'] in DATETIME and e['type']['formatting_type'] is not None
+                and e['type']['formatting_type']['@type']=='dateTimeFormattingTypeAbsolute' for e in entities)
         text=formatted['text']
         if (not 0<len(text)<=4096 or not text.strip() or
             any(unicodedata.category(c).startswith('C') and c not in '\n\t' for c in text)):
@@ -249,14 +438,18 @@ def _projection_from_message(raw: object, chat_id: int, message_id: int) -> dict
         'self_destruct_in':0.0,'auto_delete_in':0.0,**{key:None for key in nulls},
         'content':{'@type':'messageText','text':{'@type':'formattedText','text':text,'entities':entities},
                    'link_preview':None,'link_preview_options':None if link_options is None else dict(link_options)}}
+    if topic_id is not None:
+        message['topic_id'] = dict(raw['topic_id'])
     if media:
         message['content']=projected_content
-    return {'version':(10 if datetime else 8 if identity else 6 if lexical else 4 if projected_content['caption']['entities'] else 2) if media else 9 if datetime else 7 if identity else 5 if lexical else 3 if entities else 1,
+    return {'version':(22 if bank_card else 20 if phone else 18 if email else 16 if url else 14 if absolute else 12 if relative else 10 if datetime else 8 if identity else 6 if lexical else 4 if projected_content['caption']['entities'] else 2) if media else 23 if text_url else 21 if bank_card else 19 if phone else 17 if email else 15 if url else 13 if absolute else 11 if relative else 9 if datetime else 7 if identity else 5 if lexical else 3 if entities else 1,
         'anchor':{'chat_id':chat_id,'message_id':message_id},'message':message}
 
 
-def source_from_message(raw: object, chat_id: int, message_id: int) -> ReplySource:
-    source=ReplySource._validated(_projection_from_message(raw,chat_id,message_id))
+def source_from_message(raw: object, chat_id: int, message_id: int, *,
+                        expected_forum_topic_id: int | None = None) -> ReplySource:
+    source=ReplySource._validated(_projection_from_message(raw,chat_id,message_id,
+        expected_forum_topic_id=expected_forum_topic_id))
     source.target() # validates raw canonical bytes and full display before registry mutation
     return source
 
@@ -268,6 +461,14 @@ class ReplyTarget(_Closed):
     source_sha256: Hash
     sanitized: Annotated[bool,Field(strict=True)]
     truncated: Annotated[bool,Field(strict=True,json_schema_extra={'const':False})]=False
+    forum_topic_id: TopicId | None = None
+
+    @model_serializer(mode='wrap')
+    def omit_absent_topic(self, handler):
+        value = handler(self)
+        if self.forum_topic_id is None:
+            value.pop('forum_topic_id', None)
+        return value
 
     @model_validator(mode='after')
     def evidence(self):
@@ -278,16 +479,98 @@ class ReplyTarget(_Closed):
         return self
 
 
-def preview_facts(draft: DraftPreview, target: ReplyTarget) -> dict:
-    return {'version':1,'draft':draft.model_dump(mode='json'),'reply_target':target.model_dump(mode='json'),
-            'topic_id':None,'outgoing_entities':[],'send_options':dict(SEND_OPTIONS),
+class ReplyTextDraftPreview(_Closed):
+    """Complete text content; topic and reply share the sole outer approval digest."""
+    model_config = ConfigDict(extra='forbid', hide_input_in_errors=True, frozen=True)
+    draft_id: DraftId
+    account_id: AccountId
+    recipient: ChatId
+    recipient_title: Annotated[str, Field(strict=True, min_length=1, max_length=255)]
+    kind: Literal['text']
+    expires_at: datetime
+    approval_required: Annotated[bool, Field(strict=True, json_schema_extra={'const': True})] = True
+    topic: TopicSnapshot | None = None
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    sha256: Hash
+    size_bytes: Annotated[int, Field(strict=True, gt=0, le=64*1024*1024)]
+    text: Annotated[str, Field(strict=True, min_length=1, max_length=4096)] | None = None
+    artifact_id: ArtifactId | None = None
+    display_name: Annotated[str, Field(strict=True, min_length=1, max_length=255)] | None = None
+    mime_type: Annotated[str, Field(strict=True, min_length=3, max_length=127)] | None = None
+    caption: Annotated[str, Field(strict=True, max_length=1024)] | None = None
+    duration_seconds: Annotated[int, Field(strict=True, gt=0, le=600)] | None = None
+    waveform_base64: Annotated[str, Field(strict=True, max_length=256)] | None = None
+    source_sha256: Hash | None = None
+    source_display_name: Annotated[str, Field(strict=True, min_length=1, max_length=255)] | None = None
+    converted: Annotated[bool, Field(strict=True)] = False
+
+    @model_serializer(mode='wrap')
+    def omit_absent_topic(self, handler):
+        value = handler(self)
+        if self.topic is None:
+            value.pop('topic', None)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
+
+    @field_validator('expires_at', mode='before')
+    @classmethod
+    def expiry_input(cls, value):
+        if type(value) not in {str, datetime}:
+            raise ValueError('expiry must be an ISO datetime')
+        if type(value) is str:
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                raise ValueError('expiry must be an ISO datetime') from None
+        return value
+
+    @field_validator('expires_at')
+    @classmethod
+    def expiry_aware(cls, value):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError('expiry requires a timezone')
+        return value.astimezone(timezone.utc)
+
+    @field_validator('approval_required')
+    @classmethod
+    def requires_approval(cls, value):
+        if value is not True:
+            raise ValueError('draft always requires approval')
+        return value
+
+    @model_validator(mode='after')
+    def exact_content(self):
+        from .outgoing_drafts import _safe_message_text
+        if (self.text is None or _safe_message_text(self.text) != self.text or
+                any(value is not None for value in (self.artifact_id, self.display_name,
+                    self.mime_type, self.caption, self.duration_seconds, self.waveform_base64,
+                    self.source_sha256, self.source_display_name)) or self.converted):
+            raise ValueError('reply text preview contains invalid content or artifact metadata')
+        if self.outgoing_entities:
+            object.__setattr__(self, 'outgoing_entities', canonical_outgoing_entities(self.text, self.outgoing_entities))
+        data = self.text.encode('utf-8')
+        if len(data) != self.size_bytes or hashlib.sha256(data).hexdigest() != self.sha256:
+            raise ValueError('reply text preview facts disagree')
+        if self.topic is not None and (self.topic.account_id != self.account_id or
+                self.topic.chat_id != self.recipient):
+            raise ValueError('reply topic identity disagrees')
+        return self
+
+
+def preview_facts(draft: ReplyTextDraftPreview | DraftPreview, target: ReplyTarget) -> dict:
+    return {'version':3 if draft.outgoing_entities else 2 if draft.topic is not None else 1,'draft':draft.model_dump(mode='json'),'reply_target':target.model_dump(mode='json'),
+            'topic_id':({'@type':'messageTopicForum','forum_topic_id':draft.topic.forum_topic_id}
+                if draft.topic is not None else None),'outgoing_entities':native_outgoing_entities(freeze_outgoing_entities(draft.text,
+                caller_outgoing_entities(draft.outgoing_entities))) if draft.outgoing_entities else [],'send_options':dict(SEND_OPTIONS),
             'link_preview_options':dict(LINK_OPTIONS),'clear_draft':False,'reply_markup':None,
             'reply_to':{'@type':'inputMessageReplyToMessage','message_id':target.anchor.message_id,
                         'quote':None,'checklist_task_id':0,'poll_option_id':''}}
 
 
 class ReplyDraftPreview(_Closed):
-    draft: DraftPreview
+    draft: ReplyTextDraftPreview
     reply_target: ReplyTarget
     preview_sha256: Hash
 
@@ -296,13 +579,18 @@ class ReplyDraftPreview(_Closed):
         from .outgoing_drafts import _safe_message_text
         if self.draft.text is None or _safe_message_text(self.draft.text)!=self.draft.text:
             raise ValueError('reply text must be final normalized plain text')
-        if (self.draft.kind!='text' or self.draft.recipient!=self.reply_target.anchor.chat_id or
+        topic_id = self.draft.topic.forum_topic_id if self.draft.topic is not None else None
+        if (self.reply_target.forum_topic_id != topic_id or self.draft.kind!='text' or
+            self.draft.recipient!=self.reply_target.anchor.chat_id or
             digest(preview_facts(self.draft,self.reply_target))!=self.preview_sha256):
             raise ValueError('reply preview facts disagree')
         return self
 
     @classmethod
-    def create(cls, draft: DraftPreview, source: ReplySource):
+    def create(cls, draft: ReplyTextDraftPreview | DraftPreview, source: ReplySource):
+        if isinstance(draft, DraftPreview):
+            # Preserve ordinary full wire; do not strip a topic-only inner digest.
+            draft = ReplyTextDraftPreview.model_validate(draft.model_dump(mode='json'))
         target=source.target()
         return cls(draft=draft,reply_target=target,preview_sha256=digest(preview_facts(draft,target)))
 
@@ -311,12 +599,45 @@ class PrepareReplyTextSendRequest(_Closed):
     recipient: ChatId
     text: DraftText
     reply_to: SelectedMessageAnchor
+    topic: ForumTopicReference | None = None
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_serializer(mode='wrap')
+    def omit_absent_topic(self, handler):
+        value = handler(self)
+        if self.topic is None:
+            value.pop('topic', None)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
+
+    @model_validator(mode='after')
+    def exact_outgoing_entities(self):
+        if self.outgoing_entities:
+            from .outgoing_drafts import _safe_message_text
+            self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text), self.outgoing_entities)
+        return self
 
 class GetReplyDraftRequest(_Closed):
     draft_id: DraftId
 
 class UpdateReplyDraftRequest(GetReplyDraftRequest):
     text: DraftText
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def exact_outgoing_entities(self):
+        if self.outgoing_entities:
+            from .outgoing_drafts import _safe_message_text
+            self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text), self.outgoing_entities)
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
 
 class RefreshReplyDraftRequest(GetReplyDraftRequest):
     pass

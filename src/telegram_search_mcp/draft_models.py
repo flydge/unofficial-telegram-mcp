@@ -5,8 +5,10 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 from .schemas import ArtifactId, ChatId
+from .topic_models import TopicSnapshot, topic_preview_digest
+from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entities, caller_outgoing_entities
 
 DraftId = Annotated[str, Field(strict=True, pattern=r'^draft_[0-9a-f]{32}$', min_length=38, max_length=38)]
 DraftLimit = Annotated[int, Field(strict=True, ge=1, le=50)]
@@ -33,12 +35,25 @@ DraftCaption = Annotated[str, Field(strict=True, max_length=1024)]
 class UpdateDraftRequest(GetDraftRequest):
     text: DraftText | None = None
     caption: DraftCaption | None = None
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
 
     @model_validator(mode='after')
     def one_field(self):
         if (self.text is None) == (self.caption is None):
             raise ValueError('exactly one of text or caption is required')
+        if self.outgoing_entities:
+            if self.text is None:
+                raise ValueError('outgoing styles require text')
+            from .outgoing_drafts import _safe_message_text
+            self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text), self.outgoing_entities)
         return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
 
 class RefreshDraftRequest(GetDraftRequest):
     pass
@@ -51,6 +66,27 @@ class DraftSummary(_Closed):
     kind: Kind
     expires_at: datetime
     approval_required: Annotated[bool, Field(strict=True, json_schema_extra={'const': True})] = True
+    topic: TopicSnapshot | None = None
+
+    @model_serializer(mode='wrap')
+    def omit_absent_topic_fields(self, handler):
+        value = handler(self)
+        # Preserve ordinary/reply draft wire projections when this optional
+        # capability is unused, including their existing digest input.
+        if self.topic is None:
+            value.pop('topic', None)
+            if not getattr(self, 'outgoing_entities', []):
+                value.pop('preview_sha256', None)
+        if not getattr(self, 'outgoing_entities', []):
+            value.pop('outgoing_entities', None)
+        return value
+
+    @model_validator(mode='after')
+    def topic_identity(self):
+        if self.topic is not None and (self.kind != 'text' or
+                self.topic.account_id != self.account_id or self.topic.chat_id != self.recipient):
+            raise ValueError('topic draft identity disagrees')
+        return self
 
     @field_validator('expires_at', mode='before')
     @classmethod
@@ -79,6 +115,7 @@ class DraftSummary(_Closed):
         return value
 
 class DraftPreview(DraftSummary):
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
     sha256: Hash
     size_bytes: Annotated[int, Field(strict=True, gt=0, le=64*1024*1024)]
     text: Annotated[str, Field(strict=True, min_length=1, max_length=4096)] | None = None
@@ -91,9 +128,26 @@ class DraftPreview(DraftSummary):
     source_sha256: Hash | None = None
     source_display_name: Annotated[str, Field(strict=True, min_length=1, max_length=255)] | None = None
     converted: Annotated[bool, Field(strict=True)] = False
+    preview_sha256: Hash | None = None
 
     @model_validator(mode='after')
     def exact_content(self):
+        if self.outgoing_entities:
+            from .outgoing_drafts import _safe_message_text
+            if self.kind != 'text' or self.text is None or _safe_message_text(self.text) != self.text:
+                raise ValueError('outgoing styles require final normalized text')
+            self.outgoing_entities = canonical_outgoing_entities(self.text, self.outgoing_entities)
+        if self.topic is None and not self.outgoing_entities:
+            if self.preview_sha256 is not None:
+                raise ValueError('plain draft contains a topic digest')
+        else:
+            expected = topic_preview_digest(draft_id=self.draft_id, account_id=self.account_id,
+                recipient=self.recipient, recipient_title=self.recipient_title,
+                expires_at=self.expires_at, text=self.text, sha256=self.sha256,
+                size_bytes=self.size_bytes, topic=self.topic,
+                outgoing_entities=caller_outgoing_entities(self.outgoing_entities))
+            if self.preview_sha256 != expected:
+                raise ValueError('topic preview digest disagrees')
         voice = (self.duration_seconds, self.waveform_base64, self.source_sha256, self.source_display_name)
         if self.kind == 'text':
             if self.text is None or any(v is not None for v in (self.artifact_id, self.display_name, self.mime_type, self.caption, *voice)) or self.converted:

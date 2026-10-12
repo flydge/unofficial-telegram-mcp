@@ -1,0 +1,140 @@
+[
+  {
+    "capabilities": [
+      "reply_formatted_targets",
+      "reply_email_targets"
+    ],
+    "display": "[untrusted Telegram evidence] Formatted target: {\"entities\":[{\"length\":3,\"offset\":0,\"provider_type\":\"textEntityTypeEmailAddress\",\"text\":\"abc\",\"type\":\"email_address\"}],\"offset_basis\":\"original source UTF-16 code units\",\"text\":\"abc\"}",
+    "display_sha256": "4405a1de114567eb379547a99eec1df0c55ad4cc7fe78bb4b79e3da9b585b72f",
+    "label": "simple",
+    "projection_json": "{\"anchor\":{\"chat_id\":123,\"message_id\":55},\"message\":{\"@type\":\"message\",\"auto_delete_in\":0.0,\"chat_id\":123,\"content\":{\"@type\":\"messageText\",\"link_preview\":null,\"link_preview_options\":null,\"text\":{\"@type\":\"formattedText\",\"entities\":[{\"@type\":\"textEntity\",\"length\":3,\"offset\":0,\"type\":{\"@type\":\"textEntityTypeEmailAddress\"}}],\"text\":\"abc\"}},\"date\":1700000000,\"edit_date\":0,\"ephemeral_content\":null,\"ephemeral_message_id\":0,\"forward_info\":null,\"id\":55,\"import_info\":null,\"is_from_offline\":false,\"is_outgoing\":false,\"receiver_id\":null,\"reply_markup\":null,\"reply_to\":null,\"scheduling_state\":null,\"self_destruct_in\":0.0,\"self_destruct_type\":null,\"sender_id\":{\"@type\":\"messageSenderUser\",\"user_id\":8},\"sending_state\":null,\"topic_id\":null},\"version\":17}",
+    "raw": {
+      "@type": "message",
+      "auto_delete_in": 0,
+      "chat_id": 123,
+      "content": {
+        "@type": "messageText",
+        "text": {
+          "@type": "formattedText",
+          "entities": [
+            {
+              "@type": "textEntity",
+              "length": 3,
+              "offset": 0,
+              "type": {
+                "@type": "textEntityTypeEmailAddress"
+              }
+            }
+          ],
+          "text": "abc"
+        }
+      },
+      "date": 1700000000,
+      "edit_date": 0,
+      "ephemeral_message_id": 0,
+      "id": 55,
+      "is_from_offline": false,
+      "is_outgoing": false,
+      "self_destruct_in": 0,
+      "sender_id": {
+        "@type": "messageSenderUser",
+        "user_id": 8
+      }
+    },
+    "raw_sha256": "dd0adcf1ef3c4d68af153db3b30985d87b8b17122edafe37ae6962ccbb4af69e",
+    "version": 17
+  },
+  {
+    "capabilities": [
+      "reply_formatted_targets",
+      "reply_email_targets",
+      "reply_url_targets",
+      "reply_datetime_targets",
+      "reply_lexical_targets",
+      "reply_identity_targets"
+    ],
+    "display": "[untrusted Telegram evidence] Formatted target: {\"entities\":[{\"length\":3,\"offset\":0,\"provider_type\":\"textEntityTypeEmailAddress\",\"text\":\"abc\",\"type\":\"email_address\"},{\"formatting_type\":{\"@type\":\"dateTimeFormattingTypeAbsolute\",\"date_precision\":{\"@type\":\"dateTimePartPrecisionLong\"},\"show_day_of_week\":false,\"time_precision\":{\"@type\":\"dateTimePartPrecisionNone\"}},\"length\":1,\"offset\":3,\"provider_type\":\"textEntityTypeDateTime\",\"text\":\"D\",\"type\":\"date_time\",\"unix_time\":1},{\"length\":4,\"offset\":4,\"text\":\"#tag\",\"type\":\"hashtag\"},{\"length\":5,\"offset\":8,\"text\":\"@user\",\"type\":\"mention_name\",\"user_id\":42},{\"length\":1,\"offset\":13,\"provider_type\":\"textEntityTypeUrl\",\"text\":\"U\",\"type\":\"url\"}],\"offset_basis\":\"original source UTF-16 code units\",\"text\":\"abcD#tag@userU\"}",
+    "display_sha256": "88a8ac646cecb48d9db88f67f4889b72391134646eda694a8e91eb89ab453390",
+    "label": "mixed",
+    "projection_json": "{\"anchor\":{\"chat_id\":123,\"message_id\":55},\"message\":{\"@type\":\"message\",\"auto_delete_in\":0.0,\"chat_id\":123,\"content\":{\"@type\":\"messageText\",\"link_preview\":null,\"link_preview_options\":null,\"text\":{\"@type\":\"formattedText\",\"entities\":[{\"@type\":\"textEntity\",\"length\":3,\"offset\":0,\"type\":{\"@type\":\"textEntityTypeEmailAddress\"}},{\"@type\":\"textEntity\",\"length\":1,\"offset\":3,\"type\":{\"@type\":\"textEntityTypeDateTime\",\"formatting_type\":{\"@type\":\"dateTimeFormattingTypeAbsolute\",\"date_precision\":{\"@type\":\"dateTimePartPrecisionLong\"},\"show_day_of_week\":false,\"time_precision\":{\"@type\":\"dateTimePartPrecisionNone\"}},\"unix_time\":1}},{\"@type\":\"textEntity\",\"length\":4,\"offset\":4,\"type\":{\"@type\":\"textEntityTypeHashtag\"}},{\"@type\":\"textEntity\",\"length\":5,\"offset\":8,\"type\":{\"@type\":\"textEntityTypeMentionName\",\"user_id\":42}},{\"@type\":\"textEntity\",\"length\":1,\"offset\":13,\"type\":{\"@type\":\"textEntityTypeUrl\"}}],\"text\":\"abcD#tag@userU\"}},\"date\":1700000000,\"edit_date\":0,\"ephemeral_content\":null,\"ephemeral_message_id\":0,\"forward_info\":null,\"id\":55,\"import_info\":null,\"is_from_offline\":false,\"is_outgoing\":false,\"receiver_id\":null,\"reply_markup\":null,\"reply_to\":null,\"scheduling_state\":null,\"self_destruct_in\":0.0,\"self_destruct_type\":null,\"sender_id\":{\"@type\":\"messageSenderUser\",\"user_id\":8},\"sending_state\":null,\"topic_id\":null},\"version\":17}",
+    "raw": {
+      "@type": "message",
+      "auto_delete_in": 0,
+      "chat_id": 123,
+      "content": {
+        "@type": "messageText",
+        "text": {
+          "@type": "formattedText",
+          "entities": [
+            {
+              "@type": "textEntity",
+              "length": 3,
+              "offset": 0,
+              "type": {
+                "@type": "textEntityTypeEmailAddress"
+              }
+            },
+            {
+              "@type": "textEntity",
+              "length": 1,
+              "offset": 3,
+              "type": {
+                "@type": "textEntityTypeDateTime",
+                "formatting_type": {
+                  "@type": "dateTimeFormattingTypeAbsolute",
+                  "date_precision": {
+                    "@type": "dateTimePartPrecisionLong"
+                  },
+                  "show_day_of_week": false,
+                  "time_precision": {
+                    "@type": "dateTimePartPrecisionNone"
+                  }
+                },
+                "unix_time": 1
+              }
+            },
+            {
+              "@type": "textEntity",
+              "length": 4,
+              "offset": 4,
+              "type": {
+                "@type": "textEntityTypeHashtag"
+              }
+            },
+            {
+              "@type": "textEntity",
+              "length": 5,
+              "offset": 8,
+              "type": {
+                "@type": "textEntityTypeMentionName",
+                "user_id": 42
+              }
+            },
+            {
+              "@type": "textEntity",
+              "length": 1,
+              "offset": 13,
+              "type": {
+                "@type": "textEntityTypeUrl"
+              }
+            }
+          ],
+          "text": "abcD#tag@userU"
+        }
+      },
+      "date": 1700000000,
+      "edit_date": 0,
+      "ephemeral_message_id": 0,
+      "id": 55,
+      "is_from_offline": false,
+      "is_outgoing": false,
+      "self_destruct_in": 0,
+      "sender_id": {
+        "@type": "messageSenderUser",
+        "user_id": 8
+      }
+    },
+    "raw_sha256": "c8b88d97f5f426e0c772da1888e4d9ea30ab73e4486d18167d9a309b1558dc1c",
+    "version": 17
+  }
+]

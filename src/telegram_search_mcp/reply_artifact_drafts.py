@@ -34,6 +34,7 @@ class ReplyArtifactDraftPreview(_Closed):
         from .outgoing_drafts import _safe_caption, _safe_display_name, _MIME_TYPE
         draft=self.draft
         if (draft.kind not in {'document','photo','voice_note'} or draft.recipient!=self.reply_target.anchor.chat_id
+            or self.reply_target.forum_topic_id is not None
             or _safe_caption(draft.caption)!=draft.caption or _safe_display_name(draft.display_name)!=draft.display_name
             or not _MIME_TYPE.fullmatch(draft.mime_type)
             or digest(preview_facts(draft,self.reply_target))!=self.preview_sha256):

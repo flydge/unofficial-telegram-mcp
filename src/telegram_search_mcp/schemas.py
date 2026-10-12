@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from .topic_models import ForumTopicReference, TopicSnapshot, topic_preview_digest
+from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entities, caller_outgoing_entities
+
 import unicodedata
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator, model_serializer
 
 from .sanitize import render_evidence
 from .boolean_query import normalize_search_text, boolean_matches, boolean_seeds
@@ -76,7 +79,7 @@ UsernameTarget = Annotated[
 ]
 NumericTarget = Annotated[
     int,
-    Field(strict=True, ge=-(2**63), le=2**63 - 1),
+    Field(strict=True, ge=-(2**53 - 1), le=2**53 - 1),
     AfterValidator(_reject_zero_chat_id),
 ]
 SearchTarget = UsernameTarget | NumericTarget
@@ -87,10 +90,10 @@ RequireComplete = Annotated[bool, Field(strict=True)]
 
 ChatId = Annotated[
     int,
-    Field(strict=True, ge=-(2**63), le=2**63 - 1),
+    Field(strict=True, ge=-(2**53 - 1), le=2**53 - 1),
     AfterValidator(_reject_zero_chat_id),
 ]
-MessageId = Annotated[int, Field(strict=True, ge=-(2**63), le=2**63 - 1)]
+MessageId = Annotated[int, Field(strict=True, ge=-(2**53 - 1), le=2**53 - 1)]
 TargetTitle = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 ResolveTargetInput = Annotated[
     str,
@@ -497,6 +500,22 @@ class PrepareTextSendRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     recipient: ChatId
     text: Annotated[str, Field(strict=True, min_length=1, max_length=4096)]
+    topic: ForumTopicReference | None = None
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def exact_outgoing_entities(self):
+        if self.outgoing_entities:
+            from .outgoing_drafts import _safe_message_text
+            self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text), self.outgoing_entities)
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
 
 
 class PrepareTextSendResponse(BaseModel):
@@ -509,6 +528,52 @@ class PrepareTextSendResponse(BaseModel):
     expires_at: datetime | None = None
     approval_required: bool = True
     detail: str
+    account_id: Annotated[int, Field(strict=True, gt=0, lt=2**53)] | None = None
+    topic: TopicSnapshot | None = None
+    preview_sha256: Annotated[str, Field(strict=True, pattern=r'^[0-9a-f]{64}$')] | None = None
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
+
+    @model_validator(mode='before')
+    @classmethod
+    def strict_topic_projection(cls, value):
+        if isinstance(value, dict) and (value.get('topic') is not None or value.get('outgoing_entities')):
+            if (set(value) - set(cls.model_fields) or
+                    value.get('approval_required', True) is not True or
+                    type(value.get('recipient')) is not int or
+                    any(type(value.get(key)) is not str for key in
+                        ('draft_id', 'recipient_title', 'text', 'sha256', 'preview_sha256', 'detail'))):
+                raise ValueError('topic preview projection is invalid')
+        return value
+
+    @model_validator(mode='after')
+    def exact_topic_preview(self):
+        if self.topic is None and not self.outgoing_entities:
+            if self.account_id is not None or self.preview_sha256 is not None:
+                raise ValueError('plain draft contains topic evidence')
+        else:
+            if (self.status != 'prepared' or self.approval_required is not True or
+                    self.text is None or self.expires_at is None):
+                raise ValueError('topic preview is incomplete')
+            if self.outgoing_entities:
+                from .outgoing_drafts import _safe_message_text
+                if _safe_message_text(self.text) != self.text:
+                    raise ValueError('formatted preview text is not final')
+                self.outgoing_entities = canonical_outgoing_entities(self.text, self.outgoing_entities)
+            expected = topic_preview_digest(draft_id=self.draft_id, account_id=self.account_id,
+                recipient=self.recipient, recipient_title=self.recipient_title,
+                expires_at=self.expires_at, text=self.text, sha256=self.sha256,
+                size_bytes=len(self.text.encode('utf-8')), topic=self.topic,
+                outgoing_entities=caller_outgoing_entities(self.outgoing_entities))
+            if self.preview_sha256 != expected:
+                raise ValueError('topic preview digest disagrees')
+        return self
 
 
 class SendPreparedTextRequest(SendPreparedArtifactRequest):
@@ -1139,12 +1204,6 @@ class ListTopicsRequest(BaseModel):
     target: HistoryTarget
     limit: SearchLimit = 20
     cursor: TopicCursor | None = None
-
-
-class ForumTopicReference(BaseModel):
-    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    kind: Literal["forum"] = "forum"
-    id: ForumTopicId
 
 
 class ForumTopicName(BaseModel):

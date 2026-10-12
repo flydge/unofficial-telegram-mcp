@@ -151,8 +151,8 @@ class IdentitySourceTests(unittest.TestCase):
     def test_exact_shapes_strict_int53_user_ids_and_utf16_boundaries_refuse(self):
         invalid = [entity('MentionName', user_id=value) for value in (True, False, None, 0, -1, 2**53, '42', 42.0)]
         invalid += [entity('MentionName'), entity('MentionName', user_id=42, url='x'),
-            entity('Mention', user_id=42), entity('Mention', extra=None), entity('Url'), entity('EmailAddress'),
-            entity('PhoneNumber'), entity('TextUrl', url='https://example.invalid'),
+            entity('Mention', user_id=42), entity('Mention', extra=None), entity('Url', extra=None),
+            entity('PhoneNumber', phone='hidden'), entity('TextUrl', url='https://example.invalid', extra=None),
             entity('CustomEmoji', custom_emoji_id=1), entity('DateTime', unix_time=1, formatting_type={})]
         invalid += [entity('MentionName', offset, length, user_id=42) for offset, length in
             ((True, 1), ('0', 1), (0, True), (0, 0), (-1, 1), (1, 1), (0, 1), (0, 17), (2**31, 1))]

@@ -118,6 +118,18 @@ class _AttachmentGuardFailure(RuntimeError):
         super().__init__(status)
 
 
+def _matching_outgoing_entities(text, expected, actual):
+    """Derive caller intent independently of a self-consistent broker digest."""
+    if not expected and not actual:
+        return True
+    from .outgoing_drafts import _safe_message_text
+    from .outgoing_entity_models import caller_outgoing_entities
+    from .outgoing_formatting import freeze_outgoing_entities
+    final_text = _safe_message_text(text)
+    return (freeze_outgoing_entities(final_text, caller_outgoing_entities(expected)) ==
+            freeze_outgoing_entities(final_text, caller_outgoing_entities(actual)))
+
+
 class BrokerUnavailable(RuntimeError):
     """Raised when the local broker cannot safely complete a request."""
 
@@ -1459,8 +1471,14 @@ class BrokerClient:
             response = ReviseDraftResponse.model_validate(self._request(operation, request.model_dump(mode="json")))
             if response.previous_draft_id is not None and response.previous_draft_id != request.draft_id:
                 raise BrokerUnavailable("revision response does not match request")
+            if isinstance(request, UpdateDraftRequest) and response.draft is not None:
+                from .outgoing_drafts import _safe_message_text
+                if ((request.text is not None and response.draft.text != _safe_message_text(request.text)) or
+                        not _matching_outgoing_entities(request.text, request.outgoing_entities,
+                            response.draft.outgoing_entities)):
+                    raise BrokerUnavailable('revision formatting differs from request')
             return response
-        except (BrokerUnavailable, ValidationError):
+        except (BrokerUnavailable, ValidationError, ValueError):
             return ReviseDraftResponse(status="unavailable", detail="draft is unavailable")
 
     def update_draft(self, request: UpdateDraftRequest) -> ReviseDraftResponse:
@@ -1569,7 +1587,11 @@ class BrokerClient:
             if response.reply is not None:
                 from .outgoing_drafts import _safe_message_text
                 if (response.reply.draft.recipient!=request.recipient or response.reply.reply_target.anchor!=request.reply_to
-                        or response.reply.draft.text!=_safe_message_text(request.text)):
+                        or response.reply.draft.text!=_safe_message_text(request.text)
+                        or not _matching_outgoing_entities(request.text, request.outgoing_entities,
+                            response.reply.draft.outgoing_entities)
+                        or (response.reply.draft.topic.forum_topic_id if response.reply.draft.topic is not None else None)
+                           != (request.topic.id if request.topic is not None else None)):
                     raise BrokerUnavailable("reply response does not match request")
             return response
         except (BrokerUnavailable,ValidationError,ValueError):
@@ -1592,7 +1614,9 @@ class BrokerClient:
                     raise BrokerUnavailable("reply response does not match request")
                 if isinstance(request,UpdateReplyDraftRequest):
                     from .outgoing_drafts import _safe_message_text
-                    if response.reply.draft.text!=_safe_message_text(request.text):
+                    if (response.reply.draft.text!=_safe_message_text(request.text) or
+                            not _matching_outgoing_entities(request.text, request.outgoing_entities,
+                                response.reply.draft.outgoing_entities)):
                         raise BrokerUnavailable("reply response does not match request")
             return response
         except (BrokerUnavailable,ValidationError,ValueError):
@@ -1606,8 +1630,19 @@ class BrokerClient:
 
     def prepare_text_send(self, request: PrepareTextSendRequest) -> PrepareTextSendResponse:
         try:
-            return PrepareTextSendResponse.model_validate(self._request("prepare_text_send", request.model_dump(mode="json")))
-        except (BrokerUnavailable, ValidationError):
+            if request.topic is not None and 'topic_text_send' not in self._policy.enabled_capabilities:
+                raise BrokerUnavailable('topic text sending is disabled')
+            response = PrepareTextSendResponse.model_validate(self._request("prepare_text_send", request.model_dump(mode="json")))
+            if response.status == 'prepared':
+                from .outgoing_drafts import _safe_message_text
+                if (response.recipient != request.recipient or response.text != _safe_message_text(request.text) or
+                        not _matching_outgoing_entities(request.text, request.outgoing_entities,
+                            response.outgoing_entities) or
+                        (request.topic is None) != (response.topic is None) or
+                        (request.topic is not None and response.topic.forum_topic_id != request.topic.id)):
+                    raise BrokerUnavailable('text preview does not match the request')
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
             return PrepareTextSendResponse(status="error", detail="draft broker is unavailable")
 
     def send_prepared_text(self, request: SendPreparedTextRequest) -> SendPreparedTextResponse:
