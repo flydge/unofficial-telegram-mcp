@@ -1,0 +1,12 @@
+Unofficial Telegram MCP
+Copyright (C) 2026 Unofficial Telegram MCP contributors.
+
+The project-owned code is licensed under the GNU Affero General Public
+License, version 3 only (AGPL-3.0-only). See LICENSE and docs/licensing.md.
+
+Third-party components retain their own copyrights and licenses.
+Dependency references and reproduced notices are in docs/third-party-notices.md
+and docs/licenses/. These notices do not relicense third-party components.
+
+This is an independent project and is not affiliated with or endorsed by
+Telegram. Telegram names are used to describe compatibility.

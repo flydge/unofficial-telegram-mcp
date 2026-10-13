@@ -1,31 +1,87 @@
-# 0.51.0 publication candidate — 2026-10-12
+# 0.51.0 — 2026-10-13
 
-[← Overview](../README.md) · [Installation](install.md) · [Tool reference](reference.md) · [Security](security.md)
+[Overview](../README.md) · [Installation](install.md) · [Tool reference](reference.md) · [Roadmap](roadmap.md) · [Licensing](licensing.md)
 
-This is a local publication candidate, not a published release or a claim of live readiness. Public `main` was version 0.35.0 at `796f95d22ae7016ae8c7a313e96e15233aba7531` when the candidate was prepared. The implementation snapshot is version 0.51.0; the public contributor history is preserved without importing the private development history.
+This source release advances the previous public 0.35.0 baseline to the accepted
+0.51.0 implementation. Public contributor ancestry is preserved; private development
+history, local sessions and private acceptance records are not distribution inputs.
+The [original plan](plans/initial-roadmap.md) and [current progress](roadmap.md) make
+completed slices and remaining work accessible in Git.
 
-## Current scope
+## Available behavior
 
-The existing 43-tool STDIO contract covers bounded Telegram discovery, exact-chat search, selected message/history/reply/topic reads, selected document/media analysis, local artifact transfer, draft inspection, and explicitly approved text/document/photo/voice sending. Extended readers and reply-source families require their existing opt-in capabilities; client tool visibility grants no broker permission.
+The 43-tool STDIO contract covers bounded discovery and exact-chat search; selected
+message/history/reply/topic reading; selected document and media analysis; local
+artifact transfer; draft inspection/revision/cancellation; and explicitly approved
+text, document, photo and voice-note sending. Extended capabilities remain opt-in.
+Client tool visibility grants no additional broker permission.
 
-Since the public 0.35.0 snapshot, the existing reply-source workflows admit additional conservative inert DateTime, URL, email, phone-number, bank-card and TextUrl message-text evidence subsets. Exact forum-topic text sends and replies require `topic_text_send`; explicit outgoing Bold, Italic, Underline, Strikethrough and Spoiler styles require `formatted_text_send`. These remain default-off. Every outgoing attempt still requires review of its complete frozen preview and fresh applicable approval. See the reference and security model for precise bounds, source-capability conjunctions, unsupported entities, revocation, and terminal status semantics.
+Compared with the previous public snapshot, conservative reply-source admission
+includes additional inert DateTime, URL, email, phone-number, bank-card and TextUrl
+message-text subsets. Exact forum-topic text sends/replies use `topic_text_send`.
+Explicit outgoing Bold, Italic, Underline, Strikethrough and Spoiler use
+`formatted_text_send`. Unsupported source combinations and formatted captions are
+not silently accepted; see the reference for the exact bounds.
 
-Version 0.51.0 retains contract version 1, private IPC version 2 and 43 tools. Topic and style inputs extend schemas, so a previously cached fingerprint cannot be reused as proof of compatibility. Deploy matching proxy, broker, policy and skill together only through a reviewed activation/rollback procedure. Restart clears in-memory drafts, uploads and cursors; uncertain sends must never be replayed.
+Package version is 0.51.0, public contract version 1 and private IPC version 2.
+Topic/style inputs changed public schemas. Deploy matching proxy, broker, policy
+and optional skill together; a cached fingerprint is not proof of compatibility.
+Restart invalidates in-memory drafts, uploads and cursors. An uncertain send is
+never automatically repeated.
 
-Release preparation diagnostics now include environment pin checks, evidence/preflight inspection, and an installed SDK probe. Their reports use `acceptance: false`; they do not run or replace consumer/provider acceptance. See [release-preflight](release-preflight.md).
+Release diagnostics inspect environment and evidence pins and provide an installed
+SDK preflight. Their `acceptance: false` reports are preparation diagnostics, not a
+replacement for real consumer/provider acceptance.
 
-Acceptance found two defects addressed by bounded regression fixes: corrupt PNG checksums return an explicit reader error, and formatted ordinary self-sends can correlate TDLib's own Saved Messages topic with the revalidated account. The outgoing request still uses `topic_id=null`; this adds no topic selector or reply route. Exact content, entities and pending-to-final correlation remain required. An earlier uncertain attempt remains uncertain and must not be replayed.
+## Corrections included
 
-## Evidence and remaining gates
+- Corrupt PNG checksum errors produce an explicit safe reader error, without text
+  or image blocks, rather than being presented as an unavailable broker.
+- A formatted ordinary self-send can correlate TDLib's Saved Messages topic only
+  with the freshly verified account's own ID. The outgoing `topic_id=null` request
+  and strict content/entities/account/pending-to-final checks remain unchanged.
 
-The initial candidate underwent installed SDK, persistent Inspector and native Codex checks against a live broker. Two separately approved test messages were observed by the owner: the forum send had a correlated provider receipt; the Saved Messages attempt retained an unknown machine outcome despite separate visibility evidence. These facts do not upgrade an uncertain receipt or prove visual rendering of each style. Local image blocks do not prove Telegram attachment download.
+## Accepted scenarios
 
-Historical and initial-candidate evidence is supporting evidence only after these fixes. The end-to-end owner must bind fresh independent review, package/build/install checks and each applicable real consumer/provider scenario to the final public commit and package digests. Missing access or failed scenarios remain open gates. Clean-user provisioning and unattended operation are not claimed.
+The corrected implementation passed the complete automated suite, noneditable
+package installation, source/archive/wheel equality, installed RECORD checks and
+independent review. Installed official MCP SDK and genuine persistent Inspector
+sessions exercised public schemas, live reads/history/search continuation, Unicode,
+image blocks and corrupt-image recovery, draft revision/cancellation, styles, topic
+paths, approval denial and schema-mismatch recovery.
 
-The existing installation gap remains: Apple Silicon macOS, pinned TDLib, trusted Keychain provisioning and an already authorized dedicated TDLib session are required. There is no first-time login wizard or reproducible TDLib provisioning script. A clone of today's public `main` installs 0.35.0, not this unpublished candidate.
+Native Codex read a selected actual Telegram TXT attachment through both readers;
+the observed bytes and hashes matched. This does not distinguish a cache hit from
+a fresh network transfer. A new separately approved corrected Saved Messages send
+was provider-confirmed and read back at its exact anchor, also independently through
+the official SDK. An earlier forum test send had a provider-confirmed receipt and
+exact readback.
 
-Project-license selection, dependency notices/provenance review and explicit publication approval are separate owner decisions. No project license is introduced by this candidate. Consult the [dependency reference inventory](third-party-notices.md); it is not a complete legal clearance or a substitute for distribution notices.
+The final publication changes add license and roadmap documentation and package
+metadata. Product Python modules and tool schemas are unchanged from the corrected
+implementation that underwent those live checks. Packaging and automated checks
+are repeated for the publication tree.
 
-## Public presentation
+## Known limits
 
-The public name, banner, install guide and repository links remain **Unofficial Telegram MCP**. Compatibility identifiers remain `telegram-search-mcp`, `telegram_search`, the Python namespace, CLI names and `TelegramSearchMCP` runtime paths. The export preserves branding strings, public documentation, package documentation inclusion and matching test expectations. Subsequent acceptance fixes are limited to the two failures described above; no new feature or dependency upgrade is introduced.
+- Apple Silicon macOS, pinned TDLib, trusted Keychain provisioning and an already
+  authorized dedicated session remain prerequisites. A first-time login wizard and
+  reproducible TDLib provisioning are not included.
+- Current consumer evidence is for bounded tested scenarios. Every source family,
+  protocol version, first-time-user setup and unattended operation is not established.
+- Visual rendering of every outgoing style was not independently checked.
+- A historical unknown send remains unknown. A later reply source was deleted;
+  its safe refusal was accepted, with no new reply-delivery claim for that source.
+- Forward/copy, native video/albums, multiple accounts and message-management actions
+  remain on the [roadmap](roadmap.md). The complete original plan is not finished.
+
+## License and public identifiers
+
+Project-owned code is licensed under **AGPL-3.0-only**. The current PyMuPDF dependency
+is the practical reason for this choice. A possible future replacement and license
+change are explained in [licensing](licensing.md); upstream copyrights and notices
+are retained in [third-party notices](third-party-notices.md).
+
+The public name remains **Unofficial Telegram MCP**. Compatibility identifiers stay
+`telegram-search-mcp`, `telegram_search`, the Python namespace, CLI names and
+`TelegramSearchMCP` runtime paths. Dependencies are not upgraded in this release.

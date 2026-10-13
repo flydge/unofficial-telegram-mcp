@@ -24,12 +24,12 @@ A logged-in Telegram Desktop app does **not** supply this TDLib session. If you 
 
 ## 2. Install the package and broker
 
-**Version scope:** the public clone commands below describe repository setup. Public `main` was 0.35.0 on 2026-10-12; they do not fetch this unpublished 0.51.0 candidate. To evaluate 0.51.0, use the separately supplied reviewed local candidate checkout and confirm `telegram_search_mcp.__version__` before installing or changing a broker. After an approved publication, pin the reviewed public commit. The runtime-policy example below is for 0.51.0 only.
+**Version scope:** the commands below pin the `v0.51.0` source release. Confirm `telegram_search_mcp.__version__` before installing or changing an existing broker. The runtime-policy example below is for 0.51.0 only. See [release notes](release-notes-0.51.0.md) for accepted scenarios and limitations, and [licensing](licensing.md) for the AGPLv3 decision.
 
 Use a stable, owner-only checkout. Select a supported Python interpreter if your `python3` is outside the supported range.
 
 ```bash
-git clone https://github.com/flydge/unofficial-telegram-mcp.git
+git clone --branch v0.51.0 https://github.com/flydge/unofficial-telegram-mcp.git
 cd unofficial-telegram-mcp
 chmod 700 .
 python3 -m venv .venv

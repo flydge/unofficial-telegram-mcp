@@ -6,7 +6,9 @@
 
 Connect Telegram to **Claude Code, Codex, or another local MCP client**.
 
-**0.51.0 local publication candidate:** this checkout contains 43 tools, opt-in exact forum-topic text sends/replies, and five explicit outgoing text styles. Public `main` was still 0.35.0 when this candidate was prepared on 2026-10-12. Live Telegram, native-client acceptance, licensing/notices, and publication remain separate open gates. See [release notes](docs/release-notes-0.51.0.md) and the [tool reference](docs/reference.md).
+**Version 0.51.0:** 43 tools, opt-in exact forum-topic text sends/replies, and five explicit outgoing text styles. The accepted bounded scope has installed SDK, Inspector and native Codex evidence; first-time Telegram provisioning and the broader roadmap remain unfinished. See [release notes](docs/release-notes-0.51.0.md), the [tool reference](docs/reference.md), and [development progress](docs/roadmap.md).
+
+**Free and open source under [AGPLv3](LICENSE).** This license was chosen because the current PDF reader uses PyMuPDF. A future PDF replacement and different license are being considered; read the [licensing rationale](docs/licensing.md). The [original development plan](docs/plans/initial-roadmap.md) and [current roadmap](docs/roadmap.md) are tracked in Git.
 
 **Before connecting:** complete the [one-time local setup](docs/install.md) on an Apple Silicon Mac, including Telegram authorization. Your assistant and Unofficial Telegram MCP must run on the same Mac. Replace `/ABSOLUTE/PATH/TO/unofficial-telegram-mcp` below with your installation folder.
 

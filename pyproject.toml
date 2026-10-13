@@ -7,6 +7,8 @@ name = "telegram-search-mcp"
 dynamic = ["version"]
 description = "Unofficial Telegram MCP: read, search, and send messages, files, and voice notes with approval"
 requires-python = ">=3.11,<3.15"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
   "mcp==2.2.0",
   "PyMuPDF==1.26.4",
@@ -17,6 +19,8 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/flydge/unofficial-telegram-mcp"
 Documentation = "https://github.com/flydge/unofficial-telegram-mcp#readme"
+Changelog = "https://github.com/flydge/unofficial-telegram-mcp/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/flydge/unofficial-telegram-mcp/blob/main/docs/roadmap.md"
 
 [project.scripts]
 telegram-search-mcp = "telegram_search_mcp.server:main"
@@ -30,8 +34,10 @@ where = ["src"]
 version = {attr = "telegram_search_mcp.__version__"}
 
 [tool.setuptools.data-files]
-"share/telegram-search-mcp" = ["README.md"]
-"share/telegram-search-mcp/docs" = ["docs/security.md", "docs/release-preflight.md", "docs/install.md", "docs/reference.md", "docs/release-notes-0.51.0.md", "docs/third-party-notices.md"]
+"share/telegram-search-mcp" = ["README.md", "LICENSE", "NOTICE"]
+"share/telegram-search-mcp/docs" = ["docs/security.md", "docs/release-preflight.md", "docs/install.md", "docs/reference.md", "docs/release-notes-0.51.0.md", "docs/third-party-notices.md", "docs/licensing.md", "docs/roadmap.md"]
+"share/telegram-search-mcp/docs/plans" = ["docs/plans/initial-roadmap.md"]
+"share/telegram-search-mcp/docs/licenses" = ["docs/licenses/mcp-MIT.txt", "docs/licenses/python-docx-MIT.txt", "docs/licenses/Pillow.txt", "docs/licenses/PyMuPDF-COPYING.txt"]
 "share/telegram-search-mcp/docs/assets" = ["docs/assets/unofficial-telegram-mcp-header.png"]
 "share/telegram-search-mcp/.codex" = [".codex/config.toml.example"]
 "share/telegram-search-mcp/skills/telegram-search" = ["skills/telegram-search/SKILL.md"]

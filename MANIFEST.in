@@ -1,4 +1,6 @@
 include README.md
+include LICENSE
+include NOTICE
 include .gitignore
 include .codex/config.toml.example
 include docs/security.md
@@ -25,3 +27,7 @@ include docs/release-notes-0.51.0.md
 include docs/assets/unofficial-telegram-mcp-header.png
 include CHANGELOG.md
 include docs/third-party-notices.md
+include docs/licensing.md
+include docs/roadmap.md
+include docs/plans/initial-roadmap.md
+recursive-include docs/licenses *.txt
