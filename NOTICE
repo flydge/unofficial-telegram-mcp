@@ -5,6 +5,10 @@ The project-owned code is licensed under the GNU Affero General Public
 License, version 3 only (AGPL-3.0-only). See LICENSE and docs/licensing.md.
 
 Third-party components retain their own copyrights and licenses.
+The bundled verifier and installation primitives adapt this project's earlier
+local Telegram installation prototype. These adapted project-owned sources are
+distributed under AGPL-3.0-only with their current source and build scripts;
+no separate historical prototype license is implied.
 Dependency references and reproduced notices are in docs/third-party-notices.md
 and docs/licenses/. These notices do not relicense third-party components.
 

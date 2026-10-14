@@ -1649,3 +1649,34 @@ identity plus approved plain text. Unsupported media/quote/options remain denied
 The public optional input/evidence changes the schema fingerprint but adds no tool
 or capability:43 tools and28 capabilities. Installed synthetic evidence remains
 separate from actual owner-dialog, live delivery, native consumer and release gates.
+# Unreleased bundled first-install boundary
+
+Candidate `0.52.0.dev0` authenticates a bounded USTAR/gzip index and every
+member using an independently pinned prebuilt native seed before extraction or
+Python execution. Archive links, traversal, duplicates, extension headers,
+special files and unexpected entries refuse. Builder-only internal Python
+links are audited to remain inside the supplied Python root and are dereferenced
+to ordinary files in the archive. The consumer invokes no compiler or pip.
+
+Installed launchers admit an owner-only, no-follow/ACL-checked release tree and
+receipt/index binding before app imports. Native selection comes from this
+local launcher context; environment variables and MCP input never choose a
+library. The default session, credential store, shared owner lease, enrollment
+and strict auth handoff remain the same. LaunchAgent validation permits only
+the exact receipt-bound isolated form alongside the existing four-argument
+legacy form. There is no PYTHONPATH or DYLD propagation.
+
+The recoverable installation transaction owns a separate runtime root, one
+lease/journal, matched skills and its Codex subtree. Original config bytes stay
+in private transaction evidence and are never logged. Writes compare original
+bytes immediately before atomic replacement. These cooperative checks detect
+observed drift; they do not protect against a malicious process already
+controlling the same OS UID or make arbitrary editors participate in the lease.
+Initialization uses an inode-bound durable intent before root publication.
+Release, skills and local metadata retain staged-object publication records;
+pending recovery requires that exact object, not merely matching content. The
+owned Codex subtree still permits unrelated neighbor edits after its completed
+publication. Interrupted unbound packets are preserved without adoption, and
+recovery attempts are bounded.
+Current pointer publication occurs last; interrupted installations fail closed
+until exact checked recovery. No active broker is stopped or foreign data adopted.

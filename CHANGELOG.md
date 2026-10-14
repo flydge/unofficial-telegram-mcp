@@ -13,3 +13,10 @@
 ## 0.35.0 — published baseline
 
 The previously published `main` at `796f95d22ae7016ae8c7a313e96e15233aba7531` contains the Unofficial Telegram MCP rebrand. This changelog does not reconstruct intermediate private development commits or assert that they were publicly released.
+## 0.52.0.dev0 — unreleased
+
+- Add authenticated offline macOS ARM64 first-install bundle admission,
+  recoverable owned runtime/registration/paired-skills installation and an
+  isolated receipt-bound launcher integrated with the preserved default session.
+- Private installation ends at `activation_required`. Native onboarding,
+  fresh Codex search, public distribution and source completeness remain open.

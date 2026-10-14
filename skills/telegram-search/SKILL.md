@@ -5,6 +5,12 @@ description: Use when the user asks to find, verify, correlate, transfer, read, 
 
 # Telegram Search
 
+Paired local candidate: `0.52.0.dev0`, contract 1. Installation alone remains
+`activation_required`; use the paired telegram-setup skill for native hidden
+input and resume. Require the actual installed manifest's package, contract,
+schema/config binding and fresh broker Ready before a bounded search. Published
+0.51 and this private candidate have separate acceptance evidence.
+
 ## Purpose
 
 Turn a natural-language Telegram request into evidence-backed Unofficial Telegram MCP MCP calls. Codex owns semantic interpretation; Unofficial Telegram MCP supplies bounded lexical/catalog/message evidence. Discovery may inspect Main and Archive. Final correspondence search uses an exact chat or an explicitly selected bounded set; attachment transfer uses one exact message anchor.

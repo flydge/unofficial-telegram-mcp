@@ -64,3 +64,20 @@ released under this version. Existing 0.51.0 copies remain available under AGPLv
 The public source tree and source distribution contain the project source and
 build instructions. Separately installed dependencies and external runtime tools
 must retain their respective upstream licenses and corresponding-source obligations.
+# Unreleased bundled candidate inventory
+
+The `0.52.0.dev0` private bundle vendors standalone CPython/PBS, all 32 exact
+runtime distributions, installer-only tomlkit 0.13.3, TDLib/OpenSSL and an adapted
+native verifier under this project's selected AGPL license. The bundle keeps
+full upstream notices, the four installed SBOMs, available project/verifier
+build sources and exact TDLib d1085f9 tracked source without Git history.
+Its relative-path component inventory explicitly marks source completeness
+as incomplete. Nonvendoring-wheel notices below do not prove this bundle's
+corresponding-source or redistribution completeness.
+
+Cryptography's installed SBOM declares embedded OpenSSL 4.0.2, distinct from
+TDLib's relocated OpenSSL 3.6.4. CPython/PBS embedded build dependencies,
+native wheel build sources/recipes, embedded-library mappings and complete
+corresponding-source acceptance remain open. No publication or source-complete
+claim follows from private technical assembly. Available sources and notices
+are preserved; missing files require applicable retrieval/publication authority.

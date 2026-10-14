@@ -9,6 +9,15 @@ reference inventory and copied upstream notices accompany the source and package
 
 ## Direct dependencies
 
+The unreleased `0.52.0.dev0` standalone bundle additionally vendors the exact
+32-distribution closure, standalone CPython/PBS, pinned TDLib/OpenSSL and
+installer-only tomlkit 0.13.3. Its full copied notices, relative component
+inventory and four installed SBOMs accompany the archive. Cryptography's SBOM
+declares OpenSSL 4.0.2 separately from TDLib's OpenSSL 3.6.4. Available project,
+verifier and exact TDLib source is included; source/embedded-build completeness
+remains explicitly incomplete. This wheel-oriented table does not close that
+bundle's redistribution or corresponding-source gate.
+
 | Dependency | Pinned version | License / notice | Upstream source |
 | --- | --- | --- | --- |
 | MCP Python SDK (`mcp`) | 2.2.0 | MIT; [verbatim notice](licenses/mcp-MIT.txt) | [python-sdk](https://github.com/modelcontextprotocol/python-sdk) |

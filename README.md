@@ -57,3 +57,10 @@ Ask your assistant:
 > Use the `_manifest` tool from Unofficial Telegram MCP with `check_broker=true` and report whether compatibility is `compatible`.
 
 [Setup and troubleshooting](docs/install.md)
+# Unreleased local candidate
+
+This checkout is development candidate `0.52.0.dev0`. Its private authenticated
+bundle supplies Python/native dependencies and recoverable first installation
+on Apple Silicon macOS 26+. See [candidate installation](docs/install.md).
+Published 0.51 evidence remains separate; native onboarding, public hosting,
+publisher trust and complete source/redistribution acceptance remain open.

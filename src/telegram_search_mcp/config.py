@@ -52,6 +52,10 @@ def ensure_private_directory(path: Path) -> Path:
 
 def validate_tdlib_runtime() -> Path:
     """Verify the approved Homebrew TDLib runtime without reading its contents."""
+    from .bundle_runtime import selected_native
+    bundled = selected_native()
+    if bundled is not None:
+        return bundled
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise ConfigurationError("the approved TDLib runtime requires Apple ARM64 macOS")
     if not TDLIB_LIBRARY.is_file():

@@ -41,13 +41,15 @@ def _default_preflight() -> None:
 
 
 def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:
+    from .bundle_runtime import broker_arguments
+    bundled = broker_arguments()
     executable = python_executable.absolute()
     resolved_executable = executable.resolve(strict=True)
     if not resolved_executable.is_file():
         raise LaunchAgentError("Python executable is invalid")
     return {
         "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": [
+        "ProgramArguments": bundled or [
             str(executable),
             "-m",
             "telegram_search_mcp.launch_agent",
@@ -60,7 +62,7 @@ def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:
         "Umask": 0o077,
         "StandardOutPath": "/dev/null",
         "StandardErrorPath": "/dev/null",
-        "EnvironmentVariables": {"PYTHONDONTWRITEBYTECODE": "1"},
+        "EnvironmentVariables": {} if bundled else {"PYTHONDONTWRITEBYTECODE": "1"},
     }
 
 
@@ -80,14 +82,19 @@ def _managed_payload(value: object) -> bool:
         "EnvironmentVariables",
     }
     arguments = value.get("ProgramArguments")
+    from .bundle_runtime import broker_arguments, BundleError
+    try:
+        bundled = broker_arguments()
+    except BundleError:
+        return False
+    legacy = (isinstance(arguments, list) and len(arguments) == 4
+              and isinstance(arguments[0], str) and Path(arguments[0]).is_absolute()
+              and arguments[1:] == ["-m", "telegram_search_mcp.launch_agent", "run"])
+    selected = bundled is not None and arguments == bundled
     return (
         set(value) == expected_keys
         and value.get("Label") == LAUNCH_AGENT_LABEL
-        and isinstance(arguments, list)
-        and len(arguments) == 4
-        and isinstance(arguments[0], str)
-        and Path(arguments[0]).is_absolute()
-        and arguments[1:] == ["-m", "telegram_search_mcp.launch_agent", "run"]
+        and (selected or legacy)
         and value.get("RunAtLoad") is True
         and value.get("KeepAlive") is True
         and value.get("ProcessType") == "Background"
@@ -96,7 +103,7 @@ def _managed_payload(value: object) -> bool:
         and value.get("Umask") == 0o077
         and value.get("StandardOutPath") == "/dev/null"
         and value.get("StandardErrorPath") == "/dev/null"
-        and value.get("EnvironmentVariables") == {"PYTHONDONTWRITEBYTECODE": "1"}
+        and value.get("EnvironmentVariables") == ({} if selected else {"PYTHONDONTWRITEBYTECODE": "1"})
     )
 
 

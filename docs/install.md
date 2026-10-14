@@ -4,40 +4,57 @@
 
 **Existing installations:** the product was renamed from TelegramSearch. Keep your current installation folder and MCP configuration. The package, commands, skill identifier and local data paths retain their existing names for compatibility; new checkouts use `unofficial-telegram-mcp`.
 
-## 1. Prepare the Telegram runtime
+## Private bundled candidate 0.52.0.dev0
 
-The current package runs on **Apple Silicon macOS** with **Python 3.11–3.14**. It uses an existing, dedicated Telegram session; it does not include a first-time login wizard or a reproducible TDLib provisioning script.
+The continuing development candidate supports an offline authenticated first
+install for Apple Silicon macOS 26+. Its bundle supplies standalone Python,
+the exact runtime dependencies, pinned TDLib/OpenSSL and paired search/setup
+skills. It requires no consumer Python, Homebrew, Git or compiler. This is an
+unreleased private installation route; published 0.51 instructions below remain
+historical published support. Public hosting, publisher trust, source completeness
+and clean-user/native onboarding acceptance remain open.
 
-Prepare these locally before installing the broker:
+From native Terminal, run the reviewed local `packaging/bootstrap.sh` with
+`/bin/sh -p`, absolute `--seed`, independently supplied `--seed-sha256` and
+`--seed-bytes`, absolute `--archive` and `--index`, and independently supplied
+`--trusted-index-sha256`. The trust pins must come from the reviewed release
+input, not from an untrusted archive. `--prepare-only` authenticates and extracts
+into a retained private stage without installing. There is no public runnable
+download URL in this candidate.
 
-| Requirement | Exact expectation |
-| --- | --- |
-| TDLib | Homebrew keg `HEAD-d1085f9`, library `1.8.67`, legacy `td_json_client_*` ABI. `/opt/homebrew/opt/tdlib/lib/libtdjson.dylib` must resolve into that keg. A current unpinned `brew install tdlib` is not equivalent. |
-| Telegram API credentials | Your own `api_id` and `api_hash`, stored as generic-password items in macOS Keychain. Use service `com.<home-directory-name>.telegram-search-mcp`, with separate accounts `api_id` and `api_hash`. |
-| Authorized session | A dedicated TDLib session under `~/Library/Application Support/TelegramSearchMCP/tdlib`, using its `db` and `files` subdirectories, compatible with this runtime and ready for `authorizationStateReady`. |
+Default runtime storage is `~/Library/Application Support/TelegramSearch`,
+separate from the preserved default session in `TelegramSearchMCP/tdlib`.
+The installer registers only its owned `mcp_servers.telegram_search` subtree
+and the paired skills under `~/.agents/skills`. It preserves neighboring TOML
+and refuses foreign registrations, skills, runtime roots and existing services.
+Recovery retains one lease, journal, original config bytes and exact receipts;
+repeating the same admitted installation verifies/reuses it. It performs no
+login, Keychain operation, service start/stop or session mutation.
 
-The service name uses the last component of your home directory, not your display name. Enter credentials through trusted local provisioning; never place them in project files, prompts, MCP arguments or shell history. The broker only reads Keychain values. It cannot ask for your phone number, login code or two-step password.
+Initialization first prepares a complete private sibling packet and one bounded
+adjacent `.TelegramSearch.install-intent.json` record before publishing the
+runtime root. Earlier interrupted packets remain preserved for recovery; their
+bytes alone never authorize adoption. Later publications bind exact staged
+filesystem objects before rename or replacement. The runtime's parent directory
+must already exist safely; the default macOS Application Support parent is used.
 
-A logged-in Telegram Desktop app does **not** supply this TDLib session. If you do not already have compatible provisioning, stop here: first-time setup is a current product gap, not something the package-install commands below solve. Do not copy an unrelated application's live session files.
+Installation returns `activation_required` and nonsecret `activation_command` and `activation_arguments`.
+Run that exact installed Python/isolated launcher command ending in `setup`
+from a foreground, uncaptured Apple Terminal. `resume` recovers a managed
+interrupted enrollment; `status` reads bounded enrollment/handshake metadata.
+The launcher uses `-I -S -B` and a closed app path. Credentials, phone, login
+code and optional 2FA use hidden native prompts only. After confirmed native
+teardown and owner handoff, require the matching broker's fresh Ready, reconnect
+Codex, check the installed manifest and perform one authorized bounded own-chat
+search. Synthetic installation and an inert manifest do not close that gate.
 
-### Unreleased new-session setup technical support
 
-The development candidate adds an installed `telegram-search-setup` command.
-This future path is **not included in the published 0.51.0 release** and does not
-yet provide pinned TDLib provisioning, one-command installation, or automatic
-MCP/skill registration. It requires the pinned native runtime above and the
-matching candidate Python package already installed in its intended environment.
-Actual first-use Keychain, Telegram, launchd and clean-user acceptance remain open.
+### Native activation and recovery
 
-For this candidate only, run these commands yourself in a foreground, uncaptured
-native Apple Terminal, using the installed environment's absolute command path:
-
-```bash
-/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup --help
-/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup setup
-/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup resume
-/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup status
-```
+Use the exact `activation_command` returned by the authenticated installer;
+its installed launcher accepts `setup`, `resume` and `status`. Run setup or
+resume yourself in foreground, uncaptured native Apple Terminal. Native
+Keychain, Telegram, launchd and clean-user acceptance remain open.
 
 Setup refuses agent/captured shells, SSH, tmux, script wrappers and redirected or
 piped input before credentials or session changes. It uses hidden prompts for
@@ -85,15 +102,31 @@ Status reads metadata and an existing handshake only, without Keychain, provider
 initialization or service startup; `checkpoint: ready` is a past observation.
 
 A new policy enables only `read` and `artifacts`. An existing policy stays
-byte-identical; no send or extended capability is silently enabled. Registration
-and full provisioning remain the next installation slice. Preserve the exact
+byte-identical; no send or extended capability is silently enabled. Preserve the exact
 managed key and both metadata bindings for recovery: **older binaries using an
 empty key cannot open a newly encrypted managed session**. This rollback boundary
 does not migrate or alter legacy databases.
 
+
+## Published 0.51: prepare the legacy runtime
+
+The published 0.51 package runs on **Apple Silicon macOS** with **Python 3.11–3.14**. It uses an existing, dedicated Telegram session; it does not include a first-time login wizard or a reproducible TDLib provisioning script.
+
+Prepare these locally before installing the broker:
+
+| Requirement | Exact expectation |
+| --- | --- |
+| TDLib | Homebrew keg `HEAD-d1085f9`, library `1.8.67`, legacy `td_json_client_*` ABI. `/opt/homebrew/opt/tdlib/lib/libtdjson.dylib` must resolve into that keg. A current unpinned `brew install tdlib` is not equivalent. |
+| Telegram API credentials | Your own `api_id` and `api_hash`, stored as generic-password items in macOS Keychain. Use service `com.<home-directory-name>.telegram-search-mcp`, with separate accounts `api_id` and `api_hash`. |
+| Authorized session | A dedicated TDLib session under `~/Library/Application Support/TelegramSearchMCP/tdlib`, using its `db` and `files` subdirectories, compatible with this runtime and ready for `authorizationStateReady`. |
+
+The service name uses the last component of your home directory, not your display name. Enter credentials through trusted local provisioning; never place them in project files, prompts, MCP arguments or shell history. The broker only reads Keychain values. It cannot ask for your phone number, login code or two-step password.
+
+A logged-in Telegram Desktop app does **not** supply this TDLib session. If you do not already have compatible provisioning, stop here: first-time setup is a published 0.51 product gap, not something the package-install commands below solve. Do not copy an unrelated application's live session files.
+
 **Optional media dependencies:** local transcription and frame extraction use `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe` and `/opt/homebrew/bin/whisper-cli`. Provision the multilingual model at `~/Library/Application Support/TelegramSearchMCP/models/ggml-small.bin` and verify its distributor's checksum. Basic text search and document reads do not need Whisper. See the [security model](security.md) for details.
 
-## 2. Install the package and broker
+## Published 0.51: install the package and broker
 
 **Version scope:** the commands below pin the `v0.51.0` source release. Confirm `telegram_search_mcp.__version__` before installing or changing an existing broker. The runtime-policy example below is for 0.51.0 only. See [release notes](release-notes-0.51.0.md) for accepted scenarios and limitations, and [licensing](licensing.md) for the AGPLv3 decision.
 
@@ -114,7 +147,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stderr and exits `0` on success. It initializes the session when needed but does not search or read messages. Exit `2` means authorization is blocked; exit `1` indicates another setup, transport or compatibility failure.
 
-## 3. Connect an MCP client
+## Published 0.51: connect an MCP client
 
 ### Codex
 
@@ -137,7 +170,7 @@ Choose a **STDIO** server with:
 
 Use your client's configuration format and allow up to 600 seconds for bounded media operations. This release does not expose an HTTP endpoint. Start with `_manifest({"check_broker": true})` and verify compatibility before using the other tools.
 
-## Choose capabilities
+## Published 0.51: choose capabilities
 
 The client tool list controls what is visible. The broker's local policy controls what is allowed. Enabling a tool in a client does not enable its capability.
 
@@ -175,7 +208,7 @@ Replying to media or formatted sources can require additional source capabilitie
 
 After a policy change, re-run `.venv/bin/telegram-search-broker install` using the same environment and reconnect your MCP client. This restarts the managed broker and clears in-memory drafts, uploads and cursors.
 
-## Troubleshooting
+## Published 0.51: troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
