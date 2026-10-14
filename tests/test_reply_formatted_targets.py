@@ -247,6 +247,15 @@ class FormattedLifecycleRisks:
         for op,extra in [(self.ops[0],{}),(self.ops[1],self.revision_extra()),(self.ops[2],{})]:
             self.assertEqual(self.dispatch(op,dict(draft_id=did,**extra),FOREIGN)['status'],'unavailable')
         self.raw.account=8;self.assertEqual(self.dispatch(self.ops[0],{'draft_id':did})['status'],'unavailable');self.raw.account=7
+        if self.artifact_path:
+            # Observed drift permanently revokes the original artifact draft.
+            self.assertEqual(self.send(did)['status'],'expired');self.assertEqual(self.sends(),[])
+            self.assertEqual(self.dispatch(self.ops[0],{'draft_id':did})['status'],'unavailable')
+            # Later provider/epoch checks exercise an independently fresh grant.
+            fresh=self.root/'fresh-evidence.txt';fresh.write_bytes(b'bounded document')
+            with self.broker._artifact_authority.scope(CLIENT,self.broker._artifact_store):
+                self.artifact=self.broker._artifact_store.store(fresh)
+            did=self.prepare()['draft']['draft_id']
         self.assertEqual(self.send(did)['status'],'sent');count=len(self.sends())
         epoch=self.client.send_observation_epoch;self.client._send_observation_epoch=object()
         self.assertEqual(self.send(did)['status'],'expired');self.client._send_observation_epoch=epoch

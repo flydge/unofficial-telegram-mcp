@@ -88,15 +88,22 @@ class PresentationBrokerBoundaryTests(unittest.TestCase):
                     artifact_store=ArtifactStore(cache_dir=root/'cache'),
                     policy=RuntimePolicy(enabled_capabilities=('presentations',)))
                 self.addCleanup(broker._executor.shutdown)
+                # In-flight drift must start from an admitted synthetic artifact.
+                source=root/'inert.pptx'; source.write_bytes(b'inert presentation')
+                with broker._artifact_authority.scope('client_'+'a'*24, broker._artifact_store):
+                    artifact=broker._artifact_store.store(source)
+                entered=[]
                 def change(reader,request,**kwargs):
+                    entered.append(drift)
                     if drift=='policy':broker._policy=RuntimePolicy()
                     else:broker._generation='broker_'+'d'*32
                     return ReadPresentationResponse(status='unsupported')
                 with patch('telegram_search_mcp.presentations.PresentationReader.read',new=change):
                     with self.assertRaises(CompatibilityError):
-                        broker._dispatch({'operation':'read_presentation','payload':{'artifact_id':ART},
+                        broker._dispatch({'operation':'read_presentation','payload':{'artifact_id':artifact.artifact_id},
                             'client_id':'client_'+'a'*24,'broker_generation':broker._generation,
                             'deadline':time.monotonic()+30})
+                self.assertEqual(entered,[drift])
 
     def test_local_pptx_metadata_and_broker_capability(self):
         self.assertIn('read_presentation', OPERATIONS)

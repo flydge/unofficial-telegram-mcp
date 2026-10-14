@@ -285,7 +285,8 @@ class IdentityLifecycle:
             client_factory=lambda: self.client, policy=POLICY, approval_prompt=self.approve)
         self.addCleanup(self.broker.shutdown)
         path = self.root/'evidence.txt'; path.write_bytes(b'bounded document')
-        self.artifact = self.broker._artifact_store.store(path, kind='document')
+        with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+            self.artifact = self.broker._artifact_store.store(path, kind='document')
         if self.artifact_path:
             for name, function in [('stage_approved_document', stage_approved_document), ('retire_staged_document', retire_staged_document)]:
                 manager = patch('telegram_search_mcp.broker.'+name, side_effect=lambda value, fn=function: fn(value, root=self.root/'stage'))

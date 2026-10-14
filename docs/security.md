@@ -102,6 +102,46 @@ The broker socket lives in an owner-only directory with mode `0700`; the socket 
 
 The broker fails closed unless the dedicated session reaches `authorizationStateReady`. It never accepts API credentials, login codes, passwords, session paths, index paths, account selectors, wildcards, caller-controlled provider limits/filters/dates/functions, or arbitrary TDLib requests through MCP or IPC. `api_id` and `api_hash` are read only from the fixed macOS Keychain service by the broker and are never logged or included in an error.
 
+## Artifact and upload ownership in the development candidate
+
+Artifact IDs and upload tokens preserve their public formats, but broker dispatch
+now captures a client ID, the fixed broker generation and a private lifecycle
+identity. Central store redemption checks that memory-only grant before reading
+bytes or exposing metadata. Downloaded, created, upload-finished and derived
+artifacts inherit this authority, including page images, media frames and voice
+conversions. Outgoing draft admission and internal re-lookups use the same check.
+Foreign, expired and unbound IDs return content-free unavailable responses.
+
+A normal socket reconnect with the same process client ID retains its grants.
+Explicit client release revokes local-only clients too; reusing that ID creates a
+new lifecycle and cannot revive old artifacts, uploads or artifact drafts. Release
+and publication are serialized, while long download, parse, conversion and copy
+work is revalidated before publishing output. After a claim, potentially long staging is followed by a fresh account/lifecycle
+check. A final pure lifecycle/epoch fence serializes the irreversible TDLib raw
+send with release; account observations and provider confirmation waits happen
+outside that fence and outside broker-state/draft-registry critical sections.
+Release or observed drift before this boundary prevents the unissued send and
+retains a local-failure record for the consumed claim. Once raw dispatch crossed
+that boundary, release cannot cancel the in-flight attempt. Its captured original
+claim/provider identity retains terminal or unknown evidence privately, while
+revoked clients cannot disclose or replay it and no automatic retry is allowed.
+Observed auth loss through draft operations uses the same revoking account
+boundary as provider-bound artifact reads; same-account recovery cannot restore
+those grants. Offline local grants remain usable. The artifact's original 12-hour and
+upload's 15-minute expiry remain fixed; reader context idle expiry does not shorten
+these lifetimes. Broker restart denies previously persisted unbound bytes without
+adopting or deleting those cache files.
+
+Offline create, upload and local readers use the trusted fixed session namespace
+and do not initialize TDLib solely to obtain a numeric account ID. Provider-bound
+work binds separately observed numeric identity and rechecks it before publication.
+Observed account drift or authorization loss revokes provider-bound authority;
+switching back cannot revive it. This is one supported default-session namespace,
+not multi-account routing or detection of an unsupported external session
+replacement before any provider observation. Same-UID client impersonation remains
+outside this IPC isolation boundary. The underlying byte store's unscoped Python
+API is internal; MCP cannot import or adopt an unbound persisted artifact.
+
 ## Explicit outgoing text styles
 
 The four text preparation/revision tools accept optional `outgoing_entities`.

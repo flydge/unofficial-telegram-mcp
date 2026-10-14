@@ -13,7 +13,8 @@ class ArtifactReplyFixture(ReplyFixture):
         super().setUp()
         self.broker._policy = POLICY
         path=self.root/'evidence.txt';path.write_bytes(b'bounded document')
-        self.artifact=self.broker._artifact_store.store(path,kind='document')
+        with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+            self.artifact=self.broker._artifact_store.store(path,kind='document')
     def prepare(self):
         result=self.dispatch('prepare_reply_artifact_send',dict(artifact_id=self.artifact.artifact_id,
             recipient=123,display_name='evidence.txt',mime_type='text/plain',caption='Caption',kind='document',reply_to=ANCHOR))
@@ -258,7 +259,8 @@ class ArtifactMediaTests(ArtifactSendFixture, unittest.TestCase):
             from PIL import Image
             Image.new('RGB',(2,2),'white').save(path)
         else:path.write_bytes(b'synthetic audio source')
-        artifact=self.broker._artifact_store.store(path,kind='media')
+        with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+            artifact=self.broker._artifact_store.store(path,kind='media')
         self.input_artifact=artifact
         mime='image/png' if kind=='photo' else 'audio/wav'
         def convert(source,store,**kw):
@@ -287,7 +289,8 @@ class ArtifactMediaTests(ArtifactSendFixture, unittest.TestCase):
     def test_source_mutation_is_refused_or_converter_consumes_verified_snapshot(self):
         from telegram_search_mcp.outgoing_voice import prepare_reply_voice_note, VoicePrepared, VoiceError
         path=self.root/'source.wav';path.write_bytes(b'original source')
-        artifact=self.broker._artifact_store.store(path,kind='media')
+        with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+            artifact=self.broker._artifact_store.store(path,kind='media')
         artifact.path.write_bytes(b'changed! source')
         with patch('telegram_search_mcp.outgoing_voice.prepare_voice_note') as converter:
             with self.assertRaises(VoiceError):prepare_reply_voice_note(artifact,self.broker._artifact_store,input_mime='audio/wav',input_name='source.wav',budget_check=lambda:None)
@@ -503,3 +506,78 @@ class ArtifactReviewRegressionTests(ArtifactSendFixture, unittest.TestCase):
                 self.assertIsNone(self.client._send_observations.snapshot(did))
                 self.assertEqual(self.dispatch('get_send_status',{'draft_id':did})['evidence'],'local_failed')
                 self.assertEqual(self.send(did)['status'],'failed');self.assertEqual(self.sends(),[])
+
+
+class ArtifactTransportFenceTests(ArtifactSendFixture, unittest.TestCase):
+    """Real typed TDLib paths with inert raw transport, no native client."""
+    prepare_kind = ArtifactMediaTests.prepare_kind
+
+    def release(self):
+        return self.broker._dispatch({'operation': 'release_client', 'payload': {}, 'client_id': CLIENT,
+            'deadline': time.monotonic() + 10, 'broker_generation': self.broker._generation})
+
+    def test_release_after_registration_blocks_all_reply_media_raw_dispatches(self):
+        for kind in ('document', 'photo', 'voice_note'):
+            with self.subTest(kind=kind):
+                if kind == 'document':
+                    path = self.root / 'evidence.txt'
+                    with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+                        self.artifact = self.broker._artifact_store.store(path)
+                    preview = self.prepare()
+                else: preview = self.prepare_kind(kind)
+                did = preview['draft']['draft_id']
+                original = self.client._send_observations.register
+                def release_after_register(*args, **kwargs):
+                    original(*args, **kwargs)
+                    self.assertEqual(self.release(), {'released': True})
+                with patch.object(self.client._send_observations, 'register', side_effect=release_after_register):
+                    result = self.send(did)
+                self.assertEqual(result['status'], 'expired'); self.assertIsNone(result['message_id'])
+                self.assertEqual(self.sends(), [])
+                entry = self.broker._drafts._entries[did]
+                self.assertEqual((entry.state, entry.receipt.status, entry.receipt.evidence),
+                    ('finished', 'failed', 'local_failed'))
+                self.assertEqual(self.dispatch('get_send_status', {'draft_id': did})['status'], 'outcome_unknown')
+
+    def test_typed_transport_fence_exits_before_confirmation_and_retains_revoked_result(self):
+        import threading
+        preview = self.prepare(); did = preview['draft']['draft_id']
+        issued = threading.Event(); confirm = threading.Event(); errors = []; results = []; released = []
+        original_send = self.raw.send; original_receive = self.raw.receive
+        def send(request):
+            if request['@type'] == 'getMe':
+                self.assertFalse(self.broker._artifact_authority.lock._is_owned())
+                self.assertFalse(self.broker._state_lock._is_owned())
+                self.assertFalse(self.broker._drafts._lock.locked())
+            if request['@type'] == 'sendMessage':
+                self.assertTrue(self.broker._artifact_authority.lock._is_owned())
+                original_send(request); issued.set()
+            else: original_send(request)
+        waited = [False]
+        def receive(timeout):
+            if issued.is_set() and not waited[0]:
+                waited[0] = True
+                self.assertFalse(self.broker._artifact_authority.lock._is_owned())
+                self.assertTrue(confirm.wait(4))
+            return original_receive(timeout)
+        def worker_body():
+            try: results.append(self.send(did))
+            except Exception as error: errors.append(error)
+        def release_body():
+            try: released.append(self.release())
+            except Exception as error: errors.append(error)
+        with patch.object(self.raw, 'send', side_effect=send), patch.object(self.raw, 'receive', side_effect=receive):
+            worker = threading.Thread(target=worker_body); worker.start(); self.assertTrue(issued.wait(2))
+            control = threading.Thread(target=release_body); control.start(); control.join(1)
+            try:
+                self.assertFalse(control.is_alive(), 'release waited for confirmation')
+                self.assertEqual(released, [{'released': True}])
+            finally:
+                confirm.set(); worker.join(3); control.join(3)
+        self.assertEqual(errors, []); self.assertFalse(worker.is_alive())
+        self.assertEqual(len(self.sends()), 1)
+        entry = self.broker._drafts._entries[did]
+        self.assertEqual((entry.state, entry.receipt.status, entry.receipt.message_id), ('finished', 'sent', 701))
+        self.assertEqual(results[0]['status'], 'expired'); self.assertIsNone(results[0]['message_id'])
+        self.assertEqual(self.dispatch('get_send_status', {'draft_id': did})['status'], 'outcome_unknown')
+        self.assertEqual(self.send(did)['status'], 'expired'); self.assertEqual(len(self.sends()), 1)

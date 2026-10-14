@@ -157,7 +157,9 @@ class DraftBoundaryTests(unittest.TestCase):
         did=self.prepare();now[0]+=900
         self.assertEqual(self.dispatch('get_draft',{'draft_id':did})['status'],'unavailable')
         self.assertEqual(self.dispatch('list_drafts',{'after_draft_id':did})['status'],'unavailable')
-        source=self.root/'file';source.write_bytes(b'original');artifact=self.store.store(source)
+        source=self.root/'file';source.write_bytes(b'original')
+        with self.broker._artifact_authority.scope(A, self.store):
+            artifact=self.store.store(source)
         preview=self.dispatch('prepare_artifact_send',{'artifact_id':artifact.artifact_id,'recipient':123,'display_name':'secret.txt','mime_type':'text/plain','caption':'secret caption'})
         did=preview['draft_id'];got=self.dispatch('get_draft',{'draft_id':did})
         self.assertEqual((got['draft']['artifact_id'],got['draft']['caption'],got['draft']['display_name']),
@@ -184,7 +186,8 @@ class DraftBoundaryTests(unittest.TestCase):
 
     def test_missing_artifact_can_be_listed_but_get_invalidates_without_preview(self):
         source = self.root / 'original'; source.write_bytes(b'private bytes')
-        artifact = self.store.store(source)
+        with self.broker._artifact_authority.scope(A, self.store):
+            artifact = self.store.store(source)
         prepared = self.dispatch('prepare_artifact_send', {
             'artifact_id': artifact.artifact_id, 'recipient': 123,
             'display_name': 'secret.txt', 'mime_type': 'text/plain', 'caption': 'private caption'})

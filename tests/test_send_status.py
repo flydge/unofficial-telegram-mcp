@@ -393,10 +393,10 @@ class SendStatusTests(unittest.TestCase):
         errors = []
         deadlines = []
         original = self.broker._dispatch
-        def dispatch(request):
+        def dispatch(request, *, publish=None):
             if request["operation"] == "get_send_status":
                 deadlines.append(request["deadline"]-time.monotonic())
-            return original(request)
+            return original(request, publish=publish)
         def serve():
             try:
                 self.broker.serve_forever()

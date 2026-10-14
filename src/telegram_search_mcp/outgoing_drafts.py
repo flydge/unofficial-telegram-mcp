@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from .artifact_store import ArtifactStore, ArtifactStoreError, DOCUMENT_LIMIT
+from .artifact_authority import active_scope, ArtifactUnavailable
 from .outgoing_media import PHOTO_LIMIT
 from .outgoing_voice import MAX_VOICE_BYTES
 from .sanitize import sanitize_telegram_text
@@ -113,6 +114,9 @@ class OutgoingDraft:
 class ClaimedDraft:
     draft: OutgoingDraft
     path: Path | None
+    claim_token: object | None = None
+    provider: object | None = None
+    provider_epoch: object | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +138,8 @@ class _Entry:
     attempted_at: float | None = None
     provider: object | None = None
     provider_epoch: object | None = None
+    artifact_authority: tuple | None = None
+    claim_token: object | None = None
 
 
 class OutgoingDraftRegistry:
@@ -255,7 +261,8 @@ class OutgoingDraftRegistry:
                 converted=converted, reply_source=reply_source,
             )
             self._entries[draft_id] = _Entry(draft=draft, owner=owner,
-                                            artifact_expires_at=artifact.expires_at)
+                                            artifact_expires_at=artifact.expires_at,
+                                            artifact_authority=self._authority_stamp())
             return draft
 
     def prepare_text(self, *, owner: DraftOwner, recipient: int, text: str, recipient_title: str = "", reply_source: ReplySource | None = None,
@@ -374,7 +381,8 @@ class OutgoingDraftRegistry:
             revised = replace(old, draft_id=new_id, recipient_title=recipient_title,
                               expires_at=expires_at, **changes)
             self._entries[new_id] = _Entry(draft=revised, owner=owner,
-                                          artifact_expires_at=entry.artifact_expires_at)
+                                          artifact_expires_at=entry.artifact_expires_at,
+                                          artifact_authority=entry.artifact_authority)
             entry.state = "superseded"
             return revised
 
@@ -410,7 +418,9 @@ class OutgoingDraftRegistry:
             entry.attempted_at = self._attempt_clock()
             entry.provider = provider
             entry.provider_epoch = provider_epoch
-            return ClaimedDraft(draft=entry.draft, path=path)
+            entry.claim_token = object()
+            return ClaimedDraft(draft=entry.draft, path=path, claim_token=entry.claim_token,
+                                provider=provider, provider_epoch=provider_epoch)
 
     def peek(self, draft_id: str, *, owner: DraftOwner) -> OutgoingDraft:
         """Inspect an unexpired draft without claiming a send attempt."""
@@ -510,8 +520,13 @@ class OutgoingDraftRegistry:
         status: ReceiptStatus,
         message_id: int | None = None,
         evidence: str | None = None,
+        claim: ClaimedDraft | None = None,
     ) -> SendReceipt:
-        """Record a terminal result; repeats return the original receipt."""
+        """Finalize the original consumed claim, independent of public grants.
+
+        Captured claim identity/provider evidence never authorizes new redemption,
+        disclosure or another send. Public receipt reads still require authority.
+        """
         if status not in {"sent", "failed", "outcome_unknown"}:
             raise ValueError("invalid receipt status")
         if message_id is not None and (type(message_id) is not int or message_id <= 0):
@@ -519,7 +534,14 @@ class OutgoingDraftRegistry:
         if status == "sent" and message_id is None:
             raise ValueError("sent requires a positive final message ID")
         with self._lock:
-            entry = self._get(draft_id, owner)
+            entry = self._get(draft_id, owner, require_current=False)
+            if claim is not None:
+                if (claim.draft is not entry.draft or claim.claim_token is not entry.claim_token or
+                        entry.claim_token is None or claim.provider is not entry.provider or
+                        claim.provider_epoch is not entry.provider_epoch):
+                    raise DraftError("captured claim is unavailable")
+            elif active_scope(self._store) is not None and entry.draft.kind != 'text':
+                raise DraftError("captured claim is unavailable")
             if entry.receipt is not None:
                 return entry.receipt
             if entry.state != "claimed":
@@ -570,7 +592,28 @@ class OutgoingDraftRegistry:
         if not isinstance(owner, DraftOwner):
             raise ValueError("invalid draft owner")
 
+    def _authority_stamp(self):
+        scope = active_scope(self._store)
+        return (scope.owner, scope.account_epoch) if scope is not None else None
+
+    def _require_artifact_authority(self, entry):
+        scope = active_scope(self._store)
+        if scope is None or entry.draft.kind == 'text':
+            return
+        if entry.artifact_authority is None:
+            raise DraftError('draft is unavailable')
+        owner, epoch = entry.artifact_authority
+        try:
+            scope.authority.live(scope)
+            if owner != scope.owner or (epoch is not None and epoch is not scope.account_epoch):
+                raise ArtifactUnavailable('artifact is unavailable')
+            if not scope.authority.authorize_local(scope, entry.draft.artifact_id):
+                raise ArtifactUnavailable('artifact is unavailable')
+        except ArtifactUnavailable:
+            raise DraftError('draft is unavailable') from None
+
     def _pending_locked(self, entry: _Entry, *, verify_artifact: bool = True) -> Path | None:
+        self._require_artifact_authority(entry)
         if entry.state != "pending" or self._clock() >= entry.draft.expires_at:
             raise DraftError("draft is unavailable")
         if entry.draft.kind == "text" or not verify_artifact:
@@ -623,7 +666,7 @@ class OutgoingDraftRegistry:
                 raise DraftError("draft is unavailable")
             entry.state = "cancelled"
 
-    def _get(self, draft_id: str, owner: DraftOwner) -> _Entry:
+    def _get(self, draft_id: str, owner: DraftOwner, *, require_current: bool = True) -> _Entry:
         self._validate_owner(owner)
         if not isinstance(draft_id, str) or _DRAFT_ID.fullmatch(draft_id) is None:
             raise DraftError("unknown draft")
@@ -631,6 +674,8 @@ class OutgoingDraftRegistry:
             entry = self._entries[draft_id]
             if entry.owner != owner:
                 raise DraftError("unknown draft")
+            if require_current:
+                self._require_artifact_authority(entry)
             return entry
         except KeyError:
             raise DraftError("unknown draft") from None

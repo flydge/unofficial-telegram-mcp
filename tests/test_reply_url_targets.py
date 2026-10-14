@@ -302,9 +302,10 @@ class UrlLifecycleTests(unittest.TestCase):
         self.dialogs = []; self.decision = lambda: True
         def owner(**facts): self.dialogs.append(copy.deepcopy(facts)); return self.decision()
         store = ArtifactStore(cache_dir=self.root/'artifacts'); payload = self.root/'fixture.txt'; payload.write_bytes(b'data')
-        self.artifact = store.store(payload)
         self.broker = Broker(socket_path=self.root/'unused.sock', client_factory=lambda: self.provider,
             artifact_store=store, approval_prompt=owner, policy=POLICY)
+        with self.broker._artifact_authority.scope(CLIENT, store):
+            self.artifact = store.store(payload)
         self.stack = ExitStack(); self.staging = self.root/'staging'
         self.history = []
         real_claim = self.broker._drafts.claim

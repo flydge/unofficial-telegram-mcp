@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import APP_SUPPORT_ROOT
+from .artifact_authority import active_scope
 
 CACHE_DIRECTORY = APP_SUPPORT_ROOT / "artifacts"
 DOCUMENT_LIMIT = 64 * 1024 * 1024
@@ -63,6 +64,15 @@ class ArtifactStore:
             raise ValueError("artifact limits must be positive")
 
     def store(self, source_path: Path, *, kind: str = "document") -> StoredArtifact:
+        scope = active_scope(self)
+        if scope is not None:
+            scope.authority.live(scope)
+        artifact = self._store_bytes(source_path, kind=kind)
+        if scope is not None:
+            scope.authority.grant(scope, artifact)
+        return artifact
+
+    def _store_bytes(self, source_path: Path, *, kind: str = "document") -> StoredArtifact:
         """Copy one regular owner-owned TDLib file; reject changing or oversized files."""
         if kind not in {"document", "image", "media"}:
             raise ValueError("kind must be document, image, or media")
@@ -150,6 +160,15 @@ class ArtifactStore:
                 os.close(source_fd)
 
     def lookup(self, artifact_id: str) -> StoredArtifact | None:
+        scope = active_scope(self)
+        if scope is not None and not scope.authority.authorize_local(scope, artifact_id):
+            return None
+        artifact = self._lookup_bytes(artifact_id)
+        if scope is not None:
+            scope.authority.live(scope)
+        return artifact
+
+    def _lookup_bytes(self, artifact_id: str) -> StoredArtifact | None:
         """Resolve only a generated ID, removing expired or damaged copies."""
         if not isinstance(artifact_id, str) or _ARTIFACT_NAME.fullmatch(artifact_id) is None:
             return None

@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .artifact_store import ArtifactStore, ArtifactStoreError
+from .artifact_authority import ArtifactAuthority, ArtifactReaderClient, ArtifactUnavailable, active_scope
 from .config import ConfigurationError
 from .approval_prompt import confirm_approved_send
 from .attachment_service import get_attachment, get_message_context
@@ -84,7 +85,7 @@ PeerUidLoader = Callable[[socket.socket], int]
 
 @dataclass
 class _ClientContext:
-    service: SearchService
+    service: SearchService | None
     touched_at: float
     active_requests: int = 0
     release_requested: bool = False
@@ -93,7 +94,8 @@ class _ClientContext:
     presentations: object | None = None
 
     def close(self) -> None:
-        self.service.close()
+        if self.service is not None:
+            self.service.close()
         if self.attachment_pages is not None:
             self.attachment_pages.close()
         if self.spreadsheets is not None:
@@ -102,7 +104,8 @@ class _ClientContext:
             self.presentations.close()
 
     def invalidate_active_handles(self) -> None:
-        self.service.close_verified_targets()
+        if self.service is not None:
+            self.service.close_verified_targets()
         if self.attachment_pages is not None:
             self.attachment_pages.close()
         if self.spreadsheets is not None:
@@ -184,6 +187,8 @@ class Broker:
         self._lock_path = lock_path or socket_path.with_name("broker.lock")
         self._client_factory = client_factory
         self._artifact_store = artifact_store if artifact_store is not None else ArtifactStore()
+        self._artifact_authority = ArtifactAuthority(self._generation, clock=lambda: self._artifact_store.clock(),
+                                                     account_lookup=self._artifact_account)
         self._drafts = OutgoingDraftRegistry(self._artifact_store,
                                             max_ttl_seconds=self._policy.max_draft_ttl_seconds)
         self._uploads = LocalUploadRegistry(self._artifact_store)
@@ -280,7 +285,7 @@ class Broker:
                 self._contexts.pop(client_id).close()
 
     @contextmanager
-    def _service_lease(self, client_id: str):
+    def _service_lease(self, client_id: str, *, artifact_only: bool = False):
         with self._state_lock:
             self._expire_contexts()
             context = self._contexts.get(client_id)
@@ -288,15 +293,17 @@ class Broker:
                 if len(self._contexts) >= self._max_clients:
                     raise BrokerProtocolError("client capacity is exhausted")
                 context = _ClientContext(
-                    service=SearchService(
+                    service=None,
+                    touched_at=self._context_clock(),
+                )
+                self._contexts[client_id] = context
+            if context.service is None and not artifact_only:
+                context.service = SearchService(
                         client=self._shared_client(),
                         owns_client=False,
                         client_id=client_id,
                         broker_generation=self._generation,
-                    ),
-                    touched_at=self._context_clock(),
-                )
-                self._contexts[client_id] = context
+                    )
             context.touched_at = self._context_clock()
             context.active_requests += 1
         try:
@@ -332,7 +339,135 @@ class Broker:
                 "serialization_wait_count": wait_count,
             }
 
-    def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
+    def _artifact_account(self):
+        client = self._shared_client()
+        getter = getattr(client, 'get_account_id', None)
+        if getter is None:
+            return None
+        try:
+            client.ensure_ready()
+            account = getter()
+        except (AuthorizationBlocked, TDLibError):
+            self._artifact_authority.invalidate_account()
+            raise
+        if type(account) is not int or not 0 < account < 2**53:
+            self._artifact_authority.invalidate_account()
+            raise ArtifactUnavailable('artifact is unavailable')
+        return account
+
+    @staticmethod
+    def _artifact_unavailable(operation, payload):
+        detail = 'artifact is unavailable or expired'
+        if operation == 'read_attachment':
+            return ReadAttachmentResponse(status='expired', detail=detail, coverage_complete=False).model_dump(mode='json')
+        if operation == 'analyze_media':
+            return AnalyzeMediaResponse(status='expired', detail=detail).model_dump(mode='json')
+        if operation == 'get_attachment':
+            from .schemas import AttachmentResponse
+            return AttachmentResponse(status='error', anchor=payload['anchor'], coverage='none', detail='attachment transfer failed safely').model_dump(mode='json')
+        if operation == 'read_attachment_page':
+            from .attachment_page_models import terminal_attachment_page
+            return terminal_attachment_page('invalid_cursor' if payload.get('cursor') else 'expired').model_dump(mode='json')
+        if operation == 'read_spreadsheet':
+            from .spreadsheet_models import terminal_spreadsheet
+            return terminal_spreadsheet('invalid_cursor' if payload.get('cursor') else 'expired').model_dump(mode='json')
+        if operation == 'read_presentation':
+            from .presentation_models import terminal_presentation
+            return terminal_presentation('expired').model_dump(mode='json')
+        if operation == 'create_local_artifact':
+            return CreateLocalArtifactResponse(status='error', detail='local artifact creation failed safely').model_dump(mode='json')
+        if operation == 'begin_local_upload':
+            return BeginLocalUploadResponse(status='error', detail='local upload could not be started safely').model_dump(mode='json')
+        if operation == 'append_local_upload':
+            return AppendLocalUploadResponse(status='error', upload_id=payload['upload_id'], detail='chunk was rejected; no bytes from this chunk were accepted').model_dump(mode='json')
+        if operation == 'finish_local_upload':
+            return FinishLocalUploadResponse(status='error', detail='local upload could not be completed safely').model_dump(mode='json')
+        if operation == 'prepare_artifact_send':
+            return PrepareArtifactSendResponse(status='error', detail='draft could not be prepared safely').model_dump(mode='json')
+        if operation == 'prepare_reply_artifact_send':
+            return PrepareReplyArtifactSendResponse(status='unavailable', detail=REPLY_UNAVAILABLE).model_dump(mode='json')
+        terminal = {'get_draft': GetDraftResponse, 'list_drafts': ListDraftsResponse,
+            'cancel_draft': CancelDraftResponse, 'update_draft': ReviseDraftResponse,
+            'refresh_draft': ReviseDraftResponse, 'get_reply_artifact_draft': GetReplyArtifactDraftResponse,
+            'update_reply_artifact_draft': ReviseReplyArtifactDraftResponse,
+            'refresh_reply_artifact_draft': ReviseReplyArtifactDraftResponse}
+        if operation in terminal:
+            return terminal[operation](status='unavailable', detail=REPLY_UNAVAILABLE if 'reply_artifact' in operation else 'draft is unavailable').model_dump(mode='json')
+        if operation == 'get_send_status':
+            return send_status(payload['draft_id']).model_dump(mode='json')
+        if operation == 'send_prepared_artifact':
+            return SendPreparedArtifactResponse(status='expired', draft_id=payload['draft_id'], detail='draft is unavailable').model_dump(mode='json')
+        raise ArtifactUnavailable('artifact is unavailable')
+
+    def _dispatch(self, request: dict[str, Any], *, publish=None) -> dict[str, Any]:
+        require_current(self._policy)
+        if request.get('broker_generation') != self._generation:
+            raise CompatibilityError('generation_stale')
+        operation = request['operation']
+        capability = OPERATION_CAPABILITIES.get(operation)
+        if capability is not None and (capability not in self._policy.enabled_capabilities or
+                (capability in {'reply_text_send', 'reply_artifact_send'} and 'send' not in self._policy.enabled_capabilities)):
+            raise CompatibilityError('capability_disabled')
+        remaining = request['deadline'] - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('request deadline expired')
+        if remaining > MAX_DEADLINE_SECONDS:
+            raise BrokerProtocolError('request deadline exceeds the allowed bound')
+        def finish(result):
+            if publish is not None:
+                publish(result)
+            return result
+        if operation == 'release_client':
+            # Revoke even clients that never allocated a provider/reader context.
+            self._require_empty(request['payload'])
+            self._artifact_authority.release(request['client_id'])
+            return finish(self._dispatch_owned(request))
+        owned_operations = {'get_attachment', 'read_attachment', 'analyze_media', 'read_attachment_page',
+            'read_spreadsheet', 'read_presentation', 'create_local_artifact', 'begin_local_upload',
+            'append_local_upload', 'finish_local_upload', 'prepare_artifact_send', 'prepare_reply_artifact_send',
+            'get_reply_artifact_draft', 'update_reply_artifact_draft', 'refresh_reply_artifact_draft',
+            'list_drafts', 'get_draft', 'update_draft', 'refresh_draft', 'cancel_draft',
+            'send_prepared_artifact', 'get_send_status'}
+        if operation not in owned_operations:
+            return finish(self._dispatch_owned(request))
+        with self._artifact_authority.scope(request['client_id'], self._artifact_store) as scope:
+            try:
+                # Central admission precedes metadata, provider, parser and draft work.
+                # Preserve closed request validation even for unavailable IDs.
+                admission_models = {'read_attachment': ReadAttachmentRequest, 'analyze_media': AnalyzeMediaRequest,
+                    'prepare_artifact_send': PrepareArtifactSendRequest,
+                    'prepare_reply_artifact_send': PrepareReplyArtifactSendRequest}
+                if operation == 'read_attachment_page':
+                    from .attachment_page_models import ReadAttachmentPageRequest
+                    admission_models[operation] = ReadAttachmentPageRequest
+                elif operation == 'read_spreadsheet':
+                    from .spreadsheet_models import ReadSpreadsheetRequest
+                    admission_models[operation] = ReadSpreadsheetRequest
+                elif operation == 'read_presentation':
+                    from .presentation_models import ReadPresentationRequest
+                    admission_models[operation] = ReadPresentationRequest
+                model = admission_models.get(operation)
+                if model is not None:
+                    model.model_validate(request['payload'])
+                artifact_id = request['payload'].get('artifact_id') if model is not None else None
+                if artifact_id is not None and not self._artifact_authority.authorize(scope, artifact_id):
+                    return finish(self._artifact_unavailable(operation, request['payload']))
+                if operation == 'get_attachment':
+                    account = self._artifact_account()
+                    if account is not None:
+                        self._artifact_authority.observe(scope, account)
+                result = self._dispatch_owned(request)
+                with self._artifact_authority.publication(scope):
+                    return finish(result)
+            except AuthorizationBlocked:
+                if operation == 'get_attachment':
+                    from .schemas import AttachmentResponse
+                    return finish(AttachmentResponse(status='blocked', anchor=request['payload']['anchor'], coverage='none', detail='TDLib authorization is not ready').model_dump(mode='json'))
+                return finish(self._artifact_unavailable(operation, request['payload']))
+            except (ArtifactUnavailable, TDLibError):
+                return finish(self._artifact_unavailable(operation, request['payload']))
+
+    def _dispatch_owned(self, request: dict[str, Any]) -> dict[str, Any]:
         require_current(self._policy)
         if request.get("broker_generation") != self._generation:
             raise CompatibilityError("generation_stale")
@@ -378,12 +513,12 @@ class Broker:
             from .attachment_page_models import ReadAttachmentPageRequest
             from .attachment_pages import AttachmentPageReader
             model = ReadAttachmentPageRequest.model_validate(payload)
-            with self._service_lease(client_id):
+            with self._service_lease(client_id, artifact_only=True):
                 with self._state_lock:
                     context = self._contexts[client_id]
                     if context.attachment_pages is None:
                         context.attachment_pages = AttachmentPageReader(
-                            client=self._shared_client(), store=self._artifact_store,
+                            client=ArtifactReaderClient(self._artifact_store, self._shared_client), store=self._artifact_store,
                             metadata_lookup=self._attachment_metadata, client_id=client_id,
                             broker_generation=self._generation,
                         )
@@ -395,12 +530,12 @@ class Broker:
             from .spreadsheet_models import ReadSpreadsheetRequest
             from .spreadsheets import SpreadsheetReader
             model = ReadSpreadsheetRequest.model_validate(payload)
-            with self._service_lease(client_id):
+            with self._service_lease(client_id, artifact_only=True):
                 with self._state_lock:
                     context = self._contexts[client_id]
                     if context.spreadsheets is None:
                         context.spreadsheets = SpreadsheetReader(
-                            client=self._shared_client(), store=self._artifact_store,
+                            client=ArtifactReaderClient(self._artifact_store, self._shared_client), store=self._artifact_store,
                             metadata_lookup=self._attachment_metadata, client_id=client_id,
                             broker_generation=self._generation,
                         )
@@ -413,12 +548,12 @@ class Broker:
             from .presentations import PresentationReader
             policy_snapshot = self._policy
             model = ReadPresentationRequest.model_validate(payload)
-            with self._service_lease(client_id):
+            with self._service_lease(client_id, artifact_only=True):
                 with self._state_lock:
                     context = self._contexts[client_id]
                     if context.presentations is None:
                         context.presentations = PresentationReader(
-                            client=self._shared_client(), store=self._artifact_store,
+                            client=ArtifactReaderClient(self._artifact_store, self._shared_client), store=self._artifact_store,
                             metadata_lookup=self._attachment_metadata, client_id=client_id,
                             broker_generation=self._generation,
                         )
@@ -561,12 +696,14 @@ class Broker:
         raise BrokerProtocolError("operation is not allowed")
 
     def _attachment_metadata(self, artifact_id: str):
+        scope = active_scope(self._artifact_store)
+        if scope is not None and not scope.authority.authorize(scope, artifact_id):
+            return None
         with self._state_lock:
             return self._artifact_metadata.get(artifact_id)
 
     def _read_attachment(self, request: ReadAttachmentRequest) -> ReadAttachmentResponse:
-        with self._state_lock:
-            metadata = self._artifact_metadata.get(request.artifact_id)
+        metadata = self._attachment_metadata(request.artifact_id)
         if metadata is None:
             return ReadAttachmentResponse(
                 status="expired", detail="artifact metadata is unavailable", coverage_complete=False,
@@ -628,8 +765,7 @@ class Broker:
             )
 
     def _analyze_media(self, request: AnalyzeMediaRequest) -> AnalyzeMediaResponse:
-        with self._state_lock:
-            metadata = self._artifact_metadata.get(request.artifact_id)
+        metadata = self._attachment_metadata(request.artifact_id)
         if metadata is None:
             return AnalyzeMediaResponse(status="expired", detail="artifact metadata is unavailable")
         anchor, _, _, kind = metadata
@@ -748,13 +884,19 @@ class Broker:
         require_current(self._policy)
         if "send" not in self._policy.enabled_capabilities:
             raise CompatibilityError("capability_disabled")
-        client = self._shared_client()
-        client.ensure_ready()
         try:
-            account_id = client.get_account_id()
-        except AttributeError:
+            account_id = self._artifact_account()
+        except ArtifactUnavailable:
             raise DraftError("account is unavailable") from None
-        return DraftOwner(client_id=client_id, account_id=account_id)
+        if account_id is None:
+            raise DraftError("account is unavailable")
+        owner = DraftOwner(client_id=client_id, account_id=account_id)
+        scope = active_scope(self._artifact_store)
+        if scope is not None:
+            self._artifact_authority.observe(scope, account_id)
+        else:
+            self._artifact_authority.observe_account(account_id)
+        return owner
 
     @staticmethod
     def _draft_summary(draft, owner: DraftOwner) -> DraftSummary:
@@ -959,8 +1101,8 @@ class Broker:
                 formatting_provider_epoch=epoch if rows else None,
                 local_admission_guard=guard,
             )
+            known = self._drafts.known_ids()
             with self._state_lock:
-                known = self._drafts.known_ids()
                 for old_id in list(self._draft_recipient_titles):
                     if old_id not in known:
                         self._draft_recipient_titles.pop(old_id, None)
@@ -985,9 +1127,8 @@ class Broker:
 
     def _prepare_artifact_send(self, request: PrepareArtifactSendRequest, *, client_id: str) -> PrepareArtifactSendResponse:
         try:
-            client = self._shared_client()
-            client.ensure_ready()
             owner = self._draft_owner(client_id)
+            client = self._shared_client()
             chat = client.resolve_target(request.recipient)
             title = sanitize_telegram_text(chat.get("title"), max_length=255) or str(request.recipient)
             if request.kind == "photo":
@@ -1027,8 +1168,8 @@ class Broker:
                 source_sha256=source_sha256, source_display_name=source_display_name,
                 converted=converted,
             )
+            known = self._drafts.known_ids()
             with self._state_lock:
-                known = self._drafts.known_ids()
                 for old_id in list(self._draft_recipient_titles):
                     if old_id not in known:
                         self._draft_recipient_titles.pop(old_id, None)
@@ -1158,8 +1299,8 @@ class Broker:
         return ReplyDraftPreview.create(content, draft.reply_source)
 
     def _remember_draft_title(self, draft):
+        known=self._drafts.known_ids()
         with self._state_lock:
-            known=self._drafts.known_ids()
             for old_id in list(self._draft_recipient_titles):
                 if old_id not in known:self._draft_recipient_titles.pop(old_id,None)
             self._draft_recipient_titles[draft.draft_id]=draft.recipient_title
@@ -1306,8 +1447,8 @@ class Broker:
                 formatting_provider_epoch=epoch if request.outgoing_entities else None)
             if topic is not None or request.outgoing_entities:
                 self._require_topic_policy(draft.draft_id, owner)
+            known = self._drafts.known_ids()
             with self._state_lock:
-                known = self._drafts.known_ids()
                 for old_id in list(self._draft_recipient_titles):
                     if old_id not in known:
                         self._draft_recipient_titles.pop(old_id, None)
@@ -1343,6 +1484,37 @@ class Broker:
             with provider.request_budget(bounded_deadline):
                 return self._send_prepared_artifact_impl(request,client_id=client_id,text_only=text_only,deadline=bounded_deadline)
         return self._send_prepared_artifact_impl(request,client_id=client_id,text_only=text_only,deadline=deadline)
+
+    @contextmanager
+    def _artifact_send_fence(self, scope, owner, provider, provider_epoch, claim):
+        """Observe outside mutexes; serialize only irreversible raw dispatch.
+
+        Registry/state locks are never acquired while this authority fence is
+        held. Confirmation waiting happens after it, so release can acknowledge
+        an already-issued attempt without cancelling or losing its evidence.
+        """
+        try:
+            if self._draft_owner(owner.client_id) != owner or self._shared_client() is not provider:
+                raise DraftError("draft is unavailable")
+            require_current(self._policy)
+            if "send" not in self._policy.enabled_capabilities:
+                raise CompatibilityError("capability_disabled")
+            if claim.draft.reply_source is not None:
+                self._require_reply_source_policy(claim.draft.reply_source)
+                if "reply_artifact_send" not in self._policy.enabled_capabilities:
+                    raise CompatibilityError("capability_disabled")
+            self._reply_budget_check(provider)
+        except (ArtifactUnavailable, DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+            raise MessageSendNotAttempted("artifact scope changed before transport") from None
+        with self._artifact_authority.lock:
+            try:
+                self._artifact_authority.live(scope)
+                if (self._client is not provider or provider.send_observation_epoch is not provider_epoch or
+                        not self._artifact_authority.authorize_local(scope, claim.draft.artifact_id)):
+                    raise ArtifactUnavailable("artifact is unavailable")
+            except ArtifactUnavailable:
+                raise MessageSendNotAttempted("artifact scope changed before transport") from None
+            yield
 
     def _send_prepared_artifact_impl(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
         if request.approved is not True:
@@ -1444,6 +1616,9 @@ class Broker:
                     raise DraftError('formatting authority changed')
             claim = self._drafts.claim(request.draft_id, owner=owner, approved=True, provider=provider,
                                        provider_epoch=provider.send_observation_epoch)
+            scope = active_scope(self._artifact_store)
+            send_fence = (lambda: self._artifact_send_fence(scope, owner, provider, claim.provider_epoch, claim)) if scope is not None else None
+            fence_kwargs = {"pre_send_fence": send_fence} if send_fence is not None else {}
             if claim.draft.kind == "text":
                 failure_detail = "TDLib rejected the send"
                 try:
@@ -1496,15 +1671,15 @@ class Broker:
                             expected_recipient_title=expected_title, pre_send_guard=formatting_guard, **style_kwargs)
                     else:
                         message_id = provider.send_text_message(claim.draft.recipient, claim.draft.text, attempt_id=request.draft_id)
-                    receipt = self._drafts.finish(request.draft_id, owner=owner, status="sent", message_id=message_id)
+                    receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="sent", message_id=message_id)
                 except MessageSendNotAttempted:
                     failure_detail = "local preparation failed; no provider send was attempted"
-                    receipt = self._drafts.finish(request.draft_id, owner=owner, status="failed", evidence="local_failed")
+                    receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="failed", evidence="local_failed")
                 except MessageSendFailed as error:
                     failure_detail = error.public_detail()
-                    receipt = self._drafts.finish(request.draft_id, owner=owner, status="failed")
+                    receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="failed")
                 except Exception:
-                    receipt = self._drafts.finish(request.draft_id, owner=owner, status="outcome_unknown")
+                    receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="outcome_unknown")
                 if (claim.draft.topic is not None or claim.draft.outgoing_entities) and receipt.evidence != 'local_failed':
                     # Keep observed evidence internally; disclose it only to the
                     # same current account/provider/session and enabled policy.
@@ -1530,11 +1705,15 @@ class Broker:
             except (OSError,ValueError,ConfigurationError) as error:
                 if isinstance(error,ConfigurationError) and claim.draft.reply_source is None:
                     raise  # Preserve the ordinary-send exception boundary.
-                self._drafts.finish(request.draft_id, owner=owner, status="failed", evidence="local_failed")
+                self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="failed", evidence="local_failed")
                 return SendPreparedArtifactResponse(status="failed", draft_id=request.draft_id,
                                                     recipient=claim.draft.recipient,
                                                     detail="local staged file could not be prepared; no provider send was attempted")
             try:
+                # Recheck after potentially long staging, before provider entry.
+                if send_fence is not None:
+                    with send_fence():
+                        pass
                 if claim.draft.reply_source is not None:
                     def artifact_reply_guard():
                         require_current(self._policy)
@@ -1547,29 +1726,32 @@ class Broker:
                         message_id=sender(claim.draft.recipient,staged_path,claim.draft.caption,kind=claim.draft.kind,
                             duration_seconds=claim.draft.duration_seconds,waveform_base64=claim.draft.waveform_base64,
                             reply_source=claim.draft.reply_source,expected_account_id=owner.account_id,
-                            expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=artifact_reply_guard)
+                            expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=artifact_reply_guard,**fence_kwargs)
                 elif claim.draft.kind == "photo":
-                    message_id = self._shared_client().send_photo_message(
+                    message_id = provider.send_photo_message(
                         claim.draft.recipient, staged_path, claim.draft.caption, attempt_id=request.draft_id,
+                        **fence_kwargs,
                     )
                 elif claim.draft.kind == "voice_note":
-                    message_id = self._shared_client().send_voice_note_message(
+                    message_id = provider.send_voice_note_message(
                         claim.draft.recipient, staged_path, claim.draft.caption,
                         claim.draft.duration_seconds, claim.draft.waveform_base64, attempt_id=request.draft_id,
+                        **fence_kwargs,
                     )
                 else:
-                    message_id = self._shared_client().send_document_message(
+                    message_id = provider.send_document_message(
                         claim.draft.recipient, staged_path, claim.draft.caption, attempt_id=request.draft_id,
+                        **fence_kwargs,
                     )
-                receipt = self._drafts.finish(request.draft_id, owner=owner, status="sent", message_id=message_id)
+                receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="sent", message_id=message_id)
             except MessageSendNotAttempted:
                 failure_detail = "local preparation failed; no provider send was attempted"
-                receipt = self._drafts.finish(request.draft_id, owner=owner, status="failed", evidence="local_failed")
+                receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="failed", evidence="local_failed")
             except MessageSendFailed as error:
                 failure_detail = error.public_detail()
-                receipt = self._drafts.finish(request.draft_id, owner=owner, status="failed")
+                receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="failed")
             except Exception:
-                receipt = self._drafts.finish(request.draft_id, owner=owner, status="outcome_unknown")
+                receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="outcome_unknown")
             if receipt.status in {"sent", "failed"}:
                 try:
                     retire_staged_document(staged_path)
@@ -1598,6 +1780,7 @@ class Broker:
 
     def _handle_connection(self, connection: socket.socket) -> None:
         request: dict[str, Any] | None = None
+        response_sent = False
         with self._state_lock:
             self._active_handlers += 1
             self._peak_overlap = max(self._peak_overlap, self._active_handlers)
@@ -1633,7 +1816,13 @@ class Broker:
                     if (request["client_id"] != hello["client_id"] or request["deadline"] != hello["deadline"]
                             or request["request_id"] == hello["request_id"]):
                         raise CompatibilityError("handshake_invalid")
-                    result = self._dispatch(request)
+                    def publish(result):
+                        nonlocal response_sent
+                        send_frame(connection, {"version": PROTOCOL_VERSION,
+                            "request_id": request["request_id"], "ok": True, "result": result},
+                            max_bytes=MAX_RESPONSE_BYTES)
+                        response_sent = True
+                    result = self._dispatch(request, publish=publish)
                     response = {
                         "version": PROTOCOL_VERSION,
                         "request_id": request["request_id"],
@@ -1651,7 +1840,8 @@ class Broker:
                     }
                     with self._state_lock:
                         self._errors += 1
-                send_frame(connection, response, max_bytes=MAX_RESPONSE_BYTES)
+                if not response_sent:
+                    send_frame(connection, response, max_bytes=MAX_RESPONSE_BYTES)
         except (OSError, BrokerProtocolError):
             with self._state_lock:
                 self._errors += 1

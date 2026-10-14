@@ -1726,3 +1726,21 @@ retirement is best effort with TTL fallback. No source evidence adds outgoing en
 `formatted_text_send`, and attachment captions retain empty entities.
 Disable `reply_text_url_targets` to roll back. Synthetic evidence leaves native/
 live provider behavior, actual owner approval and F18 outcome unverified.
+
+## Development-candidate artifact ownership
+
+Use artifact IDs and upload tokens from the same running MCP client. Normal socket
+reconnection preserves them until their fixed expiry or explicit client release.
+A new client, release/reuse or broker restart cannot adopt a prior artifact/token,
+even when bytes still exist in the private cache; retrieve, create or upload again.
+Local create/upload/read can run offline. Provider-bound artifacts additionally
+require their separately observed account context; observed drift revokes them.
+The trusted broker generation represents one fixed default-session namespace,
+not a selectable numeric account or multi-account support. Public schemas and
+artifact/upload ID formats are unchanged.
+
+For an approved artifact draft, release or observed account drift before the
+irreversible provider dispatch prevents that unissued send. After dispatch, the
+original attempt may still finish; its terminal or unknown evidence is retained
+privately against the consumed claim. Release still denies disclosure/replay and
+never authorizes a retry. Confirmation waiting does not delay release.

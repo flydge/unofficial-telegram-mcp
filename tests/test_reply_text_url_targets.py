@@ -602,9 +602,11 @@ class TextUrlLifecycleTests(unittest.TestCase):
         self.dialogs = []; self.decision = lambda: True
         def owner(**facts): self.dialogs.append(copy.deepcopy(facts)); return self.decision()
         store = ArtifactStore(cache_dir=self.root / 'artifacts')
-        payload = self.root / 'fixture.txt'; payload.write_bytes(b'data'); self.artifact = store.store(payload)
+        payload = self.root / 'fixture.txt'; payload.write_bytes(b'data')
         self.broker = Broker(socket_path=self.root / 'unused.sock', client_factory=lambda: self.provider,
             artifact_store=store, approval_prompt=owner, policy=POLICY)
+        with self.broker._artifact_authority.scope(CLIENT, store):
+            self.artifact = store.store(payload)
         self.stack = ExitStack(); self.staging = self.root / 'staging'; self.history = []; self.registrations = []
         real_claim = self.broker._drafts.claim
         def claim(*args, **kwargs):
@@ -846,6 +848,18 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.raw.account = ACCOUNT + 1
             self.assertEqual(self.dispatch(self.operation('get', family), {'draft_id': did})['status'], 'unavailable')
             self.raw.account = ACCOUNT
+            if family == 'artifact':
+                # A provider observation permanently revokes the original draft;
+                # recovery cannot turn that old approval into another send.
+                count = len(self.sends())
+                self.assertEqual(self.send(did, family)['status'], 'expired')
+                self.assertEqual(self.dispatch(self.operation('get', family), {'draft_id': did})['status'], 'unavailable')
+                self.assertEqual(len(self.sends()), count)
+                fresh = self.root / 'fresh-fixture.txt'; fresh.write_bytes(b'data')
+                with self.broker._artifact_authority.scope(CLIENT, self.broker._artifact_store):
+                    self.artifact = self.broker._artifact_store.store(fresh)
+                replacement = self.prepared(family)['draft']['draft_id']
+                self.assertNotEqual(replacement, did); did = replacement
             owner = DraftOwner(CLIENT, ACCOUNT)
             for wrong in (DraftOwner(FOREIGN, ACCOUNT), DraftOwner(CLIENT, ACCOUNT + 1)):
                 with self.assertRaises(DraftError): self.broker._drafts.source_required_capabilities(did, owner=wrong)

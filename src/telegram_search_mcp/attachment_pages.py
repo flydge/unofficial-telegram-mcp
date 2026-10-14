@@ -55,6 +55,8 @@ class AttachmentPageReader:
         with self._lock:self._live_locked(expires,wall_expiry,deadline)
 
     def _account(self, expected=None):
+        if hasattr(self._client, 'artifact_account'):
+            return self._client.artifact_account(expected)
         self._client.ensure_ready()
         value=self._client.get_account_id()
         if type(value) is not int or not 0<value<2**53:raise _ReadFailure('error')

@@ -214,11 +214,19 @@ class TransferCliTests(unittest.TestCase):
             with self.subTest(operation=operation, change=change), running_broker(self.root / str(index)) as (broker, _, _):
                 dispatch = broker._dispatch
                 dispatched = []
-                def corrupt_receipt(request):
+                def corrupt_receipt(request, *, publish=None):
+                    def corrupt_then_publish(result):
+                        if request["operation"] == operation:
+                            dispatched.append(operation)
+                            result.update(change)
+                        if publish is not None:
+                            publish(result)
+                    # Mutation must precede actual framing; post-return changes
+                    # would leave the wire uncorrupted and miss this boundary.
+                    if publish is not None:
+                        return dispatch(request, publish=corrupt_then_publish)
                     result = dispatch(request)
-                    if request["operation"] == operation:
-                        dispatched.append(operation)
-                        result.update(change)
+                    corrupt_then_publish(result)
                     return result
                 output, error = io.StringIO(), io.StringIO()
                 with patch.object(broker, "_dispatch", side_effect=corrupt_receipt), \

@@ -67,6 +67,8 @@ class SpreadsheetReader:
             self._live_locked(expires, wall_expiry, deadline, generation)
 
     def _account(self, expected: int | None = None):
+        if hasattr(self._client, 'artifact_account'):
+            return self._client.artifact_account(expected)
         self._client.ensure_ready()
         account = self._client.get_account_id()
         if type(account) is not int or not 0 < account < 2**53:

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from .artifact_store import ArtifactStore, StoredArtifact
+from .artifact_authority import active_scope
 from .config import APP_SUPPORT_ROOT, ensure_private_directory
 
 UPLOAD_ROOT = APP_SUPPORT_ROOT / "incoming-uploads"
@@ -53,6 +54,7 @@ class _Upload:
     digest: object
     received: int = 0
     next_index: int = 0
+    owner: object | None = None
 
 
 class LocalUploadRegistry:
@@ -125,6 +127,12 @@ class LocalUploadRegistry:
                 self._retire(entry)
 
     def _get(self, upload_id: str) -> _Upload:
+        scope = active_scope(self._store)
+        if scope is not None:
+            scope.authority.live(scope)
+            candidate = self._entries.get(upload_id)
+            if candidate is None or candidate.owner != scope.owner:
+                raise UploadError("upload is unavailable")
         self._prune()
         if not isinstance(upload_id, str) or _UPLOAD_ID.fullmatch(upload_id) is None:
             raise UploadError("upload ID is invalid")
@@ -141,6 +149,9 @@ class LocalUploadRegistry:
         if not isinstance(sha256, str) or _SHA256.fullmatch(sha256) is None:
             raise UploadError("declared hash is invalid")
         with self._lock:
+            scope = active_scope(self._store)
+            if scope is not None:
+                scope.authority.live(scope)
             self._prune()
             if len(self._entries) >= self._capacity:
                 raise UploadError("upload capacity is exhausted")
@@ -151,7 +162,7 @@ class LocalUploadRegistry:
             self._entries[upload_id] = _Upload(
                 path=path, file_name=file_name, kind=kind, declared_size=size_bytes,
                 declared_sha256=sha256, expires_at=self._clock() + UPLOAD_TTL_SECONDS,
-                fd=fd, digest=hashlib.sha256(),
+                fd=fd, digest=hashlib.sha256(), owner=scope.owner if scope is not None else None,
             )
             return upload_id
 
@@ -170,13 +181,16 @@ class LocalUploadRegistry:
             entry = self._get(upload_id)
             if index != entry.next_index or entry.received + len(data) > entry.declared_size:
                 raise UploadError("chunk order or total size is invalid")
-            view = memoryview(data)
-            while view:
-                view = view[os.write(entry.fd, view):]
-            entry.digest.update(data)
-            entry.received += len(data)
-            entry.next_index += 1
-            return entry.next_index, entry.received
+            from contextlib import nullcontext
+            scope = active_scope(self._store)
+            with scope.authority.publication(scope) if scope is not None else nullcontext():
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(entry.fd, view):]
+                entry.digest.update(data)
+                entry.received += len(data)
+                entry.next_index += 1
+                return entry.next_index, entry.received
 
     def finish(self, upload_id: str) -> StoredArtifact:
         return self.finish_with_metadata(upload_id).artifact

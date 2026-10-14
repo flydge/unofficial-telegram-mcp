@@ -13,7 +13,7 @@ import platform
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -1413,7 +1413,7 @@ class TDLibClient:
             raise TDLibError("TDLib returned an invalid message")
         return message
 
-    def send_document_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None) -> int:
+    def send_document_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
         """Make one provider attempt and wait for a matching delivery update."""
         content = {
             "@type": "inputMessageDocument",
@@ -1424,7 +1424,7 @@ class TDLibClient:
             },
             "caption": {"@type": "formattedText", "text": caption, "entities": []},
         }
-        return self._send_message_content(chat_id, content, "messageDocument", attempt_id=attempt_id)
+        return self._send_message_content(chat_id, content, "messageDocument", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
     def send_text_message(self, chat_id: int, text: str, *, attempt_id: str | None = None,
                           outgoing_entities: FrozenOutgoingEntities = (),
@@ -1664,7 +1664,7 @@ class TDLibClient:
     def send_reply_artifact_message(self,chat_id: int,path: Path,caption: str,*,kind: str,
             reply_source: ReplySource,expected_account_id: int,expected_recipient_title: str,
             attempt_id: str,pre_send_guard: Callable[[],bool],duration_seconds: int | None=None,
-            waveform_base64: str | None=None) -> int:
+            waveform_base64: str | None=None,pre_send_fence=None) -> int:
         from .sanitize import sanitize_telegram_text
         self._request_context.artifact_transport_attempted=False
         try:
@@ -1699,7 +1699,7 @@ class TDLibClient:
                     expected='messageVoiceNote'
                 else:raise ValueError('unsupported reply kind')
                 return self._send_message_content(chat_id,content,expected,attempt_id=attempt_id,
-                    reply_anchor=reply_source.anchor,artifact_reply=True,pre_transport_guard=pre_send_guard)
+                    reply_anchor=reply_source.anchor,artifact_reply=True,pre_transport_guard=pre_send_guard,pre_transport_fence=pre_send_fence)
         except (MessageSendOutcomeUnknown,MessageSendFailed):
             raise
         except Exception as error:
@@ -1708,7 +1708,7 @@ class TDLibClient:
             self._send_observations.discard_unattempted(attempt_id)
             raise MessageSendNotAttempted('artifact reply was refused before transport') from error
 
-    def send_photo_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None) -> int:
+    def send_photo_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
         content = {
             "@type": "inputMessagePhoto",
             "photo": {
@@ -1718,10 +1718,10 @@ class TDLibClient:
             "caption": {"@type": "formattedText", "text": caption, "entities": []},
             "show_caption_above_media": False, "self_destruct_type": None, "has_spoiler": False,
         }
-        return self._send_message_content(chat_id, content, "messagePhoto", attempt_id=attempt_id)
+        return self._send_message_content(chat_id, content, "messagePhoto", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
     def send_voice_note_message(self, chat_id: int, path: Path, caption: str,
-                                duration_seconds: int, waveform_base64: str, *, attempt_id: str | None = None) -> int:
+                                duration_seconds: int, waveform_base64: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
         content = {
             "@type": "inputMessageVoiceNote",
             "voice_note": {
@@ -1732,13 +1732,13 @@ class TDLibClient:
             "caption": {"@type": "formattedText", "text": caption, "entities": []},
             "self_destruct_type": None,
         }
-        return self._send_message_content(chat_id, content, "messageVoiceNote", attempt_id=attempt_id)
+        return self._send_message_content(chat_id, content, "messageVoiceNote", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
     def _send_message_content(
         self, chat_id: int, content: dict[str, Any], expected_type: str,
         *, attempt_id: str | None = None, reply_anchor: tuple[int,int] | None = None, artifact_reply: bool = False, pre_transport_guard: Callable[[],bool] | None = None,
         forum_topic_id: int | None = None, outgoing_entities: FrozenOutgoingEntities = (),
-        saved_messages_topic_id: int | None = None,
+        saved_messages_topic_id: int | None = None, pre_transport_fence=None,
     ) -> int:
         sending_id = secrets.randbelow((1 << 31) - 1) + 1
         for _ in range(8):
@@ -1789,8 +1789,14 @@ class TDLibClient:
                 self._send_observations.discard_unattempted(attempt_id)
                 raise MessageSendNotAttempted("reply request deadline expired before transport")
             try:
-                if artifact_reply:self._request_context.artifact_transport_attempted=True
-                self._raw.send({**payload, "@extra": extra})
+                # Pure lifecycle/epoch fence brackets raw dispatch only. Account
+                # acquisition occurs on context entry before its mutex is held.
+                with pre_transport_fence() if pre_transport_fence is not None else nullcontext():
+                    if artifact_reply:self._request_context.artifact_transport_attempted=True
+                    self._raw.send({**payload, "@extra": extra})
+            except MessageSendNotAttempted:
+                self._send_observations.discard_unattempted(attempt_id)
+                raise
             except Exception as error:
                 raise MessageSendOutcomeUnknown("TDLib send transport failed") from error
             deadline = time.monotonic() + min(max(self._request_timeout, 30), 300)

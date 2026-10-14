@@ -108,7 +108,8 @@ class RevisionBoundaryTests(unittest.TestCase):
 
     def test_caption_change_preserves_exact_artifact_and_tamper_cannot_refresh(self):
         source = self.root/'source'; source.write_bytes(b'bytes to preserve')
-        artifact = self.store.store(source)
+        with self.broker._artifact_authority.scope(A, self.store):
+            artifact = self.store.store(source)
         prepared = self.dispatch('prepare_artifact_send', {'artifact_id': artifact.artifact_id,
             'recipient': 123, 'display_name': 'report.txt', 'mime_type': 'text/plain', 'caption': 'old'})
         revised = self.revise(prepared['draft_id'], caption='')
