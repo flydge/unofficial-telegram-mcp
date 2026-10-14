@@ -14,6 +14,16 @@ implementation batch is started. This is development source, not a new tagged
 release, installer distribution or PyPI publication. Resume requires an explicit
 request; the remaining scope below is retained.
 
+**Approved 0.52 requirement — next priority #1:**
+[QR-first Telegram onboarding](plans/0.52-qr-onboarding.md). The normal user path
+must be install MCP + skills → local QR screen → confirmation in the phone's
+Telegram app → optional local 2FA → ready MCP and a bounded Codex read/search.
+End users must not create API applications or enter API ID/hash; the distributed
+application supplies its API identity. This is mandatory for 0.52.0 and is not
+implemented in the current snapshot. It supersedes conflicting manual-credential
+and Terminal-only onboarding plans. Resolve those conflicts before lower-priority
+feature work. This documentation decision does not resume development.
+
 The local transfer CLI can now consume a short-lived upload authority issued by
 the preparing MCP client. The helper returns a result reference; the original
 client consumes it to obtain its own artifact grant. A copied result reference
@@ -41,7 +51,8 @@ packets remain failed evidence; they are not reclassified as successful runs.
 
 Still paused and unfinished:
 
-- Native first-time onboarding, reconnect and repeatability acceptance for B1.
+- **First:** implement and accept the mandatory 0.52 QR-first onboarding scope,
+  including application API identity, local login UI, reconnect and repeat use.
 - Installed file/page/parser coverage beyond the bounded B2 message and B2C text
   file scenarios; broader conversational and no-skill consumer validation.
 - F13 formatted captions and remaining applicable topic/reply/live scenarios;
@@ -61,8 +72,8 @@ The goal is convenient conversational interaction: find information or an attach
 by remembered context, inspect it, process it, prepare a result and explicitly send
 it to the intended Telegram conversation without manual IDs or file copying.
 
-The next focus is first-time setup and repeated completion of that path on the
-supported macOS platform, initially in a verified primary consumer. Short answers
+The next focus is the mandatory QR-first setup and repeated completion of that
+path on the supported macOS platform, initially in Codex. Short answers
 with usable sources, retained conversational selections, understandable approvals
 and recovery take priority alongside capabilities that actually block a task.
 Broader client/platform support must be demonstrated separately.
@@ -137,16 +148,17 @@ content family, first-time-user setup or unattended operation. A historical unkn
 send stays unknown. The source of a later test reply had been deleted; its safe
 refusal was accepted, and no new reply delivery is claimed for that deleted source.
 
-## Remaining work and proposed order
+## Remaining work and approved priority
 
-1. **First-time setup and repeatability:** finish a supported local login/provisioning
-   path, compare applicable installer work, validate on a clean user/Mac, and test
-   reconnect, expiry, ambiguous targets and honest unknown outcomes.
-   The development candidate includes bounded default-session enrollment and
-   an admitted bundle/receipt-bound launcher with private install/repeat checks.
-   Native login, fresh Codex and clean-user evidence, public installer distribution
-   and its complete source/notice closure remain open. These technical slices do
-   not complete P2/F18 or the retained F16 account-registry scope.
+1. **Priority #1 — QR-first onboarding for 0.52:** follow the
+   [approved requirements and acceptance gate](plans/0.52-qr-onboarding.md).
+   Reuse the current installer/enrollment/handoff, supply the application's API
+   identity automatically, add a local QR/optional-2FA screen, and prove a clean
+   install → real phone confirmation → Codex search → repeat-use path. Mandatory
+   end-user API-pair entry or Terminal-only login does not satisfy this scope.
+   Resolve incompatible earlier assumptions here before any unrelated B2/F13–F17
+   continuation. Public installer distribution, trust and source/notice closure
+   remain release dependencies. Development stays paused until explicit resume.
 2. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening

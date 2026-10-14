@@ -71,3 +71,9 @@ bundle supplies Python/native dependencies and recoverable first installation
 on Apple Silicon macOS 26+. See [candidate installation](docs/install.md).
 Published 0.51 evidence remains separate; native onboarding, public hosting,
 publisher trust and complete source/redistribution acceptance remain open.
+
+**Next priority for 0.52:** [QR-first Telegram login](docs/plans/0.52-qr-onboarding.md)
+with application-supplied API credentials and a local connection screen. End users
+must not need to create a Telegram API application or enter API ID/hash. This is
+an approved release requirement, not a feature available in this snapshot.
+Development remains paused; the documentation update does not resume it.

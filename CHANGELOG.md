@@ -15,6 +15,12 @@
 The previously published `main` at `796f95d22ae7016ae8c7a313e96e15233aba7531` contains the Unofficial Telegram MCP rebrand. This changelog does not reconstruct intermediate private development commits or assert that they were publicly released.
 ## 0.52.0.dev0 — unreleased
 
+- Record the approved [QR-first onboarding requirement](docs/plans/0.52-qr-onboarding.md)
+  as the next priority and a mandatory 0.52.0 release gate. Application-supplied
+  API credentials replace mandatory end-user API application creation/entry in
+  the target flow. This is a documentation-only decision; QR remains unimplemented
+  and development remains paused.
+
 - Add authenticated offline macOS ARM64 first-install bundle admission,
   recoverable owned runtime/registration/paired-skills installation and an
   isolated receipt-bound launcher integrated with the preserved default session.

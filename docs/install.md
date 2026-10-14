@@ -6,6 +6,14 @@
 
 ## Private bundled candidate 0.52.0.dev0
 
+**Current behavior versus the 0.52 target:** the instructions below describe the
+existing development candidate, including its manual API-pair and Terminal-only
+login. The approved [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the
+next implementation priority and a release gate: install → local QR screen →
+phone confirmation → optional 2FA → ready MCP, without an end-user API application
+or API ID/hash entry. That flow is not implemented yet. These current instructions
+must not be used as the acceptance target for 0.52; development remains paused.
+
 The continuing development candidate supports an offline authenticated first
 install for Apple Silicon macOS 26+. Its bundle supplies standalone Python,
 the exact runtime dependencies, pinned TDLib/OpenSSL and paired search/setup
