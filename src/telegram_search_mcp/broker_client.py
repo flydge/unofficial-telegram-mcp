@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .local_upload_models import (UPLOAD_MODELS, LocalUploadUnavailable, upload_response,
+    IssueLocalUploadAuthorityRequest, LocalUploadResultRequest, IssueLocalUploadAuthorityResponse,
+    ConsumeLocalUploadResultResponse, CancelLocalUploadAuthorityResponse)
+
 import secrets
 import json
 import socket
@@ -1461,6 +1465,21 @@ class BrokerClient(SelectionClientMixin):
             return CreateLocalArtifactResponse.model_validate(self._request("create_local_artifact", request.model_dump(mode="json")))
         except (BrokerUnavailable, ValidationError):
             return CreateLocalArtifactResponse(status="error", detail="artifact broker is unavailable")
+
+    def _local_upload_authority_call(self, operation, request):
+        try:
+            return upload_response(operation, self._request(operation, request.model_dump(mode='json')))
+        except (BrokerUnavailable, ValidationError, CompatibilityError):
+            return LocalUploadUnavailable()
+
+    def issue_local_upload_authority(self, request: IssueLocalUploadAuthorityRequest) -> IssueLocalUploadAuthorityResponse:
+        return self._local_upload_authority_call('issue_local_upload_authority', request)
+
+    def consume_local_upload_result(self, request: LocalUploadResultRequest) -> ConsumeLocalUploadResultResponse:
+        return self._local_upload_authority_call('consume_local_upload_result', request)
+
+    def cancel_local_upload_authority(self, request: LocalUploadResultRequest) -> CancelLocalUploadAuthorityResponse:
+        return self._local_upload_authority_call('cancel_local_upload_authority', request)
 
     def begin_local_upload(self, request: BeginLocalUploadRequest) -> BeginLocalUploadResponse:
         try:

@@ -31,12 +31,12 @@ class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
         from telegram_search_mcp.retained_selection_models import RetainSelectionRequest
         return RetainSelectionRequest(source=source)
 
-    async def test_no_skill_sdk_lists_44_tools_retain_read_file_process_and_refusal(self):
+    async def test_no_skill_sdk_lists_47_tools_retain_read_file_process_and_refusal(self):
         async with Client(build_server(service_factory=lambda:self.proxy,policy=self.broker._policy,
                                       artifact_root=self.helper.store.cache_dir)) as consumer:
             tools={tool.name:tool for tool in (await consumer.list_tools()).tools}
             self.assertIn('retain_selection',list(tools),'retained-source issuer is missing from discovery')
-            self.assertEqual(len(tools),44)
+            self.assertEqual(len(tools),47)
             self.assertFalse(tools['retain_selection'].input_schema['additionalProperties'])
             for name in ['read_messages','get_attachment','get_message_context','read_reply_chain',
                     'read_attachment','analyze_media','read_attachment_page','read_spreadsheet','read_presentation',

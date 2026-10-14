@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .local_upload_models import (LocalUploadManifest, UploadResultRef, IssueLocalUploadAuthorityRequest,
+    LocalUploadResultRequest, IssueLocalUploadAuthorityResponse, ConsumeLocalUploadResultResponse,
+    CancelLocalUploadAuthorityResponse, PUBLIC_MODELS, LocalUploadUnavailable)
+
 import argparse
 import atexit
 import base64
@@ -100,6 +104,9 @@ _TOOL_NAMES = [
     "begin_local_upload",
     "append_local_upload",
     "finish_local_upload",
+    "issue_local_upload_authority",
+    "consume_local_upload_result",
+    "cancel_local_upload_authority",
     "prepare_reply_artifact_send",
     "get_reply_artifact_draft",
     "update_reply_artifact_draft",
@@ -559,6 +566,21 @@ def build_server(
         upload_id: Annotated[str, Field(strict=True, pattern=r"^upload_[0-9a-f]{32}$")],
     ) -> FinishLocalUploadResponse:
         return get_service().finish_local_upload(FinishLocalUploadRequest(upload_id=upload_id))
+
+    @server.tool(name='issue_local_upload_authority', annotations=_TRANSFER, structured_output=True,
+        description='Delegate one NEW explicitly selected local file to a trusted same-UID helper; artifacts policy only, no provider or send. First run telegram-search-transfer manifest --source ABSOLUTE_PATH --kind document|photo|voice_note [--file-name SAFE_BASENAME]; give this tool its exact four-field manifest. It returns a one-use upload_authority and independent result_ref, fixed 900-second dual deadlines, max 512 KiB chunks; document/voice limit 64 MiB, photo 10000000 bytes, eight slots shared with legacy uploads. Run telegram-search-transfer upload with the same source/kind/name and --upload-authority-stdin, supplying one closed JSON object {"upload_authority": secret, "manifest": {"file_name": name, "kind": kind, "size_bytes": size, "sha256": lowercase_hash}} on private stdin followed by EOF (max 2048 bytes). Keep the secret in transport only, never argv/environment/logs/prose; helper rehashes before redemption, never retries or falls back. Helper returns upload_complete/result_ref, without artifact authority. This SAME live MCP owner calls consume_local_upload_result; pending means not completed, unavailable reveals nothing. Cancel unconsumed work via cancel_local_upload_authority. Lost helper replies: consume the original result_ref to recover complete work, otherwise cancel and issue anew; never replay uploads. Existing foreign artifacts cannot be adopted.')
+    def issue_local_upload_authority(manifest: LocalUploadManifest) -> IssueLocalUploadAuthorityResponse:
+        return get_service().issue_local_upload_authority(IssueLocalUploadAuthorityRequest(manifest=manifest))
+
+    @server.tool(name='consume_local_upload_result', annotations=_TRANSFER, structured_output=True,
+        description='Original live issuer alone consumes its upload result_ref. Pending and unavailable are closed content-free results. Complete grants only this owner the NEW cached artifact and returns its exact name/size/hash and original fixed 12-hour byte expiry; no helper grant, provider or send. Retrying a lost consume reply replays the same still-authorized receipt without regrant/copy/renewal, within the fixed ticket deadlines. Use the artifact with read_attachment, retain_selection and independent approval-required draft preparation. Cancel after consumption returns unavailable and leaves the artifact authorized.')
+    def consume_local_upload_result(result_ref: UploadResultRef) -> ConsumeLocalUploadResultResponse:
+        return get_service().consume_local_upload_result(LocalUploadResultRequest(result_ref=result_ref))
+
+    @server.tool(name='cancel_local_upload_authority', annotations=_TRANSFER, structured_output=True,
+        description='Original live issuer cancels its unconsumed result_ref atomically against redemption, finish and consume. Cancelled confirms retirement; unknown/foreign/stale/expired/disabled/revoked or already consumed return the same content-free unavailable. It cannot revoke an already consumed artifact. No provider, renewal or send.')
+    def cancel_local_upload_authority(result_ref: UploadResultRef) -> CancelLocalUploadAuthorityResponse:
+        return get_service().cancel_local_upload_authority(LocalUploadResultRequest(result_ref=result_ref))
 
     @server.tool(
         name="prepare_text_send",
@@ -1272,15 +1294,20 @@ def build_server(
             operation = TOOL_OPERATIONS[tool_name]
             capability = OPERATION_CAPABILITIES[operation]
             original = registered.fn
-            def guarded(*args, _fn=original, _capability=capability, **kwargs):
-                if consumer_schema_mismatch:
-                    raise CompatibilityError("client_schema_mismatch")
-                require_current(runtime_policy)
-                if (_capability not in runtime_policy.enabled_capabilities or
-                        (_capability in {"reply_text_send","reply_artifact_send"} and "send" not in runtime_policy.enabled_capabilities)):
-                    raise CompatibilityError("capability_disabled")
-                if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
-                    raise CompatibilityError('capability_disabled')
+            def guarded(*args, _fn=original, _capability=capability, _upload_owner=tool_name in PUBLIC_MODELS, **kwargs):
+                try:
+                    if consumer_schema_mismatch:
+                        raise CompatibilityError("client_schema_mismatch")
+                    require_current(runtime_policy)
+                    if (_capability not in runtime_policy.enabled_capabilities or
+                            (_capability in {"reply_text_send","reply_artifact_send"} and "send" not in runtime_policy.enabled_capabilities)):
+                        raise CompatibilityError("capability_disabled")
+                    if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
+                        raise CompatibilityError('capability_disabled')
+                except CompatibilityError:
+                    if _upload_owner:
+                        return LocalUploadUnavailable()
+                    raise
                 return _fn(*args, **kwargs)
             registered.fn = guarded
 

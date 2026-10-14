@@ -34,8 +34,7 @@ class SpreadsheetBoundaryTests(unittest.IsolatedAsyncioTestCase):
             policy = RuntimePolicy(enabled_capabilities=('spreadsheets',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda: service, policy=policy)) as consumer:
                 tools = (await consumer.list_tools()).tools
-                self.assertEqual(tools[27].name, 'read_spreadsheet')
-                tool = tools[27]
+                tool = next(tool for tool in tools if tool.name == 'read_spreadsheet')
                 self.assertTrue(tool.annotations.read_only_hint)
                 self.assertFalse(tool.annotations.idempotent_hint)
                 self.assertFalse(tool.input_schema['additionalProperties'])

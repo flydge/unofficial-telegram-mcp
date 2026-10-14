@@ -340,7 +340,7 @@ class SelectedRegistrationTests(unittest.IsolatedAsyncioTestCase):
             async with Client(build_server(service_factory=Service,policy=RuntimePolicy(
                     enabled_capabilities=('search_chats',) if enabled else ('read',)))) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),44)
+                self.assertEqual(len(tools),47)
                 tool=next(t for t in tools if t.name=='search_chats')
                 self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 args={'targets':[7,8],'query':'Full','mode':'latest'}

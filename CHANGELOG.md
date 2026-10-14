@@ -20,3 +20,14 @@ The previously published `main` at `796f95d22ae7016ae8c7a313e96e15233aba7531` co
   isolated receipt-bound launcher integrated with the preserved default session.
 - Private installation ends at `activation_required`. Native onboarding,
   fresh Codex search, public distribution and source completeness remain open.
+
+- Preserve client-owned artifact grants across the supported local lifecycle and
+  add retained selections for bounded conversational message reuse.
+- Add issuer-owned local upload authorities, stdin-only CLI handoff and original
+  client result retrieval/cancellation, including idempotent receipt recovery after
+  a lost response without copying bytes or renewing storage.
+- Verify the bounded B2C slice with the full guarded suite, package/install checks,
+  independent review and installed official SDK auto/legacy scenarios using
+  synthetic data. No real Telegram send or full F18 acceptance is claimed.
+- Pause development after B2C at the owner's request; retain the unfinished scope
+  and evidence limits in [the roadmap](docs/roadmap.md). No new release is tagged.

@@ -251,6 +251,9 @@ class ClosedSchemaTests(unittest.TestCase):
             if name in extended:continue
             self.assertEqual(fingerprint(tools[name]),digest,name)
         names=[t.name for t in build_server(policy=RuntimePolicy())._tool_manager.list_tools()]
+        owner_upload_tools = {'issue_local_upload_authority', 'consume_local_upload_result',
+                              'cancel_local_upload_authority'}
+        names = [name for name in names if name not in owner_upload_tools]
         self.assertEqual(names[24:27],['verify_target','read_target_messages','read_attachment_page'])
         self.assertEqual(set(names[:24]),set(baseline))
 

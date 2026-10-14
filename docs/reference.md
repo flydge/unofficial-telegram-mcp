@@ -18,6 +18,7 @@ The public surface contains forty-three tools:
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 47-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -896,8 +897,8 @@ The helper hashes the pinned file descriptor, then streams ordered chunks of at
 most 512 KiB, checking source stability, acknowledgements and the final size/hash.
 Base64 exists only inside the local transport. Its single JSON receipt contains
 the completed artifact ID, size and SHA-256; it does not print bytes or local paths.
-The receipt belongs to the helper's independent client. A separate MCP client
-cannot redeem it for reading, retention or preparation under B2A ownership.
+This legacy receipt belongs to the helper's independent client and cannot be
+adopted by another MCP owner. Use the manifest-bound delegation below for NEW bytes.
 MCP tools still accept handles, never local source paths.
 
 The current trusted `artifacts` capability and matching runtime contract are
@@ -1764,8 +1765,8 @@ The synthetic IDs above illustrate the schema; use observed sources. Messages ar
 1–20 ordered unique committed anchors, including signed group/channel chat IDs.
 Files are existing B2A grants in the same client/session incarnation: downloaded,
 created, uploaded through that client, or derived locally. Paths and foreign
-artifacts cannot be adopted. Standalone CLI upload receipts belong to that helper's
-independent client and are not directly reusable by a separate MCP client.
+artifacts cannot be adopted. Legacy plain CLI upload receipts belong to that helper's independent client.
+For NEW bytes intended for this MCP owner, use the owner-issued workflow below.
 
 A capture returns `selection_` plus 64 random hex characters, kind, fixed expiry,
 and bounded current message evidence or file hash, size, sanitized metadata and
@@ -1806,3 +1807,58 @@ requires a singleton and retains all same-chat/topic and source-entity policies.
 singleton reply selection. Final send tools still accept the immutable draft ID and
 their existing exact approval inputs; they accept no selection. Unknown external
 account/session changes without provider observation are not claimed detectable.
+
+## NEW local bytes supplied to the original MCP owner (B2C candidate)
+
+The candidate exposes 47 tools. The three owner tools below use existing
+`artifacts` policy and compatible contract/generation admission. No skill is
+needed: their tool descriptions and CLI help contain this complete sequence.
+
+1. Run `telegram-search-transfer manifest --source ABSOLUTE_PATH --kind document`
+   (or `photo`/`voice_note`, optional `--file-name SAFE_BASENAME`). It pins and
+   hashes the selected regular single-link file, without broker/policy/provider
+   work. Its output is exactly `file_name`, `kind`, `size_bytes`, lowercase `sha256`.
+2. In the intended live MCP connection call
+   `issue_local_upload_authority(manifest={...})` with those exact fields.
+   `issued` returns private `upload_authority`, independent `result_ref`,
+   timezone-aware `expires_at`, `max_chunk_bytes=524288`, and per-kind maximum.
+   Never put the authority in argv, environment, logs, ordinary receipts or prose.
+3. Run `telegram-search-transfer upload` with the same local source/kind/name and
+   `--upload-authority-stdin`. Supply one closed JSON envelope on private stdin,
+   followed by EOF, at most 2048 UTF-8 bytes:
+   `{"upload_authority":secret,"manifest":{"file_name":name,"kind":kind,"size_bytes":size,"sha256":hash}}`.
+   The helper independently re-pins/re-hashes and compares before redemption.
+   Missing/malformed/mismatched authority refuses without fallback. It uses its
+   own client identity and one-use supplier-only transport, never an MCP identity.
+4. The helper returns only `status=upload_complete`, opaque `result_ref`, and fixed
+   detail. Bytes are cached but neither caller has an artifact grant yet. The
+   original SAME live MCP owner calls `consume_local_upload_result(result_ref)`.
+   Pending is exactly `{"status":"pending","detail":"local upload is pending"}`.
+   Unavailable is exactly `{"status":"unavailable","detail":"local upload is unavailable"}`,
+   also for foreign, stale, disabled, revoked and expired references.
+   Complete returns the ordinary artifact ID/path/name/size/hash plus the original
+   fixed byte expiry. These union tools use the SDK's typed `{"result":...}` wrapper.
+5. `cancel_local_upload_authority(result_ref)` returns fixed `cancelled` before
+   consumption. Already consumed cancellation returns unavailable without revoking
+   the artifact. Lost helper replies never permit replay/resume: consume the
+   original result reference to recover complete work, otherwise cancel/issue anew.
+   The original owner may retry a lost consume reply for the identical authorized
+   receipt, within fixed ticket deadlines, without copying/regranting/renewal.
+
+Each ticket has fixed wall and monotonic 900-second deadlines from issue. Eight
+slots are shared with legacy uploads across issued/uploading/finishing/complete;
+redeeming a ticket does not count its stream twice. Cancelled finishing work holds
+its reservation until slow copy exits. At most 32 terminal delivery receipts are
+retained; they do not extend the original ticket deadlines. Documents/voice sources
+are at most 64 MiB, photos 10000000 bytes, and decoded chunks 512 KiB. Cached bytes
+retain the existing 12-hour TTL and quarantine rules. This workflow is offline:
+zero provider/account/readiness/auth calls. Observed epoch drift before consume
+permanently revokes unconsumed tickets; after consume the local artifact grant
+has no account or epoch dependency. Unobserved changes are not claimed detectable.
+
+This grants only the exact NEW artifact to the exact live original owner. Existing
+foreign artifacts cannot be adopted, result references do not transfer ownership,
+and helper operations are absent from MCP registration. Later reading/retention,
+recipient selection, draft preview, capability admission and send approval remain
+independent. No send occurs. Trusted same-UID filesystem access and explicitly
+authorized CLI exports remain outside cooperative MCP ownership isolation.

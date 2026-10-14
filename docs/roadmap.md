@@ -2,10 +2,58 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
 
-Updated **2026-10-13**, for **0.51.0**. The original scope is preserved in a separate
-[historical plan](plans/initial-roadmap.md); this document tracks completed delivery,
-known limitations and remaining development. Future changes should update this
-file in the same commits as the corresponding implementation and evidence.
+Updated **2026-10-14**. The released baseline remains **0.51.0**; the current
+**0.52.0.dev0** development snapshot and pause boundary are recorded below.
+The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
+preserved. Technical acceptance of a bounded slice does not complete that plan.
+
+## Current development snapshot — 0.52.0.dev0
+
+Development is paused after the **B2C local-upload ownership slice**. No next
+implementation batch is started. This is development source, not a new tagged
+release, installer distribution or PyPI publication. Resume requires an explicit
+request; the remaining scope below is retained.
+
+The local transfer CLI can now consume a short-lived upload authority issued by
+the preparing MCP client. The helper returns a result reference; the original
+client consumes it to obtain its own artifact grant. A copied result reference
+does not grant another client access. Retrieval can recover a completed upload
+or a consumed receipt after a lost response without copying bytes, issuing a new
+grant or renewing the original storage deadline. Cancellation and malformed
+input retain explicit refusals. Transfer alone does not authorize a Telegram send.
+
+The earlier development slices provide admitted macOS bundle installation,
+client-owned artifact lifecycle checks and retained message selections. B2C adds
+`issue_local_upload_authority`, `consume_local_upload_result` and
+`cancel_local_upload_authority`, plus the CLI `--upload-authority-stdin` path.
+Existing legacy transfer behavior remains supported within its documented scope.
+
+Validation for this bounded code snapshot includes independent product review,
+the guarded full suite (2,056 parent cases and 6,136 subtests, no failures), package
+integrity and private first/repeat installation checks. Installed official SDK
+consumers exercised both auto and legacy modes without a skill: local upload and
+bounded reading, owner/foreign-client boundaries, cancellation, malformed input,
+lost-response recovery, retained-file reuse and an unsent artifact preview.
+These checks used synthetic files and an inert provider where preview preparation
+required one. They do not establish real Telegram delivery, native onboarding,
+all attachment formats or the whole F18 consumer matrix. Earlier failed test
+packets remain failed evidence; they are not reclassified as successful runs.
+
+Still paused and unfinished:
+
+- Native first-time onboarding, reconnect and repeatability acceptance for B1.
+- Installed file/page/parser coverage beyond the bounded B2 message and B2C text
+  file scenarios; broader conversational and no-skill consumer validation.
+- F13 formatted captions and remaining applicable topic/reply/live scenarios;
+  retained TextUrl captions, CustomEmoji, MediaTimestamp and their combinations.
+- F14 exact forward/copy; F15 native video and ordered albums.
+- F16 isolated account aliases and real two-account validation.
+- F17 archive/unarchive, own text/caption editing, pin/unpin and exact deletion.
+- Final whole-scope F18 Codex/Inspector/SDK evidence, complete distribution-source
+  and notice closure, and the final requirement/privacy/history/package review.
+
+F19 HTTP remains not applicable without a demonstrated cloud-consumer need.
+Prepared notes for future slices are planning artifacts, not implemented features.
 
 ## Product direction
 
@@ -94,17 +142,17 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
 1. **First-time setup and repeatability:** finish a supported local login/provisioning
    path, compare applicable installer work, validate on a clean user/Mac, and test
    reconnect, expiry, ambiguous targets and honest unknown outcomes.
-   The unreleased development candidate now includes a bounded local
-   `telegram-search-setup` technical slice for new default-session enrollment,
-   phone/code/optional 2FA resume, encrypted-key binding and broker handoff. This
-   is not part of published 0.51.0 or completion of P2/F18: pinned provisioning,
-   one-command installation, MCP/skill registration and actual native/clean-user
-   evidence remain. Existing sessions and the retained F16 account-registry scope
-   are unchanged.
+   The development candidate includes bounded default-session enrollment and
+   an admitted bundle/receipt-bound launcher with private install/repeat checks.
+   Native login, fresh Codex and clean-user evidence, public installer distribution
+   and its complete source/notice closure remain open. These technical slices do
+   not complete P2/F18 or the retained F16 account-registry scope.
 2. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening
-   exact-payload authorization. These UX changes are planned, not present in 0.51.0.
+   exact-payload authorization. Retained message selections and B2C upload ownership
+   now have bounded technical evidence in the development snapshot; full installed
+   file/page and conversational outcome coverage remains open.
 3. **Blocking send capabilities:** complete F14 forwarding/copying and F15 native video
    when required by observed tasks; each needs its own preview and delivery evidence.
 4. **Remaining established backlog:** F16 accounts; F17 archive/unarchive and own

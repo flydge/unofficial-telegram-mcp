@@ -200,7 +200,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [tool.name for tool in listing.tools],
-            ["_manifest", "resolve_target", "discover_targets", "search_correspondence", "get_attachment", "get_message_context", "read_attachment", "analyze_media", "create_local_artifact", "begin_local_upload", "append_local_upload", "finish_local_upload", "prepare_text_send", "send_prepared_text", "prepare_artifact_send", "send_prepared_artifact", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verify_target", "read_target_messages", "read_attachment_page", "read_spreadsheet", "read_presentation", "prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "list_drafts", "get_send_status", "get_draft", "cancel_draft", "update_draft", "refresh_draft", "retain_selection"],
+            ["_manifest", "resolve_target", "discover_targets", "search_correspondence", "get_attachment", "get_message_context", "read_attachment", "analyze_media", "create_local_artifact", "begin_local_upload", "append_local_upload", "finish_local_upload", "issue_local_upload_authority", "consume_local_upload_result", "cancel_local_upload_authority", "prepare_text_send", "send_prepared_text", "prepare_artifact_send", "send_prepared_artifact", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verify_target", "read_target_messages", "read_attachment_page", "read_spreadsheet", "read_presentation", "prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "list_drafts", "get_send_status", "get_draft", "cancel_draft", "update_draft", "refresh_draft", "retain_selection"],
         )
         for tool in listing.tools[:4]:
             self.assertTrue(tool.annotations.read_only_hint)
@@ -306,7 +306,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         manifest = result.structured_content
         self.assertEqual(
             manifest["tools"],
-            ["_manifest", "resolve_target", "discover_targets", "search_correspondence", "get_attachment", "get_message_context", "read_attachment", "analyze_media", "create_local_artifact", "begin_local_upload", "append_local_upload", "finish_local_upload", "prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_text_send", "send_prepared_text", "prepare_artifact_send", "send_prepared_artifact", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verify_target", "read_target_messages", "read_attachment_page", "read_spreadsheet", "read_presentation", "list_drafts", "get_draft", "get_send_status", "cancel_draft", "update_draft", "refresh_draft", "retain_selection"],
+            ["_manifest", "resolve_target", "discover_targets", "search_correspondence", "get_attachment", "get_message_context", "read_attachment", "analyze_media", "create_local_artifact", "begin_local_upload", "append_local_upload", "finish_local_upload", "issue_local_upload_authority", "consume_local_upload_result", "cancel_local_upload_authority", "prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_text_send", "send_prepared_text", "prepare_artifact_send", "send_prepared_artifact", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verify_target", "read_target_messages", "read_attachment_page", "read_spreadsheet", "read_presentation", "list_drafts", "get_draft", "get_send_status", "cancel_draft", "update_draft", "refresh_draft", "retain_selection"],
         )
         self.assertFalse(manifest["read_only"])
         self.assertEqual(manifest["authorization_required"], "authorizationStateReady")
@@ -366,6 +366,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             "begin_local_upload",
             "append_local_upload",
             "finish_local_upload",
+            "issue_local_upload_authority",
+            "consume_local_upload_result",
+            "cancel_local_upload_authority",
             "prepare_reply_artifact_send",
             "get_reply_artifact_draft",
             "update_reply_artifact_draft",

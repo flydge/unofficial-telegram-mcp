@@ -43,6 +43,8 @@ from .contract import CompatibilityError, contract_descriptor, require_compatibl
 from .document_reader import read_document
 from .media_analyzer import analyze_media
 from .local_upload import LocalUploadRegistry, UploadError
+from .local_upload_authority import LocalUploadAuthorityRegistry
+from .local_upload_models import UPLOAD_MODELS, LocalUploadUnavailable
 from .outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
 from .outgoing_media import validate_photo
 from .outgoing_voice import prepare_voice_note, VoiceError
@@ -196,6 +198,8 @@ class Broker(SelectionBrokerMixin):
         self._drafts = OutgoingDraftRegistry(self._artifact_store,
                                             max_ttl_seconds=self._policy.max_draft_ttl_seconds)
         self._uploads = LocalUploadRegistry(self._artifact_store)
+        self._upload_authorities = LocalUploadAuthorityRegistry(self._uploads, self._artifact_authority,
+                                                               admission=self._upload_admission)
         self._approval_prompt = approval_prompt
         self._draft_recipient_titles: dict[str, str] = {}
         self._selections = SelectionRegistry()
@@ -406,6 +410,8 @@ class Broker(SelectionBrokerMixin):
         raise ArtifactUnavailable('artifact is unavailable')
 
     def _dispatch(self, request: dict[str, Any], *, publish=None) -> dict[str, Any]:
+        if request['operation'] in UPLOAD_MODELS:
+            return self._dispatch_upload_authority(request, publish=publish)
         require_current(self._policy)
         if request.get('broker_generation') != self._generation:
             raise CompatibilityError('generation_stale')
@@ -427,7 +433,7 @@ class Broker(SelectionBrokerMixin):
             # Revoke even clients that never allocated a provider/reader context.
             self._require_empty(request['payload'])
             self._selections.release(request['client_id'])
-            self._artifact_authority.release(request['client_id'])
+            self._upload_authorities.release(request['client_id'])
             return finish(self._dispatch_owned(request))
         if operation == 'retain_selection' or request['payload'].get('selection_id') is not None or request['payload'].get('reply_selection_id') is not None:
             return self._dispatch_selection(request, publish=publish)
@@ -477,6 +483,55 @@ class Broker(SelectionBrokerMixin):
                 return finish(self._artifact_unavailable(operation, request['payload']))
             except (ArtifactUnavailable, TDLibError):
                 return finish(self._artifact_unavailable(operation, request['payload']))
+
+    def _upload_admission(self):
+        """Observe bounded policy outside locks, return a pure final fact check."""
+        policy, generation, contract = self._policy, self._generation, self._contract
+        require_current(policy)
+        if ('artifacts' not in policy.enabled_capabilities or contract_descriptor(policy) != contract):
+            raise UploadError('local upload is unavailable')
+        def checked():
+            if (self._policy is not policy or self._generation != generation or self._contract is not contract
+                    or self._stop.is_set() or self._artifact_authority.generation != generation):
+                raise UploadError('local upload is unavailable')
+        return checked
+
+    def _record_uploaded_metadata(self, completed):
+        mime_type, media_kind = _local_artifact_classification(completed.file_name, completed.kind)
+        with self._state_lock:
+            self._artifact_provenance[completed.artifact.artifact_id] = FileProvenance('local')
+            self._artifact_metadata[completed.artifact.artifact_id] = (
+                None, completed.file_name, mime_type, media_kind)
+
+    def _dispatch_upload_authority(self, request, *, publish=None):
+        operation = request['operation']
+        model = UPLOAD_MODELS[operation][0].model_validate(request['payload'])
+        registry = self._upload_authorities
+        try:
+            if request.get('broker_generation') != self._generation:
+                raise UploadError('local upload is unavailable')
+            remaining = request['deadline'] - time.monotonic()
+            if not 0 < remaining <= MAX_DEADLINE_SECONDS:
+                raise UploadError('local upload is unavailable')
+            with self._artifact_authority.scope(request['client_id'], self._artifact_store) as scope:
+                if operation == 'issue_local_upload_authority':
+                    return registry.issue(scope, model.manifest, publish)
+                if operation == 'consume_local_upload_result':
+                    return registry.consume(scope, model, publish, self._record_uploaded_metadata)
+                if operation == 'cancel_local_upload_authority':
+                    return registry.cancel(scope, model, publish)
+                if operation == 'redeem_local_upload_authority':
+                    return registry.redeem(scope, model, publish)
+                if operation == 'append_authorized_local_upload':
+                    return registry.append(scope, model, publish)
+                return registry.finish(scope, model, publish)
+        except (UploadError, ArtifactUnavailable, ArtifactStoreError, CompatibilityError):
+            result = LocalUploadUnavailable().model_dump(mode='json')
+            if publish is not None:
+                publish(result)
+            return result
+        finally:
+            registry.cleanup()
 
     def _dispatch_owned(self, request: dict[str, Any]) -> dict[str, Any]:
         require_current(self._policy)
@@ -1964,7 +2019,7 @@ class Broker(SelectionBrokerMixin):
             os.close(lock_descriptor)
 
     def shutdown(self) -> None:
-        self._stop.set()
+        self._upload_authorities.shutdown(self._stop.set)
         listener = self._listener
         if listener is not None:
             listener.close()

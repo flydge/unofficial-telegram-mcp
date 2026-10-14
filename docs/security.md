@@ -1772,3 +1772,47 @@ owners are distinct; foreign receipt adoption is refused. Unobserved session
 replacement is outside the claimed observation coverage. Synthetic guarded tests
 are technical evidence; installed/native/live consumer gates and publication
 remain separate.
+
+## External NEW-byte delegation (B2C candidate)
+
+Three closed owner tools add manifest-bound, one-use authority under existing
+artifacts policy; no new send capability/default is granted. A private authority
+has at least 256 bits of entropy. Only its digest, exact four-field manifest,
+opaque independent result reference and lifecycle facts are retained in bounded
+memory. No bodies, source paths or plaintext authority are persisted by the ticket
+registry. The trusted helper receives a bounded closed authority+manifest envelope
+only via stdin/IPC, rehashes before redemption, uses its own still-live lifecycle,
+and never falls back or retries lost mutations. Helper operations are absent from
+MCP registration. Secret transport is never an ordinary receipt or logged argument.
+
+The exact original owner object/lifecycle/generation and already observed account
+epoch are checked at each transition. Released/reused identity strings, broker
+restart, fixed dual 900-second expiry or observed pre-consume epoch drift cannot
+resurrect authority; switch-back does not undo drift. Offline issue/supply/consume
+makes zero provider/account/readiness/auth calls. Unknown external changes without
+an observation are outside detection coverage. The eventual local grant explicitly
+has account_id=None and account_epoch=None; observed drift after consumption does
+not revoke local reads. Receipts replay the existing fixed grant without renewal.
+
+Lock order is shared upload registry, artifact authority, then broker metadata
+state. Chunk decode/hash and finish fsync/copy/hash run outside revocation locks.
+Finishing paths and shared reservations remain tracked until copying exits, so
+legacy cleanup cannot retire them as orphans. Issued through complete tickets share
+the legacy eight-slot budget; a redeemed stream consumes no second slot. Terminal
+delivery receipts have a separate 32-entry bound and original ticket deadlines.
+No grant or public artifact identifier exists before original-owner consume.
+The final pure fence rechecks owner/supplier/state/epoch/deadlines/manifest/policy,
+creates only the original-owner grant, installs metadata/receipt and covers the
+broker response publication callback. Cancellation/release that wins refuses
+without metadata. Unpublished bytes retain normal cache/quarantine cleanup rules.
+
+Foreign result/read/metadata/page/XLSX/PPTX/draft admission refuses before content
+or provider work. Pending/unavailable responses contain only fixed status/detail.
+Consumed cancellation is unavailable and leaves the existing artifact grant
+intact. Lost supplier replies never permit upload replay; owner consume can recover
+only completed work. Exact recipient, unsent preview and approval remain separate.
+Legacy plain helper artifacts still belong to the helper and cannot be adopted.
+This is cooperative MCP isolation: trusted same-UID filesystem privilege and
+explicitly authorized CLI exports remain, without a hostile same-UID secrecy claim.
+Synthetic writer tests are technical evidence; installed/native/live and release
+acceptance remain separate gates.

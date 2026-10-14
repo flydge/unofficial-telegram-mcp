@@ -820,7 +820,7 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
       proxy = h.start_ipc()
       async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
         tools = {t.name: t for t in (await consumer.list_tools()).tools}
-        self.assertEqual(len(tools), 44)
+        self.assertEqual(len(tools), 47)
         self.assertIn('topic', tools['prepare_reply_text_send'].input_schema['properties'])
         payload = {'recipient': CHAT, 'text': BODY, 'reply_to': ANCHOR, 'topic': TOPIC}
         for bad in ({'id': True}, {'id': None}, {'id': 41, 'reply_to': ANCHOR}, {'id': '41'}, {'id': 0}, {'id': -1}, {'id': 2**31},

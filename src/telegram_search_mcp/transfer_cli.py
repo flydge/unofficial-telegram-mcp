@@ -18,7 +18,8 @@ import time
 import uuid
 from collections.abc import Sequence
 
-from pydantic import ValidationError
+from pydantic import ValidationError, TypeAdapter
+from .local_upload_models import LocalUploadManifest, UploadAuthorityEnvelope, UPLOAD_MODELS
 
 from .broker_client import BrokerClient, BrokerUnavailable
 from .artifact_store import CACHE_DIRECTORY, MEDIA_LIMIT, TTL_SECONDS
@@ -33,6 +34,8 @@ from .schemas import (
 _UPLOAD_ID = re.compile(r"upload_[0-9a-f]{32}\Z")
 _ARTIFACT_ID = re.compile(r"artifact_[0-9a-f]{32}_([0-9a-f]{64})_([0-9]+)\Z")
 _DETAILS = {
+    'invalid_authority': 'Supply one bounded closed authority and expected manifest JSON object on private stdin; no upload was dispatched.',
+    'manifest_mismatch': 'Selected source differs from the issued manifest; no redemption was dispatched.',
     "invalid_arguments": "Use upload with an absolute source, supported kind and optional safe file name.",
     "invalid_source": "Source must be an owner-owned regular file with one link and no symlink components.",
     "invalid_name": "Supply a safe ASCII file basename of at most 128 characters.",
@@ -160,36 +163,73 @@ def _call(client: BrokerClient, operation: str, request):
         raise TransferError("upload_unverified") from None
 
 
-def upload_source(*, source: str, kind: str, client: BrokerClient,
-                  file_name: str | None = None) -> dict[str, str | int]:
-    """Verify and stream one explicit local source; return only a verified handle."""
+def _verified_manifest(pinned, kind, file_name):
     if kind not in _LIMITS:
         raise TransferError("invalid_arguments")
+    name = pinned.name if file_name is None else file_name
+    if type(name) is not str or _NAME.fullmatch(name) is None:
+        raise TransferError('invalid_name')
+    size = pinned.info.st_size
+    if not 0 < size <= _LIMITS[kind]:
+        raise TransferError('invalid_size')
+    digest = hashlib.sha256()
+    total = 0
+    while total < size:
+        data = _read(pinned.fd, min(MAX_CHUNK_BYTES, size - total))
+        if not data:
+            raise TransferError('source_changed')
+        digest.update(data)
+        total += len(data)
+    if _read(pinned.fd, 1):
+        raise TransferError('source_changed')
+    try:
+        os.lseek(pinned.fd, 0, os.SEEK_SET)
+    except OSError:
+        raise TransferError('source_changed') from None
+    pinned.recheck()
+    return LocalUploadManifest(file_name=name, kind=kind, size_bytes=size, sha256=digest.hexdigest())
+
+
+def manifest_source(*, source: str, kind: str, file_name: str | None = None):
+    """Exact pinned-file metadata only; no broker, policy or provider work."""
     with _PinnedSource(source) as pinned:
-        name = pinned.name if file_name is None else file_name
-        if type(name) is not str or _NAME.fullmatch(name) is None:
-            raise TransferError("invalid_name")
-        size = pinned.info.st_size
-        if not 0 < size <= _LIMITS[kind]:
-            raise TransferError("invalid_size")
-        digest = hashlib.sha256()
-        total = 0
-        while total < size:
-            data = _read(pinned.fd, min(MAX_CHUNK_BYTES, size - total))
-            if not data:
-                raise TransferError("source_changed")
-            digest.update(data)
-            total += len(data)
-        if _read(pinned.fd, 1):
-            raise TransferError("source_changed")
-        sha256 = digest.hexdigest()
-        try:
-            os.lseek(pinned.fd, 0, os.SEEK_SET)
-        except OSError:
-            raise TransferError("source_changed") from None
-        pinned.recheck()
-        ready = _call(client, "begin_local_upload", BeginLocalUploadRequest(
-            file_name=name, kind=kind, size_bytes=size, sha256=sha256))
+        return _verified_manifest(pinned, kind, file_name).model_dump(mode='json')
+
+
+def _authority_stdin():
+    def closed(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate field')
+            result[key] = value
+        return result
+    try:
+        # EOF terminates the private envelope. Never echo malformed input or
+        # pydantic diagnostics, which might contain transport authority.
+        raw = sys.stdin.read(2049)
+        if not raw or len(raw.encode('utf-8')) > 2048:
+            raise ValueError('invalid envelope')
+        value = json.loads(raw, object_pairs_hook=closed,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite')))
+        return UploadAuthorityEnvelope.model_validate(value)
+    except (ValueError, TypeError, OSError, UnicodeError):
+        raise TransferError('invalid_authority') from None
+
+
+def upload_source(*, source: str, kind: str, client: BrokerClient | None,
+                  file_name: str | None = None, authority_envelope: UploadAuthorityEnvelope | None = None) -> dict[str, str | int]:
+    """Verify and stream one explicit local source; never retry dispatched work."""
+    with _PinnedSource(source) as pinned:
+        manifest = _verified_manifest(pinned, kind, file_name)
+        name, size, sha256 = manifest.file_name, manifest.size_bytes, manifest.sha256
+        external = authority_envelope is not None
+        if external and manifest != authority_envelope.manifest:
+            raise TransferError('manifest_mismatch')
+        if client is None:
+            client = _make_client()
+        ready = _call(client, 'redeem_local_upload_authority', authority_envelope) if external else _call(
+            client, 'begin_local_upload', BeginLocalUploadRequest(**manifest.model_dump()))
         if (ready.status != "ready" or type(ready.upload_id) is not str
                 or _UPLOAD_ID.fullmatch(ready.upload_id) is None):
             raise TransferError("upload_unverified")
@@ -203,7 +243,7 @@ def upload_source(*, source: str, kind: str, client: BrokerClient,
                 raise TransferError("source_changed")
             streamed.update(data)
             total += len(data)
-            accepted = _call(client, "append_local_upload", AppendLocalUploadRequest(
+            accepted = _call(client, 'append_authorized_local_upload' if external else 'append_local_upload', AppendLocalUploadRequest(
                 upload_id=upload_id, index=index, content_base64=base64.b64encode(data).decode("ascii"),
                 sha256=hashlib.sha256(data).hexdigest()))
             if (accepted.status != "accepted" or accepted.upload_id != upload_id
@@ -214,7 +254,11 @@ def upload_source(*, source: str, kind: str, client: BrokerClient,
         if _read(pinned.fd, 1) or total != size or streamed.hexdigest() != sha256:
             raise TransferError("source_changed")
         pinned.recheck()
-        finished = _call(client, "finish_local_upload", FinishLocalUploadRequest(upload_id=upload_id))
+        finished = _call(client, 'finish_authorized_local_upload' if external else 'finish_local_upload', FinishLocalUploadRequest(upload_id=upload_id))
+        if external:
+            if finished.status != 'upload_complete' or finished.result_ref != ready.result_ref:
+                raise TransferError('upload_unverified')
+            return finished.model_dump(mode='json')
         artifact = _ARTIFACT_ID.fullmatch(finished.artifact_id) if type(finished.artifact_id) is str else None
         if (finished.status != "complete" or artifact is None or artifact[1] != sha256
                 or artifact[2] != str(size) or finished.sha256 != sha256
@@ -588,6 +632,19 @@ class _UploadBrokerClient(BrokerClient):
     def finish_local_upload(self, request: FinishLocalUploadRequest) -> FinishLocalUploadResponse:
         return self._upload_call("finish_local_upload", request, FinishLocalUploadResponse)
 
+    def _authorized_call(self, operation, request):
+        result = self._request(operation, request.model_dump(mode='json'))
+        return TypeAdapter(UPLOAD_MODELS[operation][1]).validate_json(json.dumps(result, allow_nan=False), strict=True)
+
+    def redeem_local_upload_authority(self, request):
+        return self._authorized_call('redeem_local_upload_authority', request)
+
+    def append_authorized_local_upload(self, request):
+        return self._authorized_call('append_authorized_local_upload', request)
+
+    def finish_authorized_local_upload(self, request):
+        return self._authorized_call('finish_authorized_local_upload', request)
+
 
 def _make_client() -> BrokerClient:
     return _UploadBrokerClient(socket_path=BROKER_SOCKET_PATH, policy=load_runtime_policy(),
@@ -620,6 +677,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     upload.add_argument("--source", required=True, metavar="ABSOLUTE_PATH")
     upload.add_argument("--kind", required=True, choices=tuple(_LIMITS))
     upload.add_argument("--file-name", metavar="SAFE_BASENAME")
+    upload.add_argument('--upload-authority-stdin', action='store_true',
+        help='Private stdin to EOF: closed JSON {"upload_authority":secret,"manifest":{"file_name":name,"kind":kind,"size_bytes":size,"sha256":hash}}, max 2048 bytes. Rehash before redemption; no fallback/retry. Original MCP owner consumes result_ref.')
+    manifest = commands.add_parser('manifest', help='Print exact name/kind/size/SHA-256 only; no broker or policy', allow_abbrev=False)
+    manifest.add_argument('--source', required=True, metavar='ABSOLUTE_PATH')
+    manifest.add_argument('--kind', required=True, choices=tuple(_LIMITS))
+    manifest.add_argument('--file-name', metavar='SAFE_BASENAME')
     download = commands.add_parser("download", help="Verify and export one selected cached artifact", allow_abbrev=False)
     download.add_argument("--artifact-id", required=True, metavar="ISSUED_ID")
     download.add_argument("--destination", required=True, metavar="ABSOLUTE_PATH")
@@ -633,8 +696,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if command == "download":
                 receipt = download_artifact(artifact_id=args.artifact_id, destination=args.destination,
                                             client=_make_client(), _publication=publication)
+            elif command == 'manifest':
+                receipt = manifest_source(source=args.source, kind=args.kind, file_name=args.file_name)
             else:
-                receipt = upload_source(source=args.source, kind=args.kind, file_name=args.file_name, client=_make_client())
+                envelope = _authority_stdin() if args.upload_authority_stdin else None
+                receipt = upload_source(source=args.source, kind=args.kind, file_name=args.file_name,
+                                        client=None, authority_envelope=envelope)
             try:
                 print(json.dumps(receipt, separators=(",", ":")), flush=command == "download")
             except BaseException:
