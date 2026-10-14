@@ -39,6 +39,9 @@ class SetupPaths:
 
 _FIELDS = {'version', 'uid', 'enrollment_id', 'session', 'root_device', 'root_inode',
            'session_device', 'session_inode', 'key_account', 'state'}
+# 0.52 binds the API identity source. Records written earlier have neither field
+# and remain Keychain sessions; both fields appear together or not at all.
+_IDENTITY_FIELDS = {'credential_source', 'identity_fingerprint'}
 
 
 class EnrollmentStore:
@@ -46,7 +49,12 @@ class EnrollmentStore:
         self.paths = paths
 
     def _binding(self, record, root_fd):
-        if (type(record) is not dict or set(record) != _FIELDS or type(record['version']) is not int
+        if (type(record) is not dict or set(record) not in (_FIELDS, _FIELDS | _IDENTITY_FIELDS)
+                or (_IDENTITY_FIELDS <= set(record) and (
+                    record['credential_source'] not in {'keychain', 'bundled'}
+                    or type(record['identity_fingerprint']) is not str
+                    or re.fullmatch('[0-9a-f]{64}', record['identity_fingerprint']) is None))
+                or type(record['version']) is not int
                 or record['version'] != 1 or type(record['uid']) is not int or record['uid'] != os.getuid()
                 or type(record['enrollment_id']) is not str
                 or re.fullmatch('[0-9a-f]{32}', record['enrollment_id']) is None
@@ -191,7 +199,7 @@ class EnrollmentStore:
                 os.unlink(temporary, dir_fd=descriptor)
             os.close(descriptor)
 
-    def create(self, store):
+    def create(self, store, bound=None):
         self.require_new()
         if self.read() is not None:
             raise EnrollmentError()
@@ -205,6 +213,8 @@ class EnrollmentStore:
                 session=str(self.paths.session), root_device=root.st_dev, root_inode=root.st_ino,
                 session_device=session.st_dev, session_inode=session.st_ino,
                 key_account='database_key_' + identity, state='pending')
+            if bound is not None:
+                record.update(credential_source=bound.source, identity_fingerprint=bound.fingerprint)
             key = SecretValue(secrets.token_bytes(32))
             # Key first: a crash leaves an unused orphan, never an opened unkeyed database.
             store.put(record['key_account'], key)
@@ -229,6 +239,18 @@ class EnrollmentStore:
         if record is None or state not in {'pending', 'ready'}:
             raise EnrollmentError()
         self._write(dict(record, state=state), replace=True)
+
+    def bind_identity(self, bound):
+        """Add the identity binding to a pre-0.52 record; an existing binding never changes."""
+        record = self.read()
+        if record is None:
+            raise EnrollmentError()
+        if 'credential_source' in record:
+            if (record['credential_source'], record['identity_fingerprint']) != (bound.source, bound.fingerprint):
+                raise EnrollmentError()
+            return
+        self._write(dict(record, credential_source=bound.source, identity_fingerprint=bound.fingerprint),
+                    replace=True)
 
 
 def managed_key(record, store):

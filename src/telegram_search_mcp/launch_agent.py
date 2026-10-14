@@ -23,7 +23,6 @@ from .config import (
     LAUNCH_AGENT_PLIST,
     validate_tdlib_runtime,
 )
-from .keychain import read_api_credentials
 
 LAUNCHCTL = "/bin/launchctl"
 
@@ -36,8 +35,9 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _default_preflight() -> None:
+    from .credential_identity import session_credential_loader
     validate_tdlib_runtime()
-    read_api_credentials()
+    session_credential_loader()[1]()
 
 
 def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:

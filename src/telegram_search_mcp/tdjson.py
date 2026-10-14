@@ -778,12 +778,9 @@ class TDLibClient:
     @classmethod
     def from_defaults(cls) -> "TDLibClient":
         os.umask(0o077)
-        from .enrollment import load_database_key
+        from .credential_identity import session_credential_loader
         # The broker already holds the exclusive session lease at this boundary.
-        key = load_database_key()
-        def credentials():
-            legacy = read_api_credentials()
-            return ApiCredentials(legacy.api_id, legacy.api_hash, key)
+        key, credentials = session_credential_loader()
         return cls(raw=LegacyTDJson(), credential_loader=credentials, database_key_loader=lambda: key)
 
     def _apply_catalog_update(self, update: dict[str, Any]) -> None:

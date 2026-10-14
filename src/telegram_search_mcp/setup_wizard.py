@@ -5,9 +5,11 @@ import math
 import os
 import time
 from . import __version__
+from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
 from .config import ConfigurationError, load_runtime_policy
-from .credentials import CredentialStoreError, SecretValue
+from .credential_identity import CredentialIdentityError, ResolvedIdentity, resolve_enrolled, valid_record
+from .credentials import CredentialStoreError
 from .enrollment import SetupPaths, EnrollmentStore, EnrollmentError, managed_key
 from .keychain import ApiCredentials
 from .secure_terminal import TerminalError
@@ -19,7 +21,7 @@ _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'l
     'unsupported_auth_state', 'invalid_code', 'code_expired', 'invalid_password', 'flood_wait',
     'dependency_unavailable', 'auth_request_failed', 'timeout', 'cancelled', 'invalid_input',
     'auth_close_failed', 'auth_destroy_failed', 'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
-    'policy_unsafe'})
+    'policy_unsafe', 'app_identity_missing', 'app_identity_invalid', 'identity_changed'})
 
 
 @dataclass(frozen=True)
@@ -51,18 +53,17 @@ def _result(code, *, closed=False, destroyed=None, retry_after=None):
     return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed)
 
 
-def _api_credentials(terminal, store, remaining):
+def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None):
     values = {name: store.get(name) for name in ('api_id', 'api_hash')}
     missing = [name for name, value in values.items() if value is None]
-    def valid(name, value):
-        if type(value) is not SecretValue:
-            return False
-        data = value.reveal()
-        if name == 'api_id':
-            return len(data) <= 10 and data.isdigit() and data.isascii() and 0 < int(data) <= 2147483647
-        return len(data) == 32 and all(byte in b'0123456789abcdefABCDEF' for byte in data)
+    valid = valid_record
     if any(not valid(name, value) for name, value in values.items() if value is not None):
         raise CredentialStoreError('invalid_record')
+    if len(missing) == 2:
+        # No owner pair at all: an admitted bundle supplies the application identity.
+        bundled = bundled_loader()
+        if bundled is not None:
+            return ResolvedIdentity(bundled, 'bundled')
     for name in missing:
         values[name] = terminal.read_secret(name, timeout=remaining())
         if not valid(name, values[name]):
@@ -70,7 +71,8 @@ def _api_credentials(terminal, store, remaining):
     # Validate both first. Add-only writes leave partial progress recoverable.
     for name in missing:
         store.put(name, values[name])
-    return ApiCredentials(int(values['api_id'].reveal()), values['api_hash'].reveal().decode('ascii'))
+    return ResolvedIdentity(ApiCredentials(int(values['api_id'].reveal()),
+                                           values['api_hash'].reveal().decode('ascii')), 'keychain')
 
 
 def _ensure_policy(paths):
@@ -115,7 +117,7 @@ def setup_status(paths=None):
 
 
 def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False,
-              timeout=120, close_timeout=10) -> SetupResult:
+              timeout=120, close_timeout=10, bundled_loader=bundled_app_identity) -> SetupResult:
     """All secret inputs come from the verified native terminal, never CLI/env.
 
     One submission per provider state; uncertainty returns a resumable failure.
@@ -151,11 +153,13 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                 lease.check()
                 if record is not None:
                     key = managed_key(record, store)  # Never regenerate a managed key.
-                credentials = _api_credentials(terminal, store, remaining)
-                if record is None:
-                    record, key = enrollment.create(store)
-                else:
+                    credentials = resolve_enrolled(record, bundled_loader=bundled_loader,
+                        keychain_loader=lambda: _api_credentials(terminal, store, remaining).credentials)
                     enrollment.set_state('pending')
+                else:
+                    identity = _api_credentials(terminal, store, remaining, bundled_loader)
+                    credentials = identity.credentials
+                    record, key = enrollment.create(store, identity)
                 _ensure_policy(paths)
                 for directory in (paths.session / 'db', paths.session / 'files'):
                     fd = open_private_directory(directory, create=True)
@@ -192,6 +196,8 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                 result = _result(error.code)
             except CredentialStoreError as error:
                 result = _result('credential_' + error.code)
+            except (CredentialIdentityError, AppIdentityError) as error:
+                result = _result(error.code)
             except (AuthTransportError, TerminalError) as error:
                 result = _result(error.code, retry_after=getattr(error, 'retry_after', None))
             except ConfigurationError:

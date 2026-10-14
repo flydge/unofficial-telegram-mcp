@@ -15,12 +15,14 @@ import time
 from typing import NoReturn, Protocol
 
 from .credentials import ApiCredentials, SecretValue
+from .sanitize import sanitize_telegram_text
 
 
 class AuthorizationState(Enum):
     PARAMETERS = 'authorizationStateWaitTdlibParameters'
     ENCRYPTION = 'authorizationStateWaitEncryptionKey'
     PHONE = 'authorizationStateWaitPhoneNumber'
+    OTHER_DEVICE = 'authorizationStateWaitOtherDeviceConfirmation'
     CODE = 'authorizationStateWaitCode'
     PASSWORD = 'authorizationStateWaitPassword'
     READY = 'authorizationStateReady'
@@ -60,6 +62,27 @@ class AuthTeardown:
     native_destroyed: bool
 
 
+@dataclass(frozen=True, repr=False)
+class AuthObservation:
+    """One provider state. The QR link is a secret: it never enters repr or logs."""
+    state: AuthorizationState
+    qr_link: SecretValue | None = None
+    password_hint: str | None = None
+
+    def __repr__(self):
+        return f'AuthObservation({self.state.name})'
+
+    def same_as(self, other) -> bool:
+        def link(value):
+            return None if value.qr_link is None else value.qr_link.reveal()
+        return (type(other) is AuthObservation and self.state is other.state
+                and link(self) == link(other) and self.password_hint == other.password_hint)
+
+
+# Pinned TDLib renders tg://login?token=<base64url>; anything else fails closed.
+_QR_LINK = re.compile(r'tg://login\?token=[A-Za-z0-9_-]{16,200}={0,2}')
+
+
 def _state(value: object) -> AuthorizationState:
     kind = value.get('@type') if type(value) is dict else None
     if type(kind) is str:
@@ -67,6 +90,20 @@ def _state(value: object) -> AuthorizationState:
             if kind == state.value:
                 return state
     return AuthorizationState.UNSUPPORTED
+
+
+def _observe(value: object) -> AuthObservation:
+    state = _state(value)
+    if state is AuthorizationState.OTHER_DEVICE:
+        link = value.get('link')
+        if type(link) is not str or len(link) > 256 or _QR_LINK.fullmatch(link) is None:
+            return AuthObservation(AuthorizationState.UNSUPPORTED)
+        return AuthObservation(state, qr_link=SecretValue(link.encode('ascii')))
+    if state is AuthorizationState.PASSWORD:
+        hint = value.get('password_hint')
+        return AuthObservation(state, password_hint=sanitize_telegram_text(
+            hint if type(hint) is str and len(hint) <= 4096 else '', max_length=128))
+    return AuthObservation(state)
 
 
 def _provider_error(value: dict) -> tuple[str, int | None]:
@@ -106,6 +143,7 @@ class AuthTransport:
         self._raw, self._clock = raw, _clock
         self._counter = 0
         self._last_state = None
+        self._last_observation = None
         self._destroyed = False
         self._teardown = None
 
@@ -134,8 +172,11 @@ class AuthTransport:
         if result is not None and type(result) is not dict:
             _fail('auth_request_failed')
         if result is not None and result.get('@type') == 'updateAuthorizationState':
-            self._last_state = _state(result.get('authorization_state'))
+            self._remember(_observe(result.get('authorization_state')))
         return result
+
+    def _remember(self, observation):
+        self._last_observation, self._last_state = observation, observation.state
 
     def _request(self, kind, fields, timeout):
         deadline = self._deadline(timeout)
@@ -165,8 +206,11 @@ class AuthTransport:
 
     def get_authorization_state(self, *, timeout=10) -> AuthorizationState:
         value = self._request('getAuthorizationState', {}, timeout)
-        self._last_state = _state(value)
+        self._remember(_observe(value))
         return self._last_state
+
+    def observation(self) -> AuthObservation | None:
+        return self._last_observation
 
     def set_parameters(self, credentials: ApiCredentials, key: SecretValue, *, database_directory: str,
                        files_directory: str, application_version: str, timeout=10) -> None:
@@ -194,6 +238,9 @@ class AuthTransport:
                 'allow_sms_retriever_api': False, 'firebase_authentication_settings': None,
                 'authentication_tokens': []}}, timeout)
 
+    def request_qr_code(self, *, timeout=10) -> None:
+        self._ok('requestQrCodeAuthentication', {'other_user_ids': []}, timeout)
+
     def check_code(self, code: SecretValue, *, timeout=10) -> None:
         self._ok('checkAuthenticationCode', {'code': _text(code, max_bytes=128)}, timeout)
 
@@ -205,6 +252,16 @@ class AuthTransport:
         for _ in range(100000):
             if self._last_state is not None and self._last_state is not previous:
                 return self._last_state
+            self._receive(deadline)
+        _fail('timeout')
+
+    def wait_for_change(self, previous: AuthObservation, *, timeout=10) -> AuthObservation:
+        """Like wait_for_state_change, but a replaced QR link also counts."""
+        deadline = self._deadline(timeout)
+        for _ in range(100000):
+            current = self._last_observation
+            if current is not None and not current.same_as(previous):
+                return current
             self._receive(deadline)
         _fail('timeout')
 
