@@ -896,7 +896,8 @@ The helper hashes the pinned file descriptor, then streams ordered chunks of at
 most 512 KiB, checking source stability, acknowledgements and the final size/hash.
 Base64 exists only inside the local transport. Its single JSON receipt contains
 the completed artifact ID, size and SHA-256; it does not print bytes or local paths.
-Pass the artifact ID to a supported reader or an explicitly requested preview.
+The receipt belongs to the helper's independent client. A separate MCP client
+cannot redeem it for reading, retention or preparation under B2A ownership.
 MCP tools still accept handles, never local source paths.
 
 The current trusted `artifacts` capability and matching runtime contract are
@@ -912,8 +913,8 @@ Completed uploads register filename/MIME/media metadata before returning success
 Supported text, PDF, DOCX, image, XLSX and PPTX readers can use the artifact within
 their separate limits and capabilities. Unsupported formats remain unsupported.
 Metadata is memory-only: a broker restart can leave retained bytes without reader
-metadata. Upload and artifact handles are local broker-wide handles, not private
-grants between mutually hostile same-UID clients. Account registry support and
+metadata. Upload and artifact grants are client/session/incarnation scoped; same-UID
+filesystem export is a distinct trusted-local operation. Account registry support and
 selected Telegram XLSX/PPTX transfer are not added by this helper.
 
 ## Save a selected artifact locally
@@ -1744,3 +1745,64 @@ irreversible provider dispatch prevents that unissued send. After dispatch, the
 original attempt may still finish; its terminal or unknown evidence is retained
 privately against the consumed claim. Release still denies disclosure/replay and
 never authorizes a retry. Confirmation waiting does not delay release.
+
+
+## Exact retained selections (opt-in candidate)
+
+`retained_selections` is default-off and adds `retain_selection(source)`. The
+consumer chooses existing anchors or one owned artifact, captures once, and inspects
+the returned fresh evidence. A capture grants source reuse only. Explicit recipient,
+reply/topic admission, media kind, immutable preview and send approval stay separate.
+
+| Source | Capture input | Later uses |
+| --- | --- | --- |
+| Messages | `{"kind":"messages","anchors":[{"chat_id":7,"message_id":11}]}` | `read_messages(selection_id=S)` uses the complete ordered set; attachment, context and reply-chain tools require a singleton |
+| Verified target messages | `{"kind":"target_messages","target_handle":T,"message_ids":[11]}` | Same message uses, additionally bounded by the original verified target and `verified_targets` capability |
+| Owned file | `{"kind":"file","artifact_id":A}` | File readers, media analysis and supported draft preparation use `selection_id=F`; original page/range/slide selectors and continuation arguments stay exact |
+
+The synthetic IDs above illustrate the schema; use observed sources. Messages are
+1–20 ordered unique committed anchors, including signed group/channel chat IDs.
+Files are existing B2A grants in the same client/session incarnation: downloaded,
+created, uploaded through that client, or derived locally. Paths and foreign
+artifacts cannot be adopted. Standalone CLI upload receipts belong to that helper's
+independent client and are not directly reusable by a separate MCP client.
+
+A capture returns `selection_` plus 64 random hex characters, kind, fixed expiry,
+and bounded current message evidence or file hash, size, sanitized metadata and
+`telegram`/`local`/`derived` provenance. Structured union-returning SDK tools use
+the typed `{"result": <operation response or refusal>}` wrapper. Image-returning
+`CallToolResult` tools expose the operation/refusal directly in `structured_content`
+alongside their existing media blocks. Inspect the published output schema.
+
+Selections live at most 300 seconds from capture start, capped by artifact or target
+expiry. Unchanged recapture returns the original token and expiry. Use never renews
+a selection. There are 16 live entries and four active operations, including pending
+captures, per owner; capacity refuses without eviction. The exact private projection
+is bounded to 64 KiB per message and 100000 raw text characters per capture.
+Oversized, malformed or unsupported sources refuse atomically; ordinary reader
+bounds remain available without retention. Display truncation remains labelled
+partial and does not truncate private fingerprints.
+
+Each use revalidates the exact raw source, original UTF-16 entity coordinates and
+inert payloads, sender/date/edit/reply/topic/album and stable selected media facts.
+Message deletion, identity/entity/body/topic/media/unsafe-state drift, expiry,
+release, observed account change or broker restart invalidates the entire selection.
+The content-free refusal is exactly
+`{"status":"selection_unavailable","detail":"Selection is unavailable; select the source again."}`.
+Choose and capture the source again; there is no refresh, list, resolve-to-IDs,
+persistent name, sharing or automatic search rescan.
+
+Local-only files do not start TDLib. Telegram and derived files revalidate their
+original downloaded-source provenance before processing/preparation and publication.
+Missing stable remote identity or provenance refuses file retention. Selected page
+and XLSX continuations bind the original selection, selector, file hash/provenance
+and expiry; raw-artifact continuations cannot redeem them. The independent B2A
+12-hour artifact and 15-minute upload lifetimes are unchanged, and selection expiry
+does not delete cached bytes.
+
+For a reply, `reply_selection_id=S` replaces exactly one `reply_to` anchor; it
+requires a singleton and retains all same-chat/topic and source-entity policies.
+`prepare_reply_artifact_send` can combine an owned file selection and a separate
+singleton reply selection. Final send tools still accept the immutable draft ID and
+their existing exact approval inputs; they accept no selection. Unknown external
+account/session changes without provider observation are not claimed detectable.

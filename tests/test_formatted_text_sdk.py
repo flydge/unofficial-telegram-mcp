@@ -76,6 +76,12 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(data, dict)
         self.assertIsNotNone(tools[name].output_schema)
         Draft202012Validator(tools[name].output_schema).validate(data)
+        # The extended union return has the SDK's declared result envelope.
+        # Validate it first, then require that exact shape rather than a fallback.
+        if name == 'prepare_reply_text_send':
+            self.assertEqual(set(tools[name].output_schema['properties']), {'result'})
+            self.assertEqual(set(data), {'result'})
+            data = data['result']
         text = [block.text for block in result.content if getattr(block, 'type', None) == 'text']
         self.assertEqual(len(text), 1)
         self.assertEqual(json.loads(text[0]), data)
@@ -99,7 +105,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                 proxy = h.start_ipc()
                 async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
                     tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                    self.assertEqual(len(tools), 43)
+                    self.assertEqual(len(tools), 44)
                     for name in ('prepare_text_send', 'prepare_reply_text_send', 'update_draft', 'update_reply_draft'):
                         self.assertIn('outgoing_entities', tools[name].input_schema['properties'])
                     payload = {'recipient': CHAT, 'text': TEXT, 'outgoing_entities': copy.deepcopy(STYLES[::-1])}
@@ -183,7 +189,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                 proxy = h.start_ipc()
                 async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
                     tools = {tool.name: tool for tool in (await consumer.list_tools()).tools}
-                    self.assertEqual(len(tools), 43)
+                    self.assertEqual(len(tools), 44)
                     initial = [{'offset': 3, 'length': 2, 'type': {'@type': kind}} for kind in kinds]
                     payload = {'recipient': CHAT, 'text': 'ﬃ🙂B', 'outgoing_entities': initial[::-1]}
                     if h.is_topic: payload['topic'] = copy.deepcopy(TOPIC)
@@ -263,7 +269,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                         preview['preview_sha256'] = expected_digest(preview, True, UPDATED_NATIVE)
                         self.assertNotIn('preview_sha256', preview['draft'])
                         self.assertEqual(PrepareReplyTextSendResponse.model_validate(envelope).model_dump(mode='json'), envelope)
-                        Draft202012Validator(tools['prepare_reply_text_send'].output_schema).validate(envelope)
+                        Draft202012Validator(tools['prepare_reply_text_send'].output_schema).validate({'result': envelope})
                         forged.append(copy.deepcopy(envelope))
                     return envelope
                 with patch.object(proxy, '_request', side_effect=changed):

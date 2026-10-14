@@ -92,6 +92,9 @@ def get_attachment(
     request: AttachmentRequest,
     *,
     source_root: Path = TDLIB_SESSION_DIRECTORY / "files",
+    capture_source=None,
+    validate_source=None,
+    record_source=None,
 ) -> AttachmentResponse:
     """Resolve one exact message, download its selected original, and snapshot it."""
     anchor = request.anchor
@@ -116,6 +119,7 @@ def get_attachment(
         if message.get("can_be_saved") is False or message.get("self_destruct_type") is not None:
             return incomplete("unsupported", "message disallows persistent transfer")
         selected = select_attachment(message)
+        provenance = capture_source(chat, message) if capture_source is not None else None
         if selected.kind == "document" and Path(selected.name or "").suffix.casefold() not in _DOCUMENT_SUFFIXES:
             return incomplete("unsupported", "document format is unsupported", selected)
         if selected.kind == "photo" and selected.mime_type not in _IMAGE_MIMES:
@@ -124,10 +128,14 @@ def get_attachment(
         if selected.size_bytes is not None and selected.size_bytes > size_limit:
             return incomplete("too_large", "attachment exceeds the transfer limit", selected)
         source_path = client.download_file(selected.file_id, max_bytes=size_limit, timeout=300)
+        if provenance is not None and validate_source is not None:
+            validate_source(provenance)
         if not source_path.is_absolute() or not source_path.resolve(strict=True).is_relative_to(source_root.resolve(strict=True)):
             return incomplete("error", "TDLib file path is outside its private cache", selected)
         storage_kind = "media" if selected.kind in _MEDIA_KINDS else ("image" if selected.kind == "photo" else "document")
         artifact = store.store(source_path, kind=storage_kind)
+        if provenance is not None and record_source is not None:
+            record_source(provenance, artifact)
         return AttachmentResponse(
             status="complete", anchor=anchor, media_type=selected.kind,
             file_name=selected.name, mime_type=selected.mime_type,

@@ -1720,3 +1720,55 @@ publication. Interrupted unbound packets are preserved without adoption, and
 recovery attempts are bounded.
 Current pointer publication occurs last; interrupted installations fail closed
 until exact checked recovery. No active broker is stopped or foreign data adopted.
+
+
+## Retained-selection boundary (B2B candidate)
+
+The default-off `retained_selections` capability adds one closed issuer and exact
+source alternatives on existing operations. Request, proxy, broker and finalized
+SDK schemas enforce exactly one raw source or selection, plus an independent
+exactly-one reply source where applicable. Target capture additionally requires
+`verified_targets`; original operation capabilities remain required. Contract 1 and
+framing 2 remain, while the schema fingerprint honestly changes for 44 tools.
+
+A memory-only selection binds B2A owner/client/session incarnation, observed numeric
+account and revocation epoch, schema fingerprint, ordered anchors or immutable
+artifact hash/size/metadata, original provenance, target dependency, and fixed wall
+and monotonic expiry. No persisted raw body, entity, filename, local path or token
+registry is created. Capacity is 16 live entries/four active operations including
+pending captures per owner, without eviction or sliding refresh.
+
+Exact projection hashes the complete bounded raw text/caption, original whole-scalar
+UTF-16 entity coordinates and inert type payloads, identity/date/edit/reply/topic/album
+and the existing selected attachment variant. Stable remote unique identity is
+hashed separately from in-generation file ID and exact raw name/MIME/size and
+applicable dimensions/duration. Unknown inert entity payloads detect changes only;
+they add no reply rendering, replay, outgoing entity, navigation or send authority.
+Serialization above 64 KiB/message or aggregate raw text above 100000 characters
+refuses; no prefix hash or sanitization-equivalent shortcut is used. Titles, sender
+display names, transfer progress, local paths and view/unread counts are excluded.
+
+Ownership admission precedes metadata, byte hashing, provider work and extraction.
+Local provenance makes zero provider calls; Telegram/derived provenance is frozen
+from the original download and rechecked after transfer/store and every selected
+use. Actual raw message returns during selected message operations also match the
+captured projection, catching transient drift that later reverts. Any failed source
+discards all earlier rows and outputs. Observed account drift revokes B2A provider
+grants and selection epochs permanently; switching back cannot resurrect them.
+
+Provider observations remain outside authority, selection, target, state and draft
+registry locks. Pure revocation fences cover constructed content, derived IDs,
+paths, cursor publication and draft insertion. Unpublished candidate drafts are
+tracked per selected operation and atomically discarded on interrupted publication
+or preview failure. Continuations bind original selection/selector/hash/provenance
+and cap real cursor state to selection expiry; both grants are checked on each call.
+A refusal contains only fixed status/detail and discloses no owner, existence,
+anchor, name, path, hash, preview or other source content.
+
+Selections do not shorten artifact/upload TTLs, delete cached bytes, select a
+recipient, relax same-chat/topic/source admission, or satisfy send approval. Raw
+artifact paths retain their independent B2A authority. CLI upload and MCP client
+owners are distinct; foreign receipt adoption is refused. Unobserved session
+replacement is outside the claimed observation coverage. Synthetic guarded tests
+are technical evidence; installed/native/live consumer gates and publication
+remain separate.

@@ -203,7 +203,7 @@ class TopicHistoryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             provider=HistoryForumProvider();service=SearchService(client=provider,owns_client=False)
             policy=RuntimePolicy(enabled_capabilities=('read_topic_history',)) if enabled else RuntimePolicy(enabled_capabilities=('list_topics','read_history'))
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
-                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),43)
+                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),44)
                 tool=next(t for t in tools if t.name=='read_topic_history')
                 self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 self.assertFalse(tool.input_schema['additionalProperties'])

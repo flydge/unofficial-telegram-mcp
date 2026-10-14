@@ -153,7 +153,7 @@ The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stder
 
 Merge the server block from [`.codex/config.toml.example`](../.codex/config.toml.example) into `.codex/config.toml` in the project where you want to use Unofficial Telegram MCP. Preserve any existing settings. Replace **both** absolute-path placeholders. The example does not expand `~` or shell variables.
 
-The example lists all 43 tools and sets the required timeouts. Start a fresh chat in that project after configuration or schema changes.
+The example lists all 44 tools and sets the required timeouts. Start a fresh chat in that project after configuration or schema changes.
 
 Install the optional skill by copying [the skill file](../skills/telegram-search/SKILL.md) to `~/.agents/skills/telegram-search/SKILL.md`. Back up an existing copy first. The skill supplies search and approval guidance; the broker enforces its own permissions.
 
@@ -198,6 +198,7 @@ The containing directory must be owned by you with mode `0700`; the regular poli
 | Selected messages and history | `read_messages`, `read_history`, `read_reply_chain` |
 | Topics and richer search | `list_topics`, `read_topic_history`, `search_messages`, `list_chats`, `search_chats` |
 | Reuse a verified chat | `verified_targets` |
+| Retain exact messages or owned files (candidate) | `retained_selections`; original reader/send capabilities still apply |
 | Document pages, spreadsheets, presentations | `attachment_pages`, `spreadsheets`, `presentations` |
 | Approved sending | `send` |
 | Exact forum-topic text sends/replies | `send`, `topic_text_send`, and `reply_text_send` for replies |

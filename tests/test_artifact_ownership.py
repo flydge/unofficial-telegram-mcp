@@ -359,7 +359,7 @@ class OwnershipTests(unittest.TestCase):
             self.assertEqual(prepared['status'], 'prepared')
             derived.append(self.broker._drafts._entries[prepared['draft_id']].draft.artifact_id)
         for token in derived:
-            self.assertNotIn(token, self.broker._artifact_metadata)
+            # Derived previews may now have metadata, but ownership precedes its use.
             with self.broker._artifact_authority.scope(B, self.store):
                 self.assertIsNone(self.store.lookup(token))
             with self.broker._artifact_authority.scope(A, self.store):

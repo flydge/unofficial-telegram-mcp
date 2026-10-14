@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .selection_broker import selected_request_facts, selected_file_context
 from .artifact_store import ArtifactStore, ArtifactStoreError
 from .contract import fingerprint
 from .presentation_models import (PRESENTATION_DETAIL, PresentationSlide, PresentationScope,
@@ -111,7 +112,7 @@ class PresentationReader:
                 wall_expiry = min(wall_expiry, datetime.fromtimestamp(artifact.expires_at, tz=timezone.utc))
                 expires = min(expires, self._clock() + max(0., (wall_expiry - self._wall()).total_seconds()))
                 self._live(expires, wall_expiry, deadline, generation)
-                params = fingerprint({'request': request.model_dump(mode='json'), 'metadata': metadata_digest,
+                params = fingerprint({'request': selected_request_facts(request), 'metadata': metadata_digest,
                                       'sha256': artifact.sha256, 'bytes': artifact.size_bytes, 'extractor_version': 1})
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -134,7 +135,7 @@ class PresentationReader:
                 selected = [PresentationSlide.model_validate(item) for item in result.slides]
                 if presentation_text_size(selected) > 20_000:
                     raise _ReadFailure('limit_reached')
-                scope = PresentationScope(artifact_id=artifact.artifact_id, artifact_sha256=artifact.sha256,
+                scope = PresentationScope(selection_id=selected_file_context().selection_id if selected_file_context() else None,artifact_id=artifact.artifact_id, artifact_sha256=artifact.sha256,
                     artifact_bytes=artifact.size_bytes, extraction_fingerprint=params, broker_generation=generation,
                     source_anchor=SelectedMessageAnchor.model_validate(anchor.model_dump()) if anchor is not None else None,
                     catalog=list(result.catalog), slides=request.slides, include_notes=request.include_notes)

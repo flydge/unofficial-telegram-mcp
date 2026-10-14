@@ -155,7 +155,11 @@ def _local_artifact_classification(file_name: str, kind: str = "document") -> tu
     return _LOCAL_MIME_TYPES.get(suffix, "application/octet-stream"), media_kind
 
 
-class Broker:
+from .selection_broker import SelectionBrokerMixin, FileProvenance
+from .retained_selections import SelectionRegistry
+
+
+class Broker(SelectionBrokerMixin):
     """Own one lazy Telegram client and isolate discovery state per proxy client."""
 
     def __init__(
@@ -194,6 +198,8 @@ class Broker:
         self._uploads = LocalUploadRegistry(self._artifact_store)
         self._approval_prompt = approval_prompt
         self._draft_recipient_titles: dict[str, str] = {}
+        self._selections = SelectionRegistry()
+        self._artifact_provenance = {}
         self._artifact_metadata: dict[str, tuple[object, str | None, str | None, str]] = {}
         self._download_source_root = download_source_root
         self._verify_peer_uid = verify_peer_uid
@@ -420,8 +426,11 @@ class Broker:
         if operation == 'release_client':
             # Revoke even clients that never allocated a provider/reader context.
             self._require_empty(request['payload'])
+            self._selections.release(request['client_id'])
             self._artifact_authority.release(request['client_id'])
             return finish(self._dispatch_owned(request))
+        if operation == 'retain_selection' or request['payload'].get('selection_id') is not None or request['payload'].get('reply_selection_id') is not None:
+            return self._dispatch_selection(request, publish=publish)
         owned_operations = {'get_attachment', 'read_attachment', 'analyze_media', 'read_attachment_page',
             'read_spreadsheet', 'read_presentation', 'create_local_artifact', 'begin_local_upload',
             'append_local_upload', 'finish_local_upload', 'prepare_artifact_send', 'prepare_reply_artifact_send',
@@ -457,6 +466,8 @@ class Broker:
                     if account is not None:
                         self._artifact_authority.observe(scope, account)
                 result = self._dispatch_owned(request)
+                if artifact_id is not None:
+                    self._record_derived(result, artifact_id)
                 with self._artifact_authority.publication(scope):
                     return finish(result)
             except AuthorizationBlocked:
@@ -499,8 +510,11 @@ class Broker:
         if operation == "get_attachment":
             model = AttachmentRequest.model_validate(payload)
             response = get_attachment(
-                self._shared_client(), self._artifact_store, model,
+                self._selection_message_client(), self._artifact_store, model,
                 source_root=self._download_source_root,
+                capture_source=lambda chat,raw:self._download_capture(active_scope(self._artifact_store),chat,raw),
+                validate_source=lambda provenance:self._download_validate(active_scope(self._artifact_store),provenance),
+                record_source=lambda provenance,artifact:self._download_record(active_scope(self._artifact_store),provenance,artifact),
             )
             if response.status == "complete" and response.artifact_id is not None:
                 with self._state_lock:
@@ -630,7 +644,7 @@ class Broker:
             return self._revise_draft(RefreshDraftRequest.model_validate(payload), client_id=client_id).model_dump(mode="json")
         if operation == "read_reply_chain":
             model = ReadReplyChainRequest.model_validate(payload)
-            return read_reply_chain(self._shared_client(), model, deadline=request["deadline"]).model_dump(mode="json")
+            return read_reply_chain(self._selection_message_client(), model, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "verify_target":
             model = VerifyTargetRequest.model_validate(payload)
             with self._service_lease(client_id) as service:
@@ -641,7 +655,7 @@ class Broker:
                 return service.read_target_messages(model, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "read_messages":
             model = ReadMessagesRequest.model_validate(payload)
-            return read_messages(self._shared_client(), model, deadline=request["deadline"]).model_dump(mode="json")
+            return read_messages(self._selection_message_client(), model, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "search_chats":
             model = SearchChatsRequest.model_validate(payload)
             with self._service_lease(client_id) as service:
@@ -668,7 +682,7 @@ class Broker:
                 return service.read_history(model, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "get_message_context":
             model = MessageContextRequest.model_validate(payload)
-            return get_message_context(self._shared_client(), model).model_dump(mode="json")
+            return get_message_context(self._selection_message_client(), model).model_dump(mode="json")
         if operation == "check":
             self._require_empty(payload)
             try:
@@ -829,6 +843,7 @@ class Broker:
                 mime_type, media_kind = _local_artifact_classification(request.file_name)
                 artifact = self._artifact_store.store(path, kind="media" if media_kind != "document" else "document")
             with self._state_lock:
+                self._artifact_provenance[artifact.artifact_id] = FileProvenance('local')
                 self._artifact_metadata[artifact.artifact_id] = (
                     None, request.file_name, mime_type, media_kind,
                 )
@@ -870,6 +885,7 @@ class Broker:
             artifact = completed.artifact
             mime_type, media_kind = _local_artifact_classification(completed.file_name, completed.kind)
             with self._state_lock:
+                self._artifact_provenance[artifact.artifact_id] = FileProvenance('local')
                 self._artifact_metadata[artifact.artifact_id] = (
                     None, completed.file_name, mime_type, media_kind,
                 )
@@ -1153,6 +1169,7 @@ class Broker:
                                            input_mime=request.mime_type,
                                            input_name=request.display_name)
                 artifact_id = voice.artifact.artifact_id
+                self._record_derived_file(artifact_id, request.artifact_id, Path(request.display_name).stem + ".ogg", "audio/ogg", "voice_note")
                 display_name = Path(request.display_name).stem + ".ogg"
                 mime_type = "audio/ogg"
                 duration_seconds = voice.duration_seconds
@@ -1222,7 +1239,7 @@ class Broker:
             if request.reply_to.chat_id!=request.recipient:raise DraftError(REPLY_UNAVAILABLE)
             chat=provider.resolve_target(request.recipient)
             title=sanitize_telegram_text(chat.get('title'),max_length=255) or str(request.recipient)
-            source=provider.read_reply_source(request.reply_to.chat_id,request.reply_to.message_id)
+            source=self._selection_message_client().read_reply_source(request.reply_to.chat_id,request.reply_to.message_id)
             self._require_reply_source_policy(source)
             artifact=self._artifact_store.lookup(request.artifact_id)
             if artifact is None:raise DraftError(REPLY_UNAVAILABLE)
@@ -1232,6 +1249,7 @@ class Broker:
             elif request.kind=='voice_note':
                 voice=prepare_reply_voice_note(artifact,self._artifact_store,input_mime=request.mime_type,
                     input_name=request.display_name,budget_check=lambda:self._reply_budget_check(provider))
+                self._record_derived_file(voice.artifact.artifact_id,request.artifact_id,Path(request.display_name).stem+".ogg","audio/ogg","voice_note")
                 kwargs.update(artifact_id=voice.artifact.artifact_id,display_name=_safe_display_name(Path(_safe_display_name(request.display_name)).stem+'.ogg'),mime_type='audio/ogg',
                     duration_seconds=voice.duration_seconds,waveform_base64=voice.waveform_base64,
                     source_sha256=voice.source_sha256,source_display_name=_safe_display_name(request.display_name),converted=voice.converted)
@@ -1325,7 +1343,7 @@ class Broker:
             if request.topic is not None:
                 topic = provider.read_topic_snapshot(request.recipient, request.topic.id,
                     expected_account_id=owner.account_id, expected_recipient_title=title)
-            source=provider.read_reply_source(request.reply_to.chat_id,request.reply_to.message_id,
+            source=self._selection_message_client().read_reply_source(request.reply_to.chat_id,request.reply_to.message_id,
                 **({'expected_forum_topic_id': topic.forum_topic_id} if topic is not None else {}))
             self._require_reply_source_policy(source)
             if (self._reply_owner(client_id)!=owner or self._shared_client() is not provider or

@@ -445,6 +445,7 @@ client.close()
             "cancel_draft",
             "update_draft",
             "refresh_draft",
+            "retain_selection",
         ]
         self.assertEqual([tool.name for tool in first_tools.tools], expected_tools)
         self.assertEqual([tool.name for tool in second_tools.tools], expected_tools)

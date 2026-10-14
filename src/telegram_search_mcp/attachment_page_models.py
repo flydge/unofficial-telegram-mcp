@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
 
 PageNumber = Annotated[int, Field(strict=True, ge=1, le=2**53-1)]
@@ -12,9 +13,10 @@ AttachmentCursor = Annotated[str, Field(strict=True, pattern=r'^attachment_[0-9a
 Hash = Annotated[str, Field(strict=True, pattern=r'^[0-9a-f]{64}$', min_length=64, max_length=64)]
 Count = Annotated[int, Field(strict=True, ge=0, le=1_000_000)]
 
-class ReadAttachmentPageRequest(BaseModel):
+class ReadAttachmentPageRequest(SelectedInput):
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
-    artifact_id: ArtifactId
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     pages: PageSelection | None = None
     max_chars: Annotated[int, Field(strict=True, ge=1, le=20_000)] = 20_000
     render_pages: Annotated[bool, Field(strict=True)] = True
@@ -35,6 +37,7 @@ class ReadAttachmentPageRequest(BaseModel):
         return value
 
 class AttachmentPageScope(BaseModel):
+    selection_id: SelectionId | None = None
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
     artifact_id: ArtifactId
     artifact_sha256: Hash

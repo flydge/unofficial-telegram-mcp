@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+from .selection_broker import selected_request_facts, selected_file_context
 from .artifact_store import ArtifactStore, ArtifactStoreError
 from .contract import fingerprint
 from .schemas import SelectedMessageAnchor
@@ -88,7 +89,7 @@ class SpreadsheetReader:
         reserved = False
         try:
             request = ReadSpreadsheetRequest.model_validate(request.model_dump())
-            digest = fingerprint(request.model_dump(mode='json', exclude={'cursor'}))
+            digest = fingerprint(selected_request_facts(request))
             deadline = min(deadline if deadline is not None else float('inf'), time.monotonic() + 30)
             with self._lock:
                 now = self._clock()
@@ -107,6 +108,10 @@ class SpreadsheetReader:
                 reserved = True
                 expires = prior.expires if prior else now + 300
                 wall_expiry = prior.scope.expires_at if prior else self._wall() + timedelta(seconds=300)
+                selection = selected_file_context()
+                if selection is not None:
+                    wall_expiry = min(wall_expiry, selection.expires_at)
+                    expires = min(expires, selection.expires_monotonic)
                 self._live_locked(expires, wall_expiry, deadline, generation)
             with self._client.request_budget(deadline):
                 account = self._account(prior.account_id if prior else None)
@@ -129,7 +134,7 @@ class SpreadsheetReader:
                 elif artifact_expiry < wall_expiry:
                     raise _ReadFailure('expired')
                 self._live(expires, wall_expiry, deadline, generation)
-                params = fingerprint({'request':request.model_dump(mode='json', exclude={'cursor'}),
+                params = fingerprint({'request':selected_request_facts(request),
                     'metadata':metadata_digest, 'sha256':artifact.sha256, 'bytes':artifact.size_bytes, 'extractor_version':1})
                 if prior and params != prior.scope.extraction_fingerprint:
                     raise _ReadFailure('invalid_cursor')
@@ -142,7 +147,7 @@ class SpreadsheetReader:
                 self._account(account)
                 if result.status not in {'catalog', 'page', 'complete'}:
                     raise _ReadFailure(result.status if result.status in {'unsupported','invalid_selection','limit_reached','error'} else 'error')
-                scope = SpreadsheetScope(artifact_id=artifact.artifact_id, artifact_sha256=artifact.sha256,
+                scope = SpreadsheetScope(selection_id=selected_file_context().selection_id if selected_file_context() else None,artifact_id=artifact.artifact_id, artifact_sha256=artifact.sha256,
                     artifact_bytes=artifact.size_bytes, extraction_fingerprint=params, broker_generation=generation,
                     source_anchor=SelectedMessageAnchor.model_validate(anchor.model_dump()) if anchor is not None else None,
                     catalog=list(result.catalog), selections=request.selections, total_cells=result.total_cells,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
 
 SlideIndex = Annotated[int, Field(strict=True, ge=1, le=128)]
@@ -30,8 +31,9 @@ def _unique(value):
     return value
 
 
-class ReadPresentationRequest(_StrictModel):
-    artifact_id: ArtifactId
+class ReadPresentationRequest(SelectedInput):
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     slides: SlideSelection | None = None
     include_notes: StrictBoolean = False
 
@@ -77,6 +79,7 @@ def presentation_text_size(slides) -> int:
 
 
 class PresentationScope(_StrictModel):
+    selection_id: SelectionId | None = None
     artifact_id: ArtifactId
     artifact_sha256: Hash
     artifact_bytes: Annotated[int, Field(strict=True, ge=0, le=64 * 1024 * 1024)]

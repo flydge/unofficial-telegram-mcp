@@ -233,7 +233,8 @@ class OutgoingDraftRegistry:
         expires_at = min(now + self._max_ttl_seconds, artifact.expires_at)
         if expires_at <= now:
             raise DraftError("artifact has expired")
-        with self._lock:
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
             if local_admission_guard is not None:
                 local_admission_guard()
             self._prune_locked(now)
@@ -263,6 +264,7 @@ class OutgoingDraftRegistry:
             self._entries[draft_id] = _Entry(draft=draft, owner=owner,
                                             artifact_expires_at=artifact.expires_at,
                                             artifact_authority=self._authority_stamp())
+            record_selection_draft(draft_id)
             return draft
 
     def prepare_text(self, *, owner: DraftOwner, recipient: int, text: str, recipient_title: str = "", reply_source: ReplySource | None = None,
@@ -293,7 +295,8 @@ class OutgoingDraftRegistry:
                 formatting_provider_epoch is not topic_provider_epoch):
             raise DraftError('text provider authority is inconsistent')
         now = self._clock()
-        with self._lock:
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
             self._prune_locked(now)
             if len(self._entries) >= self._capacity:
                 raise DraftError("draft capacity is exhausted")
@@ -310,6 +313,7 @@ class OutgoingDraftRegistry:
                 formatting_provider_epoch=formatting_provider_epoch,
             )
             self._entries[draft_id] = _Entry(draft=draft, owner=owner)
+            record_selection_draft(draft_id)
             return draft
 
     def revise(self, draft_id: str, *, owner: DraftOwner, recipient_title: str,
@@ -679,3 +683,10 @@ class OutgoingDraftRegistry:
             return entry
         except KeyError:
             raise DraftError("unknown draft") from None
+
+    def discard_unpublished(self, draft_id):
+        """Retire an unpublished local candidate; never make a provider request."""
+        with self._lock:
+            entry = self._entries.get(draft_id)
+            if entry is not None and entry.state == "pending":
+                self._entries.pop(draft_id, None)

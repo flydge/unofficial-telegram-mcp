@@ -508,6 +508,8 @@ class ReplyTextDraftPreview(_Closed):
     @model_serializer(mode='wrap')
     def omit_absent_topic(self, handler):
         value = handler(self)
+        for key in ('reply_to','reply_selection_id'):
+            if value.get(key) is None:value.pop(key,None)
         if self.topic is None:
             value.pop('topic', None)
         if not self.outgoing_entities:
@@ -595,16 +597,21 @@ class ReplyDraftPreview(_Closed):
         return cls(draft=draft,reply_target=target,preview_sha256=digest(preview_facts(draft,target)))
 
 
-class PrepareReplyTextSendRequest(_Closed):
+from .selection_refs import SelectedInput, SelectionId
+
+class PrepareReplyTextSendRequest(SelectedInput):
     recipient: ChatId
     text: DraftText
-    reply_to: SelectedMessageAnchor
+    reply_to: SelectedMessageAnchor | None = None
+    reply_selection_id: SelectionId | None = None
     topic: ForumTopicReference | None = None
     outgoing_entities: OutgoingEntityList = Field(default_factory=list)
 
     @model_serializer(mode='wrap')
     def omit_absent_topic(self, handler):
         value = handler(self)
+        for key in ('reply_to','reply_selection_id'):
+            if getattr(self,key) is None:value.pop(key,None)
         if self.topic is None:
             value.pop('topic', None)
         if not self.outgoing_entities:

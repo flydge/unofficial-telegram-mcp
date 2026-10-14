@@ -278,10 +278,14 @@ class EvidenceAnchor(BaseModel):
     message_id: MessageId
 
 
-class AttachmentRequest(BaseModel):
+from .selection_refs import SelectionId, SelectionRefusal, SelectedInput, source_schema
+
+
+class AttachmentRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    anchor: EvidenceAnchor
+    anchor: EvidenceAnchor | None = None
+    selection_id: SelectionId | None = None
 
 
 class AttachmentResponse(BaseModel):
@@ -318,10 +322,11 @@ ArtifactId = Annotated[
 ]
 
 
-class ReadAttachmentRequest(BaseModel):
+class ReadAttachmentRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    artifact_id: ArtifactId
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     max_chars: Annotated[int, Field(strict=True, ge=1, le=20_000)] = 20_000
     max_pages: Annotated[int, Field(strict=True, ge=1, le=5)] = 5
 
@@ -350,9 +355,10 @@ class ReadAttachmentResponse(BaseModel):
     detail: str
 
 
-class AnalyzeMediaRequest(BaseModel):
+class AnalyzeMediaRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    artifact_id: ArtifactId
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     start_seconds: Annotated[float, Field(strict=True, ge=0, le=86400)] = 0.0
 
 
@@ -451,9 +457,10 @@ class FinishLocalUploadResponse(CreateLocalArtifactResponse):
     pass
 
 
-class PrepareArtifactSendRequest(BaseModel):
+class PrepareArtifactSendRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    artifact_id: ArtifactId
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     recipient: ChatId
     display_name: Annotated[str, Field(strict=True, min_length=1, max_length=255)]
     mime_type: Annotated[str, Field(strict=True, min_length=3, max_length=127)]
@@ -859,10 +866,11 @@ class ContextEvidence(BaseModel):
     snippet: str
 
 
-class MessageContextRequest(BaseModel):
+class MessageContextRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    anchor: EvidenceAnchor
+    anchor: EvidenceAnchor | None = None
+    selection_id: SelectionId | None = None
     radius: Annotated[int, Field(strict=True, ge=0, le=4)] = 2
 
 
@@ -906,13 +914,14 @@ class SelectedMessageAnchor(EvidenceAnchor):
 SelectedMessageAnchors = Annotated[list[SelectedMessageAnchor], Field(min_length=1, max_length=20)]
 
 
-class ReadMessagesRequest(BaseModel):
+class ReadMessagesRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    anchors: SelectedMessageAnchors
+    anchors: SelectedMessageAnchors | None = None
+    selection_id: SelectionId | None = None
 
     @model_validator(mode="after")
     def unique_anchors(self) -> "ReadMessagesRequest":
-        if len({(a.chat_id, a.message_id) for a in self.anchors}) != len(self.anchors):
+        if self.anchors is not None and len({(a.chat_id, a.message_id) for a in self.anchors}) != len(self.anchors):
             raise ValueError("selected anchors must be unique")
         return self
 
@@ -1015,9 +1024,10 @@ class ReadMessagesResponse(BaseModel):
 ReplyDepth = Annotated[int, Field(strict=True, ge=1, le=10)]
 
 
-class ReadReplyChainRequest(BaseModel):
+class ReadReplyChainRequest(SelectedInput):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    anchor: SelectedMessageAnchor
+    anchor: SelectedMessageAnchor | None = None
+    selection_id: SelectionId | None = None
     max_depth: ReplyDepth = 10
 
 

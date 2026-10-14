@@ -156,7 +156,11 @@ class NumericIdPublicBoundaryTests(unittest.IsolatedAsyncioTestCase):
             ]:
                 result = await consumer.call_tool(tool, arguments)
                 self.assertFalse(result.is_error)
-                self.assertEqual(result.structured_content["status"], status)
+                data = result.structured_content
+                if tool == "get_attachment":
+                    self.assertEqual(set(data), {"result"})
+                    data = data["result"]
+                self.assertEqual(data["status"], status)
             self.assertEqual(len(factories), 1)
             self.assertEqual([name for name, request in service.calls],
                              ["search", "prepare_text_send", "get_attachment"])

@@ -377,7 +377,10 @@ requested `photo`/`voice_note` kind). Use a source with no symlink components or
 `..`, owned by the local user with one hard link. An optional `--file-name` supplies
 a safe ASCII display basename. The helper hashes and streams through the existing
 upload protocol; keep base64 and file bytes out of the model conversation. Use only
-its successful artifact ID, size and SHA-256 receipt in subsequent MCP calls.
+its successful size and SHA-256 receipt as upload evidence. The standalone helper
+owns an independent B2A client; a separate MCP client cannot directly reuse that
+artifact for retention, reading or preparation. Reuse only artifacts already issued
+to the current MCP client; never adopt a foreign receipt.
 `create_local_artifact` remains available for content within 512 KiB. Never pass
 local paths, URLs, credentials, TDLib file IDs or raw provider functions as MCP inputs.
 
@@ -824,3 +827,42 @@ revision and fresh approval. Pretransport guard refusal records local_failed wit
 no raw send; posttransport uncertainty never permits retry. Use only exact late
 evidence for the original attempt. Live delivery/dialog and the remaining F13
 scope retain their separate validation gates.
+
+
+## Retain exact conversational sources
+
+When `retained_selections` is enabled, choose sources from existing search/history
+evidence or the user's explicit source selection, then capture once.
+
+1. Call `retain_selection` with `source={"kind":"messages","anchors":[...]}` or
+   `{"kind":"target_messages","target_handle":T,"message_ids":[...]}`. Target
+   capture also requires `verified_targets`. Inspect the fresh current evidence
+   returned inside the typed SDK `result` wrapper. Preserve ordered sources.
+2. Use `read_messages(selection_id=S)` for the full set. Attachment/context/reply
+   chain tools require a singleton. After a selected attachment download, explicitly
+   retain its same-client artifact once with `source={"kind":"file","artifact_id":A}`
+   and inspect hash, size, sanitized metadata and provenance.
+3. Pass the file selection directly to an existing file/media reader or exact
+   page/range/slide operation. Keep its selectors and continuation arguments
+   identical. Image-returning tools expose their typed response directly in
+   `structured_content`; structured union-returning tools use `result`. Locally
+   create or upload supported results through the current MCP client; optionally
+   retain the resulting owned artifact. A standalone CLI upload belongs to its own
+   client and cannot be silently adopted.
+4. For an explicitly requested send preparation, use `prepare_artifact_send` with
+   the result selection and the explicit recipient/name/MIME/caption/media kind.
+   A singleton `reply_selection_id` may replace the reply anchor on existing reply
+   preparation; same-chat/topic/source admission still applies. Present the complete
+   immutable preview. Final send uses only the existing draft ID/digest and a
+   separate explicit approval of that preview. A selection supplies no recipient
+   choice or approval.
+
+Selections are memory-only, same-client/session/incarnation scoped and fixed for
+at most 300 seconds, capped by source file/target expiry. Use never renews them.
+Any missing source, drift, unsafe state, ownership/release/account change, expiry
+or restart returns only `selection_unavailable` with the fixed recovery detail.
+Choose and retain the source again; do not search automatically, refresh, resolve
+the token to raw IDs, share it or substitute another source. Ordinary reader
+truncation stays partial; oversized exact projections refuse retention. Local file
+use makes no provider calls; Telegram and derived files revalidate original source
+provenance. Human users need not copy message IDs or local files between steps.

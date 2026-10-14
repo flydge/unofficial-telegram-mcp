@@ -39,8 +39,8 @@ class ReplyBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tool.input_schema['properties']['max_depth']['maximum'], 10)
                 result = await consumer.call_tool('read_reply_chain', ARGS)
                 if enabled:
-                    self.assertEqual(result.structured_content['stop_reason'], 'no_parent')
-                    self.assertEqual(len(result.structured_content['results']), 2)
+                    self.assertEqual(result.structured_content['result']['stop_reason'], 'no_parent')
+                    self.assertEqual(len(result.structured_content['result']['results']), 2)
                     provider.calls.clear()
                     for invalid in ({'max_depth': True}, {'max_depth': '2'}, {'max_depth': 2.0},
                             {'max_depth': 0}, {'max_depth': 11}, {'path': '/private'},

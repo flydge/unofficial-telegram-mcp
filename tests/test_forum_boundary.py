@@ -51,7 +51,7 @@ class ForumBoundaryTests(unittest.IsolatedAsyncioTestCase):
             policy=RuntimePolicy(enabled_capabilities=('list_topics',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),43)
+                self.assertEqual(len(tools),44)
                 tool=next(t for t in tools if t.name=='list_topics')
                 self.assertTrue(tool.annotations.read_only_hint)
                 self.assertFalse(tool.annotations.idempotent_hint)

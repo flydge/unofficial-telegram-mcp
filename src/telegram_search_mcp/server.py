@@ -18,6 +18,8 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import ConfigDict, Field
 
+from .selection_refs import SelectionId, SelectionRefusal, source_schema
+from .retained_selection_models import RetainSelectionRequest, RetainSelectionSource, RetainSelectionResponse
 from . import __version__
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
@@ -129,6 +131,7 @@ _TOOL_NAMES = [
     "cancel_draft",
     "update_draft",
     "refresh_draft",
+    "retain_selection",
 ]
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -305,6 +308,12 @@ def build_server(
             "scan_ttl_seconds": 300,
             "scan_capacity": 4,
             "persistent_private_index": False,
+            "retained_selections": {
+                "default_enabled": False, "ttl_seconds": 300, "live_capacity_per_owner": 16,
+                "active_capacity_per_owner": 4, "message_projection_bytes": 65536,
+                "capture_raw_characters": 100000, "persistent": False,
+                "refusal": "selection_unavailable", "recipient_or_send_authority": False,
+            },
             "exact_chat_analysis": (
                 "transient numeric text and caption analysis within one exact chat; "
                 "matching evidence only, never a transcript export"
@@ -406,8 +415,8 @@ def build_server(
         annotations=_TRANSFER,
         structured_output=True,
     )
-    def get_attachment(anchor: EvidenceAnchor) -> AttachmentResponse:
-        return get_service().get_attachment(AttachmentRequest(anchor=anchor))
+    def get_attachment(anchor: EvidenceAnchor | None = None, selection_id: SelectionId | None = None) -> AttachmentResponse | SelectionRefusal:
+        return get_service().get_attachment(AttachmentRequest(anchor=anchor,selection_id=selection_id))
 
     @server.tool(
         name="get_message_context",
@@ -419,10 +428,9 @@ def build_server(
         structured_output=True,
     )
     def get_message_context(
-        anchor: EvidenceAnchor,
-        radius: Annotated[int, Field(strict=True, ge=0, le=4)] = 2,
-    ) -> MessageContextResponse:
-        return get_service().get_message_context(MessageContextRequest(anchor=anchor, radius=radius))
+        anchor: EvidenceAnchor | None = None,
+        radius: Annotated[int, Field(strict=True, ge=0, le=4)] = 2, selection_id: SelectionId | None = None) -> MessageContextResponse | SelectionRefusal:
+        return get_service().get_message_context(MessageContextRequest(anchor=anchor,selection_id=selection_id, radius=radius))
 
     @server.tool(
         name="read_attachment",
@@ -434,13 +442,15 @@ def build_server(
         structured_output=False,
     )
     def read_attachment(
-        artifact_id: ArtifactId,
+        artifact_id: ArtifactId | None = None,
         max_chars: Annotated[int, Field(strict=True, ge=1, le=20_000)] = 20_000,
-        max_pages: Annotated[int, Field(strict=True, ge=1, le=5)] = 5,
-    ) -> CallToolResult:
+        max_pages: Annotated[int, Field(strict=True, ge=1, le=5)] = 5, selection_id: SelectionId | None = None) -> CallToolResult:
         response = get_service().read_attachment(ReadAttachmentRequest(
-            artifact_id=artifact_id, max_chars=max_chars, max_pages=max_pages,
+            artifact_id=artifact_id,selection_id=selection_id, max_chars=max_chars, max_pages=max_pages,
         ))
+        if isinstance(response, SelectionRefusal):
+            structured = response.model_dump(mode='json')
+            return CallToolResult(content=[TextContent(text=json.dumps(structured))], structured_content=structured)
         blocks: list[TextContent | ImageContent] = []
         remaining = 6 * 1024 * 1024
         for item in response.images:
@@ -468,12 +478,14 @@ def build_server(
         structured_output=False,
     )
     def analyze_media_tool(
-        artifact_id: ArtifactId,
-        start_seconds: Annotated[float, Field(strict=True, ge=0, le=86400)] = 0.0,
-    ) -> CallToolResult:
+        artifact_id: ArtifactId | None = None,
+        start_seconds: Annotated[float, Field(strict=True, ge=0, le=86400)] = 0.0, selection_id: SelectionId | None = None) -> CallToolResult:
         response = get_service().analyze_media(AnalyzeMediaRequest(
-            artifact_id=artifact_id, start_seconds=start_seconds,
+            artifact_id=artifact_id,selection_id=selection_id, start_seconds=start_seconds,
         ))
+        if isinstance(response, SelectionRefusal):
+            structured = response.model_dump(mode='json')
+            return CallToolResult(content=[TextContent(text=json.dumps(structured))], structured_content=structured)
         blocks: list[TextContent | ImageContent] = []
         remaining = 8 * 1024 * 1024
         for item in response.frames:
@@ -580,15 +592,15 @@ def build_server(
         structured_output=True,
     )
     def prepare_artifact_send(
-        artifact_id: ArtifactId,
+
         recipient: ChatId,
         display_name: Annotated[str, Field(strict=True, min_length=1, max_length=255)],
         mime_type: Annotated[str, Field(strict=True, min_length=3, max_length=127)],
-        caption: Annotated[str, Field(strict=True, max_length=1024)] = "",
+        artifact_id: ArtifactId | None = None, selection_id: SelectionId | None = None, caption: Annotated[str, Field(strict=True, max_length=1024)] = "",
         kind: Annotated[str, Field(strict=True, pattern=r"^(document|photo|voice_note)$")] = "document",
-    ) -> PrepareArtifactSendResponse:
+    ) -> PrepareArtifactSendResponse | SelectionRefusal:
         return get_service().prepare_artifact_send(PrepareArtifactSendRequest(
-            artifact_id=artifact_id, recipient=recipient, display_name=display_name,
+            artifact_id=artifact_id,selection_id=selection_id, recipient=recipient, display_name=display_name,
             mime_type=mime_type, caption=caption, kind=kind,
         ))
 
@@ -621,8 +633,8 @@ def build_server(
         annotations=_READ_ONLY,
         structured_output=True,
     )
-    def read_messages_tool(anchors: SelectedMessageAnchors) -> ReadMessagesResponse:
-        return get_service().read_messages(ReadMessagesRequest(anchors=anchors))
+    def read_messages_tool(anchors: SelectedMessageAnchors | None = None, selection_id: SelectionId | None = None) -> ReadMessagesResponse | SelectionRefusal:
+        return get_service().read_messages(ReadMessagesRequest(anchors=anchors,selection_id=selection_id))
 
     @server.tool(
         name="read_history",
@@ -667,8 +679,8 @@ def build_server(
             "No downloads, cross-chat fetches, story reads or persistent transcript."
         ), annotations=_READ_ONLY, structured_output=True,
     )
-    def read_reply_chain_tool(anchor: SelectedMessageAnchor, max_depth: ReplyDepth = 10) -> ReadReplyChainResponse:
-        return get_service().read_reply_chain(ReadReplyChainRequest(anchor=anchor, max_depth=max_depth))
+    def read_reply_chain_tool(anchor: SelectedMessageAnchor | None = None, max_depth: ReplyDepth = 10, selection_id: SelectionId | None = None) -> ReadReplyChainResponse | SelectionRefusal:
+        return get_service().read_reply_chain(ReadReplyChainRequest(anchor=anchor,selection_id=selection_id, max_depth=max_depth))
 
     @server.tool(
         name="list_topics",
@@ -892,12 +904,15 @@ def build_server(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True),
         structured_output=False,
     )
-    def read_attachment_page_tool(artifact_id: ArtifactId, pages: PageSelection | None = None,
+    def read_attachment_page_tool(artifact_id: ArtifactId | None = None, pages: PageSelection | None = None,
             max_chars: Annotated[int, Field(strict=True, ge=1, le=20_000)] = 20_000,
             render_pages: Annotated[bool, Field(strict=True)] = True,
-            cursor: AttachmentCursor | None = None) -> CallToolResult:
-        response = get_service().read_attachment_page(ReadAttachmentPageRequest(artifact_id=artifact_id,
+            cursor: AttachmentCursor | None = None, selection_id: SelectionId | None = None) -> CallToolResult:
+        response = get_service().read_attachment_page(ReadAttachmentPageRequest(artifact_id=artifact_id,selection_id=selection_id,
             pages=pages, max_chars=max_chars, render_pages=render_pages, cursor=cursor))
+        if isinstance(response, SelectionRefusal):
+            structured = response.model_dump(mode='json')
+            return CallToolResult(content=[TextContent(text=json.dumps(structured))], structured_content=structured)
         blocks: list[TextContent | ImageContent] = []
         remaining = 6 * 1024 * 1024
         for item in response.images:
@@ -927,11 +942,11 @@ def build_server(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True),
         structured_output=True,
     )
-    def read_spreadsheet_tool(artifact_id: ArtifactId,
+    def read_spreadsheet_tool(artifact_id: ArtifactId | None = None,
             selections: Annotated[list[SheetRange], Field(min_length=1, max_length=5)] | None = None,
             max_cells: Annotated[int, Field(strict=True, ge=1, le=200)] = 200,
-            cursor: SpreadsheetCursor | None = None) -> ReadSpreadsheetResponse:
-        return get_service().read_spreadsheet(ReadSpreadsheetRequest(artifact_id=artifact_id,
+            cursor: SpreadsheetCursor | None = None, selection_id: SelectionId | None = None) -> ReadSpreadsheetResponse | SelectionRefusal:
+        return get_service().read_spreadsheet(ReadSpreadsheetRequest(artifact_id=artifact_id,selection_id=selection_id,
             selections=selections, max_cells=max_cells, cursor=cursor))
 
     @server.tool(
@@ -950,11 +965,11 @@ def build_server(
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
         structured_output=True,
     )
-    def read_presentation_tool(artifact_id: ArtifactId,
+    def read_presentation_tool(artifact_id: ArtifactId | None = None,
             slides: Annotated[list[Annotated[int, Field(strict=True, ge=1, le=128)]], Field(min_length=1, max_length=5)] | None = None,
-            include_notes: Annotated[bool, Field(strict=True)] = False) -> ReadPresentationResponse:
+            include_notes: Annotated[bool, Field(strict=True)] = False, selection_id: SelectionId | None = None) -> ReadPresentationResponse | SelectionRefusal:
         return get_service().read_presentation(ReadPresentationRequest(
-            artifact_id=artifact_id, slides=slides, include_notes=include_notes))
+            artifact_id=artifact_id,selection_id=selection_id, slides=slides, include_notes=include_notes))
 
     search_tool = server._tool_manager.get_tool("search_correspondence")
     if search_tool is None:  # pragma: no cover - registration above is deterministic
@@ -1060,12 +1075,12 @@ def build_server(
     @server.tool(name="prepare_reply_artifact_send",
         description="Prepare an immutable document, photo or voice-note reply to an exact committed same-chat supported message. Requires opt-in reply_artifact_send and send. Source styles require reply_formatted_targets; ordinary document/static-photo/voice-note sources require reply_media_targets, plus reply_formatted_targets for styled captions. Hashtag, Cashtag or BotCommand text sources require both reply_formatted_targets and reply_lexical_targets. Returns full marked untrusted span evidence and a digest binding final artifact bytes, caption, voice provenance and fixed reply options. Inspect the full preview and obtain explicit approval and independent local owner confirmation. No upload/send; outgoing entities, topics, hidden-link/custom entities are unsupported. Lexical captions on supported document/static-photo/voice-note sources require all three default-off source capabilities: reply_media_targets, reply_formatted_targets and reply_lexical_targets. Provider labels are untrusted assertions; inspect complete caption/span/media evidence. Mention or MentionName text sources require reply_formatted_targets and reply_identity_targets, plus reply_lexical_targets when lexical entities are present. Inspect the provider-declared user_id and complete original UTF-16 spans; identity evidence never resolves a user or selects the recipient. Mention or MentionName captions on supported document/static-photo/OGG-voice-note sources require reply_media_targets, reply_formatted_targets and reply_identity_targets, adding reply_lexical_targets exactly when lexical entities are present. Inspect full original UTF-16 caption spans, provider-declared user_id and stable media evidence before approval. DateTime text sources additionally require default-off reply_datetime_targets and reply_formatted_targets, adding lexical and identity source capabilities exactly when those entities coexist. Text sources support a strict signed int32 unix_time with absent/null formatting_type, the exact fieldless dateTimeFormattingTypeRelative, or explicitly specified dateTimeFormattingTypeAbsolute. Absolute requires exactly time_precision and date_precision fieldless dateTimePartPrecisionNone/Short/Long objects and a strict show_day_of_week boolean; all combinations including both None with false are admitted. Missing/null precisions, coerced booleans and open/unknown fields are outside this conservative source subset. Null-only text stays private v9; Relative without Absolute uses v11; at least one Absolute selects v13. The original text stays unchanged. Inspect complete original UTF-16 spans, provider_type textEntityTypeDateTime, date_time label, unix_time and exact null/Relative/Absolute formatting_type including both precisions and weekday flag as untrusted evidence. This conservative subset rejects every overlap involving DateTime; adjacency is allowed. Supported document/static-photo/OGG-voice-note DateTime captions additionally require reply_media_targets; absent/null-only captions retain private v10, Relative without Absolute uses private v12, and at least one validated explicitly specified Absolute selects private v14. The same explicit precision and strict weekday subset applies to captions; null, Relative and Absolute may coexist. Inspect complete original UTF-16 caption spans, exact null/Relative/Absolute constructor including both precisions and weekday flag, and stable media evidence. Missing/null precision, coerced booleans and unknown/open fields remain unavailable. Outgoing artifact captions remain plain; explicit styled text replies use the separate text tools and formatted_text_send. No date-text generation, clock/locale interpretation, date conversion, timezone interpretation or source-triggered action is performed. Exact fieldless textEntityTypeUrl in messageText uses private v15; supported document/static-photo/OGG-voice-note captions use private v16 only after complete validation with at least one fieldless Url. URL captions require reply_media_targets in addition to reply_formatted_targets and reply_url_targets, plus datetime, lexical and identity capabilities exactly when those entities are present. Inspect the complete original caption, escaped whole-scalar UTF-16 span evidence and stable media facts; caption1024,32entities,projection65536 and complete display4096 bounds are preserved. Media helpers keep url=False by default. Source drift or later properties/immediate-prewire revocation blocks raw transport after claim and possible transient artifact staging with terminal failure and retirement; missing authority or owner-callback revocation blocks before claim/staging. It requires both default-off reply_formatted_targets and reply_url_targets, adding reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when those source families coexist. Inspect provider_type textEntityTypeUrl, type url, the complete escaped covered span and original whole-scalar UTF-16 coordinates as untrusted evidence; the raw text remains immutable. Url is locally exclusive with lexical, identity, Url, quote, code and DateTime spans; ordinary style containment is allowed and crossing or invalid spans refuse. TextUrl hidden destinations, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. PhoneNumber messageText and supported media captions require separate private v19/v20 authority below. EmailAddress captions require separate private v18 authority described below. No URL grammar, normalization, navigation, fetching, resolution or link preview is performed. Both old and new sources retain their full capability conjunction through lifecycle, owner/final guards and terminal replay; older v1-v14 snapshots cannot authorize Url and v15 cannot authorize URL captions. V15/v16 without Url refuse; all v1-v15 canonical/display bytes and authority remain unchanged. Outgoing artifact captions retain empty entities; no source-directed action is performed. Exact fieldless textEntityTypeEmailAddress in messageText selects private v17 only after complete validation containing EmailAddress. It requires both default-off reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authority exactly when those entities coexist. Inspect the complete escaped covered text, type email_address, provider_type textEntityTypeEmailAddress and original whole-scalar UTF-16 offset/length as inert untrusted evidence. No email grammar, deliverability inference, address resolution, mailto/navigation, contact action or email sending occurs. EmailAddress joins the same conservative exclusive overlap rules; ordinary style containment remains supported. Supported document/static-photo/OGG-voice-note EmailAddress captions select private v18 only after complete caption/media validation containing exact fieldless EmailAddress. They require reply_media_targets, reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authorities exactly when present. Media parser/validator/renderer retain email=False defaults. Complete escaped caption spans, raw caption and stable media facts remain immutable, with caption1024,32entities,projection65536 and complete display4096 bounds unchanged; no source download occurs. Older tags cannot authorize EmailAddress captions; v17 remains messageText only, and email-less v17/v18 refuse. Full immutable evidence, existing bounds and capability conjunction through lifecycle/final guards/replay remain required; outgoing artifact caption entities stay empty and source labels trigger no email action. Earlier v1-v17 canonical/display bytes and authority, public schemas/annotations/mappings, contract1, IPC2 and schema fingerprint stay unchanged. Exact fieldless textEntityTypePhoneNumber in fully validated messageText containing PhoneNumber selects private v19. It requires both default-off reply_formatted_targets and reply_phone_targets, adding reply_email_targets, reply_url_targets, reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when present, in that order. Internal formatter/validator/renderer retain phone=False. Supported document/static-photo/OGG-voice-note PhoneNumber captions select private v20 only after complete caption/media validation containing exact fieldless PhoneNumber. They require reply_media_targets, reply_formatted_targets and reply_phone_targets, adding email, URL, DateTime, lexical and identity authority exactly when present, in that order. Media parser/validator/renderer also retain phone=False. Inspect the complete escaped original caption spans, raw caption and stable media identity bound to the immutable preview digest; no source download occurs. TextUrl, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. Inspect complete escaped type phone_number, provider_type textEntityTypePhoneNumber, covered literal, full source text and original whole-scalar UTF-16 offset/length as inert untrusted assertions. No number grammar, E164, normalization, country inference, tel/navigation, dialing, resolution or contact creation occurs. Phone shares conservative exclusive overlap rules against semantic families, DateTime, quotes and code; ordinary style containment remains supported. Duplicate/crossing/malformed/extra-field/split-surrogate entities, forged older phone tags and phone-less v19/v20 refuse; v19 remains messageText only. Message4096/caption1024,32entities,projection65536 and complete display4096 bounds stay unchanged. All source capabilities remain required through immutable get/update, old/new refresh, owner/final guards, immediate prewire and terminal replay. Missing authority or owner revocation refuses before claim/staging; late properties/prewire revocation or source drift may follow claim/transient artifact staging but terminal-fails, retires staging and refuses raw transport. Outgoing artifact captions keep empty entities and exact recipient/anchor/options; no phone action occurs. V1-v19 canonical/display bytes and authority, public schemas/annotations/mappings, contract1, IPC2 and schema fingerprint remain unchanged.",
         annotations=_TRANSFER,structured_output=True)
-    def prepare_reply_artifact_send(artifact_id: ArtifactId, recipient: ChatId,
+    def prepare_reply_artifact_send( recipient: ChatId,
             display_name: Annotated[str,Field(strict=True,min_length=1,max_length=255)],
             mime_type: Annotated[str,Field(strict=True,min_length=3,max_length=127)],
-            reply_to: SelectedMessageAnchor,caption: DraftCaption="",kind: Literal["document","photo","voice_note"]="document") -> PrepareReplyArtifactSendResponse:
-        return get_service().prepare_reply_artifact_send(PrepareReplyArtifactSendRequest(artifact_id=artifact_id,
-            recipient=recipient,display_name=display_name,mime_type=mime_type,caption=caption,kind=kind,reply_to=reply_to))
+            artifact_id: ArtifactId | None = None, selection_id: SelectionId | None = None, reply_to: SelectedMessageAnchor | None = None, reply_selection_id: SelectionId | None = None, caption: DraftCaption="",kind: Literal["document","photo","voice_note"]="document") -> PrepareReplyArtifactSendResponse | SelectionRefusal:
+        return get_service().prepare_reply_artifact_send(PrepareReplyArtifactSendRequest(artifact_id=artifact_id,selection_id=selection_id,
+            recipient=recipient,display_name=display_name,mime_type=mime_type,caption=caption,kind=kind,reply_to=reply_to,reply_selection_id=reply_selection_id))
 
     @server.tool(name="get_reply_artifact_draft",
         description="Inspect your immutable pending artifact reply for the current account; requires reply_artifact_send and send. Source styles require reply_formatted_targets; ordinary media targets require reply_media_targets, plus reply_formatted_targets for styled captions. Hashtag, Cashtag or BotCommand text sources require both reply_formatted_targets and reply_lexical_targets. Full marked untrusted target spans and artifact evidence are inspection, not approval. Outgoing entities, topics, hidden-link/custom entities are unsupported. Ordinary and text-reply drafts are unavailable. Lexical captions on supported document/static-photo/voice-note sources require all three default-off source capabilities: reply_media_targets, reply_formatted_targets and reply_lexical_targets. Provider labels are untrusted assertions; inspect complete caption/span/media evidence. Mention or MentionName text sources require reply_formatted_targets and reply_identity_targets, plus reply_lexical_targets when lexical entities are present. Inspect the provider-declared user_id and complete original UTF-16 spans; identity evidence never resolves a user or selects the recipient. Mention or MentionName captions on supported document/static-photo/OGG-voice-note sources require reply_media_targets, reply_formatted_targets and reply_identity_targets, adding reply_lexical_targets exactly when lexical entities are present. Inspect full original UTF-16 caption spans, provider-declared user_id and stable media evidence before approval. DateTime text sources additionally require default-off reply_datetime_targets and reply_formatted_targets, adding lexical and identity source capabilities exactly when those entities coexist. Text sources support a strict signed int32 unix_time with absent/null formatting_type, the exact fieldless dateTimeFormattingTypeRelative, or explicitly specified dateTimeFormattingTypeAbsolute. Absolute requires exactly time_precision and date_precision fieldless dateTimePartPrecisionNone/Short/Long objects and a strict show_day_of_week boolean; all combinations including both None with false are admitted. Missing/null precisions, coerced booleans and open/unknown fields are outside this conservative source subset. Null-only text stays private v9; Relative without Absolute uses v11; at least one Absolute selects v13. The original text stays unchanged. Inspect complete original UTF-16 spans, provider_type textEntityTypeDateTime, date_time label, unix_time and exact null/Relative/Absolute formatting_type including both precisions and weekday flag as untrusted evidence. This conservative subset rejects every overlap involving DateTime; adjacency is allowed. Supported document/static-photo/OGG-voice-note DateTime captions additionally require reply_media_targets; absent/null-only captions retain private v10, Relative without Absolute uses private v12, and at least one validated explicitly specified Absolute selects private v14. The same explicit precision and strict weekday subset applies to captions; null, Relative and Absolute may coexist. Inspect complete original UTF-16 caption spans, exact null/Relative/Absolute constructor including both precisions and weekday flag, and stable media evidence. Missing/null precision, coerced booleans and unknown/open fields remain unavailable. Outgoing artifact captions remain plain; explicit styled text replies use the separate text tools and formatted_text_send. No date-text generation, clock/locale interpretation, date conversion, timezone interpretation or source-triggered action is performed. Exact fieldless textEntityTypeUrl in messageText uses private v15; supported document/static-photo/OGG-voice-note captions use private v16 only after complete validation with at least one fieldless Url. URL captions require reply_media_targets in addition to reply_formatted_targets and reply_url_targets, plus datetime, lexical and identity capabilities exactly when those entities are present. Inspect the complete original caption, escaped whole-scalar UTF-16 span evidence and stable media facts; caption1024,32entities,projection65536 and complete display4096 bounds are preserved. Media helpers keep url=False by default. Source drift or later properties/immediate-prewire revocation blocks raw transport after claim and possible transient artifact staging with terminal failure and retirement; missing authority or owner-callback revocation blocks before claim/staging. It requires both default-off reply_formatted_targets and reply_url_targets, adding reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when those source families coexist. Inspect provider_type textEntityTypeUrl, type url, the complete escaped covered span and original whole-scalar UTF-16 coordinates as untrusted evidence; the raw text remains immutable. Url is locally exclusive with lexical, identity, Url, quote, code and DateTime spans; ordinary style containment is allowed and crossing or invalid spans refuse. TextUrl hidden destinations, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. PhoneNumber messageText and supported media captions require separate private v19/v20 authority below. EmailAddress captions require separate private v18 authority described below. No URL grammar, normalization, navigation, fetching, resolution or link preview is performed. Both old and new sources retain their full capability conjunction through lifecycle, owner/final guards and terminal replay; older v1-v14 snapshots cannot authorize Url and v15 cannot authorize URL captions. V15/v16 without Url refuse; all v1-v15 canonical/display bytes and authority remain unchanged. Outgoing artifact captions retain empty entities; no source-directed action is performed. Exact fieldless textEntityTypeEmailAddress in messageText selects private v17 only after complete validation containing EmailAddress. It requires both default-off reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authority exactly when those entities coexist. Inspect the complete escaped covered text, type email_address, provider_type textEntityTypeEmailAddress and original whole-scalar UTF-16 offset/length as inert untrusted evidence. No email grammar, deliverability inference, address resolution, mailto/navigation, contact action or email sending occurs. EmailAddress joins the same conservative exclusive overlap rules; ordinary style containment remains supported. Supported document/static-photo/OGG-voice-note EmailAddress captions select private v18 only after complete caption/media validation containing exact fieldless EmailAddress. They require reply_media_targets, reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authorities exactly when present. Media parser/validator/renderer retain email=False defaults. Complete escaped caption spans, raw caption and stable media facts remain immutable, with caption1024,32entities,projection65536 and complete display4096 bounds unchanged; no source download occurs. Older tags cannot authorize EmailAddress captions; v17 remains messageText only, and email-less v17/v18 refuse. Full immutable evidence, existing bounds and capability conjunction through lifecycle/final guards/replay remain required; outgoing artifact caption entities stay empty and source labels trigger no email action. Earlier v1-v17 canonical/display bytes and authority, public schemas/annotations/mappings, contract1, IPC2 and schema fingerprint stay unchanged. Exact fieldless textEntityTypePhoneNumber in fully validated messageText containing PhoneNumber selects private v19. It requires both default-off reply_formatted_targets and reply_phone_targets, adding reply_email_targets, reply_url_targets, reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when present, in that order. Internal formatter/validator/renderer retain phone=False. Supported document/static-photo/OGG-voice-note PhoneNumber captions select private v20 only after complete caption/media validation containing exact fieldless PhoneNumber. They require reply_media_targets, reply_formatted_targets and reply_phone_targets, adding email, URL, DateTime, lexical and identity authority exactly when present, in that order. Media parser/validator/renderer also retain phone=False. Inspect the complete escaped original caption spans, raw caption and stable media identity bound to the immutable preview digest; no source download occurs. TextUrl, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. Inspect complete escaped type phone_number, provider_type textEntityTypePhoneNumber, covered literal, full source text and original whole-scalar UTF-16 offset/length as inert untrusted assertions. No number grammar, E164, normalization, country inference, tel/navigation, dialing, resolution or contact creation occurs. Phone shares conservative exclusive overlap rules against semantic families, DateTime, quotes and code; ordinary style containment remains supported. Duplicate/crossing/malformed/extra-field/split-surrogate entities, forged older phone tags and phone-less v19/v20 refuse; v19 remains messageText only. Message4096/caption1024,32entities,projection65536 and complete display4096 bounds stay unchanged. All source capabilities remain required through immutable get/update, old/new refresh, owner/final guards, immediate prewire and terminal replay. Missing authority or owner revocation refuses before claim/staging; late properties/prewire revocation or source drift may follow claim/transient artifact staging but terminal-fails, retires staging and refuses raw transport. Outgoing artifact captions keep empty entities and exact recipient/anchor/options; no phone action occurs. V1-v19 canonical/display bytes and authority, public schemas/annotations/mappings, contract1, IPC2 and schema fingerprint remain unchanged.",
@@ -1090,11 +1105,11 @@ def build_server(
         description=('Prepare one immutable text reply to an exact committed same-chat supported message. Requires opt-in reply_text_send and send. Source styles require reply_formatted_targets; ordinary document/static-photo/voice-note sources require reply_media_targets, plus reply_formatted_targets for styled captions. Hashtag, Cashtag or BotCommand text sources require both reply_formatted_targets and reply_lexical_targets. Returns full marked untrusted span evidence, raw source digest and complete review digest; no send. An explicit forum topic additionally requires topic_text_send and exact current source membership; the preview binds the complete topic and source evidence in one review digest. Hidden-link/custom outgoing entities, outgoing quotes, outgoing media, scheduling and cross-chat replies are unavailable. Inspect and obtain fresh approval and independent local owner confirmation before send_prepared_text. Lexical captions on supported document/static-photo/voice-note sources require all three default-off source capabilities: reply_media_targets, reply_formatted_targets and reply_lexical_targets. Provider labels are untrusted assertions; inspect complete caption/span/media evidence. Mention or MentionName text sources require reply_formatted_targets and reply_identity_targets, plus reply_lexical_targets when lexical entities are present. Inspect the provider-declared user_id and complete original UTF-16 spans; identity evidence never resolves a user or selects the recipient. Mention or MentionName captions on supported document/static-photo/OGG-voice-note sources require reply_media_targets, reply_formatted_targets and reply_identity_targets, adding reply_lexical_targets exactly when lexical entities are present. Inspect full original UTF-16 caption spans, provider-declared user_id and stable media evidence before approval. DateTime text sources additionally require default-off reply_datetime_targets and reply_formatted_targets, adding lexical and identity source capabilities exactly when those entities coexist. Text sources support a strict signed int32 unix_time with absent/null formatting_type, the exact fieldless dateTimeFormattingTypeRelative, or explicitly specified dateTimeFormattingTypeAbsolute. Absolute requires exactly time_precision and date_precision fieldless dateTimePartPrecisionNone/Short/Long objects and a strict show_day_of_week boolean; all combinations including both None with false are admitted. Missing/null precisions, coerced booleans and open/unknown fields are outside this conservative source subset. Null-only text stays private v9; Relative without Absolute uses v11; at least one Absolute selects v13. The original text stays unchanged. Inspect complete original UTF-16 spans, provider_type textEntityTypeDateTime, date_time label, unix_time and exact null/Relative/Absolute formatting_type including both precisions and weekday flag as untrusted evidence. This conservative subset rejects every overlap involving DateTime; adjacency is allowed. Supported document/static-photo/OGG-voice-note DateTime captions additionally require reply_media_targets; absent/null-only captions retain private v10, Relative without Absolute uses private v12, and at least one validated explicitly specified Absolute selects private v14. The same explicit precision and strict weekday subset applies to captions; null, Relative and Absolute may coexist. Inspect complete original UTF-16 caption spans, exact null/Relative/Absolute constructor including both precisions and weekday flag, and stable media evidence. Missing/null precision, coerced booleans and unknown/open fields remain unavailable. Outgoing captions remain plain. No date-text generation, clock/locale interpretation, date conversion, timezone interpretation or source-triggered action is performed. Exact fieldless textEntityTypeUrl in messageText uses private v15; supported document/static-photo/OGG-voice-note captions use private v16 only after complete validation with at least one fieldless Url. URL captions require reply_media_targets in addition to reply_formatted_targets and reply_url_targets, plus datetime, lexical and identity capabilities exactly when those entities are present. Inspect the complete original caption, escaped whole-scalar UTF-16 span evidence and stable media facts; caption1024,32entities,projection65536 and complete display4096 bounds are preserved. Media helpers keep url=False by default. Source drift or later properties/immediate-prewire revocation blocks raw transport after claim and possible transient artifact staging with terminal failure and retirement; missing authority or owner-callback revocation blocks before claim/staging. It requires both default-off reply_formatted_targets and reply_url_targets, adding reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when those source families coexist. Inspect provider_type textEntityTypeUrl, type url, the complete escaped covered span and original whole-scalar UTF-16 coordinates as untrusted evidence; the raw text remains immutable. Url is locally exclusive with lexical, identity, Url, quote, code and DateTime spans; ordinary style containment is allowed and crossing or invalid spans refuse. TextUrl hidden destinations, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. PhoneNumber messageText and supported media captions require separate private v19/v20 authority below. EmailAddress captions require separate private v18 authority described below. No URL grammar, normalization, navigation, fetching, resolution or link preview is performed. Both old and new sources retain their full capability conjunction through lifecycle, owner/final guards and terminal replay; older v1-v14 snapshots cannot authorize Url and v15 cannot authorize URL captions. V15/v16 without Url refuse; all v1-v15 canonical/display bytes and authority remain unchanged. Outgoing captions retain empty entities; no source-directed action is performed. Exact fieldless textEntityTypeEmailAddress in messageText selects private v17 only after complete validation containing EmailAddress. It requires both default-off reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authority exactly when those entities coexist. Inspect the complete escaped covered text, type email_address, provider_type textEntityTypeEmailAddress and original whole-scalar UTF-16 offset/length as inert untrusted evidence. No email grammar, deliverability inference, address resolution, mailto/navigation, contact action or email sending occurs. EmailAddress joins the same conservative exclusive overlap rules; ordinary style containment remains supported. Supported document/static-photo/OGG-voice-note EmailAddress captions select private v18 only after complete caption/media validation containing exact fieldless EmailAddress. They require reply_media_targets, reply_formatted_targets and reply_email_targets, plus URL, DateTime, lexical and identity authorities exactly when present. Media parser/validator/renderer retain email=False defaults. Complete escaped caption spans, raw caption and stable media facts remain immutable, with caption1024,32entities,projection65536 and complete display4096 bounds unchanged; no source download occurs. Older tags cannot authorize EmailAddress captions; v17 remains messageText only, and email-less v17/v18 refuse. Full immutable evidence, existing bounds and capability conjunction through lifecycle/final guards/replay remain required; outgoing captions stay plain and source labels trigger no email action. Earlier v1-v17 canonical/display bytes and authority, annotations/mappings, contract1 and IPC2 stay unchanged. Topic-reply inputs and evidence extend the public schemas and require a new schema fingerprint. Exact fieldless textEntityTypePhoneNumber in fully validated messageText containing PhoneNumber selects private v19. It requires both default-off reply_formatted_targets and reply_phone_targets, adding reply_email_targets, reply_url_targets, reply_datetime_targets, reply_lexical_targets and reply_identity_targets exactly when present, in that order. Internal formatter/validator/renderer retain phone=False. Supported document/static-photo/OGG-voice-note PhoneNumber captions select private v20 only after complete caption/media validation containing exact fieldless PhoneNumber. They require reply_media_targets, reply_formatted_targets and reply_phone_targets, adding email, URL, DateTime, lexical and identity authority exactly when present, in that order. Media parser/validator/renderer also retain phone=False. Inspect the complete escaped original caption spans, raw caption and stable media identity bound to the immutable preview digest; no source download occurs. TextUrl, BankCardNumber, CustomEmoji and MediaTimestamp remain unavailable. Inspect complete escaped type phone_number, provider_type textEntityTypePhoneNumber, covered literal, full source text and original whole-scalar UTF-16 offset/length as inert untrusted assertions. No number grammar, E164, normalization, country inference, tel/navigation, dialing, resolution or contact creation occurs. Phone shares conservative exclusive overlap rules against semantic families, DateTime, quotes and code; ordinary style containment remains supported. Duplicate/crossing/malformed/extra-field/split-surrogate entities, forged older phone tags and phone-less v19/v20 refuse; v19 remains messageText only. Message4096/caption1024,32entities,projection65536 and complete display4096 bounds stay unchanged. All source capabilities remain required through immutable get/update, old/new refresh, owner/final guards, immediate prewire and terminal replay. Missing authority or owner revocation refuses before claim/staging; late properties/prewire revocation or source drift may follow claim/transient artifact staging but terminal-fails, retires staging and refuses raw transport. Outgoing captions keep empty entities and exact recipient/anchor/options; no phone action occurs. V1-v19 canonical/display bytes and authority, annotations/mappings, contract1 and IPC2 remain unchanged. Topic-reply inputs and evidence extend the public schemas and require a new schema fingerprint. Optional outgoing_entities is a strict list of at most 32 closed offset/length/type records: fieldless textEntityTypeBold, textEntityTypeItalic, textEntityTypeUnderline, textEntityTypeStrikethrough or textEntityTypeSpoiler. Coordinates refer to FINAL whole normalized text (NFKC and CRLF/CR to LF), in UTF-16 code units on whole Unicode scalar boundaries; no parser or automatic rebase. Nonempty styles require default-off formatted_text_send separately from incoming source capabilities. Inspect all types, offsets, lengths and complete covered text including spoilers under one preview digest. Empty/omitted lists preserve plain behavior; on text update they clear styles. Nonempty styles require replacement text; no entity-only update or formatted attachment captions. Invalid/duplicate/crossing/redundant same-style spans refuse. New styles/text require a new immutable preview and owner approval; no send by preparation/update.'),
         annotations=_TRANSFER, structured_output=True,
     )
-    def prepare_reply_text_send(recipient: ChatId, text: DraftText, reply_to: SelectedMessageAnchor,
+    def prepare_reply_text_send(recipient: ChatId, text: DraftText, reply_to: SelectedMessageAnchor | None = None,
                                 topic: ForumTopicReference | None = None,
-                                outgoing_entities: OutgoingEntityList = []) -> PrepareReplyTextSendResponse:
+                                outgoing_entities: OutgoingEntityList = [], reply_selection_id: SelectionId | None = None) -> PrepareReplyTextSendResponse | SelectionRefusal:
         return get_service().prepare_reply_text_send(PrepareReplyTextSendRequest(recipient=recipient,
-            text=text,reply_to=reply_to,topic=topic,outgoing_entities=outgoing_entities))
+            text=text,reply_to=reply_to,reply_selection_id=reply_selection_id,topic=topic,outgoing_entities=outgoing_entities))
 
     @server.tool(
         name="get_reply_draft",
@@ -1184,6 +1199,19 @@ def build_server(
     def refresh_draft(draft_id: DraftId) -> ReviseDraftResponse:
         return get_service().refresh_draft(RefreshDraftRequest(draft_id=draft_id))
 
+    @server.tool(name="retain_selection", description=(
+        "Retain exact chosen sources as a memory-only selection, requiring opt-in retained_selections. "
+        "source.kind=messages accepts 1–20 ordered unique committed anchors; target_messages accepts an "
+        "existing verified target and ordered message IDs, also requiring verified_targets; file accepts "
+        "one already owned artifact ID. Inspect the fresh current message or file evidence. Fixed expiry "
+        "at most 300 seconds, capped by target/file lifetime; unchanged recapture reuses original expiry. "
+        "Later reads, downloads, processing and draft preparation revalidate the exact raw source, "
+        "entities and stable media/provenance. Any drift, expiry or release returns content-free "
+        "selection_unavailable; choose and retain the source again. No recipient or send authority."),
+        annotations=_READ_ONLY, structured_output=True)
+    def retain_selection_tool(source: RetainSelectionSource) -> RetainSelectionResponse:
+        return get_service().retain_selection(RetainSelectionRequest(source=source))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
@@ -1198,6 +1226,28 @@ def build_server(
             return StrictReplyMetadata
         registered.fn_metadata=reply_metadata(request_model).model_validate(registered.fn_metadata.model_dump())
 
+    from .selection_broker import selected_models
+    from pydantic import TypeAdapter
+    for name, output in {'read_attachment': ReadAttachmentResponse,
+            'analyze_media': AnalyzeMediaResponse, 'read_attachment_page': ReadAttachmentPageResponse}.items():
+        registered = server._tool_manager.get_tool(name)
+        registered.fn_metadata.output_model = output | SelectionRefusal
+        registered.fn_metadata.output_schema = {'type': 'object', **TypeAdapter(output | SelectionRefusal).json_schema()}
+    for name, model in {**selected_models(), 'retain_selection': RetainSelectionRequest}.items():
+        registered = server._tool_manager.get_tool(name)
+        class StrictSelectionMetadata(metadata_type):
+            _selection_model = model
+            def pre_parse_json(self, data):
+                self._selection_model.model_validate(data)
+                return super().pre_parse_json(data)
+        registered.fn_metadata = StrictSelectionMetadata.model_validate(registered.fn_metadata.model_dump())
+        if name != 'retain_selection':
+            registered.description += (' Supply exactly one raw source or selection_id; read_messages uses the '
+                'whole ordered message selection, anchor tools require a singleton message, artifact tools '
+                'require a file selection. reply_selection_id substitutes only a singleton reply source. '
+                'Selections expire within 300 seconds and revalidate each use; selection_unavailable carries '
+                'no content. Choose and retain sources again. Explicit recipient/topic and approval stay required.')
+
     # MCP SDK 2.2.0 otherwise ignores undeclared arguments at runtime. Rebuild the
     # generated models fail-closed and publish the matching additionalProperties=false.
     for tool_name in _TOOL_NAMES:
@@ -1211,6 +1261,13 @@ def build_server(
         )
         registered.fn_metadata.arg_model.model_rebuild(force=True)
         registered.parameters = registered.fn_metadata.arg_model.model_json_schema(by_alias=True)
+        selection_model = selected_models().get(tool_name)
+        if selection_model is not None:
+            if 'selection_id' in selection_model.model_fields:
+                raw = next(key for key in ('artifact_id','anchors','anchor') if key in selection_model.model_fields)
+                source_schema(registered.parameters, raw)
+            if 'reply_selection_id' in selection_model.model_fields:
+                source_schema(registered.parameters, 'reply_to', 'reply_selection_id')
         if tool_name in TOOL_OPERATIONS:
             operation = TOOL_OPERATIONS[tool_name]
             capability = OPERATION_CAPABILITIES[operation]
@@ -1222,6 +1279,8 @@ def build_server(
                 if (_capability not in runtime_policy.enabled_capabilities or
                         (_capability in {"reply_text_send","reply_artifact_send"} and "send" not in runtime_policy.enabled_capabilities)):
                     raise CompatibilityError("capability_disabled")
+                if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
+                    raise CompatibilityError('capability_disabled')
                 return _fn(*args, **kwargs)
             registered.fn = guarded
 

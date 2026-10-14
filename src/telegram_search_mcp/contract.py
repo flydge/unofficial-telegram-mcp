@@ -10,6 +10,7 @@ from .config import RuntimePolicy, ConfigurationError
 
 CONTRACT_VERSION = 1
 OPERATION_CAPABILITIES = {
+    "retain_selection": "retained_selections",
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},
     **{name: "reply_text_send" for name in ("prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft")},
     "read_presentation": "presentations",

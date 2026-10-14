@@ -225,7 +225,10 @@ def _request_launchd_restart() -> None:
     restart_launch_agent()
 
 
-class BrokerClient:
+from .selection_client import SelectionClientMixin, selected_method, selection_wire, strict_selection_response
+
+
+class BrokerClient(SelectionClientMixin):
     """Public-model-aware proxy with one isolated process-lifetime client ID."""
 
     def __init__(
@@ -254,6 +257,7 @@ class BrokerClient:
         self._retry_backoff_seconds = float(retry_backoff_seconds)
         self._sleeper = sleeper
         self._closed = False
+        self._init_selections()
         self._history_lock = threading.Lock()
         self._history_states: dict[str, _HistoryContinuation] = {}
         self._history_active = 0
@@ -332,6 +336,7 @@ class BrokerClient:
         return response["result"]
 
     def _request(self, operation: str | None, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = selection_wire(operation, payload)
         try:
             require_current(self._policy)
             local = contract_descriptor(self._policy)
@@ -360,6 +365,7 @@ class BrokerClient:
                 remote = self._exchange(connection, "handshake", local, deadline=deadline, generation=None)
                 require_compatible(remote, local, broker=True)
                 handshaken = True
+                self._selection_handshake(remote["broker_generation"])
                 with self._target_lock:
                     generation = remote["broker_generation"]
                     if self._target_generation != generation:
@@ -397,7 +403,7 @@ class BrokerClient:
                     self._spreadsheet_operation_state.generation = remote["broker_generation"]
                 if operation == "read_presentation":
                     self._presentation_operation_state.generation = remote["broker_generation"]
-                return result
+                return strict_selection_response(operation, result)
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None
         except (OSError, BrokerProtocolError) as error:
@@ -439,6 +445,7 @@ class BrokerClient:
         except (BrokerUnavailable, ValidationError):
             return terminal_search_response(request, "error")
 
+    @selected_method("get_attachment", AttachmentResponse)
     def get_attachment(self, request: AttachmentRequest) -> AttachmentResponse:
         try:
             result = self._request("get_attachment", request.model_dump(mode="json"))
@@ -449,6 +456,7 @@ class BrokerClient:
                 detail="attachment broker is unavailable",
             )
 
+    @selected_method("read_reply_chain", ReadReplyChainResponse)
     def read_reply_chain(self, request: ReadReplyChainRequest) -> ReadReplyChainResponse:
         from .reply_reader import reply_response
         try:
@@ -558,6 +566,7 @@ class BrokerClient:
             if reserved:
                 with self._target_lock:self._target_active -= 1
 
+    @selected_method("read_messages", ReadMessagesResponse)
     def read_messages(self, request: ReadMessagesRequest) -> ReadMessagesResponse:
         from .message_reader import terminal_read
         try:
@@ -1099,6 +1108,7 @@ class BrokerClient:
             with self._history_lock:
                 self._history_active -= 1
 
+    @selected_method("get_message_context", MessageContextResponse)
     def get_message_context(self, request: MessageContextRequest) -> MessageContextResponse:
         try:
             result = self._request("get_message_context", request.model_dump(mode="json"))
@@ -1128,6 +1138,7 @@ class BrokerClient:
             if prior.generation != self._attachment_generation:
                 raise _AttachmentGuardFailure()
 
+    @selected_method("read_attachment_page", ReadAttachmentPageResponse)
     def read_attachment_page(self, request: ReadAttachmentPageRequest) -> ReadAttachmentPageResponse:
         self._require_attachment_pages()
         try:
@@ -1259,6 +1270,7 @@ class BrokerClient:
                         label = chr(ord('A') + digit) + label
                     yield index, label + str(row), row, column
 
+    @selected_method("read_spreadsheet", ReadSpreadsheetResponse)
     def read_spreadsheet(self, request: ReadSpreadsheetRequest) -> ReadSpreadsheetResponse:
         self._require_spreadsheets()
         try:
@@ -1358,6 +1370,7 @@ class BrokerClient:
                     self._spreadsheet_active -= 1
                     self._spreadsheet_pending -= 1
 
+    @selected_method("read_presentation", ReadPresentationResponse)
     def read_presentation(self, request: ReadPresentationRequest) -> ReadPresentationResponse:
         policy_snapshot = self._policy
         try:
@@ -1425,6 +1438,7 @@ class BrokerClient:
                 with self._presentation_lock:
                     self._presentation_active -= 1
 
+    @selected_method("read_attachment", ReadAttachmentResponse)
     def read_attachment(self, request: ReadAttachmentRequest) -> ReadAttachmentResponse:
         try:
             result = self._request("read_attachment", request.model_dump(mode="json"))
@@ -1435,6 +1449,7 @@ class BrokerClient:
                 detail="attachment broker is unavailable",
             )
 
+    @selected_method("analyze_media", AnalyzeMediaResponse)
     def analyze_media(self, request: AnalyzeMediaRequest) -> AnalyzeMediaResponse:
         try:
             return AnalyzeMediaResponse.model_validate(self._request("analyze_media", request.model_dump(mode="json")))
@@ -1528,12 +1543,14 @@ class BrokerClient:
         except (BrokerUnavailable, ValidationError):
             return CancelDraftResponse(status="unavailable", detail="draft is unavailable")
 
+    @selected_method("prepare_artifact_send", PrepareArtifactSendResponse)
     def prepare_artifact_send(self, request: PrepareArtifactSendRequest) -> PrepareArtifactSendResponse:
         try:
             return PrepareArtifactSendResponse.model_validate(self._request("prepare_artifact_send", request.model_dump(mode="json")))
         except (BrokerUnavailable, ValidationError):
             return PrepareArtifactSendResponse(status="error", detail="draft broker is unavailable")
 
+    @selected_method("prepare_reply_artifact_send", PrepareReplyArtifactSendResponse)
     def prepare_reply_artifact_send(self,request: PrepareReplyArtifactSendRequest) -> PrepareReplyArtifactSendResponse:
         from .outgoing_drafts import _safe_caption,_safe_display_name
         try:
@@ -1581,6 +1598,7 @@ class BrokerClient:
     def refresh_reply_artifact_draft(self,request: RefreshReplyArtifactDraftRequest) -> ReviseReplyArtifactDraftResponse:
         return self._revise_reply_artifact_draft('refresh_reply_artifact_draft',request)
 
+    @selected_method("prepare_reply_text_send", PrepareReplyTextSendResponse)
     def prepare_reply_text_send(self, request: PrepareReplyTextSendRequest) -> PrepareReplyTextSendResponse:
         try:
             response=PrepareReplyTextSendResponse.model_validate(self._request("prepare_reply_text_send",request.model_dump(mode="json")))
@@ -1700,6 +1718,9 @@ class BrokerClient:
         return result
 
     def close(self) -> None:
+        with self._selection_lock:
+            self._selection_states.clear()
+            self._selection_cursors.clear()
         with self._spreadsheet_lock:
             self._spreadsheet_closed = True
             self._spreadsheet_states.clear()

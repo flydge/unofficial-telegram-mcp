@@ -10,7 +10,7 @@ completed slices and remaining work accessible in Git.
 
 ## Available behavior
 
-The 43-tool STDIO contract covers bounded discovery and exact-chat search; selected
+The 44-tool candidate STDIO contract covers bounded discovery and exact-chat search; selected
 message/history/reply/topic reading; selected document and media analysis; local
 artifact transfer; draft inspection/revision/cancellation; and explicitly approved
 text, document, photo and voice-note sending. Extended capabilities remain opt-in.
@@ -85,3 +85,6 @@ are retained in [third-party notices](third-party-notices.md).
 The public name remains **Unofficial Telegram MCP**. Compatibility identifiers stay
 `telegram-search-mcp`, `telegram_search`, the Python namespace, CLI names and
 `TelegramSearchMCP` runtime paths. Dependencies are not upgraded in this release.
+
+The candidate adds default-off exact retained selections for chosen messages and
+owned files. Technical selection tests do not close installed/native/live gates.

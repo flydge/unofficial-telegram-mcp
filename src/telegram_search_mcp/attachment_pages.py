@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .selection_broker import selected_request_facts, selected_file_context
 from .artifact_store import ArtifactStore, ArtifactStoreError
 from .attachment_page_models import (AttachmentPageImage, AttachmentPageScope,
     ReadAttachmentPageRequest, ReadAttachmentPageResponse, terminal_attachment_page)
@@ -72,7 +73,7 @@ class AttachmentPageReader:
 
     def read(self, request: ReadAttachmentPageRequest, *, deadline: float | None=None) -> ReadAttachmentPageResponse:
         request=ReadAttachmentPageRequest.model_validate(request.model_dump())
-        digest=fingerprint(request.model_dump(mode='json',exclude={'cursor'}));prior=None;reserved=False
+        digest=fingerprint(selected_request_facts(request));prior=None;reserved=False
         deadline=min(deadline if deadline is not None else float('inf'),time.monotonic()+30)
         try:
             with self._lock:
@@ -88,6 +89,10 @@ class AttachmentPageReader:
                 self._active+=1;self._pending+=1;reserved=True
                 expires=prior.expires if prior else now+300
                 wall_expiry=prior.scope.expires_at if prior else self._wall()+timedelta(seconds=300)
+                selection = selected_file_context()
+                if selection is not None:
+                    wall_expiry = min(wall_expiry, selection.expires_at)
+                    expires = min(expires, selection.expires_monotonic)
                 self._live_locked(expires,wall_expiry,deadline)
             with self._client.request_budget(deadline):
                 account=self._account(prior.account_id if prior else None)
@@ -104,7 +109,7 @@ class AttachmentPageReader:
                     expires=min(expires,self._clock()+max(0.,(wall_expiry-self._wall()).total_seconds()))
                 elif artifact_expiry<wall_expiry:raise _ReadFailure('expired')
                 self._live(expires,wall_expiry,deadline)
-                params=fingerprint({'request':request.model_dump(mode='json',exclude={'cursor'}),
+                params=fingerprint({'request':selected_request_facts(request),
                     'metadata':metadata_digest,'sha256':artifact.sha256,'bytes':artifact.size_bytes,'extractor_version':1})
                 if prior and params!=prior.scope.extraction_fingerprint:raise _ReadFailure('invalid_cursor')
                 offset=prior.offset if prior else 0
@@ -116,7 +121,7 @@ class AttachmentPageReader:
                 self._account(account)
                 if result.status not in {'page','complete'}:
                     raise _ReadFailure(result.status if result.status in {'unsupported','invalid_selection','limit_reached','error'} else 'error')
-                scope=AttachmentPageScope(artifact_id=artifact.artifact_id,artifact_sha256=artifact.sha256,
+                scope=AttachmentPageScope(selection_id=selected_file_context().selection_id if selected_file_context() else None,artifact_id=artifact.artifact_id,artifact_sha256=artifact.sha256,
                     artifact_bytes=artifact.size_bytes,extraction_fingerprint=params,broker_generation=self._generation,
                     source_anchor=SelectedMessageAnchor.model_validate(anchor.model_dump()) if anchor is not None else None,kind=result.kind,selected_pages=list(result.selected_pages),
                     total_pages=result.total_pages,all_pages_selected=result.kind=='pdf' and len(result.selected_pages)==result.total_pages,

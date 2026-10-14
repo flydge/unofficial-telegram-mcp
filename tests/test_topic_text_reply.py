@@ -820,7 +820,7 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
       proxy = h.start_ipc()
       async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
         tools = {t.name: t for t in (await consumer.list_tools()).tools}
-        self.assertEqual(len(tools), 43)
+        self.assertEqual(len(tools), 44)
         self.assertIn('topic', tools['prepare_reply_text_send'].input_schema['properties'])
         payload = {'recipient': CHAT, 'text': BODY, 'reply_to': ANCHOR, 'topic': TOPIC}
         for bad in ({'id': True}, {'id': None}, {'id': 41, 'reply_to': ANCHOR}, {'id': '41'}, {'id': 0}, {'id': -1}, {'id': 2**31},
@@ -829,7 +829,7 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
         for extra in ({'topic_id': NATIVE_TOPIC}, {'outgoing_entities': None}, {'quote': 'Unreviewed'}):
           await invalid(consumer, {**payload, **extra})
         self.assertEqual((h.raw.sent, h.approvals, len(h.broker._drafts._entries)), ([], [], 0))
-        prepared = (await consumer.call_tool('prepare_reply_text_send', payload)).structured_content
+        prepared = (await consumer.call_tool('prepare_reply_text_send', payload)).structured_content['result']
         self.assertEqual(prepared['status'], 'prepared'); preview = prepared['reply']; did = preview['draft']['draft_id']
         got = (await consumer.call_tool('get_reply_draft', {'draft_id': did})).structured_content
         self.assertEqual(got['reply'], preview)
@@ -870,7 +870,7 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
               diagnostic = ' '.join(getattr(block, 'text', '') for block in result.content).lower()
               self.assertIn('capability', diagnostic)
             else:
-              self.assertEqual((result.structured_content['status'], result.structured_content['reply']), ('unavailable', None))
+              self.assertEqual((result.structured_content['result']['status'], result.structured_content['result']['reply']), ('unavailable', None))
             self.assertEqual((h.raw.sent, h.approvals, h.register_count, len(h.broker._drafts._entries)), ([], [], 0, 0))
 
 

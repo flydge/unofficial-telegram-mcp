@@ -60,8 +60,11 @@ class ReplyArtifactDraftPreview(_Closed):
         return cls(draft=draft,reply_target=target,preview_sha256=digest(preview_facts(draft,target)))
 
 
+from .selection_refs import SelectionId
+
 class PrepareReplyArtifactSendRequest(PrepareArtifactSendRequest):
-    reply_to: SelectedMessageAnchor
+    reply_to: SelectedMessageAnchor | None = None
+    reply_selection_id: SelectionId | None = None
 
 class GetReplyArtifactDraftRequest(_Closed):
     draft_id: DraftId

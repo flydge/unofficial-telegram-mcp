@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
 
 SpreadsheetCursor = Annotated[str, Field(strict=True, pattern=r'^spreadsheet_[0-9a-f]{64}$', min_length=76, max_length=76)]
@@ -100,8 +101,9 @@ def _validate_selections(value):
     return value
 
 
-class ReadSpreadsheetRequest(_StrictModel):
-    artifact_id: ArtifactId
+class ReadSpreadsheetRequest(SelectedInput):
+    artifact_id: ArtifactId | None = None
+    selection_id: SelectionId | None = None
     selections: SheetSelections | None = None
     max_cells: Annotated[int, Field(strict=True, ge=1, le=200)] = 200
     cursor: SpreadsheetCursor | None = None
@@ -126,6 +128,7 @@ class SheetInfo(_StrictModel):
 
 
 class SpreadsheetScope(_StrictModel):
+    selection_id: SelectionId | None = None
     artifact_id: ArtifactId
     artifact_sha256: Hash
     artifact_bytes: Annotated[int, Field(strict=True, ge=0, le=64 * 1024 * 1024)]

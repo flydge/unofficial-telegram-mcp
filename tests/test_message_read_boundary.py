@@ -31,10 +31,10 @@ class ReadBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(tool, 'selected-read tool is missing')
                 self.assertTrue(tool.annotations.read_only_hint)
                 self.assertFalse(tool.input_schema['additionalProperties'])
-                self.assertEqual(tool.input_schema['properties']['anchors']['maxItems'],20)
+                self.assertEqual(tool.input_schema['properties']['anchors']['anyOf'][0]['maxItems'],20)
                 result = await consumer.call_tool('read_messages', {'anchors':[{'chat_id':7,'message_id':11}]})
                 if enabled:
-                    self.assertEqual(result.structured_content['status'],'complete')
+                    self.assertEqual(result.structured_content['result']['status'],'complete')
                     invalid = await consumer.call_tool('read_messages', {'anchors':[{'chat_id':7,'message_id':11}], 'path':'/private'})
                     self.assertTrue(invalid.is_error)
                 else:
