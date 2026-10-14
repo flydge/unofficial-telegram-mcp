@@ -752,11 +752,13 @@ class TDLibClient:
         raw: RawTDJson,
         session_directory: Path = TDLIB_SESSION_DIRECTORY,
         credential_loader: Callable[[], ApiCredentials] = read_api_credentials,
+        database_key_loader: Callable[[], bytes] | None = None,
         request_timeout: float = 30.0,
     ) -> None:
         self._raw = raw
         self._session_directory = session_directory
         self._credential_loader = credential_loader
+        self._database_key_loader = database_key_loader
         self._request_timeout = request_timeout
         self._ids = itertools.count(1)
         self._lock = threading.RLock()
@@ -776,7 +778,13 @@ class TDLibClient:
     @classmethod
     def from_defaults(cls) -> "TDLibClient":
         os.umask(0o077)
-        return cls(raw=LegacyTDJson())
+        from .enrollment import load_database_key
+        # The broker already holds the exclusive session lease at this boundary.
+        key = load_database_key()
+        def credentials():
+            legacy = read_api_credentials()
+            return ApiCredentials(legacy.api_id, legacy.api_hash, key)
+        return cls(raw=LegacyTDJson(), credential_loader=credentials, database_key_loader=lambda: key)
 
     def _apply_catalog_update(self, update: dict[str, Any]) -> None:
         change = _catalog_change_from_update(update)
@@ -953,6 +961,12 @@ class TDLibClient:
                     raise TDLibError(f"TDLib request failed with code {code}")
                 return response
 
+    @staticmethod
+    def _encoded_database_key(key: bytes) -> str:
+        if type(key) is not bytes or len(key) not in {0, 32}:
+            raise AuthorizationBlocked("the dedicated TDLib database key is unavailable")
+        return base64.b64encode(key).decode("ascii")
+
     def ensure_ready(self) -> None:
         for _ in range(8):
             state = self._call({"@type": "getAuthorizationState"}).get("@type")
@@ -972,7 +986,8 @@ class TDLibClient:
                         "use_test_dc": False,
                         "database_directory": str(database),
                         "files_directory": str(files),
-                        "database_encryption_key": "",
+                        "database_encryption_key": self._encoded_database_key(
+                            self._database_key_loader() if self._database_key_loader else credentials.database_key),
                         "use_file_database": False,
                         "use_chat_info_database": True,
                         "use_message_database": True,
@@ -987,7 +1002,9 @@ class TDLibClient:
                 )
                 continue
             if state == "authorizationStateWaitEncryptionKey":
-                self._call({"@type": "checkDatabaseEncryptionKey", "encryption_key": ""})
+                self._call({"@type": "checkDatabaseEncryptionKey",
+                            "encryption_key": self._encoded_database_key(
+                                self._database_key_loader() if self._database_key_loader else b"")})
                 continue
             raise AuthorizationBlocked("the dedicated TDLib session is not authorizationStateReady")
         raise AuthorizationBlocked("the dedicated TDLib session did not become ready")

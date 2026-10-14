@@ -20,6 +20,77 @@ The service name uses the last component of your home directory, not your displa
 
 A logged-in Telegram Desktop app does **not** supply this TDLib session. If you do not already have compatible provisioning, stop here: first-time setup is a current product gap, not something the package-install commands below solve. Do not copy an unrelated application's live session files.
 
+### Unreleased new-session setup technical support
+
+The development candidate adds an installed `telegram-search-setup` command.
+This future path is **not included in the published 0.51.0 release** and does not
+yet provide pinned TDLib provisioning, one-command installation, or automatic
+MCP/skill registration. It requires the pinned native runtime above and the
+matching candidate Python package already installed in its intended environment.
+Actual first-use Keychain, Telegram, launchd and clean-user acceptance remain open.
+
+For this candidate only, run these commands yourself in a foreground, uncaptured
+native Apple Terminal, using the installed environment's absolute command path:
+
+```bash
+/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup --help
+/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup setup
+/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup resume
+/ABSOLUTE/PATH/TO/.venv/bin/telegram-search-setup status
+```
+
+Setup refuses agent/captured shells, SSH, tmux, script wrappers and redirected or
+piped input before credentials or session changes. It uses hidden prompts for
+missing API credentials, your phone number, the Telegram code and optional 2FA
+password. Obtain your own API pair through [Telegram's application portal](https://my.telegram.org/apps).
+It preserves valid existing `api_id`/`api_hash` records and adds only missing
+records through Security.framework. A denied or locked Keychain is a recoverable
+error, never treated as an absent record or a reason to overwrite one.
+
+Only an absent or genuinely empty default session can enroll. Any unrecognized
+nonempty legacy session returns `legacy_unmanaged` and remains untouched.
+A private `enrollment.json` record and session-side `.managed-enrollment` identity
+marker bind the session path, directory identities, OS owner and dedicated
+`database_key_<enrollment-id>` Keychain account. A random 32-byte key encrypts
+only this new session. Missing, damaged or rebound metadata/key refuses; setup
+never regenerates a managed key or changes an existing database's encryption.
+
+Cancellation or a failed/uncertain submission retains progress and attempts
+temporary-client close/destroy without logout, revocation or deletion. Use
+`resume` after addressing the reported issue. Before enrollment, resume can
+complete add-only partial API provisioning or retry cancelled credential entry
+under the same genuinely-new-session checks; it cannot adopt legacy or damaged
+managed state. Resume asks TDLib for fresh authorization
+state; a local checkpoint cannot prove Ready. QR, email, registration and
+purchase authorization states are unsupported and return a safe status without
+provider details. Setup has a bounded 120-second auth/input deadline; another
+resume may be needed if Telegram's code arrives later.
+
+Provider Closed and native destruction are reported separately. If destruction
+is uncertain (`auth_destroy_failed`), the owning setup process retains its lease
+and auth owner until process exit. Allow that invocation to exit before resuming;
+an embedded caller must exit its owning process first. Destruction is never
+retried automatically, and no broker handoff occurs in that state. A provider
+close error with confirmed destruction releases ownership but still reports
+failure instead of Ready.
+
+The temporary auth client holds the broker's exact owner lease through native
+close/destroy. After destruction and lease release, setup can create an absent
+credential-free matching LaunchAgent definition and bootstrap it. It preserves
+an existing plist/registration and refuses a mismatch. It never stops a competing
+owner. A contended owner must first pass read-only validation of the intended
+installed plist/live registration. Success requires both the matching broker contract/config handshake and
+fresh TDLib Ready; launch success alone, a timeout or `owner_busy` is not readiness.
+Status reads metadata and an existing handshake only, without Keychain, provider
+initialization or service startup; `checkpoint: ready` is a past observation.
+
+A new policy enables only `read` and `artifacts`. An existing policy stays
+byte-identical; no send or extended capability is silently enabled. Registration
+and full provisioning remain the next installation slice. Preserve the exact
+managed key and both metadata bindings for recovery: **older binaries using an
+empty key cannot open a newly encrypted managed session**. This rollback boundary
+does not migrate or alter legacy databases.
+
 **Optional media dependencies:** local transcription and frame extraction use `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe` and `/opt/homebrew/bin/whisper-cli`. Provision the multilingual model at `~/Library/Application Support/TelegramSearchMCP/models/ggml-small.bin` and verify its distributor's checksum. Basic text search and document reads do not need Whisper. See the [security model](security.md) for details.
 
 ## 2. Install the package and broker

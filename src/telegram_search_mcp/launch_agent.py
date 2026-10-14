@@ -285,6 +285,118 @@ def launch_agent_status(
     return completed.returncode == 0
 
 
+def _matching_live_registration(text: object, plist_path: Path, payload: dict) -> bool:
+    """Check only bounded registration metadata, never print launchd diagnostics."""
+    if type(text) is not str or len(text.encode('utf-8')) > 65536:
+        return False
+    lines = [line.strip() for line in text.splitlines()]
+    if (lines.count('path = ' + str(plist_path.absolute())) != 1
+            or lines.count('program = ' + payload['ProgramArguments'][0]) != 1
+            or lines.count('arguments = {') != 1):
+        return False
+    start = lines.index('arguments = {') + 1
+    try:
+        end = lines.index('}', start)
+    except ValueError:
+        return False
+    return lines[start:end] == payload['ProgramArguments']
+
+
+def _require_enrolled_definition(parent: int, plist_path: Path, payload: dict) -> None:
+    existing = _read_launch_agent(parent, plist_path.name)
+    metadata = os.stat(plist_path.name, dir_fd=parent, follow_symlinks=False)
+    if (existing != payload or not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600):
+        raise LaunchAgentError('existing LaunchAgent does not match the installed broker')
+
+
+def validate_enrolled_broker(
+    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
+    uid: int | None = None,
+) -> None:
+    """Read-only intended-registration check for an existing competing owner.
+
+    No directory/plist creation, bootstrap, stop, restart or provider operation.
+    A compatible socket alone cannot substitute for the installed lifecycle.
+    """
+    if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
+        raise LaunchAgentError('LaunchAgent directory is unsafe')
+    parent = _open_launch_agent_directory(plist_path)
+    try:
+        payload = launch_agent_payload(python_executable=python_executable)
+        _require_enrolled_definition(parent, plist_path, payload)
+        user_id = os.getuid() if uid is None else uid
+        service = f'gui/{user_id}/{LAUNCH_AGENT_LABEL}'
+        state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=10)
+        if state.returncode != 0 or not _matching_live_registration(state.stdout, plist_path, payload):
+            raise LaunchAgentError('existing service does not match the installed broker')
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to verify installed broker registration') from None
+    finally:
+        os.close(parent)
+
+
+def start_enrolled_broker(
+    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
+    uid: int | None = None,
+) -> None:
+    """Start after auth teardown; no bootout, kill, restart or existing rewrite.
+
+    A new installed user may have no plist. Publish the fixed credential-free
+    definition without replacing any name, then bootstrap the absent service.
+    An existing service must match its actual registration and installed path.
+    Ready is checked separately through the compatible IPC boundary.
+    """
+    if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
+        raise LaunchAgentError('LaunchAgent directory is unsafe')
+    plist_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent = _open_launch_agent_directory(plist_path)
+    temporary = '.enrolled-agent-' + secrets.token_hex(16)
+    created = False
+    try:
+        payload = launch_agent_payload(python_executable=python_executable)
+        existing = _read_launch_agent(parent, plist_path.name)
+        if existing is None:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=parent)
+            created = True
+            with os.fdopen(fd, 'wb') as stream:
+                plistlib.dump(payload, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, plist_path.name, src_dir_fd=parent, dst_dir_fd=parent,
+                        follow_symlinks=False)
+            except FileExistsError:
+                # A competitor's registration is inspected, never overwritten.
+                pass
+            os.unlink(temporary, dir_fd=parent)
+            created = False
+            os.fsync(parent)
+            existing = _read_launch_agent(parent, plist_path.name)
+        _require_enrolled_definition(parent, plist_path, payload)
+        user_id = os.getuid() if uid is None else uid
+        domain = f'gui/{user_id}'
+        service = f'{domain}/{LAUNCH_AGENT_LABEL}'
+        state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=10)
+        if state.returncode == 0:
+            if not _matching_live_registration(state.stdout, plist_path, payload):
+                raise LaunchAgentError('existing service does not match the installed broker')
+            return
+        if state.returncode != 113:
+            raise LaunchAgentError('unable to verify installed broker registration')
+        _run_launchctl([LAUNCHCTL, 'bootstrap', domain, str(plist_path)],
+                      runner=runner, required=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to start installed broker') from None
+    finally:
+        if created:
+            os.unlink(temporary, dir_fd=parent)
+        os.close(parent)
+
+
 def restart_launch_agent(
     *,
     runner: Runner = subprocess.run,

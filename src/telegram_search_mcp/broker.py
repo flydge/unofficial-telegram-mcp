@@ -6,7 +6,6 @@ import ctypes
 import base64
 import binascii
 import errno
-import fcntl
 import os
 import secrets
 import socket
@@ -217,29 +216,13 @@ class Broker:
         self._errors = 0
 
     def _acquire_owner_lock(self) -> int:
-        if self._lock_path.is_symlink():
-            raise BrokerStartupError("broker owner lock is unsafe")
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        from .session_owner import acquire_owner_lock, OwnerLeaseError
         try:
-            descriptor = os.open(self._lock_path, flags, 0o600)
-        except OSError as error:
-            raise BrokerStartupError("broker owner lock is unsafe") from error
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                raise BrokerStartupError("broker owner lock is unsafe")
-            os.fchmod(descriptor, 0o600)
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as error:
-                if error.errno in {errno.EACCES, errno.EAGAIN}:
-                    raise BrokerStartupError("broker owner lock is already held") from error
-                raise BrokerStartupError("broker owner lock is unavailable") from error
-        except BaseException:
-            os.close(descriptor)
-            raise
-        return descriptor
+            return acquire_owner_lock(self._lock_path)
+        except OwnerLeaseError as error:
+            message = ("broker owner lock is already held" if error.code == "owner_busy"
+                       else "broker owner lock is unsafe")
+            raise BrokerStartupError(message) from None
 
     def _prepare_socket_path(self) -> None:
         try:

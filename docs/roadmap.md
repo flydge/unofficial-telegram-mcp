@@ -94,6 +94,13 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
 1. **First-time setup and repeatability:** finish a supported local login/provisioning
    path, compare applicable installer work, validate on a clean user/Mac, and test
    reconnect, expiry, ambiguous targets and honest unknown outcomes.
+   The unreleased development candidate now includes a bounded local
+   `telegram-search-setup` technical slice for new default-session enrollment,
+   phone/code/optional 2FA resume, encrypted-key binding and broker handoff. This
+   is not part of published 0.51.0 or completion of P2/F18: pinned provisioning,
+   one-command installation, MCP/skill registration and actual native/clean-user
+   evidence remain. Existing sessions and the retained F16 account-registry scope
+   are unchanged.
 2. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening

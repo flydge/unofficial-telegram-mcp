@@ -19,6 +19,7 @@ class KeychainError(RuntimeError):
 class ApiCredentials:
     api_id: int
     api_hash: str = field(repr=False)
+    database_key: bytes = field(default=b"", repr=False)
 
 
 def _read_account(

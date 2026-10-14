@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import io
 import importlib
+import json
 import os
 import socket
 import subprocess
@@ -19,6 +20,8 @@ from unittest import mock
 from mcp import Client
 
 from telegram_search_mcp.broker_client import BrokerClient
+from telegram_search_mcp.config import RuntimePolicy
+from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker_protocol import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -33,6 +36,20 @@ from telegram_search_mcp.schemas import (
 )
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp.tdjson import GlobalMessagePage, TDLibError
+
+
+def _synthetic_broker(*, socket_path, **kwargs):
+    root = Path(socket_path).parent
+    kwargs.setdefault("policy", RuntimePolicy())
+    kwargs.setdefault("artifact_store", ArtifactStore(cache_dir=root / "artifacts"))
+    kwargs.setdefault("download_source_root", root / "fake-session" / "files")
+    return importlib.import_module("telegram_search_mcp.broker").Broker(socket_path=socket_path, **kwargs)
+
+
+def _synthetic_proxy(**kwargs):
+    kwargs.setdefault("policy", RuntimePolicy())
+    kwargs.setdefault("restart_callback", lambda: None)
+    return BrokerClient(**kwargs)
 
 
 class SerializedFakeTDLib:
@@ -143,7 +160,7 @@ class BrokerWalkingSkeletonTests(unittest.IsolatedAsyncioTestCase):
 
         backend = BudgetAwareBackend()
         with tempfile.TemporaryDirectory() as parent:
-            broker = broker_module.Broker(socket_path=Path(parent) / "broker.sock",
+            broker = _synthetic_broker(socket_path=Path(parent) / "broker.sock",
                                            client_factory=lambda: backend)
             deadline = time.monotonic() + 10
             result = broker._dispatch({"operation": "search", "client_id": "test",
@@ -154,6 +171,44 @@ class BrokerWalkingSkeletonTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(backend.active_deadline)
 
     def test_subprocess_proxies_share_one_fake_tdlib_broker(self) -> None:
+        child_guard = r'''
+import atexit
+import json
+import os
+from pathlib import Path
+import sys
+
+fixture_root = Path(sys.argv[1]).resolve()
+if fixture_root.name == 'broker.sock':
+    fixture_root = fixture_root.parent
+real_profile = Path.home() / 'Library/Application Support/TelegramSearchMCP'
+blocked = []
+def protected(value):
+    if not isinstance(value, (str, bytes, os.PathLike)):
+        return False
+    path = Path(os.fsdecode(value))
+    return path.is_absolute() and path.is_relative_to(real_profile)
+def audit(event, args):
+    refused = False
+    if event in {'open', 'os.mkdir', 'os.remove', 'os.rmdir', 'os.listdir', 'os.scandir'}:
+        refused = bool(args) and protected(args[0])
+    elif event in {'os.rename', 'os.link', 'os.symlink'}:
+        refused = any(protected(value) for value in args[:2])
+    elif event in {'socket.connect', 'socket.bind'}:
+        refused = len(args) > 1 and protected(args[1])
+    elif event == 'subprocess.Popen' and args:
+        refused = os.path.basename(os.fsdecode(args[0])) in {'security', 'launchctl', 'osascript'}
+    elif event == 'ctypes.dlopen' and args and isinstance(args[0], str):
+        refused = 'Security.framework' in args[0] or 'libtdjson' in args[0]
+    if refused:
+        blocked.append(event)
+        raise RuntimeError('synthetic_child_attempted_real_runtime')
+sys.addaudithook(audit)
+def receipt():
+    (fixture_root / ('child-guard-' + str(os.getpid()) + '.json')).write_text(
+        json.dumps({'installed': True, 'blocked_events': blocked, 'pid': os.getpid()}) + '\n')
+atexit.register(receipt)
+'''
         broker_script = r'''
 import signal
 import sys
@@ -162,6 +217,8 @@ from collections import deque
 from pathlib import Path
 
 from telegram_search_mcp.broker import Broker
+from telegram_search_mcp.config import RuntimePolicy
+from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.keychain import ApiCredentials
 from telegram_search_mcp.tdjson import TDLibClient
 
@@ -214,6 +271,9 @@ broker = Broker(
     socket_path=root / "broker.sock",
     lock_path=root / "broker.lock",
     client_factory=lambda: client,
+    policy=RuntimePolicy(),
+    artifact_store=ArtifactStore(cache_dir=root / "artifacts"),
+    download_source_root=root / "fake-session" / "files",
 )
 signal.signal(signal.SIGTERM, lambda *_args: broker.shutdown())
 signal.signal(signal.SIGINT, lambda *_args: broker.shutdown())
@@ -224,9 +284,11 @@ import sys
 from pathlib import Path
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.schemas import ResolveTargetRequest
+from telegram_search_mcp.config import RuntimePolicy
 
 client = BrokerClient(
     socket_path=Path(sys.argv[1]),
+    policy=RuntimePolicy(),
     restart_callback=lambda: None,
     retry_backoff_seconds=0,
 )
@@ -241,7 +303,7 @@ client.close()
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
             broker_process = subprocess.Popen(
-                [sys.executable, "-c", broker_script, str(root)],
+                [sys.executable, "-c", child_guard + broker_script, str(root)],
                 cwd=repository,
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -255,7 +317,7 @@ client.close()
                 self.assertTrue((root / "broker.sock").exists())
                 proxies = [
                     subprocess.Popen(
-                        [sys.executable, "-c", proxy_script, str(root / "broker.sock")],
+                        [sys.executable, "-c", child_guard + proxy_script, str(root / "broker.sock")],
                         cwd=repository,
                         env=environment,
                         stdout=subprocess.PIPE,
@@ -265,7 +327,7 @@ client.close()
                     for _ in range(2)
                 ]
                 results = [process.communicate(timeout=10) for process in proxies]
-                health = BrokerClient(
+                health = _synthetic_proxy(
                     socket_path=root / "broker.sock",
                     restart_callback=lambda: None,
                     retry_backoff_seconds=0,
@@ -277,6 +339,15 @@ client.close()
                 except subprocess.TimeoutExpired:
                     broker_process.kill()
                     broker_stdout, broker_stderr = broker_process.communicate(timeout=5)
+
+            child_receipts = [json.loads(path.read_text()) for path in root.glob('child-guard-*.json')]
+            self.assertEqual(len(child_receipts), 3)
+            self.assertTrue(all(row['installed'] and not row['blocked_events'] for row in child_receipts))
+            evidence = os.environ.get('TG_BUILD_TEST_BROKER_CHILD_EVIDENCE')
+            if evidence:
+                Path(evidence).write_text(json.dumps({'fixture_root': str(root.resolve()),
+                    'children': child_receipts, 'broker_exit_code': broker_process.returncode,
+                    'proxy_exit_codes': [process.returncode for process in proxies]}, indent=2) + '\n')
 
         self.assertEqual([item[0] for item in results], ["resolved\n", "resolved\n"])
         self.assertEqual([item[1] for item in results], ["", ""])
@@ -301,7 +372,7 @@ client.close()
                 created.append(backend)
                 return backend
 
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=socket_path,
                 client_factory=client_factory,
                 verify_peer_uid=False,
@@ -309,11 +380,11 @@ client.close()
             broker_thread = threading.Thread(target=broker.serve_forever)
             broker_thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
-            first_proxy = BrokerClient(socket_path=socket_path)
-            second_proxy = BrokerClient(socket_path=socket_path)
+            first_proxy = _synthetic_proxy(socket_path=socket_path)
+            second_proxy = _synthetic_proxy(socket_path=socket_path)
             self.assertNotEqual(first_proxy.client_id, second_proxy.client_id)
-            first_server = build_server(service_factory=lambda: first_proxy)
-            second_server = build_server(service_factory=lambda: second_proxy)
+            first_server = build_server(policy=RuntimePolicy(), service_factory=lambda: first_proxy)
+            second_server = build_server(policy=RuntimePolicy(), service_factory=lambda: second_proxy)
 
             async with Client(first_server) as first, Client(second_server) as second:
                 first_tools, second_tools = await asyncio.gather(
@@ -402,7 +473,7 @@ client.close()
                     created.append(backend)
                     return backend
 
-                broker = broker_module.Broker(
+                broker = _synthetic_broker(
                     socket_path=socket_path,
                     client_factory=client_factory,
                     peer_uid_loader=lambda _connection, value=peer_uid: value,
@@ -410,7 +481,7 @@ client.close()
                 broker_thread = threading.Thread(target=broker.serve_forever)
                 broker_thread.start()
                 self.assertTrue(broker.wait_until_ready(timeout=2))
-                proxy = BrokerClient(
+                proxy = _synthetic_proxy(
                     socket_path=socket_path,
                     restart_callback=lambda: None,
                     retry_backoff_seconds=0,
@@ -434,7 +505,7 @@ client.close()
             root = Path(parent)
             socket_path = root / "broker.sock"
             lock_path = root / "broker.lock"
-            first = broker_module.Broker(
+            first = _synthetic_broker(
                 socket_path=socket_path,
                 lock_path=lock_path,
                 client_factory=SerializedFakeTDLib,
@@ -443,7 +514,7 @@ client.close()
             first_thread = threading.Thread(target=first.serve_forever)
             first_thread.start()
             self.assertTrue(first.wait_until_ready(timeout=2))
-            second = broker_module.Broker(
+            second = _synthetic_broker(
                 socket_path=socket_path,
                 lock_path=lock_path,
                 client_factory=SerializedFakeTDLib,
@@ -465,7 +536,7 @@ client.close()
             stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             stale.bind(str(socket_path))
             stale.close()
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=socket_path,
                 lock_path=root / "broker.lock",
                 client_factory=SerializedFakeTDLib,
@@ -491,7 +562,7 @@ client.close()
                 lock_path = root / "broker.lock"
                 link = socket_path if unsafe_name == "socket" else lock_path
                 link.symlink_to(target)
-                broker = broker_module.Broker(
+                broker = _synthetic_broker(
                     socket_path=socket_path,
                     lock_path=lock_path,
                     client_factory=SerializedFakeTDLib,
@@ -509,7 +580,7 @@ client.close()
         now = [100.0]
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=SerializedFakeTDLib,
@@ -520,7 +591,7 @@ client.close()
             thread = threading.Thread(target=broker.serve_forever)
             thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
-            proxy = BrokerClient(socket_path=root / "broker.sock")
+            proxy = _synthetic_proxy(socket_path=root / "broker.sock")
             resolved = await asyncio.to_thread(
                 proxy.resolve, ResolveTargetRequest(target="@known_chat")
             )
@@ -555,7 +626,7 @@ client.close()
         backend = BlockingBackend()
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=lambda: backend,
@@ -566,7 +637,7 @@ client.close()
             thread = threading.Thread(target=broker.serve_forever)
             thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
-            proxy = BrokerClient(socket_path=root / "broker.sock")
+            proxy = _synthetic_proxy(socket_path=root / "broker.sock")
             request = asyncio.create_task(
                 asyncio.to_thread(
                     proxy.resolve, ResolveTargetRequest(target="@known_chat")
@@ -597,7 +668,7 @@ client.close()
                 created.append(backend)
                 return backend
 
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=client_factory,
@@ -636,7 +707,7 @@ client.close()
         created: list[SerializedFakeTDLib] = []
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=lambda: created.append(SerializedFakeTDLib()) or created[-1],
@@ -674,7 +745,7 @@ client.close()
         broker_module = importlib.import_module("telegram_search_mcp.broker")
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=SerializedFakeTDLib,
@@ -722,7 +793,7 @@ client.close()
         backend = BlockingBackend()
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=lambda: backend,
@@ -734,11 +805,11 @@ client.close()
             thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
             restart = mock.Mock()
-            first = BrokerClient(
+            first = _synthetic_proxy(
                 socket_path=root / "broker.sock",
                 restart_callback=restart,
             )
-            second = BrokerClient(
+            second = _synthetic_proxy(
                 socket_path=root / "broker.sock",
                 restart_callback=restart,
             )
@@ -784,7 +855,7 @@ client.close()
         backend = BlockingBackend()
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=lambda: backend,
@@ -794,7 +865,7 @@ client.close()
             thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
             restart = mock.Mock()
-            proxy = BrokerClient(
+            proxy = _synthetic_proxy(
                 socket_path=root / "broker.sock",
                 request_timeout=0.05,
                 restart_callback=restart,
@@ -807,7 +878,7 @@ client.close()
             backend.release.set()
             await asyncio.sleep(0.1)
             follow_up = await asyncio.to_thread(
-                BrokerClient(socket_path=root / "broker.sock").resolve,
+                _synthetic_proxy(socket_path=root / "broker.sock").resolve,
                 ResolveTargetRequest(target="@known_chat"),
             )
 
@@ -824,7 +895,7 @@ client.close()
             root = Path(parent)
             socket_path = root / "broker.sock"
             lock_path = root / "broker.lock"
-            first_broker = broker_module.Broker(
+            first_broker = _synthetic_broker(
                 socket_path=socket_path,
                 lock_path=lock_path,
                 client_factory=SerializedFakeTDLib,
@@ -833,7 +904,7 @@ client.close()
             first_thread = threading.Thread(target=first_broker.serve_forever)
             first_thread.start()
             self.assertTrue(first_broker.wait_until_ready(timeout=2))
-            proxy = BrokerClient(socket_path=socket_path)
+            proxy = _synthetic_proxy(socket_path=socket_path)
             request = DiscoverTargetsRequest(
                 hypotheses=["garden group", "seed exchange"], scope="both"
             )
@@ -841,7 +912,7 @@ client.close()
             first_broker.shutdown()
             first_thread.join(timeout=2)
 
-            second_broker = broker_module.Broker(
+            second_broker = _synthetic_broker(
                 socket_path=socket_path,
                 lock_path=lock_path,
                 client_factory=SerializedFakeTDLib,
@@ -874,7 +945,7 @@ client.close()
             output
         ), contextlib.redirect_stderr(output):
             root = Path(parent)
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=root / "broker.sock",
                 lock_path=root / "broker.lock",
                 client_factory=FailingBackend,
@@ -883,7 +954,7 @@ client.close()
             thread = threading.Thread(target=broker.serve_forever)
             thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
-            proxy = BrokerClient(socket_path=root / "broker.sock")
+            proxy = _synthetic_proxy(socket_path=root / "broker.sock")
             response = await asyncio.to_thread(
                 proxy.resolve, ResolveTargetRequest(target="@private_query")
             )
@@ -908,7 +979,7 @@ client.close()
                 created.append(backend)
                 return backend
 
-            broker = broker_module.Broker(
+            broker = _synthetic_broker(
                 socket_path=socket_path,
                 client_factory=client_factory,
                 verify_peer_uid=False,
@@ -916,8 +987,8 @@ client.close()
             broker_thread = threading.Thread(target=broker.serve_forever)
             broker_thread.start()
             self.assertTrue(broker.wait_until_ready(timeout=2))
-            first = BrokerClient(socket_path=socket_path)
-            second = BrokerClient(socket_path=socket_path)
+            first = _synthetic_proxy(socket_path=socket_path)
+            second = _synthetic_proxy(socket_path=socket_path)
             request = DiscoverTargetsRequest(
                 hypotheses=["garden group", "seed exchange"], scope="both"
             )

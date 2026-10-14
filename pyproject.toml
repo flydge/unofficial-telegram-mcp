@@ -26,6 +26,7 @@ Roadmap = "https://github.com/flydge/unofficial-telegram-mcp/blob/main/docs/road
 telegram-search-mcp = "telegram_search_mcp.server:main"
 telegram-search-broker = "telegram_search_mcp.launch_agent:main"
 telegram-search-transfer = "telegram_search_mcp.transfer_cli:main"
+telegram-search-setup = "telegram_search_mcp.setup_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

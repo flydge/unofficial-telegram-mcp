@@ -1,5 +1,68 @@
 # Unofficial Telegram MCP security model
 
+## Unreleased default-session enrollment
+
+The development candidate's local `telegram-search-setup` path is technical
+support beyond published 0.51.0. It does not change MCP schemas, data-request
+allowlists or legacy capability defaults. Its separate typed auth transport has
+no MCP/broker/raw-dispatch interface. Setup/resume require a foreground native
+Apple Terminal with bounded ancestry/TTY checks and hidden input; help/status
+never read Keychain, initialize a native client or start a service. These checks
+refuse known captured/agent/remote intermediaries; they do not claim protection
+against arbitrary hostile software running as the same OS user or a separately
+compromised terminal.
+
+Broker and setup share one private stable-inode nonblocking `broker.lock` lease.
+Contention returns `owner_busy` without killing the owner, changing its socket or
+resetting a session. Setup holds the lease through auth close and native destroy,
+including cancellation/error cleanup. Only after teardown and release can the
+matching installed broker start. A new plist is published without replacing an
+existing name; existing plist/live registration must match and remain unchanged.
+Before accepting a competing Ready owner, read-only validation must prove the
+same intended installed definition/live registration. Matching IPC contract/config
+and fresh Ready are also required; a compatible socket alone is insufficient.
+
+Observed provider Closed and completed native destruction are independent facts.
+If destroy fails or is interrupted, the process retains the exact lease fd and
+auth owner through context exit, garbage collection and later setup calls until
+OS process exit. It never automatically retries a possibly completed destroy or
+starts a broker. `auth_destroy_failed` requires the owning process to exit before
+resume. A provider-close error with confirmed native destruction can release
+ownership but cannot report Ready.
+
+Enrollment is confined to a genuinely new default session. A bounded private
+atomic durable root record plus a private durable session identity marker bind
+the exact path, directory inodes, UID, enrollment identity and dedicated Keychain
+database-key account. API records are preserved and only absent accounts are
+added through native Security.framework; denied/locked/unreadable differs from
+absent. A new random 32-byte key is stored before the pending record, and the
+record/marker precede TDLib parameters. Interrupted initial persistence can leave
+an unused key or incomplete metadata; it never opens a database and requires
+honest recovery instead of silent adoption or key regeneration. Missing/damaged
+or inconsistent bindings/keys refuse before managed native initialization.
+
+Phone/code/optional password are used only by the local auth process; uncertain
+teardown can retain its auth owner until that process exits. Errors, status and
+representations contain bounded codes, not provider
+messages or input. Python immutable strings/bytes are not claimed to be zeroized.
+TDLib JSON byte fields use base64 for both parameters and the resumed encryption
+key branch. Unmanaged legacy sessions keep their empty-key behavior; no existing
+database is rekeyed. Older binaries cannot open a newly encrypted managed session,
+so retain its exact key and metadata when rolling back package code.
+
+Provider state is reread on resume; local pending/ready checkpoints never prove
+current authorization. Failed or uncertain credential submissions are not
+replayed automatically. Resume before enrollment uses the same new-session
+admission and can recover partial API writes or early credential cancellation;
+existing credentials are never overwritten and foreign/damaged state refuses.
+Cancellation preserves state and attempts teardown without logout/revoke/deletion,
+retaining ownership until process exit when native destruction is uncertain.
+Unsupported QR/email/registration/purchase
+states return redacted actionable status. New policy enables only `read` and
+`artifacts`; an existing policy remains byte-identical. Synthetic tests do not
+close native Keychain/Telegram/launchd or clean-user acceptance, pinned runtime
+provisioning, one-command installation or MCP/skill registration gates.
+
 ## Authority boundary
 
 The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the forty-three tools listed in README; the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
