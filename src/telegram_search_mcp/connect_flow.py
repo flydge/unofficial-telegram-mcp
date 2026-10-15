@@ -34,6 +34,7 @@ _CODES = frozenset({'owner_busy', 'owner_unsafe', 'legacy_unmanaged', 'enrollmen
     'invalid_input', 'flood_wait', 'dependency_unavailable', 'auth_request_failed', 'timeout',
     'password_submission_uncertain', 'expired', 'cancelled', 'auth_close_failed', 'auth_destroy_failed',
     'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout'})
+STATUS_CODES = _CODES  # Public: the fixed codes a UI may display.
 PASSWORD_ATTEMPTS = 5  # Submissions per run; Telegram's flood control is the security bound.
 _SLICE = 1.0  # Longest wait between cancel/expiry checks.
 _STEP = 30  # Cap for one provider request inside the run lifetime.
