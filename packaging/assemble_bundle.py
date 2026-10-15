@@ -11,13 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import subprocess
 import tarfile
+from types import SimpleNamespace
 
+from telegram_search_mcp.app_identity import IDENTITY_FILE, parse_app_identity
 from telegram_search_mcp.bundle_runtime import unique_json, digest, BundleError
+from telegram_search_mcp.keychain import read_api_credentials
 from telegram_search_mcp.native_runtime import parse_native_manifest, NativeRuntimeError
 from telegram_search_mcp.release_archive import (
     MAX_ARCHIVE_BYTES, MAX_FILES, MAX_INDEX_BYTES, MAX_MEMBER_BYTES,
@@ -57,6 +62,7 @@ class _File:
     metadata: os.stat_result
     sha256: str
     executable: bool
+    data: bytes | None = None  # Generated in memory (never read from the payload); source is a label only.
 
     def record(self):
         return {'path': self.name, 'bytes': self.metadata.st_size,
@@ -184,6 +190,25 @@ def _json_bytes(value):
                        separators=(',', ':')) + '\n').encode('utf-8')
 
 
+def _app_identity_file(runner):
+    """The owner's Keychain pair as an in-memory, indexed `app-identity.json` (mode 0400).
+
+    Only behind the explicit assembly flag. Neither value is printed, logged or written
+    anywhere but the archive; failures carry a fixed code and no chained exception.
+    """
+    failed = False
+    try:
+        credentials = read_api_credentials(runner=runner)
+        data = _json_bytes({'version': 1, 'api_id': credentials.api_id, 'api_hash': credentials.api_hash})
+        parse_app_identity(data)
+    except Exception:  # Keychain, parser and encoder errors alike: never forward their text.
+        failed = True
+    if failed:
+        raise ReleasePackageError('app_identity_unavailable')
+    return _File(IDENTITY_FILE, Path('<keychain>'), Path('<keychain>'), None, SimpleNamespace(st_size=len(data)),
+                 digest(data), False, data)
+
+
 def _header(file):
     # The index parser supplies the consumer's path/count/size bounds as well.
     info = tarfile.TarInfo(file.name)
@@ -238,13 +263,17 @@ class _VerifiedReader:
             raise ValueError
 
 
-def assemble_bundle(payload, output_directory):
+def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=False,
+                    keychain_runner=subprocess.run):
     """Stream one prepared current bundle; only audited internal Python links.
 
     Preparation is a separate bounded builder operation. This producer verifies
     actual current product/contract/skills/native bytes, never executes payload
     binaries and emits its metadata audit before creating the large archive.
+    `app_identity_from_keychain` is the only way an `app-identity.json` can enter a
+    bundle: a payload that already carries one is refused either way.
     """
+    identity = _app_identity_file(keychain_runner) if app_identity_from_keychain else None
     try:
         payload, output = Path(payload), Path(output_directory)
         _safe_path(payload,directory=True); _safe_path(output.parent,directory=True)
@@ -254,6 +283,8 @@ def assemble_bundle(payload, output_directory):
         for child in sorted(payload.iterdir()):
             if child.is_dir(): files += _scan(child,child.name,python_links=child.name=='python')
             else: files.append(_single(child,child.name))
+        if any(f.name==IDENTITY_FILE for f in files): raise ValueError
+        if identity is not None: files.append(identity)
         files.sort(key=lambda f:f.name)
         manifest_data=_bounded_input(payload/'manifest/release.json')
         manifest=unique_json(manifest_data)
@@ -298,6 +329,7 @@ def assemble_bundle(payload, output_directory):
             with gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0,compresslevel=6) as compressed:
                 with tarfile.open(fileobj=compressed,mode='w|',format=tarfile.USTAR_FORMAT,encoding='utf-8',errors='strict') as tar:
                     for file in files:
+                        if file.data is not None:tar.addfile(_header(file),io.BytesIO(file.data));continue
                         if file.root is not None and _resolve_python(file.supplied,file.root)!=file.source:raise ValueError
                         stream,before=_open_source(file.source)
                         with stream:
@@ -306,7 +338,7 @@ def assemble_bundle(payload, output_directory):
             raw.flush();os.fsync(raw.fileno());os.fchmod(raw.fileno(),0o400)
         am,ah=_digest_input(archive,MAX_ARCHIVE_BYTES)
         for file in files:
-            if _snapshot(_safe_path(file.source))!=_snapshot(file.metadata):raise ValueError
+            if file.data is None and _snapshot(_safe_path(file.source))!=_snapshot(file.metadata):raise ValueError
         final=_json_bytes(_index(files,manifest,am.st_size,ah));load_archive_index(final)
         index=output/'release-index.json';_write_private(index,final)
         provenance=_json_bytes({'schema_version':1,'package_version':__version__,'publication':'unreleased',
@@ -324,7 +356,9 @@ if __name__=='__main__':
     import argparse
     parser=argparse.ArgumentParser()
     parser.add_argument('--payload',required=True);parser.add_argument('--output-directory',required=True)
+    parser.add_argument('--app-identity-from-keychain',action='store_true',
+        help='bundle this Mac\'s Keychain api_id/api_hash as app-identity.json (never printed)')
     args=parser.parse_args()
-    result=assemble_bundle(args.payload,args.output_directory)
+    result=assemble_bundle(args.payload,args.output_directory,app_identity_from_keychain=args.app_identity_from_keychain)
     print(_json_bytes({'archive_sha256':result.archive_sha256,'index_sha256':result.index_sha256,
         'files':result.files,'unpacked_bytes':result.unpacked_bytes,'archive_bytes':result.archive_bytes}).decode(),end='')

@@ -293,15 +293,20 @@ def read_owned_file(path: Path, *, max_bytes: int, mode: int | None = None,
         return data
 
 
-def ensure_owned_private_directory(path: Path) -> Path:
-    """Create missing private components safely; refuse unsafe existing metadata."""
+def ensure_owned_private_directory(path: Path, *, private_leaf: bool = True) -> Path:
+    """Create missing private components safely; refuse unsafe existing metadata.
+
+    `private_leaf=False` is for client-owned roots (Codex home, skills roots): an
+    existing leaf must be the user's and not group/world-writable, but need not be
+    0700. Components this call creates are always 0700.
+    """
     path = _absolute(path)
     descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     current = Path(path.anchor)
     owned_chain = False
     try:
         _safe_metadata(current, os.fstat(descriptor), final=current == path,
-                       private=current == path)
+                       private=private_leaf and current == path)
         _validate_descriptor_acl(descriptor)
         for part in path.parts[1:]:
             current /= part
@@ -323,10 +328,10 @@ def ensure_owned_private_directory(path: Path) -> Path:
             try:
                 metadata = os.fstat(child)
                 owned_chain = owned_chain or metadata.st_uid == os.getuid()
-                _safe_metadata(current, metadata, final=current == path or owned_chain, private=current == path)
+                _safe_metadata(current, metadata, final=current == path or owned_chain, private=private_leaf and current == path)
                 _validate_descriptor_acl(child)
                 _safe_metadata(current, os.fstat(child), final=current == path or owned_chain,
-                               private=current == path)
+                               private=private_leaf and current == path)
             except BaseException:
                 os.close(child)
                 raise

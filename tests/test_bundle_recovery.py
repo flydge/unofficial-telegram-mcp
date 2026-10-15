@@ -18,9 +18,9 @@ class RecoveryTests(BundleInstallTests):
             with self.subTest(kind=kind):
                 self.setUp();packet=self.fixture();module=packet[0];fired=False
                 original_directory=module.ensure_owned_private_directory;original_create=module.create
-                def directory(path):
+                def directory(path,**kwargs):
                     nonlocal fired
-                    value=original_directory(path);path=Path(path)
+                    value=original_directory(path,**kwargs);path=Path(path)
                     wanted=(path.name==kind or kind=='tx' and path.name.startswith('install_')
                             or kind=='skill_dir' and path.name.startswith('skill-packet-telegram-search-'))
                     if wanted and not fired:fired=True;raise RuntimeError('interrupted after mkdir')
@@ -89,7 +89,7 @@ class RecoveryTests(BundleInstallTests):
                 self.assertEqual(self.install(packet)['status'],'activation_required')
 
     def test_matching_or_mismatched_foreign_creation_after_durable_intent_refuses(self):
-        for kind in ['release','registration','telegram-search','telegram-setup','receipt','pointer']:
+        for kind in ['release','registration','telegram-search','telegram-setup','claude-telegram-search','claude-telegram-setup','receipt','pointer']:
             for matching in [True,False]:
                 with self.subTest(kind=kind,matching=matching):
                     self.setUp();packet=self.fixture();module=packet[0];foreign=None
@@ -102,12 +102,14 @@ class RecoveryTests(BundleInstallTests):
                         if kind=='registration':
                             target=self.codex/'config.toml';target.write_bytes((tx/'config.candidate').read_bytes() if matching else b'# foreign\n');target.chmod(0o600)
                         else:
-                            target=self.runtime/'releases'/packet[3] if kind=='release' else self.skills/kind if kind.startswith('telegram-') else self.runtime/('current.json' if kind=='pointer' else 'receipt.json')
+                            target=(self.runtime/'releases'/packet[3] if kind=='release' else self.skills/kind if kind.startswith('telegram-')
+                                    else self.claude_skills/kind[len('claude-'):] if kind.startswith('claude-')
+                                    else self.runtime/('current.json' if kind=='pointer' else 'receipt.json'))
                             source=Path(bound['staged'])
                             if source.is_dir():shutil.copytree(source,target)
                             else:shutil.copyfile(source,target);target.chmod(0o600)
                             if not matching:
-                                changed=target/'launcher.py' if kind=='release' else target/'SKILL.md' if kind.startswith('telegram-') else target
+                                changed=target/'launcher.py' if kind=='release' else target/'SKILL.md' if kind.startswith(('telegram-','claude-')) else target
                                 changed.chmod(0o600);changed.write_bytes(b'foreign')
                         foreign=(target,target.stat().st_ino)
                     with self.assertRaises(module.InstallError):self.install(packet,checkpoint=actor)
@@ -116,7 +118,7 @@ class RecoveryTests(BundleInstallTests):
                     self.assertEqual(foreign[0].stat().st_ino,foreign[1])
 
     def test_matching_foreign_targets_appearing_during_install_are_never_adopted(self):
-        for kind in ['release','config','skill']:
+        for kind in ['release','config','skill','claude_skill']:
             with self.subTest(kind=kind):
                 self.setUp();packet=self.fixture();module,source,index,pin=packet;foreign=None
                 def actor(stage):
@@ -128,8 +130,8 @@ class RecoveryTests(BundleInstallTests):
                     if kind=='config' and stage=='release':
                         tx=self.runtime/'transactions'/('install_'+pin[:24]);target=self.codex/'config.toml'
                         target.write_bytes((tx/'config.candidate').read_bytes());target.chmod(0o600);foreign=(target,target.stat().st_ino)
-                    if kind=='skill' and stage=='registration':
-                        target=self.skills/'telegram-search';target.mkdir(mode=0o700)
+                    if kind in ('skill','claude_skill') and stage=='registration':
+                        target=(self.skills if kind=='skill' else self.claude_skills)/'telegram-search';target.mkdir(mode=0o700)
                         (target/'SKILL.md').write_bytes((source/'skills/telegram-search/SKILL.md').read_bytes());(target/'SKILL.md').chmod(0o600)
                         foreign=(target,target.stat().st_ino)
                 with self.assertRaises(module.InstallError):self.install(packet,checkpoint=actor)
@@ -138,14 +140,15 @@ class RecoveryTests(BundleInstallTests):
                 self.assertFalse((self.runtime/'current.json').exists())
 
     def test_crash_immediately_after_own_publication_can_recover(self):
-        for kind in ['root','release','config','telegram-search','telegram-setup']:
+        for kind in ['root','release','config','telegram-search','telegram-setup','claude-telegram-search','claude-telegram-setup']:
             with self.subTest(kind=kind):
                 self.setUp();packet=self.fixture();module=packet[0];original_rename=module._rename;fired=False
                 def renamed(source,destination):
                     nonlocal fired
                     original_rename(source,destination)
                     name=Path(destination).name
-                    if not fired and (kind=='root' and Path(destination)==self.runtime or kind=='release' and name==packet[3] or name==kind):
+                    if not fired and (kind=='root' and Path(destination)==self.runtime or kind=='release' and name==packet[3] or name==kind
+                                      or kind.startswith('claude-') and Path(destination)==self.claude_skills/kind[len('claude-'):]):
                         fired=True;raise RuntimeError('crash after directory rename')
                 from telegram_search_mcp import codex_registration
                 original_replace=codex_registration.os.replace

@@ -21,6 +21,8 @@ cover it. See the [retained selection reference](docs/reference.md#exact-retaine
 
 ## Claude Code
 
+*The 0.52 candidate installer registers this for you; see [the candidate below](#unreleased-local-candidate). The manual command below is for the published 0.51 install.*
+
 Run in your terminal:
 
 ```bash
@@ -31,6 +33,8 @@ claude mcp add --transport stdio --scope user telegram_search -- \
 Open Claude Code and run `/mcp` to check the connection. [Claude Code MCP guide](https://code.claude.com/docs/en/mcp).
 
 ## Codex
+
+*The 0.52 candidate installer registers this for you as well.*
 
 Add this block to `~/.codex/config.toml`, preserving your existing settings:
 
@@ -64,6 +68,7 @@ Ask your assistant:
 > Use the `_manifest` tool from Unofficial Telegram MCP with `check_broker=true` and report whether compatibility is `compatible`.
 
 [Setup and troubleshooting](docs/install.md)
+
 # Unreleased local candidate
 
 This checkout is development candidate `0.52.0.dev0`. Its private authenticated
@@ -72,8 +77,12 @@ on Apple Silicon macOS 26+. See [candidate installation](docs/install.md).
 Published 0.51 evidence remains separate; native onboarding, public hosting,
 publisher trust and complete source/redistribution acceptance remain open.
 
-**Next priority for 0.52:** [QR-first Telegram login](docs/plans/0.52-qr-onboarding.md)
-with application-supplied API credentials and a local connection screen. End users
-must not need to create a Telegram API application or enter API ID/hash. This is
-an approved release requirement, not a feature available in this snapshot.
-Development remains paused; the documentation update does not resume it.
+**QR-first login (0.52):** the candidate installer registers the MCP server in **both
+Claude Code and Codex** and installs the paired skills for both. Your assistant then runs
+`connect`: a local browser page on your Mac shows a QR code, you scan it in Telegram on
+your phone (Settings → Devices → Link Desktop Device) and enter 2FA only on that page.
+No API ID or hash, phone number or login code passes through the assistant, and a bundle
+assembled with the application identity needs no API ID/hash entry at all. This is technically implemented and tested with
+fakes; real acceptance on a clean macOS user is pending, so it is not yet a released or
+accepted feature. The Terminal phone/code setup remains as a fallback. Details and the
+shared-API-identity risk: [candidate installation](docs/install.md#private-bundled-candidate-0520dev0).

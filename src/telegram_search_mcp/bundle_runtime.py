@@ -144,18 +144,24 @@ class Selection:
             raise BundleError('receipt_mismatch')
         index,manifest=validate_tree(self.root, self.root / 'bundle-index.json', self.index_sha256, installed=True)
         keys={'schema_version','index_sha256','release_root','installation_root','codex_home','skills_root',
-              'user_home','package_version','registration_sha256','skills','publication_objects','status'}
+              'claude_skills_root','user_home','package_version','registration_sha256','skills','publication_objects',
+              'claude_code','status'}
         if (set(receipt)!=keys or type(receipt['schema_version']) is not int or receipt['schema_version']!=1
                 or receipt['installation_root']!=str(installation) or receipt['package_version']!=manifest['package_version']
                 or receipt['status']!='activation_required' or receipt['skills']!=manifest['skills']
-                or not _hash(receipt['registration_sha256'])):
+                or not _hash(receipt['registration_sha256'])
+                # The Claude entry is owned by an external CLI: only the record's shape is checked here,
+                # never its live registration (a launch must not depend on, or reach for, that CLI).
+                or type(receipt['claude_code']) is not str
+                or receipt['claude_code'] not in ('registered','reused','not_found')):
             raise BundleError('receipt_mismatch')
         try:
             objects=receipt['publication_objects']
-            if type(objects) is not dict or set(objects)!={'release','telegram-search','telegram-setup'}:
+            if type(objects) is not dict or set(objects)!={'release','telegram-search','telegram-setup',
+                                                          'claude-telegram-search','claude-telegram-setup'}:
                 raise BundleError('publication_mismatch')
             require_object_binding(self.root,objects['release']['object'])
-            paths={k:Path(receipt[k]) for k in ('codex_home','skills_root','user_home')}
+            paths={k:Path(receipt[k]) for k in ('codex_home','skills_root','claude_skills_root','user_home')}
             if any(not p.is_absolute() or '..' in p.parts for p in paths.values()):raise BundleError('receipt_mismatch')
             # Installation stores only nonsecret local registration authority.
             # B1A session/Keychain/service identity is still derived from the OS
@@ -167,17 +173,18 @@ class Selection:
                 'args':['-I','-S','-B',str(self.root/'launcher.py'),'mcp'],
                 'enabled':True,'required':True,'startup_timeout_sec':30,'tool_timeout_sec':600,'enabled_tools':manifest['tools']}
             if config.get('mcp_servers',{}).get('telegram_search')!=expected:raise BundleError('registration_mismatch')
-            for skill in manifest['skills']:
-                directory=paths['skills_root']/skill['id']
-                require_object_binding(directory,objects[skill['id']]['object'])
-                require_object_binding(directory/'SKILL.md',objects[skill['id']]['child'])
-                with open_owned_directory(directory,private=True):pass
-                if (set(p.name for p in directory.iterdir())!={'SKILL.md'}
-                        or digest(read(directory/'SKILL.md',mode=0o600))!=skill['sha256']):raise BundleError('skill_mismatch')
+            for prefix,root_key in (('','skills_root'),('claude-','claude_skills_root')):
+                for skill in manifest['skills']:
+                    directory=paths[root_key]/skill['id'];bound=objects[prefix+skill['id']]
+                    require_object_binding(directory,bound['object'])
+                    require_object_binding(directory/'SKILL.md',bound['child'])
+                    with open_owned_directory(directory,private=True):pass
+                    if (set(p.name for p in directory.iterdir())!={'SKILL.md'}
+                            or digest(read(directory/'SKILL.md',mode=0o600))!=skill['sha256']):raise BundleError('skill_mismatch')
             # Bind receipt's home to the transaction's immutable declaration,
             # without using it as an environment or MCP-driven home override.
             journal=unique_json(read(installation/'transactions'/('install_'+self.index_sha256[:24])/'journal.json',mode=0o600))
-            if any(journal.get(k)!=receipt[k] for k in ('installation_root','codex_home','skills_root','user_home','index_sha256','release_root','package_version')):
+            if any(journal.get(k)!=receipt[k] for k in ('installation_root','codex_home','skills_root','claude_skills_root','user_home','index_sha256','release_root','package_version')):
                 raise BundleError('receipt_mismatch')
         except BundleError:raise
         except (OSError,ValueError,TypeError,AttributeError,RuntimePathError):raise BundleError('installed_binding_mismatch') from None

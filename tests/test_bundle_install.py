@@ -9,9 +9,12 @@ import tempfile
 import shlex
 import unittest
 from unittest import mock
+from claude_fake import FakeClaude
 
 
-class BundleInstallTests(unittest.TestCase):
+class InstallHarness:
+    """Disposable user home plus a synthetic admitted release; never a real client, CLI or config."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -21,6 +24,21 @@ class BundleInstallTests(unittest.TestCase):
         self.runtime = self.home / 'runtime'
         self.codex = self.home / '.codex'
         self.skills = self.home / '.agents' / 'skills'
+
+    @property
+    def claude_skills(self):
+        return self.home / '.claude' / 'skills'
+
+    def claude(self):
+        """The fake `claude` CLI for the current home (rebuilt when a subtest resets the fixture)."""
+        if getattr(self, '_claude_base', None) != self.base:
+            self._claude_base = self.base
+            self._claude = FakeClaude()
+            self.claude_cli = self.base / 'bin' / 'claude'
+            self.claude_cli.parent.mkdir(mode=0o700)
+            self.claude_cli.write_bytes(b'#!/bin/sh\n# inert placeholder; the fake runner never executes it\n')
+            self.claude_cli.chmod(0o700)
+        return self._claude
 
     def module(self):
         spec = importlib.util.find_spec('telegram_search_mcp.bundle_install')
@@ -66,9 +84,15 @@ class BundleInstallTests(unittest.TestCase):
 
     def install(self, packet, **kwargs):
         module, release, index, pin = packet
+        fake = self.claude()
+        kwargs.setdefault('claude_candidates', (self.claude_cli,))
+        kwargs.setdefault('claude_runner', fake)
         with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
             return module.install(release, index, pin, installation_root=self.runtime,
                 codex_home=self.codex, skills_root=self.skills, user_home=self.home, **kwargs)
+
+
+class BundleInstallTests(InstallHarness, unittest.TestCase):
 
     def test_success_is_activation_required_and_exact_repeat_preserves_config_inode(self):
         packet = self.fixture()
@@ -79,14 +103,62 @@ class BundleInstallTests(unittest.TestCase):
         result = self.install(packet)
         self.assertEqual(result['status'], 'activation_required')
         self.assertEqual(shlex.split(result['activation_command']),result['activation_arguments'])
+        installed = Path(result['release_root'])
+        self.assertEqual(result['activation_arguments'], [str(installed/'python/bin/python3'), '-I', '-S', '-B',
+                                                          str(installed/'launcher.py'), 'connect'])
+        self.assertEqual(result['next_action'], 'run_activation_then_wait')
+        self.assertEqual(result['claude_code'], 'registered')
         self.assertTrue(config.read_bytes().startswith(b'# preserved neighbor\nmodel = "example"\n'))
         self.assertTrue((self.runtime / 'current.json').is_file())
         inode = config.stat().st_ino
         self.assertEqual(self.install(packet)['installation'], 'reused')
         self.assertEqual(config.stat().st_ino, inode)
 
+    def test_client_created_0755_roots_are_accepted_and_never_chmodded(self):
+        # Codex and Claude Code create ~/.codex, ~/.agents and ~/.claude as 0755.
+        packet = self.fixture()
+        for root in (self.codex, self.skills, self.claude_skills):
+            root.mkdir(parents=True, exist_ok=True)
+            for path in (root, root.parent):
+                if path != self.home:
+                    path.chmod(0o755)
+        result = self.install(packet)
+        self.assertEqual(result['status'], 'activation_required')
+        for root in (self.codex, self.skills, self.claude_skills):
+            self.assertEqual(oct(root.stat().st_mode & 0o777), '0o755')
+        for name in ('telegram-search', 'telegram-setup'):
+            self.assertEqual(oct((self.claude_skills / name).stat().st_mode & 0o777), '0o700')
+
+    def test_group_or_world_writable_client_roots_are_refused(self):
+        for mode in (0o775, 0o757):
+            with self.subTest(mode=oct(mode)):
+                self.setUp()
+                packet = self.fixture()
+                self.claude_skills.mkdir(parents=True)
+                self.claude_skills.chmod(mode)
+                with self.assertRaises(packet[0].InstallError):
+                    self.install(packet)
+                self.assertFalse((self.runtime / 'current.json').exists())
+
+    def test_both_skill_roots_receive_exact_private_copies(self):
+        packet = self.fixture()
+        result = self.install(packet)
+        installed = Path(result['release_root'])
+        for root in (self.skills, self.claude_skills):
+            self.assertEqual(oct(root.stat().st_mode & 0o777), '0o700')
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ['telegram-search', 'telegram-setup'])
+            for name in ('telegram-search', 'telegram-setup'):
+                self.assertEqual(oct((root / name).stat().st_mode & 0o777), '0o700')
+                self.assertEqual([p.name for p in (root / name).iterdir()], ['SKILL.md'])
+                self.assertEqual((root / name / 'SKILL.md').read_bytes(), (installed / 'skills' / name / 'SKILL.md').read_bytes())
+        receipt = json.loads((self.runtime / 'receipt.json').read_text())
+        self.assertEqual(receipt['claude_skills_root'], str(self.claude_skills))
+        self.assertEqual(set(receipt['publication_objects']), {'release', 'telegram-search', 'telegram-setup',
+                                                               'claude-telegram-search', 'claude-telegram-setup'})
+        self.assertEqual(receipt['claude_code'], 'registered')
+
     def test_foreign_config_skill_and_runtime_are_preserved(self):
-        for kind in ['config', 'skill', 'runtime', 'service']:
+        for kind in ['config', 'skill', 'claude_skill', 'runtime', 'service']:
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
                 self.setUp()
                 packet = self.fixture()
@@ -96,6 +168,9 @@ class BundleInstallTests(unittest.TestCase):
                 elif kind == 'skill':
                     target = self.skills / 'telegram-search' / 'SKILL.md'
                     content = b'foreign skill'
+                elif kind == 'claude_skill':
+                    target = self.claude_skills / 'telegram-setup' / 'SKILL.md'
+                    content = b'foreign claude skill'
                 elif kind == 'service':
                     from telegram_search_mcp.config import _owner_paths
                     target = _owner_paths(self.home)[3]
@@ -111,7 +186,8 @@ class BundleInstallTests(unittest.TestCase):
                 self.assertFalse((self.runtime / 'current.json').exists())
 
     def test_interruptions_resume_every_pending_transaction_step(self):
-        for stage in ['prepared', 'release', 'registration', 'telegram-search', 'telegram-setup', 'receipt']:
+        for stage in ['prepared', 'release', 'registration', 'telegram-search', 'telegram-setup', 'claude-telegram-search',
+                      'claude-telegram-setup', 'claude_code', 'receipt']:
             with self.subTest(stage=stage):
                 self.setUp()
                 packet = self.fixture()

@@ -10,10 +10,10 @@ from test_bundle_install import BundleInstallTests
 
 
 class BundleRuntimeTests(BundleInstallTests):
-    def selected(self):
+    def selected(self, **install_options):
         from telegram_search_mcp import bundle_runtime
         packet = self.fixture()
-        result = self.install(packet)
+        result = self.install(packet, **install_options)
         selection = bundle_runtime.Selection(Path(result['release_root']),packet[3])
         patcher = mock.patch.object(bundle_runtime,'_SELECTION',selection)
         patcher.start(); self.addCleanup(patcher.stop)
@@ -54,15 +54,46 @@ class BundleRuntimeTests(BundleInstallTests):
 
     def test_matching_pointer_cannot_mask_registration_or_paired_skill_drift(self):
         from telegram_search_mcp import bundle_runtime
-        for kind in ['registration','skill','receipt_home']:
+        for kind in ['registration','skill','claude_skill','claude_skill_extra','claude_skill_removed','receipt_home','receipt_claude_root']:
             with self.subTest(kind=kind):
                 self.setUp();selection=self.selected()
                 if kind=='registration':
                     p=self.codex/'config.toml';p.write_text('[mcp_servers.telegram_search]\ncommand="/foreign"\n')
                 elif kind=='skill':(self.skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
+                elif kind=='claude_skill':(self.claude_skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
+                elif kind=='claude_skill_extra':(self.claude_skills/'telegram-search/extra').write_bytes(b'x')
+                elif kind=='claude_skill_removed':
+                    (self.claude_skills/'telegram-search/SKILL.md').unlink();(self.claude_skills/'telegram-search').rmdir()
+                elif kind=='receipt_claude_root':
+                    p=self.runtime/'receipt.json';value=json.loads(p.read_text());value['claude_skills_root']=str(self.base/'elsewhere');p.write_text(json.dumps(value))
                 else:
                     p=self.runtime/'receipt.json';value=json.loads(p.read_text());value['user_home']='/foreign';p.write_text(json.dumps(value))
                 with self.assertRaises(bundle_runtime.BundleError):selection.check()
+
+    def test_claude_registration_record_is_validated_by_shape_and_never_by_the_live_cli(self):
+        from telegram_search_mcp import bundle_runtime, claude_registration
+        selection = self.selected()
+        receipt_path = self.runtime / 'receipt.json'
+        original = json.loads(receipt_path.read_text())
+        self.assertEqual(original['claude_code'], 'registered')
+        self.claude().entry = None  # The external CLI's entry vanished: a launch must not notice or care.
+        with mock.patch.object(claude_registration, '_run', side_effect=AssertionError('check must not drive the CLI')):
+            for value in ('registered', 'reused', 'not_found'):
+                receipt_path.write_text(json.dumps({**original, 'claude_code': value}))
+                selection.check()
+            for value in ('', 'maybe', None, True, 1, ['registered'], {'status': 'registered'}):
+                with self.subTest(value=value):
+                    receipt_path.write_text(json.dumps({**original, 'claude_code': value}))
+                    with self.assertRaises(bundle_runtime.BundleError): selection.check()
+            missing = {k: v for k, v in original.items() if k != 'claude_code'}
+            receipt_path.write_text(json.dumps(missing))
+            with self.assertRaises(bundle_runtime.BundleError): selection.check()
+
+    def test_installation_without_a_claude_cli_still_passes_every_launch_check(self):
+        selection = self.selected(claude_candidates=())
+        self.assertEqual(json.loads((self.runtime / 'receipt.json').read_text())['claude_code'], 'not_found')
+        self.assertEqual(self.claude().calls, [])
+        selection.check()
 
     def test_bundled_manifest_names_actual_native_pin_without_loading_provider(self):
         from telegram_search_mcp import server

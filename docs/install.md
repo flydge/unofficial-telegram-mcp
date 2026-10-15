@@ -6,13 +6,15 @@
 
 ## Private bundled candidate 0.52.0.dev0
 
-**Current behavior versus the 0.52 target:** the instructions below describe the
-existing development candidate, including its manual API-pair and Terminal-only
-login. The approved [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the
-next implementation priority and a release gate: install → local QR screen →
-phone confirmation → optional 2FA → ready MCP, without an end-user API application
-or API ID/hash entry. That flow is not implemented yet. These current instructions
-must not be used as the acceptance target for 0.52; development remains paused.
+**Current behavior versus the 0.52 target:** the approved
+[0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this
+candidate: install → `connect` → local QR screen → phone confirmation → optional 2FA →
+ready MCP, with no API ID/hash, phone number or login code going through your
+assistant. It is implemented and covered by synthetic and inert-fake tests only. Real
+acceptance (a clean macOS user, a test-account phone scan with 2FA, a bounded search in
+Claude Code and in Codex, restart and revoke/reconnect) is still pending, so nothing
+here is released or accepted end to end. The phone/code Terminal flow remains as the
+[fallback](#terminal-fallback-phone-and-code-setup).
 
 The continuing development candidate supports an offline authenticated first
 install for Apple Silicon macOS 26+. Its bundle supplies standalone Python,
@@ -32,12 +34,29 @@ download URL in this candidate.
 
 Default runtime storage is `~/Library/Application Support/TelegramSearch`,
 separate from the preserved default session in `TelegramSearchMCP/tdlib`.
-The installer registers only its owned `mcp_servers.telegram_search` subtree
-and the paired skills under `~/.agents/skills`. It preserves neighboring TOML
-and refuses foreign registrations, skills, runtime roots and existing services.
+The installer registers, with ownership receipts:
+
+- Codex: only its owned `mcp_servers.telegram_search` subtree in `~/.codex/config.toml`;
+  neighboring TOML is preserved.
+- Claude Code: a user-scope server `telegram_search`, added with
+  `claude mcp add-json --scope user` and confirmed with `claude mcp get`. The `claude` CLI
+  is looked up only at `~/.local/bin/claude`, `~/.claude/local/claude`,
+  `/opt/homebrew/bin/claude` and `/usr/local/bin/claude` (a regular executable owned by
+  you or root; `PATH` is never searched). If none exists, Claude Code registration is
+  skipped and the receipt records `claude_code: not_found`; that is not a failure. An
+  identical existing entry is reused; a different `telegram_search` entry is refused as
+  `claude_registration_conflict` and is never overwritten or removed. If the install
+  refuses after the installer added the entry, only that entry is removed.
+- The paired `telegram-search` and `telegram-setup` skills under both `~/.agents/skills`
+  and `~/.claude/skills` (created owner-only if absent).
+
+It refuses foreign registrations, skills, runtime roots and existing services.
 Recovery retains one lease, journal, original config bytes and exact receipts;
-repeating the same admitted installation verifies/reuses it. It performs no
-login, Keychain operation, service start/stop or session mutation.
+repeating the same admitted installation verifies/reuses it, without consulting the
+`claude` CLI again. Apart from those registration commands it performs no login,
+Keychain operation, service start/stop or session mutation. A launch checks the
+receipt, the Codex registration, both skill copies and the shape of the Claude receipt
+record only; it never re-reads the Claude registration.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
@@ -46,23 +65,79 @@ bytes alone never authorize adoption. Later publications bind exact staged
 filesystem objects before rename or replacement. The runtime's parent directory
 must already exist safely; the default macOS Application Support parent is used.
 
-Installation returns `activation_required` and nonsecret `activation_command` and `activation_arguments`.
-Run that exact installed Python/isolated launcher command ending in `setup`
-from a foreground, uncaptured Apple Terminal. `resume` recovers a managed
-interrupted enrollment; `status` reads bounded enrollment/handshake metadata.
-The launcher uses `-I -S -B` and a closed app path. Credentials, phone, login
-code and optional 2FA use hidden native prompts only. After confirmed native
-teardown and owner handoff, require the matching broker's fresh Ready, reconnect
-Codex, check the installed manifest and perform one authorized bounded own-chat
-search. Synthetic installation and an inert manifest do not close that gate.
+Installation returns `status: activation_required`, `next_action: run_activation_then_wait`,
+`claude_code` (`registered`, `reused` or `not_found`) and the nonsecret
+`activation_command` and `activation_arguments`: the installed Python and isolated
+launcher (`-I -S -B`, a closed app path) ending in `connect`. Installation, a started
+screen or a launch is not Ready.
 
 
-### Native activation and recovery
+### Connect with a QR code (primary path)
 
-Use the exact `activation_command` returned by the authenticated installer;
-its installed launcher accepts `setup`, `resume` and `status`. Run setup or
-resume yourself in foreground, uncaptured native Apple Terminal. Native
-Keychain, Telegram, launchd and clean-user acceptance remain open.
+Your assistant (Claude Code or Codex) can run all of this from its captured shell; no
+step takes a secret.
+
+1. Run the exact `activation_command`. `connect` validates the installation, starts a
+   short-lived background job outside the assistant's process tree and returns at once with
+   `screen_opened`. The job opens your default browser on this Mac at a local
+   `http://127.0.0.1:<port>/` page; the address is never printed or logged.
+2. In Telegram on your phone open **Settings → Devices → Link Desktop Device** and scan the
+   QR. It refreshes by itself and shows a countdown. If you use two-step verification, type
+   the password on that page only (never to the assistant). The page is in Russian or English
+   following your browser language.
+3. Your assistant runs the same command with `wait` in place of `connect`. One call blocks
+   up to 540 seconds and reports the current phase; it repeats until `ready`, `failed`,
+   `expired` or `cancelled`. The whole run lives at most 600 seconds.
+4. On `ready`, reconnect the MCP client (Claude Code: `/mcp`; Codex: restart it), have the
+   assistant call `_manifest` with `check_broker=true`, and make one bounded own-chat
+   read or search. That, not the installer or `ready` alone, is the end-to-end check.
+
+Repeating `connect` is safe: with a Ready broker it reports `already_connected` and asks for
+no new login, and while a screen is open it reports `connect_in_progress`. If the broker is
+the exact receipt-bound one but its Telegram authorization is no longer valid (for example
+after revoking the session from the phone), `connect` may stop that one broker, run the QR
+flow on the existing managed enrollment and hand off again; a foreign, incompatible or Ready
+owner is never stopped. An existing unmanaged session is never touched (`legacy_unmanaged`).
+A new policy enables only `read` and `artifacts`.
+
+If the background job cannot start (`connect_launch_failed`) or no page can open (headless,
+SSH), run the same command from a native Apple Terminal window on this Mac, or use the
+Terminal fallback below.
+
+**Application identity.** With no API pair of your own, `connect` uses the application
+identity shipped in the bundle (`app-identity.json`, owner-only and hash-authenticated like
+every bundled file). Credential order for a new enrollment: a complete API pair already in
+your Keychain, else the bundled identity, else `connect` refuses `app_identity_missing`.
+A partial Keychain pair is `credential_conflict`; an existing enrollment keeps the source and
+identity it was created with (`identity_changed` otherwise). To use your own pair (obtain it
+from [Telegram's application portal](https://my.telegram.org/apps)), run the launcher with
+`api-credentials` in a native Terminal before the first `connect`; it prompts with hidden
+input and stores the pair add-only.
+
+**Assembling a bundle with the identity.** The bundle producer adds the identity only when
+asked: `python packaging/assemble_bundle.py --payload <dir> --output-directory <dir>
+--app-identity-from-keychain`. It reads `api_id` and `api_hash` from the build machine's
+Keychain service, validates them, and writes `app-identity.json` (canonical JSON, mode 0400)
+at the release root before the index is computed, so it is indexed like every other file.
+Values are never printed and errors are redacted. Without the flag no such file exists, and a
+payload that already carries one is refused.
+
+**Risk note.** Every user of a bundle shares the distributor's API ID, and distributed client
+parameters are extractable by design. If Telegram were to restrict that application (for
+example under §1.5 of its API terms), every bundled-identity installation, and the owner's own
+installation if it uses the same pair, would stop working. The Keychain override above is the
+mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-off.
+
+
+### Terminal fallback: phone and code setup
+
+The same launcher accepts `setup`, `resume`, `api-credentials` and `status` besides `connect`
+and `wait`. Run setup, resume and api-credentials yourself in foreground, uncaptured native
+Apple Terminal; `resume` recovers a managed interrupted enrollment, `status` reads bounded
+enrollment/handshake metadata. After confirmed native teardown and owner handoff, require the
+matching broker's fresh Ready, reconnect the client, check the installed manifest and perform
+one authorized bounded own-chat search. Synthetic installation and an inert manifest do not
+close that gate. Native Keychain, Telegram, launchd and clean-user acceptance remain open.
 
 Setup refuses agent/captured shells, SSH, tmux, script wrappers and redirected or
 piped input before credentials or session changes. It uses hidden prompts for

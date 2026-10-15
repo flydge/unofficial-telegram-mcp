@@ -2,7 +2,7 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
 
-Updated **2026-10-14**. The released baseline remains **0.51.0**; the current
+Updated **2026-10-16**. The released baseline remains **0.51.0**; the current
 **0.52.0.dev0** development snapshot and pause boundary are recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
@@ -19,10 +19,20 @@ request; the remaining scope below is retained.
 must be install MCP + skills → local QR screen → confirmation in the phone's
 Telegram app → optional local 2FA → ready MCP and a bounded Codex read/search.
 End users must not create API applications or enter API ID/hash; the distributed
-application supplies its API identity. This is mandatory for 0.52.0 and is not
-implemented in the current snapshot. It supersedes conflicting manual-credential
-and Terminal-only onboarding plans. Resolve those conflicts before lower-priority
-feature work. This documentation decision does not resume development.
+application supplies its API identity. This is mandatory for 0.52.0. It supersedes
+conflicting manual-credential and Terminal-only onboarding plans; the Terminal
+phone/code setup remains only as a fallback.
+
+**0.52 QR-first status** ([spec](plans/0.52-qr-onboarding-spec.md), phases A–F):
+phases A–E are technically done on branch `qr-onboarding-052` — transport and credential
+resolution, connect flow, loopback QR screen, `connect`/`wait`/`api-credentials` with the
+transient launchd job and narrow reconnect, and the installer/docs phase (application
+identity injection at assembly, Claude Code and Codex registration, skill copies for both
+clients, rewritten setup skill). Evidence is synthetic: fakes for Telegram, launchd, the
+`claude` CLI and Keychain. **Phase F (real acceptance) is pending the owner:** a separate
+macOS user, a test-account phone scan with 2FA, bounded own-chat search in Claude Code and
+Codex, QR refresh/cancel/interruption, restart and revoke/reconnect, and unchanged live 0.51
+hashes. Until then 0.52 is not accepted and not released.
 
 The local transfer CLI can now consume a short-lived upload authority issued by
 the preparing MCP client. The helper returns a result reference; the original
@@ -51,8 +61,9 @@ packets remain failed evidence; they are not reclassified as successful runs.
 
 Still paused and unfinished:
 
-- **First:** implement and accept the mandatory 0.52 QR-first onboarding scope,
-  including application API identity, local login UI, reconnect and repeat use.
+- **First:** accept the mandatory 0.52 QR-first onboarding scope (phase F: real
+  clean-user run with a test-account phone, 2FA, reconnect and repeat use); phases A–E
+  are technically implemented.
 - Installed file/page/parser coverage beyond the bounded B2 message and B2C text
   file scenarios; broader conversational and no-skill consumer validation.
 - F13 formatted captions and remaining applicable topic/reply/live scenarios;
@@ -152,9 +163,10 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
 
 1. **Priority #1 — QR-first onboarding for 0.52:** follow the
    [approved requirements and acceptance gate](plans/0.52-qr-onboarding.md).
-   Reuse the current installer/enrollment/handoff, supply the application's API
-   identity automatically, add a local QR/optional-2FA screen, and prove a clean
-   install → real phone confirmation → Codex search → repeat-use path. Mandatory
+   The installer, application identity, local QR/optional-2FA screen and
+   `connect`/`wait` commands are implemented (phases A–E); what remains is to prove a
+   clean install → real phone confirmation → Claude Code and Codex search →
+   repeat-use path (phase F, owner-run). Mandatory
    end-user API-pair entry or Terminal-only login does not satisfy this scope.
    Resolve incompatible earlier assumptions here before any unrelated B2/F13–F17
    continuation. Public installer distribution, trust and source/notice closure

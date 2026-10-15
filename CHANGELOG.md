@@ -15,11 +15,22 @@
 The previously published `main` at `796f95d22ae7016ae8c7a313e96e15233aba7531` contains the Unofficial Telegram MCP rebrand. This changelog does not reconstruct intermediate private development commits or assert that they were publicly released.
 ## 0.52.0.dev0 — unreleased
 
+- Add QR-first Telegram login to the private candidate: `connect` opens a loopback
+  QR screen on the Mac, `wait` reports progress, 2FA is typed only on that page, and a
+  bundle assembled with the application identity needs no API ID/hash entry. The installer now
+  registers the MCP server in both Claude Code (user scope, through the `claude` CLI at
+  fixed locations, foreign entries refused, `claude_code: not_found` when absent) and Codex,
+  copies the paired skills to both `~/.agents/skills` and `~/.claude/skills`, and returns an
+  activation command ending in `connect`. The bundle assembler injects `app-identity.json`
+  only with the explicit `--app-identity-from-keychain` flag. The Terminal `setup` flow
+  remains as the fallback; the setup skill is rewritten for the connect/wait flow.
+  Verified with synthetic fakes only; real clean-user acceptance (phase F) is pending.
+
 - Record the approved [QR-first onboarding requirement](docs/plans/0.52-qr-onboarding.md)
   as the next priority and a mandatory 0.52.0 release gate. Application-supplied
   API credentials replace mandatory end-user API application creation/entry in
-  the target flow. This is a documentation-only decision; QR remains unimplemented
-  and development remains paused.
+  the target flow. This entry records the decision; the implementation is the entry
+  above.
 
 - Add authenticated offline macOS ARM64 first-install bundle admission,
   recoverable owned runtime/registration/paired-skills installation and an
