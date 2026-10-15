@@ -117,3 +117,16 @@ def session_credential_loader(paths=None, store=None, *, keychain_loader=None, b
     key = managed_key(record, store).reveal()
     return key, lambda: resolve_enrolled(record, keychain_loader=keychain_loader,
                                          bundled_loader=bundled_loader, database_key=key)
+
+
+def preflight_credentials(paths=None, *, keychain_loader=None, bundled_loader=None) -> ApiCredentials:
+    """Legacy install preflight: the resolved pair only, never the database key (no lease)."""
+    from .enrollment import EnrollmentStore, SetupPaths
+    if keychain_loader is None:
+        from .keychain import read_api_credentials as keychain_loader
+    if bundled_loader is None:
+        from .app_identity import bundled_app_identity as bundled_loader
+    record = EnrollmentStore(SetupPaths() if paths is None else paths).read()
+    if record is None:
+        return keychain_loader()
+    return resolve_enrolled(record, keychain_loader=keychain_loader, bundled_loader=bundled_loader)

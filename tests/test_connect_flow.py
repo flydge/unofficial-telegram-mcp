@@ -10,10 +10,11 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from test_onboarding import MemoryStore
 
-from telegram_search_mcp import session_owner
+from telegram_search_mcp import connect_flow, session_owner
 from telegram_search_mcp.connect_flow import (PASSWORD_ATTEMPTS, ConnectUI, connect_status_path, run_connect,
                                               write_connect_status)
 from telegram_search_mcp.credential_identity import identity_fingerprint
@@ -78,6 +79,9 @@ class QrRaw:
             if outcome == 'raise':
                 raise RuntimeError('provider failed for ' + payload['password'])
             if outcome == 'silent':
+                return
+            if outcome == 'malformed':
+                self.queue.append({'@type': 'session', '@extra': extra})
                 return
             if outcome == 'invalid':
                 self.queue.append({'@type': 'error', '@extra': extra, 'code': 400,
@@ -276,8 +280,8 @@ class ConnectFlowTests(ConnectHarness):
         self.assert_torn_down_pending(result)
 
     def test_uncertain_password_submission_is_never_resubmitted(self):
-        for outcome, lifetime in [('raise', 30), ('silent', .4)]:
-            with self.subTest(outcome=outcome):
+        for outcome, lifetime in [('raise', 30), ('silent', .4), ('malformed', 30)]:
+            with self.subTest(outcome=outcome), mock.patch.object(connect_flow, '_MIN_SUBMIT', .1):
                 ui = FakeUI(self.paths, [PASSWORD, PASSWORD])
                 result, _ = self.connect([password_state(), READY], ui, lifetime=lifetime,
                                          raw_options={'outcomes': [outcome, 'ok']})
@@ -332,6 +336,37 @@ class ConnectFlowTests(ConnectHarness):
                 self.assertEqual((result.phase, result.code), ('cancelled', 'cancelled'))
                 self.assertEqual(self.sent('checkAuthenticationPassword'), 0)
                 self.assert_torn_down_pending(result)
+
+    def test_observed_ready_wins_over_a_cancel_in_the_same_slice(self):
+        harness = self
+        class CancelAtReady(FakeUI):
+            def cancelled(self):  # Pressed during the slice in which the provider reached Ready.
+                return harness.raws[-1].state == READY
+        ui = CancelAtReady(self.paths)
+        result, _ = self.connect([other_device(), READY], ui, raw_options={'scan_after': 1})
+        self.assertEqual((result.phase, result.code), ('ready', None))
+        self.assertEqual(self.handoffs, 1)
+
+    def test_password_is_not_sent_without_a_round_trip_budget(self):
+        ui = FakeUI(self.paths, [PASSWORD])
+        result, _ = self.connect([password_state(), READY], ui, lifetime=2, raw_options={'outcomes': ['ok']})
+        self.assertEqual((result.phase, result.code), ('expired', 'expired'))
+        self.assertEqual(self.sent('checkAuthenticationPassword'), 0)
+        self.assert_torn_down_pending(result)
+
+    def test_status_is_finalized_when_the_lease_check_fails_after_teardown(self):
+        checks = []
+        original = SessionOwnerLease.check
+        def failing(lease):
+            checks.append(1)
+            if len(checks) >= 3:
+                raise OwnerLeaseError('owner_unsafe')
+            return original(lease)
+        with mock.patch.object(SessionOwnerLease, 'check', failing):
+            result, _ = self.connect([other_device(), READY])
+        self.assertEqual((result.phase, result.code), ('failed', 'owner_unsafe'))
+        self.assertEqual(self.status()['code'], 'owner_unsafe')
+        self.assertEqual(self.handoffs, 0)
 
     # Teardown and handoff ----------------------------------------------------------------
 
@@ -493,6 +528,9 @@ class ConnectLeakageTests(ConnectHarness):
         handler, level = Keep(level=logging.DEBUG), logger.level
         logger.addHandler(handler)
         logger.setLevel(logging.DEBUG)
+        budget = mock.patch.object(connect_flow, '_MIN_SUBMIT', .1)
+        budget.start()
+        self.addCleanup(budget.stop)
         try:
             for flow, outcomes, kwargs in scenarios:
                 with self.subTest(outcomes=outcomes):

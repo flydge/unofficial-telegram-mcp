@@ -82,6 +82,21 @@ class SetupIdentityTests(Fixture):
         self.assertEqual(result.code, 'identity_changed')
         self.assertEqual(self.events, [])
 
+    def test_wrong_typed_pair_for_bound_record_is_refused_before_any_keychain_write(self):
+        self.store.values.update(OWN_PAIR)
+        self.assertEqual(self.setup().status, 'ready')
+        for name in ('api_id', 'api_hash'):
+            del self.store.values[name]
+        self.store.puts.clear()
+        self.terminal.values.update(api_id=b'999999', api_hash=b'e' * 32)
+        self.events.clear()
+        self.assertEqual(self.setup(resume=True).code, 'identity_changed')
+        self.assertEqual((self.store.puts, self.events), ([], []))
+        self.assertNotIn('api_id', self.store.values)
+        self.terminal.values.update(api_id=b'123456', api_hash=b'a' * 32)
+        self.assertEqual(self.setup(resume=True).status, 'ready')
+        self.assertEqual(sorted(self.store.puts), ['api_hash', 'api_id'])
+
     def test_invalid_bundled_identity_refuses_without_prompts(self):
         def broken():
             raise AppIdentityError()
@@ -107,16 +122,24 @@ class RecordCompatibilityTests(Fixture):
         store.set_state('pending')
         self.assertEqual(set(store.read()), set(legacy))
 
-    def test_bind_identity_adds_fields_once_and_never_rebinds(self):
+    def test_state_write_with_binding_adds_fields_once_and_never_rebinds(self):
         self.enrolled_legacy()
         store = EnrollmentStore(self.paths)
         own = ResolvedIdentity(ApiCredentials(123456, 'a' * 32), 'keychain')
-        store.bind_identity(own)
+        store.set_state('pending', bound=own)
         self.assertEqual(store.read()['identity_fingerprint'], own.fingerprint)
-        store.bind_identity(own)
-        with self.assertRaises(EnrollmentError):
-            store.bind_identity(ResolvedIdentity(BUNDLED, 'bundled'))
+        store.set_state('ready', bound=own)
+        with self.assertRaises(CredentialIdentityError) as caught:
+            store.set_state('pending', bound=ResolvedIdentity(BUNDLED, 'bundled'))
+        self.assertEqual(caught.exception.code, 'identity_changed')
         self.assertEqual(store.read()['credential_source'], 'keychain')
+
+    def test_resume_binds_a_pre_052_record_on_its_state_write(self):
+        self.enrolled_legacy()
+        self.assertEqual(self.setup(resume=True).status, 'ready')
+        record = EnrollmentStore(self.paths).read()
+        self.assertEqual(record['credential_source'], 'keychain')
+        self.assertEqual(record['identity_fingerprint'], identity_fingerprint(ApiCredentials(123456, 'a' * 32)))
 
     def test_malformed_identity_fields_refuse(self):
         self.store.values.update(OWN_PAIR)
@@ -163,3 +186,24 @@ class BrokerLoaderTests(Fixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BrokerWiringTests(Fixture):
+    def test_from_defaults_uses_the_session_loader(self):
+        from telegram_search_mcp import tdjson
+        loader = mock.Mock(return_value=BUNDLED)
+        with mock.patch('telegram_search_mcp.credential_identity.session_credential_loader',
+                        return_value=(b'k' * 32, loader)), mock.patch.object(tdjson, 'LegacyTDJson'):
+            client = tdjson.TDLibClient.from_defaults()
+        self.assertIs(client._credential_loader, loader)
+        self.assertEqual(client._database_key_loader(), b'k' * 32)
+
+    def test_preflight_resolves_pair_without_reading_the_database_key(self):
+        from telegram_search_mcp.credential_identity import preflight_credentials
+        self.setup(bundled=lambda: BUNDLED)
+        self.store.gets.clear()
+        resolved = preflight_credentials(self.paths, keychain_loader=mock.Mock(), bundled_loader=lambda: BUNDLED)
+        self.assertEqual((resolved.api_id, resolved.database_key), (777001, b''))
+        keychain = mock.Mock(return_value=ApiCredentials(1, 'f' * 32))
+        empty = SetupPaths(Path(self.temp.name).resolve() / 'other')
+        self.assertEqual(preflight_credentials(empty, keychain_loader=keychain, bundled_loader=lambda: None).api_id, 1)

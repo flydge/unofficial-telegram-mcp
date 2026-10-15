@@ -53,7 +53,12 @@ def _result(code, *, closed=False, destroyed=None, retry_after=None):
     return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed)
 
 
-def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None):
+def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None, expected_fingerprint=None):
+    """Terminal path. Keeps add-only partial-pair resume (pre-0.52 behaviour, spec §2).
+
+    For a bound enrollment the typed pair is checked against its fingerprint before
+    any Keychain write, so a wrong pair is refused instead of persisted.
+    """
     values = {name: store.get(name) for name in ('api_id', 'api_hash')}
     missing = [name for name, value in values.items() if value is None]
     valid = valid_record
@@ -68,11 +73,14 @@ def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None):
         values[name] = terminal.read_secret(name, timeout=remaining())
         if not valid(name, values[name]):
             raise TerminalError('invalid_input')
+    identity = ResolvedIdentity(ApiCredentials(int(values['api_id'].reveal()),
+                                               values['api_hash'].reveal().decode('ascii')), 'keychain')
+    if expected_fingerprint is not None and identity.fingerprint != expected_fingerprint:
+        raise CredentialIdentityError('identity_changed')
     # Validate both first. Add-only writes leave partial progress recoverable.
     for name in missing:
         store.put(name, values[name])
-    return ResolvedIdentity(ApiCredentials(int(values['api_id'].reveal()),
-                                           values['api_hash'].reveal().decode('ascii')), 'keychain')
+    return identity
 
 
 def _ensure_policy(paths):
@@ -154,8 +162,11 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                 if record is not None:
                     key = managed_key(record, store)  # Never regenerate a managed key.
                     credentials = resolve_enrolled(record, bundled_loader=bundled_loader,
-                        keychain_loader=lambda: _api_credentials(terminal, store, remaining).credentials)
-                    enrollment.set_state('pending')
+                        keychain_loader=lambda: _api_credentials(terminal, store, remaining,
+                            expected_fingerprint=record.get('identity_fingerprint')).credentials)
+                    # A pre-0.52 record gains its binding with this write (spec §2).
+                    enrollment.set_state('pending', bound=ResolvedIdentity(credentials, 'keychain')
+                                         if 'credential_source' not in record else None)
                 else:
                     identity = _api_credentials(terminal, store, remaining, bundled_loader)
                     credentials = identity.credentials

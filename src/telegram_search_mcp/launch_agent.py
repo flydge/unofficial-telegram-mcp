@@ -35,9 +35,9 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _default_preflight() -> None:
-    from .credential_identity import session_credential_loader
+    from .credential_identity import preflight_credentials
     validate_tdlib_runtime()
-    session_credential_loader()[1]()
+    preflight_credentials()
 
 
 def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:

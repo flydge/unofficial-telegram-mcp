@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 from .config import APP_SUPPORT_ROOT
+from .credential_identity import CredentialIdentityError
 from .credentials import SecretValue, CredentialStoreError
 from .session_owner import open_private_directory, OwnerLeaseError
 
@@ -234,23 +235,22 @@ class EnrollmentStore:
             os.close(root_fd)
             if session_fd >= 0: os.close(session_fd)
 
-    def set_state(self, state):
+    def set_state(self, state, bound=None):
+        """`bound` adds the identity binding to a pre-0.52 record in the same write.
+
+        An existing binding never changes: a different identity refuses.
+        """
         record = self.read()
         if record is None or state not in {'pending', 'ready'}:
             raise EnrollmentError()
-        self._write(dict(record, state=state), replace=True)
-
-    def bind_identity(self, bound):
-        """Add the identity binding to a pre-0.52 record; an existing binding never changes."""
-        record = self.read()
-        if record is None:
-            raise EnrollmentError()
-        if 'credential_source' in record:
-            if (record['credential_source'], record['identity_fingerprint']) != (bound.source, bound.fingerprint):
-                raise EnrollmentError()
-            return
-        self._write(dict(record, credential_source=bound.source, identity_fingerprint=bound.fingerprint),
-                    replace=True)
+        updated = dict(record, state=state)
+        if bound is not None:
+            if 'credential_source' in record:
+                if (record['credential_source'], record['identity_fingerprint']) != (bound.source, bound.fingerprint):
+                    raise CredentialIdentityError('identity_changed')
+            else:
+                updated.update(credential_source=bound.source, identity_fingerprint=bound.fingerprint)
+        self._write(updated, replace=True)
 
 
 def managed_key(record, store):

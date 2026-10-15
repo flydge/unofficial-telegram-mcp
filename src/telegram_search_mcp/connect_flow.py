@@ -18,7 +18,7 @@ from . import __version__
 from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
 from .config import ConfigurationError, load_runtime_policy
-from .credential_identity import CredentialIdentityError, resolve_enrolled, resolve_new
+from .credential_identity import CredentialIdentityError, ResolvedIdentity, resolve_enrolled, resolve_new
 from .credentials import CredentialStoreError, SecretValue
 from .enrollment import SetupPaths, EnrollmentStore, EnrollmentError, managed_key
 from .session_owner import SessionOwnerLease, OwnerLeaseError, open_private_directory
@@ -38,6 +38,9 @@ PASSWORD_ATTEMPTS = 5  # Submissions per run; Telegram's flood control is the se
 _SLICE = 1.0  # Longest wait between cancel/expiry checks.
 _STEP = 30  # Cap for one provider request inside the run lifetime.
 _DEFINITIVE_PASSWORD = frozenset({'invalid_password', 'invalid_input'})
+# A submission needs a provider round trip; with less left its outcome would be
+# uncertain by construction, so the run expires instead of sending.
+_MIN_SUBMIT = 5.0
 
 
 class ConnectUI(ABC):
@@ -145,9 +148,11 @@ class _Progress:
     def __call__(self, phase, code=None):
         if (phase, code) == self.current:
             return
-        write_connect_status(self.paths, phase, code, updated_at=self.wall(), expires_at=self.expires_at)
         self.current = (phase, code)
-        self.ui.notify(phase, code)
+        try:
+            write_connect_status(self.paths, phase, code, updated_at=self.wall(), expires_at=self.expires_at)
+        finally:
+            self.ui.notify(phase, code)  # The page must learn the phase even if the file write fails.
 
     def final(self, phase, code):
         try:
@@ -167,12 +172,12 @@ def _drive(transport, ui, progress, credentials, key, paths, remaining):
     qr_requested, attempts = False, 0
     transport.get_authorization_state(timeout=remaining(_STEP))
     for _ in range(4096):
-        if ui.cancelled():
-            raise _Stop('cancelled')
         observation = transport.observation()
         state = observation.state
         if state is AuthorizationState.READY:
-            return
+            return  # An observed Ready wins over a late cancel: the device is already authorized.
+        if ui.cancelled():
+            raise _Stop('cancelled')
         if state is AuthorizationState.PARAMETERS:
             transport.set_parameters(credentials, key, database_directory=str(paths.session / 'db'),
                 files_directory=str(paths.session / 'files'), application_version=__version__,
@@ -210,20 +215,27 @@ def _password(transport, ui, progress, observation, attempts, remaining):
                     break
             if type(secret) is not SecretValue:
                 raise _Stop('invalid_input')
+            if remaining(_STEP) < _MIN_SUBMIT:
+                raise _Stop('expired')
             attempts += 1
             progress('authorizing')
+            # Raise outside the handler: the transport error's frames hold the password,
+            # so it must not stay reachable as __context__.
+            failure = None
             try:
                 transport.check_password(secret, timeout=remaining(_STEP))
             except AuthTransportError as error:
-                if error.code in _DEFINITIVE_PASSWORD:
-                    code = error.code
-                    continue
-                if error.code in ('timeout', 'dependency_unavailable'):
-                    raise _Stop('password_submission_uncertain') from None
-                raise _Stop(error.code, error.retry_after) from None
+                failure = (error.code, error.retry_after)
             except TimeoutError:
-                raise _Stop('expired') from None
-            return attempts
+                failure = ('expired', None)
+            if failure is None:
+                return attempts
+            if failure[0] in _DEFINITIVE_PASSWORD:
+                code = failure[0]
+                continue
+            if failure[0] in ('timeout', 'dependency_unavailable', 'auth_request_failed'):
+                raise _Stop('password_submission_uncertain')
+            raise _Stop(*failure)
         finally:
             secret = None
     raise _Stop(code or 'invalid_password')
@@ -232,6 +244,9 @@ def _password(transport, ui, progress, observation, attempts, remaining):
 def _await_change(transport, ui, previous, remaining):
     """Slices keep cancel and expiry responsive while the provider is quiet."""
     for _ in range(1000000):
+        current = transport.observation()
+        if current is not None and not current.same_as(previous):
+            return current  # Already changed (possibly to Ready): report it before a cancel.
         if ui.cancelled():
             raise _Stop('cancelled')
         try:
@@ -247,6 +262,8 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
     """No terminal: secrets come only through the UI port, credentials only from the bound identity.
 
     A run that cannot take the owner lease writes no status: the lease holder owns it.
+    Handing-off and its outcome are written after the lease is released (the broker
+    takes it); the connect CLI guarantees a single helper and clears stale status.
     """
     if (type(paths) is not SetupPaths or not isinstance(ui, ConnectUI)
             or type(lifetime) not in (int, float) or not math.isfinite(lifetime) or not 0 < lifetime <= 3600
@@ -263,8 +280,10 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
         return 'expired' if code == 'timeout' and deadline - _clock() <= 0 else code
     transport, result = None, _failed('dependency_unavailable')
     enrollment = EnrollmentStore(paths)
+    acquired = False
     try:
         with SessionOwnerLease(paths.lock) as lease:
+            acquired = True
             try:
                 progress('starting')
                 record = enrollment.read()
@@ -276,7 +295,9 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
                     key = managed_key(record, store)  # Never regenerate a managed key.
                     credentials = resolve_enrolled(record, bundled_loader=bundled_loader,
                                                    keychain_loader=lambda: _keychain_pair(store))
-                    enrollment.set_state('pending')
+                    # A pre-0.52 record gains its binding with this write (spec §2).
+                    enrollment.set_state('pending', bound=ResolvedIdentity(credentials, 'keychain')
+                                         if 'credential_source' not in record else None)
                 else:
                     identity = resolve_new(store, bundled_loader)
                     credentials = identity.credentials
@@ -324,9 +345,16 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
                     progress.final(result.phase, result.code)
                 lease.check()
     except OwnerLeaseError as error:
-        return _failed(error.code)
+        if not acquired:
+            return _failed(error.code)  # Contended: the lease holder owns the status file.
+        result = _failed(error.code, closed=result.auth_client_closed, destroyed=result.auth_client_destroyed)
+        progress.final(result.phase, result.code)
+        return result
     except Exception:
-        return _failed('dependency_unavailable')
+        result = _failed('dependency_unavailable')
+        if acquired:
+            progress.final(result.phase, result.code)
+        return result
     if result.phase == 'authorizing' and result.auth_client_closed and result.auth_client_destroyed:
         try:
             progress.final('handing_off', None)
