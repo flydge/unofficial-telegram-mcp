@@ -122,7 +122,7 @@ _HTML_TEMPLATE = """<!doctype html>
 <p data-i18n="pwIntro">{{pwIntro}}</p>
 <form id="pw-form" class="form">
 <label for="pw-input" data-i18n="pwLabel">{{pwLabel}}</label>
-<input id="pw-input" name="password" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="900" required aria-describedby="pw-hint pw-error">
+<input id="pw-input" name="password" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="900" required aria-describedby="pw-hint pw-error">
 <p id="pw-hint" class="hint" hidden></p>
 <p id="pw-error" class="error" role="alert" hidden></p>
 <button type="submit" class="btn btn-primary" id="pw-submit">{{pwSubmit}}</button>
@@ -314,7 +314,11 @@ _JS_TEMPLATE = r"""'use strict';
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
-    return window.fetch(path, init);
+    // A starved or vanished server must not leave the page waiting forever.
+    var controller = new AbortController();
+    init.signal = controller.signal;
+    var limit = window.setTimeout(function () { controller.abort(); }, 5000);
+    return window.fetch(path, init).finally(function () { window.clearTimeout(limit); });
   }
 
   function poll() {

@@ -15,6 +15,7 @@ import hmac
 import json
 import math
 import secrets
+import socket
 import socketserver
 import threading
 import time
@@ -27,7 +28,9 @@ from .credentials import SecretValue
 MAX_BODY = 4096  # Bytes of a POST body.
 MAX_LINK = 256  # Bytes of a login link; the provider's links are far shorter.
 MAX_HINT = 128  # Characters of the password hint shown on the page.
-SOCKET_TIMEOUT = 10.0  # Per connection; a stalled client cannot hold a thread longer.
+SOCKET_TIMEOUT = 10.0  # Per blocking read; a silent client is dropped after this.
+REQUEST_DEADLINE = 15.0  # Absolute per connection; a client trickling bytes is cut off here.
+MAX_CONNECTIONS = 16  # Concurrent; the page needs one or two. Extra connections are closed unanswered.
 _DRAIN = 65536  # Unread request bytes consumed before refusing, so the client sees the status.
 _SECURITY_HEADERS = (
     ('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; "
@@ -36,6 +39,8 @@ _SECURITY_HEADERS = (
     ('Referrer-Policy', 'no-referrer'),
     ('X-Content-Type-Options', 'nosniff'),
     ('X-Frame-Options', 'DENY'),
+    ('Cross-Origin-Resource-Policy', 'same-origin'),
+    ('Cross-Origin-Opener-Policy', 'same-origin'),
 )
 _ROUTES = {'/': 'GET', '/app.js': 'GET', '/app.css': 'GET', '/api/state': 'GET',
            '/api/password': 'POST', '/api/cancel': 'POST'}
@@ -105,7 +110,7 @@ class LoopbackConnectUI(ConnectUI):
 
     def cancelled(self) -> bool:
         with self._cond:
-            return self._cancelled
+            return self._cancelled or self._closed  # A closed screen can no longer finish the run.
 
     def notify(self, phase: str, code: str | None) -> None:
         if type(phase) is not str or phase not in PHASES or (code is not None and (
@@ -168,6 +173,28 @@ def _is_json_type(value):
 class _Handler(BaseHTTPRequestHandler):
     timeout = SOCKET_TIMEOUT
     _body_read = False
+    _watchdog = None
+
+    def setup(self):
+        super().setup()
+        # The socket timeout bounds each read only; this bounds the whole connection.
+        connection = self.connection
+        def cut():
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        self._watchdog = threading.Timer(REQUEST_DEADLINE, cut)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def finish(self):
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+        try:
+            super().finish()
+        except OSError:
+            pass
 
     def log_message(self, format, *args):
         pass
@@ -291,6 +318,29 @@ class _Handler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 16
+    # Pinned: SO_REUSEPORT would let another local socket share the port and receive the token.
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)  # Over the cap: close unanswered, no thread.
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)  # Skips HTTPServer's reverse-DNS lookup of the host.

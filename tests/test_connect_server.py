@@ -271,8 +271,8 @@ class RequestGuardTests(ScreenCase):
         with captured_process_output() as output:
             answers = [raw(probe) for probe in probes]
         self.assertEqual(list(output), [b'', b'', b'', b''])
-        self.assertTrue(any(answers))
-        for answer in filter(None, answers):
+        self.assertTrue(all(answers))
+        for answer in answers:
             head, _, body = answer.partition(b'\r\n\r\n')
             self.assertRegex(head, rb'^HTTP/1\.1 4\d\d ')
             self.assertEqual(body, b'')
@@ -362,7 +362,7 @@ class StaticAssetTests(ScreenCase):
         self.assertIn('<title>Unofficial Telegram MCP</title>', html)
         self.assertIn('Uses the Telegram API. Not an official Telegram app.', html)
         self.assertIn('type="password"', html)
-        self.assertIn('autocomplete="current-password"', html)
+        self.assertIn('autocomplete="off"', html)
         self.assertRegex(html, r'<label for="pw-input"')
         self.assertNotRegex(html, r'(?i)logo|\.svg|\.png')
         self.assertIn('Использует Telegram API. Не является официальным приложением Telegram.', js)
@@ -795,8 +795,6 @@ class LeakageTests(ConnectHarness):
                 if uri is not None:
                     # The one place the link may be rendered: as a QR image, never as text.
                     for canary in canaries:
-                        for form in (uri.encode(), unquote(uri).encode(), base64.b64encode(canary)):
-                            self.assertNotEqual(form, canary)
                         self.assertNotIn(canary, uri.encode())
                         self.assertNotIn(canary, unquote(uri).encode())
                         self.assertNotIn(base64.b64encode(canary), uri.encode())
@@ -861,3 +859,94 @@ class LeakageTests(ConnectHarness):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConnectionLimitTests(ScreenCase):
+    """A local process without the token must not exhaust the helper's threads or descriptors."""
+
+    def hold(self, count):
+        streams = []
+        for _ in range(count):
+            stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+            stream.sendall(b'GET / HT')  # Never completes its request line.
+            streams.append(stream)
+            self.addCleanup(stream.close)
+        return streams
+
+    def test_connections_over_the_cap_are_closed_unanswered(self):
+        held = self.hold(connect_server.MAX_CONNECTIONS)
+        time.sleep(0.2)
+        with socket.create_connection(('127.0.0.1', self.port), timeout=5) as extra:
+            extra.sendall(('GET / HTTP/1.1\r\nHost: %s\r\n\r\n' % self.host).encode())
+            extra.settimeout(3)
+            try:
+                answer = extra.recv(64)
+            except (ConnectionResetError, socket.timeout):
+                answer = b''
+        self.assertEqual(answer, b'')
+        for stream in held:
+            stream.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self.assertEqual(self.state()['phase'], 'starting')
+                return
+            except Exception:
+                time.sleep(0.1)
+        self.fail('server did not recover after held connections closed')
+
+    def test_a_trickling_client_is_cut_at_the_absolute_deadline(self):
+        with mock.patch.object(connect_server, 'REQUEST_DEADLINE', 0.6):
+            stream = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+            self.addCleanup(stream.close)
+            started, closed = time.monotonic(), False
+            for byte in b'GET / HTTP/1.1\r\nX-Slow: ' + b'a' * 40:
+                try:
+                    stream.sendall(bytes([byte]))
+                    stream.settimeout(0.15)
+                    if stream.recv(1) == b'':
+                        closed = True
+                        break
+                except socket.timeout:
+                    continue
+                except OSError:
+                    closed = True
+                    break
+            self.assertTrue(closed)
+            self.assertLess(time.monotonic() - started, 4)
+
+    def test_listening_socket_does_not_allow_port_sharing(self):
+        sock = self.server._httpd.socket
+        self.assertEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT), 0)
+        self.assertEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR), 0)
+
+    def test_cross_origin_isolation_headers_are_present(self):
+        response = self.call('GET', '/app.js', token=None)
+        self.assertEqual(response.headers.get('cross-origin-resource-policy'), 'same-origin')
+        self.assertEqual(response.headers.get('cross-origin-opener-policy'), 'same-origin')
+
+    def test_password_field_is_not_offered_to_password_managers(self):
+        page = connect_page.ASSETS['/'][1].decode()
+        self.assertIn('autocomplete="off"', page)
+        self.assertNotIn('current-password', page)
+
+
+class CloseDuringRunTests(ConnectHarness):
+    def test_a_closed_screen_cancels_the_run_promptly(self):
+        for flow, wait_for in [([password_state(), READY], 'waiting_for_password'),
+                               ([other_device(), READY], 'waiting_for_scan')]:
+            with self.subTest(phase=wait_for):
+                ui = LoopbackConnectUI()
+                self.assertFalse(ui.cancelled())
+                box = []
+                runner = threading.Thread(target=lambda: box.append(
+                    self.connect(flow, ui, raw_options={'outcomes': ['ok'], 'scan_after': None})[0]), daemon=True)
+                started = time.monotonic()
+                runner.start()
+                while ui.snapshot()['phase'] != wait_for and time.monotonic() - started < 10:
+                    time.sleep(0.01)
+                ui.close()
+                self.assertTrue(ui.cancelled())
+                runner.join(10)
+                self.assertEqual((box[0].phase, box[0].code), ('cancelled', 'cancelled'))
+                self.assertLess(time.monotonic() - started, 8)
