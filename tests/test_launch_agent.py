@@ -9,6 +9,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -262,6 +263,197 @@ class LaunchAgentTests(unittest.TestCase):
 
             self.assertTrue(foreign.exists())
             self.assertEqual(len(calls), 1)
+
+
+class ConnectJobLifecycleTests(unittest.TestCase):
+    """Phase D launchd surface: stopping the enrolled broker and the transient connect job."""
+
+    def setUp(self) -> None:
+        self.launch_agent = importlib.import_module("telegram_search_mcp.launch_agent")
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.plist = self.root / "broker.plist"
+        self.calls: list[list[str]] = []
+
+    def installed(self) -> bytes:
+        value = self.launch_agent.launch_agent_payload(python_executable=Path(sys.executable))
+        self.plist.write_bytes(plistlib.dumps(value))
+        self.plist.chmod(0o600)
+        arguments = value["ProgramArguments"]
+        self.registration = ("path = " + str(self.plist) + "\nprogram = " + arguments[0]
+                             + "\narguments = {\n" + "\n".join(arguments) + "\n}\n")
+        return self.plist.read_bytes()
+
+    def runner(self, *, bootout=0, retired_after=1, matching=True):
+        prints = 0
+
+        def run(arguments, **kwargs):
+            nonlocal prints
+            self.calls.append(list(arguments))
+            if arguments[1] == "print":
+                prints += 1
+                if prints > retired_after:
+                    return subprocess.CompletedProcess(arguments, 113, "", "")
+                return subprocess.CompletedProcess(arguments, 0, self.registration if matching else "program = /x", "")
+            if arguments[1] == "bootout":
+                return subprocess.CompletedProcess(arguments, bootout, "", "")
+            raise AssertionError(arguments)
+
+        return run
+
+    def test_label_is_derived_like_the_broker_label(self) -> None:
+        from telegram_search_mcp.config import KEYCHAIN_SERVICE
+        self.assertEqual(self.launch_agent.CONNECT_JOB_LABEL, KEYCHAIN_SERVICE + ".connect")
+        self.assertEqual(LAUNCH_AGENT_LABEL, KEYCHAIN_SERVICE + ".broker")
+
+    def test_stop_validates_then_boots_out_only_the_broker_label_and_keeps_the_plist(self) -> None:
+        before = self.installed()
+        sleeps: list[float] = []
+        self.launch_agent.stop_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+            runner=self.runner(retired_after=2), uid=501, sleeper=sleeps.append)
+        service = "gui/501/" + LAUNCH_AGENT_LABEL
+        self.assertEqual(self.calls, [["/bin/launchctl", "print", service], ["/bin/launchctl", "bootout", service],
+                                      ["/bin/launchctl", "print", service], ["/bin/launchctl", "print", service]])
+        self.assertEqual(sleeps, [0.1])
+        self.assertEqual(self.plist.read_bytes(), before)
+
+    def test_stop_refuses_before_any_bootout_on_every_validation_failure(self) -> None:
+        self.installed()
+        cases = {
+            "live registration differs": dict(matching=False),
+            "registration reported absent": dict(retired_after=0),
+        }
+        for name, options in cases.items():
+            with self.subTest(name), self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.calls.clear()
+                try:
+                    self.launch_agent.stop_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                        runner=self.runner(**options), uid=501, sleeper=lambda _: None)
+                finally:
+                    self.assertNotIn("bootout", [call[1] for call in self.calls])
+        self.plist.write_bytes(plistlib.dumps({"Label": "foreign"}))
+        self.plist.chmod(0o600)
+        foreign = self.plist.read_bytes()
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.calls.clear()
+            self.launch_agent.stop_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                runner=self.runner(), uid=501, sleeper=lambda _: None)
+        self.assertEqual((self.calls, self.plist.read_bytes()), ([], foreign))
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.stop_enrolled_broker(plist_path=self.root / "missing" / "x.plist",
+                python_executable=Path(sys.executable), runner=self.runner(), uid=501, sleeper=lambda _: None)
+
+    def test_stop_reports_a_failed_bootout_or_a_service_that_never_retires(self) -> None:
+        self.installed()
+        for options in [dict(bootout=5), dict(retired_after=10 ** 6)]:
+            with self.subTest(options), self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.launch_agent.stop_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                    runner=self.runner(**options), uid=501, sleeper=lambda _: None)
+
+    def test_connect_job_state_reads_the_jobs_own_state_line_only(self) -> None:
+        def state(code, text):
+            return self.launch_agent.connect_job_state(
+                runner=lambda a, **k: subprocess.CompletedProcess(a, code, text, ""), uid=501)
+        self.assertEqual(state(113, ""), "absent")
+        self.assertEqual(state(0, "x = {\n\tstate = running\n}"), "running")
+        self.assertEqual(state(0, "x = {\n\tstate = not running\n\tendpoints = {\n\t\tstate = running\n\t}\n}"), "loaded")
+        self.assertEqual(state(0, "x = {\n\tactive count = 0\n}"), "loaded")
+        for code, text in [(5, ""), (0, None), (0, "state = running\n" + "x" * 70000)]:
+            with self.subTest(code=code), self.assertRaises(self.launch_agent.LaunchAgentError):
+                state(code, text)
+        for error in (PermissionError(), subprocess.TimeoutExpired("launchctl", 10)):
+            with self.subTest(error=error), self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.launch_agent.connect_job_state(runner=lambda a, **k: (_ for _ in ()).throw(error), uid=501)
+
+    def test_connect_job_plist_is_a_valid_exact_owner_only_definition(self) -> None:
+        run = self.root / "run"
+        path = run / (self.launch_agent.CONNECT_JOB_LABEL + ".plist")
+        self.launch_agent.write_connect_job(plist_path=path, python_executable=Path(sys.executable))
+        value = plistlib.loads(path.read_bytes())
+        self.assertEqual(value, {
+            "Label": self.launch_agent.CONNECT_JOB_LABEL,
+            "ProgramArguments": [str(Path(sys.executable).absolute()), "-m", "telegram_search_mcp.setup_cli", "connect-helper"],
+            "RunAtLoad": True, "KeepAlive": False, "LimitLoadToSessionType": "Aqua", "ProcessType": "Interactive",
+            "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null", "Umask": 63,
+            "EnvironmentVariables": {"PYTHONDONTWRITEBYTECODE": "1"}})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(run.stat().st_mode), 0o700)
+        lint = subprocess.run(["plutil", "-lint", str(path)], capture_output=True, text=True, check=False)
+        self.assertEqual(lint.returncode, 0, lint.stdout + lint.stderr)
+
+    def test_connect_job_plist_creation_refuses_unsafe_directories_and_names(self) -> None:
+        run = self.root / "loose"
+        run.mkdir()
+        run.chmod(0o755)  # The process umask may be restrictive; set the mode explicitly.
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.write_connect_job(plist_path=run / "job.plist", python_executable=Path(sys.executable))
+        self.assertEqual(list(run.iterdir()), [])
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        victim = self.root / "victim.txt"
+        victim.write_bytes(b"precious")
+        (private / "link.plist").symlink_to(victim)
+        (private / "dir.plist").mkdir()
+        (private / "multi.plist").write_bytes(b"x")
+        os.link(private / "multi.plist", self.root / "second-name")
+        for name in ["link.plist", "dir.plist", "multi.plist"]:
+            with self.subTest(name), self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.launch_agent.write_connect_job(plist_path=private / name, python_executable=Path(sys.executable))
+        self.assertEqual(victim.read_bytes(), b"precious")
+        self.assertEqual((self.root / "second-name").read_bytes(), b"x")
+
+    def test_connect_job_plist_is_created_exclusively_never_opening_a_name_that_appears_late(self) -> None:
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        path = private / "job.plist"
+        path.write_bytes(b"planted between the check and the create")
+        planted = path.read_bytes()
+        real_stat = os.stat
+        def late_stat(name, *args, **kwargs):  # The name is absent at the check and present at the create.
+            if kwargs.get("dir_fd") is not None and name == "job.plist":
+                raise FileNotFoundError(name)
+            return real_stat(name, *args, **kwargs)
+        with unittest.mock.patch.object(self.launch_agent.os, "unlink"), \
+             unittest.mock.patch.object(self.launch_agent.os, "stat", side_effect=late_stat):
+            with self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.launch_agent.write_connect_job(plist_path=path, python_executable=Path(sys.executable))
+        self.assertEqual(path.read_bytes(), planted)
+
+    def test_remove_connect_job_only_unlinks_its_own_regular_file(self) -> None:
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        victim = self.root / "victim.txt"
+        victim.write_bytes(b"precious")
+        (private / "link.plist").symlink_to(victim)
+        (private / "dir.plist").mkdir()
+        (private / "job.plist").write_bytes(b"x")
+        self.assertFalse(self.launch_agent.remove_connect_job(private / "link.plist"))
+        self.assertFalse(self.launch_agent.remove_connect_job(private / "dir.plist"))
+        self.assertFalse(self.launch_agent.remove_connect_job(private / "missing.plist"))
+        self.assertFalse(self.launch_agent.remove_connect_job(self.root / "nowhere" / "job.plist"))
+        self.assertTrue(self.launch_agent.remove_connect_job(private / "job.plist"))
+        self.assertEqual(victim.read_bytes(), b"precious")
+
+    def test_start_leaves_a_running_job_untouched_and_cleans_up_a_failed_bootstrap(self) -> None:
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        path = private / "job.plist"
+        label = self.launch_agent.CONNECT_JOB_LABEL
+        def running(arguments, **kwargs):
+            self.calls.append(list(arguments))
+            return subprocess.CompletedProcess(arguments, 0, "state = running\n", "")
+        self.assertEqual(self.launch_agent.start_connect_job(plist_path=path, runner=running, uid=501), "running")
+        self.assertEqual([call[1] for call in self.calls], ["print"])
+        self.assertFalse(path.exists())
+        def refusing(arguments, **kwargs):
+            if arguments[1] == "print":
+                return subprocess.CompletedProcess(arguments, 113, "", "")
+            return subprocess.CompletedProcess(arguments, 5, "", "")
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.start_connect_job(plist_path=path, runner=refusing, uid=501)
+        self.assertFalse(path.exists())
+        self.assertIn(label, self.launch_agent.connect_job_payload()["Label"])
 
 
 if __name__ == "__main__":

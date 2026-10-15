@@ -223,3 +223,23 @@ class InstalledHandoffTests(unittest.TestCase):
             self.assertEqual(setup_cli.handoff_broker(paths=self.paths, timeout=.001), 'broker_incompatible')
         with mock.patch.object(setup_cli, 'start_enrolled_broker', side_effect=launch_agent.LaunchAgentError()):
             self.assertEqual(setup_cli.handoff_broker(paths=self.paths, timeout=.001), 'broker_start_failed')
+
+
+class ClosedGrammarTests(unittest.TestCase):
+    def test_new_commands_are_part_of_the_closed_grammar_and_nothing_else_is(self):
+        self.assertEqual(setup_cli.COMMANDS, ('setup', 'resume', 'status', 'connect', 'wait', 'api-credentials',
+                                              'connect-helper'))
+        sentinel = 'SYNTHETIC_SECRET_SENTINEL'
+        for args in [['connect', sentinel], ['wait', '5'], ['api-credentials', '--api-hash', sentinel],
+                     ['connect-helper', sentinel], ['connect', 'wait'], ['CONNECT']]:
+            with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()) as output, \
+                 contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(setup_cli.main(args), 2)
+            self.assertEqual(json.loads(output.getvalue())['code'], 'invalid_arguments')
+            self.assertNotIn(sentinel, output.getvalue() + errors.getvalue())
+    def test_help_describes_connect_wait_and_api_credentials_without_the_internal_helper_contract(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(setup_cli.main(['--help']), 0)
+        for word in ['connect', 'wait', 'api-credentials', '540']:
+            self.assertIn(word, output.getvalue())
+        self.assertNotIn('osascript', output.getvalue())

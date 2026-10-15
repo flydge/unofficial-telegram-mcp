@@ -19,12 +19,16 @@ from .broker import Broker, BrokerStartupError
 from .config import (
     BROKER_LOCK_PATH,
     BROKER_SOCKET_PATH,
+    KEYCHAIN_SERVICE,
     LAUNCH_AGENT_LABEL,
     LAUNCH_AGENT_PLIST,
     validate_tdlib_runtime,
 )
+from .session_owner import OwnerLeaseError, open_private_directory
 
 LAUNCHCTL = "/bin/launchctl"
+# Transient QR connect helper: same per-user derivation as the broker label.
+CONNECT_JOB_LABEL = f"{KEYCHAIN_SERVICE}.connect"
 
 
 class LaunchAgentError(RuntimeError):
@@ -402,6 +406,188 @@ def start_enrolled_broker(
         if created:
             os.unlink(temporary, dir_fd=parent)
         os.close(parent)
+
+
+def _await_retired(service: str, *, runner: Runner, sleeper: Callable[[float], None]) -> None:
+    """A successful bootout may return before launchd retires the registration."""
+    for _ in range(50):
+        state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=1)
+        if state.returncode == 113:  # launchd: service not found
+            return
+        if state.returncode != 0:
+            raise LaunchAgentError('unable to verify previous service shutdown')
+        sleeper(0.1)
+    raise LaunchAgentError('previous service did not shut down')
+
+
+def stop_enrolled_broker(
+    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
+    uid: int | None = None, sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """QR-06 reconnect: stop the exact receipt-bound broker, nothing else.
+
+    The caller has observed a compatible handshake whose check is not ready. This
+    validates the installed definition and live registration first (any mismatch
+    raises before launchctl can stop anything), then boots only that label out.
+    The plist stays on disk so the next start reuses the same registration.
+    """
+    validate_enrolled_broker(plist_path=plist_path, python_executable=python_executable,
+                             runner=runner, uid=uid)
+    user_id = os.getuid() if uid is None else uid
+    service = f'gui/{user_id}/{LAUNCH_AGENT_LABEL}'
+    try:
+        _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=True, timeout=10)
+        _await_retired(service, runner=runner, sleeper=sleeper)
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to stop installed broker') from None
+
+
+def connect_job_arguments(*, python_executable: Path = Path(sys.executable)) -> list[str]:
+    """Bundle mode: the receipt-bound launcher; source mode: this interpreter's module."""
+    from . import bundle_runtime
+    selection = bundle_runtime._SELECTION
+    if selection is not None:
+        try:
+            return selection.arguments('connect-helper')
+        except bundle_runtime.BundleError:
+            raise LaunchAgentError('installed bundle binding is unsafe') from None
+    executable = python_executable.absolute()
+    try:
+        if not executable.resolve(strict=True).is_file():
+            raise LaunchAgentError('Python executable is invalid')
+    except OSError:
+        raise LaunchAgentError('Python executable is invalid') from None
+    return [str(executable), '-m', 'telegram_search_mcp.setup_cli', 'connect-helper']
+
+
+def connect_job_payload(*, python_executable: Path = Path(sys.executable)) -> dict[str, Any]:
+    return {
+        'Label': CONNECT_JOB_LABEL,
+        'ProgramArguments': connect_job_arguments(python_executable=python_executable),
+        'RunAtLoad': True,
+        'KeepAlive': False,
+        'LimitLoadToSessionType': 'Aqua',
+        'ProcessType': 'Interactive',
+        'StandardOutPath': '/dev/null',
+        'StandardErrorPath': '/dev/null',
+        'Umask': 0o077,
+        'EnvironmentVariables': {'PYTHONDONTWRITEBYTECODE': '1'},
+    }
+
+
+def write_connect_job(*, plist_path: Path, python_executable: Path = Path(sys.executable)) -> None:
+    """Owner-only, exclusive, no-follow plist in the private run directory.
+
+    Only a stale regular file of ours is replaced; the caller has established that
+    no helper job is running. Anything else at the name (link, directory) refuses.
+    """
+    payload = connect_job_payload(python_executable=python_executable)
+    try:
+        parent = open_private_directory(plist_path.parent, create=True)
+    except OwnerLeaseError:
+        raise LaunchAgentError('connect job directory is unsafe') from None
+    name, created = plist_path.name, False
+    try:
+        try:
+            existing = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if (not stat.S_ISREG(existing.st_mode) or existing.st_uid != os.getuid()
+                    or existing.st_nlink != 1):
+                raise LaunchAgentError('existing connect job file is unsafe')
+            os.unlink(name, dir_fd=parent)
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                             | getattr(os, 'O_CLOEXEC', 0), 0o600, dir_fd=parent)
+        created = True
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, 'wb', closefd=False) as stream:
+                plistlib.dump(payload, stream, sort_keys=True)
+                stream.flush()
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(parent)
+        created = False
+    except OSError:
+        raise LaunchAgentError('unable to write connect job') from None
+    finally:
+        if created:
+            try:
+                os.unlink(name, dir_fd=parent)
+            except OSError:
+                pass
+        os.close(parent)
+
+
+def remove_connect_job(plist_path: Path) -> bool:
+    """Best effort, no-follow removal of our own regular plist; never raises."""
+    try:
+        parent = open_private_directory(plist_path.parent)
+    except OwnerLeaseError:
+        return False
+    try:
+        existing = os.stat(plist_path.name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISREG(existing.st_mode) or existing.st_uid != os.getuid():
+            return False
+        os.unlink(plist_path.name, dir_fd=parent)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(parent)
+
+
+def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None) -> str:
+    """'running', 'loaded' (registered, not running) or 'absent'; anything else raises."""
+    user_id = os.getuid() if uid is None else uid
+    try:
+        state = _run_launchctl([LAUNCHCTL, 'print', f'gui/{user_id}/{CONNECT_JOB_LABEL}'],
+                               runner=runner, required=False, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to verify connect job') from None
+    if state.returncode == 113:  # launchd: service not found
+        return 'absent'
+    text = state.stdout
+    if state.returncode != 0 or type(text) is not str or len(text.encode('utf-8')) > 65536:
+        raise LaunchAgentError('unable to verify connect job')
+    # The first state line belongs to the job itself; nested sections come later.
+    first = next((line.strip() for line in text.splitlines() if line.strip().startswith('state = ')), None)
+    return 'running' if first == 'state = running' else 'loaded'
+
+
+def start_connect_job(
+    *, plist_path: Path, python_executable: Path = Path(sys.executable),
+    runner: Runner = subprocess.run, uid: int | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> str:
+    """Bootstrap the transient helper; 'running' when one already is (nothing is touched).
+
+    A registered but idle job is booted out first. The plist is removed again if the
+    bootstrap fails, so a refused start leaves nothing behind.
+    """
+    user_id = os.getuid() if uid is None else uid
+    domain = f'gui/{user_id}'
+    service = f'{domain}/{CONNECT_JOB_LABEL}'
+    try:
+        state = connect_job_state(runner=runner, uid=user_id)
+        if state == 'running':
+            return 'running'
+        if state == 'loaded':
+            _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=True, timeout=10)
+            _await_retired(service, runner=runner, sleeper=sleeper)
+        write_connect_job(plist_path=plist_path, python_executable=python_executable)
+        try:
+            _run_launchctl([LAUNCHCTL, 'bootstrap', domain, str(plist_path)],
+                           runner=runner, required=True, timeout=10)
+        except BaseException:
+            remove_connect_job(plist_path)
+            raise
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to start connect job') from None
+    return 'started'
 
 
 def restart_launch_agent(

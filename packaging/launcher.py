@@ -18,6 +18,9 @@ import sys
 
 class AdmissionError(ValueError): pass
 
+# Closed grammar. connect-helper is internal: only the transient launchd job runs it.
+ACTIONS=('mcp','broker','setup','resume','status','connect','wait','api-credentials','connect-helper')
+
 
 def _acl(fd):
     if sys.platform != 'darwin': return
@@ -164,7 +167,8 @@ def dispatch_mcp():
 def main(argv=None):
     args=list(sys.argv[1:] if argv is None else argv)
     if args==['--help']:
-        print('Unreleased 0.52.0.dev0: mcp | broker | setup | resume | status. Activation requires native Apple Terminal.')
+        print('Unreleased 0.52.0.dev0: mcp | broker | setup | resume | status | connect | wait | api-credentials. '
+              'setup, resume and api-credentials require native Apple Terminal; connect and wait take no credentials.')
         return 0
     try:
         root=Path(__file__).absolute().parent
@@ -179,7 +183,7 @@ def main(argv=None):
             result=install(root,Path(values['--index']),pin,installation_root=Path(values['--installation-root']),
                 codex_home=Path(values['--codex-home']),skills_root=Path(values['--skills-root']),user_home=Path.home())
             print(json.dumps(result,sort_keys=True)); return 0
-        if args not in [[v] for v in ('mcp','broker','setup','resume','status')]: raise AdmissionError()
+        if args not in [[v] for v in ACTIONS]: raise AdmissionError()
         receipt=_json(_read(root.parent.parent/'receipt.json',mode=0o600)); pin=receipt.get('index_sha256')
         if receipt.get('release_root')!=str(root) or root!=root.parent.parent/'releases'/str(pin): raise AdmissionError()
         admit(root,root/'bundle-index.json',pin,True)
