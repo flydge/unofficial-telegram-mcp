@@ -24,6 +24,7 @@ bundle's redistribution or corresponding-source gate.
 | PyMuPDF | 1.26.4 | AGPLv3 or Artifex commercial; this project uses the AGPL route. [Installed notice](licenses/PyMuPDF-COPYING.txt), [full AGPLv3](../LICENSE) | [1.26.4 source](https://github.com/pymupdf/PyMuPDF/tree/1.26.4), [licensing](https://pymupdf.io/licensing) |
 | python-docx | 1.2.0 | MIT; [verbatim notice](licenses/python-docx-MIT.txt) | [python-docx](https://github.com/python-openxml/python-docx) |
 | Pillow | 11.3.0 | MIT-CMU with bundled third-party notices; [verbatim license collection](licenses/Pillow.txt) | [Pillow](https://github.com/python-pillow/Pillow) |
+| segno | 1.6.6 | BSD-3-Clause; [verbatim notice](licenses/segno-BSD.txt). Renders the local login QR only. | [segno](https://github.com/heuer/segno) |
 | setuptools (build backend) | 80.9.0 | MIT; installed separately for building | [setuptools](https://github.com/pypa/setuptools) |
 
 The copied notices were taken unchanged from the pinned installed distributions.
