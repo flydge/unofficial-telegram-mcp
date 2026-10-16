@@ -10,7 +10,9 @@ import json
 import re
 from dataclasses import dataclass
 
-PROJECTION_VERSION = 1
+from .reply_formatted_sources import _boundaries
+
+PROJECTION_VERSION = 2
 MAX_PROJECTION_BYTES = 65536
 MAX_TEXT = 4096
 MAX_ENTITIES = 100
@@ -19,8 +21,19 @@ CONTENT_TYPES = {'messageText': 'text', 'messagePhoto': 'photo', 'messageDocumen
                  'messageAnimation': 'animation'}
 TDLIB_CONTENT_TYPES = {kind: name for name, kind in CONTENT_TYPES.items()}
 REFUSALS = frozenset({'unsupported_source_content', 'unsupported_source_state',
-                      'source_not_forwardable', 'protected_content'})
+                      'source_not_forwardable', 'protected_content', 'hidden_source_content',
+                      'source_is_forward', 'invalid_input'})
 MODES = ('forward', 'copy')
+# Fieldless entity types whose whole effect is visible in the text itself. Any
+# other type (TextUrl, MentionName, CustomEmoji, PreCode, MediaTimestamp,
+# DateTime, unknown) carries a parameter or hides content and is refused.
+VISIBLE_ENTITY_TYPES = (
+    'textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
+    'textEntityTypeStrikethrough', 'textEntityTypeSpoiler', 'textEntityTypeCode', 'textEntityTypePre',
+    'textEntityTypeBlockQuote', 'textEntityTypeExpandableBlockQuote', 'textEntityTypeMention',
+    'textEntityTypeHashtag', 'textEntityTypeCashtag', 'textEntityTypeBotCommand', 'textEntityTypeUrl',
+    'textEntityTypeEmailAddress', 'textEntityTypePhoneNumber', 'textEntityTypeBankCardNumber')
+LINK_OPTION_FLAGS = ('is_disabled', 'force_small_media', 'force_large_media', 'show_above_text')
 _ENTITY_TYPE = re.compile(r'textEntityType[A-Za-z]{1,48}\Z')
 _INT32 = 2**31 - 1
 _INT53 = 2**53 - 1
@@ -59,22 +72,38 @@ def _content_refusal() -> ForwardRefusal:
 
 
 def _formatted(value: object) -> dict:
-    if (type(value) is not dict or value.get('@type') != 'formattedText' or
-            not _string(value.get('text'), MAX_TEXT) or type(value.get('entities')) is not list or
-            len(value['entities']) > MAX_ENTITIES):
+    if (type(value) is not dict or set(value) != {'@type', 'text', 'entities'} or
+            value['@type'] != 'formattedText' or not _string(value['text'], MAX_TEXT) or
+            type(value['entities']) is not list or len(value['entities']) > MAX_ENTITIES):
         raise _content_refusal()
     text = value['text']
-    units = len(text.encode('utf-16-le')) // 2
+    boundaries = _boundaries(text)  # Raw UTF-16 offsets on whole scalars; never sanitized text.
     rows = []
     for entity in value['entities']:
         kind = entity.get('type') if type(entity) is dict else None
-        if (type(entity) is not dict or entity.get('@type') != 'textEntity' or
-                not _int(entity.get('offset'), 0, units) or not _int(entity.get('length'), 1, units) or
-                entity['offset'] + entity['length'] > units or type(kind) is not dict or
+        if (type(entity) is not dict or set(entity) != {'@type', 'offset', 'length', 'type'} or
+                entity['@type'] != 'textEntity' or not _int(entity['offset'], 0, _INT32) or
+                not _int(entity['length'], 1, _INT32) or entity['offset'] not in boundaries or
+                entity['offset'] + entity['length'] not in boundaries or type(kind) is not dict or
                 type(kind.get('@type')) is not str or _ENTITY_TYPE.fullmatch(kind['@type']) is None):
             raise _content_refusal()
+        if kind['@type'] not in VISIBLE_ENTITY_TYPES or set(kind) != {'@type'}:
+            raise ForwardRefusal('hidden_source_content')
         rows.append({'type': kind['@type'], 'offset': entity['offset'], 'length': entity['length']})
     return {'text': text, 'entities': rows}
+
+
+def _link_options(value: object, text: str) -> dict | None:
+    """A preview URL absent from the visible text would be a hidden link target."""
+    if value is None:
+        return None
+    if (type(value) is not dict or set(value) != {'@type', 'url', *LINK_OPTION_FLAGS} or
+            value['@type'] != 'linkPreviewOptions' or not _string(value['url'], MAX_TEXT) or
+            any(type(value[name]) is not bool for name in LINK_OPTION_FLAGS)):
+        raise _content_refusal()
+    if value['url'] and value['url'] not in text:
+        raise ForwardRefusal('hidden_source_content')
+    return {name: value[name] for name in ('url', *LINK_OPTION_FLAGS)}
 
 
 def _file(value: object) -> dict:
@@ -110,13 +139,17 @@ def _content(content: object) -> dict:
     if kind is None:
         raise _content_refusal()
     if kind == 'text':
-        return {'kind': 'text', 'text': _formatted(content.get('text'))}
+        text = _formatted(content.get('text'))
+        return {'kind': 'text', 'text': text,
+                'link_preview_options': _link_options(content.get('link_preview_options'), text['text'])}
+    result = {'kind': kind, 'caption': _formatted(content.get('caption'))}
     if kind in ('photo', 'video', 'animation'):
         if content.get('is_secret') is True:
             raise ForwardRefusal('unsupported_source_state')
-        if content.get('is_secret') is not False:
+        if (content.get('is_secret') is not False or
+                any(type(content.get(name)) is not bool for name in ('has_spoiler', 'show_caption_above_media'))):
             raise _content_refusal()
-    result = {'kind': kind, 'caption': _formatted(content.get('caption'))}
+        result.update(has_spoiler=content['has_spoiler'], show_caption_above_media=content['show_caption_above_media'])
     if kind == 'photo':
         photo = _object(content.get('photo'), 'photo')
         sizes = photo.get('sizes')
@@ -141,10 +174,16 @@ def _content(content: object) -> dict:
         result.update(_measures(voice, 'duration'), mime_type=voice['mime_type'], file=_file(voice.get('voice')))
     elif kind == 'video':
         video = _object(content.get('video'), 'video')
-        result.update(_measures(video, 'duration', 'width', 'height'), **_named(video), file=_file(video.get('video')))
+        if not _int(content.get('start_timestamp'), 0, _INT32):
+            raise _content_refusal()
+        result.update(_measures(video, 'duration', 'width', 'height'), **_named(video), file=_file(video.get('video')),
+                      start_timestamp=content['start_timestamp'])
     elif kind == 'audio':
         audio = _object(content.get('audio'), 'audio')
-        result.update(_measures(audio, 'duration'), **_named(audio), file=_file(audio.get('audio')))
+        if not _string(audio.get('title'), 1024) or not _string(audio.get('performer'), 1024):
+            raise _content_refusal()
+        result.update(_measures(audio, 'duration'), **_named(audio), file=_file(audio.get('audio')),
+                      title=audio['title'], performer=audio['performer'])
     else:
         animation = _object(content.get('animation'), 'animation')
         result.update(_measures(animation, 'duration', 'width', 'height'), **_named(animation),
@@ -159,10 +198,12 @@ def project_message(raw: object, chat_id: int, message_id: int) -> dict:
     if (type(raw) is not dict or raw.get('@type') != 'message' or type(raw.get('chat_id')) is not int or
             raw['chat_id'] != chat_id or type(raw.get('id')) is not int or raw['id'] != message_id):
         raise ValueError('forward source is unavailable')
-    if type(raw.get('self_destruct_in')) not in (int, float) or type(raw.get('ephemeral_message_id')) is not int:
+    if (type(raw.get('self_destruct_in')) not in (int, float) or type(raw.get('auto_delete_in')) not in (int, float) or
+            type(raw.get('ephemeral_message_id')) is not int):
         raise ValueError('forward source is unavailable')
     if (raw.get('sending_state') is not None or raw.get('scheduling_state') is not None or
             raw.get('self_destruct_type') is not None or raw['self_destruct_in'] != 0 or
+            raw['auto_delete_in'] != 0 or
             raw.get('ephemeral_content') is not None or raw['ephemeral_message_id'] != 0 or
             (type(raw.get('date')) is int and raw['date'] == 0)):
         raise ForwardRefusal('unsupported_source_state')
@@ -170,6 +211,10 @@ def project_message(raw: object, chat_id: int, message_id: int) -> dict:
         raise ValueError('forward source is unavailable')
     if raw.get('forward_info') is not None and type(raw['forward_info']) is not dict:
         raise ValueError('forward source is unavailable')
+    if not _string(raw.get('author_signature'), 1024) or not _int(raw.get('via_bot_user_id'), 0, _INT53):
+        raise ValueError('forward source is unavailable')
+    if raw.get('reply_markup') is not None:
+        raise ForwardRefusal('hidden_source_content')  # Buttons carry targets the text does not show.
     sender = raw.get('sender_id')
     key = {'messageSenderUser': 'user_id', 'messageSenderChat': 'chat_id'}.get(
         sender.get('@type') if type(sender) is dict else None)
@@ -178,6 +223,8 @@ def project_message(raw: object, chat_id: int, message_id: int) -> dict:
         raise ValueError('forward source is unavailable')
     projection = {'version': PROJECTION_VERSION, 'chat_id': chat_id, 'message_id': message_id,
                   'sender': {'type': 'user' if key == 'user_id' else 'chat', 'id': sender[key]},
+                  'author_signature': raw['author_signature'], 'via_bot_user_id': raw['via_bot_user_id'],
+                  'is_forward': raw.get('forward_info') is not None,
                   'date': raw['date'], 'edit_date': raw['edit_date'], 'content': _content(raw.get('content'))}
     if len(canonical(projection).encode('utf-8')) > MAX_PROJECTION_BYTES:
         raise _content_refusal()
@@ -194,9 +241,10 @@ class ForwardSource:
             raise ValueError('invalid forward projection')
         value = json.loads(self.projection_json)
         if (type(value) is not dict or canonical(value) != self.projection_json or
-                set(value) != {'version', 'chat_id', 'message_id', 'sender', 'date', 'edit_date', 'content'} or
-                value['version'] != PROJECTION_VERSION or type(value['content']) is not dict or
-                value['content'].get('kind') not in TDLIB_CONTENT_TYPES):
+                set(value) != {'version', 'chat_id', 'message_id', 'sender', 'author_signature', 'via_bot_user_id',
+                               'is_forward', 'date', 'edit_date', 'content'} or
+                value['version'] != PROJECTION_VERSION or type(value['is_forward']) is not bool or
+                type(value['content']) is not dict or value['content'].get('kind') not in TDLIB_CONTENT_TYPES):
             raise ValueError('invalid forward projection')
 
     @classmethod
@@ -270,4 +318,6 @@ class ForwardSnapshot:
             return 'protected_content'
         if not (self.can_be_forwarded if mode == 'forward' else self.can_be_copied):
             return 'source_not_forwardable'
+        if mode == 'forward' and self.source.value['is_forward']:
+            return 'source_is_forward'  # Nested attribution is not shown; copy sends none.
         return None

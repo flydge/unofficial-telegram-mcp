@@ -29,7 +29,7 @@ from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS
 from telegram_search_mcp.forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
     SendPreparedForwardResponse, UNAVAILABLE)
-from telegram_search_mcp.forward_sources import ForwardSnapshot, ForwardSource
+from telegram_search_mcp.forward_sources import VISIBLE_ENTITY_TYPES, ForwardSnapshot, ForwardSource
 from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.send_observations import ObservationUnavailable, SendObservations
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
@@ -51,12 +51,30 @@ DID = 'draft_' + '1' * 32
 EXPIRY = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 SECRET_FILE_ID = 'REMOTE-FILE-ID-SECRET'
 SECRET_PATH = '/private/should-not-leak'
+MARK = '[untrusted Telegram evidence] '
+ACCOUNT = 7
 
 
 def digest(value):
     # Independent expected adapter; never imports the implementation helper.
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
         ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+def escape(value):
+    # Independent reversible escape: only ASCII letters, digits, _ and - stay literal.
+    out = '"'
+    for char in value:
+        if char.isascii() and (char.isalnum() or char in '_-'):
+            out += char
+        else:
+            data = char.encode('utf-16-be')
+            out += ''.join('\\u%04x' % int.from_bytes(data[i:i + 2], 'big') for i in range(0, len(data), 2))
+    return out + '"'
+
+
+def entity(kind, offset=0, length=1, **fields):
+    return {'@type': 'textEntity', 'offset': offset, 'length': length, 'type': {'@type': kind, **fields}}
 
 
 def chat(chat_id, title, kind='supergroup', protected=False, native=1234):
@@ -119,6 +137,7 @@ CONTENTS = {
 def source_message(content=None, **changes):
     return {'@type': 'message', 'chat_id': SOURCE_CHAT, 'id': 55,
             'sender_id': {'@type': 'messageSenderUser', 'user_id': 8}, 'is_outgoing': False,
+            'author_signature': '', 'via_bot_user_id': 0,
             'date': 1700000000, 'edit_date': 0, 'self_destruct_in': 0.0, 'auto_delete_in': 0.0,
             'ephemeral_message_id': 0, 'interaction_info': {'@type': 'messageInteractionInfo', 'view_count': 3},
             'content': copy.deepcopy(content) if content is not None else text_content(), **changes}
@@ -131,10 +150,11 @@ def outgoing(identifier, kind='messageText', chat_id=RECIPIENT, **changes):
 
 class Raw:
     def __init__(self):
-        self.sent = []; self.events = deque(); self.account = 7; self.mode = 'sent'; self.fail_receive = False
-        self.source = source_message(); self.properties = dict(PROPERTIES)
+        self.sent = []; self.events = deque(); self.account = ACCOUNT; self.mode = 'sent'; self.fail_receive = False
+        self.source = source_message(); self.properties = dict(PROPERTIES); self.result_outgoing = True
         self.chats = {SOURCE_CHAT: chat(SOURCE_CHAT, 'Source Group'),
-                      RECIPIENT: chat(RECIPIENT, 'Recipient', 'private', native=RECIPIENT)}
+                      RECIPIENT: chat(RECIPIENT, 'Recipient', 'private', native=RECIPIENT),
+                      ACCOUNT: chat(ACCOUNT, 'Saved Messages', 'private', native=ACCOUNT)}
 
     def send(self, request):
         self.sent.append(copy.deepcopy(request)); kind = request['@type']
@@ -150,24 +170,42 @@ class Raw:
             value = copy.deepcopy(self.properties)
         elif kind == 'forwardMessages':
             content_type = self.source['content']['@type']
-            pending = outgoing(-10, content_type, chat_id=999 if self.mode == 'wrong_chat' else RECIPIENT,
-                sending_state={'@type': 'messageSendingStatePending', 'sending_id': request['options']['sending_id']})
+            sending_id = request['options']['sending_id']
+            if self.mode == 'foreign_pending':
+                sending_id = sending_id % (2**31 - 1) + 1  # Another send's pending message in the same chat.
+            target = 999 if self.mode == 'wrong_chat' else request['chat_id']
+            def message(identifier, **changes):
+                # Realistic provider copies: a forward carries forward_info, a copy carries none.
+                value = outgoing(identifier, content_type, chat_id=target, is_outgoing=self.result_outgoing,
+                                 sender_id={'@type': 'messageSenderUser', 'user_id': self.account}, **changes)
+                if not request['send_copy']:
+                    value['forward_info'] = {'@type': 'messageForwardInfo', 'origin': {'@type': 'messageOriginUser',
+                        'sender_user_id': 8}, 'date': self.source['date'], 'source': None,
+                        'public_service_announcement_type': ''}
+                return value
+            pending = message(-10, sending_state={'@type': 'messageSendingStatePending', 'sending_id': sending_id})
             if self.mode == 'rejected':
                 self.events.append({'@type': 'error', 'code': 403, 'message': 'PRIVATE PROVIDER TEXT',
                                     '@extra': request['@extra']}); return
             self.events.append({'@type': 'updateNewMessage', 'message': copy.deepcopy(pending)})
             if self.mode == 'lost_before_result':
                 self.fail_receive = True; return
-            result = {'@type': 'messages', 'total_count': 1, 'messages': [pending]}
-            if self.mode == 'malformed':
+            result = {'@type': 'messages', 'total_count': 1, 'messages': [copy.deepcopy(pending)]}
+            if self.mode in ('malformed', 'early_malformed'):
                 result = {'@type': 'messages', 'total_count': 2, 'messages': [pending, copy.deepcopy(pending)]}
+            success = {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                       'message': message(701, sending_state=None)}
+            if self.mode.startswith('early_'):
+                self.events.append(success)  # The final update overtakes the forwardMessages result.
+                if self.mode == 'early_lost':
+                    self.fail_receive = True; return
+                self.events.append({**result, '@extra': request['@extra']}); return
             self.events.append({**result, '@extra': request['@extra']})
-            if self.mode == 'sent':
-                self.events.append({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
-                                    'message': outgoing(701, content_type, sending_state=None)})
+            if self.mode in ('sent', 'foreign_pending'):
+                self.events.append(success)
             elif self.mode == 'failed':
                 self.events.append({'@type': 'updateMessageSendFailed', 'old_message_id': -10,
-                    'message': outgoing(-10, content_type, sending_state={'@type': 'messageSendingStateFailed',
+                    'message': message(-10, sending_state={'@type': 'messageSendingStateFailed',
                         'error': {'@type': 'error', 'code': 403}}),
                     'error': {'@type': 'error', 'code': 403, 'message': 'PRIVATE'}})
             else:
@@ -218,6 +256,22 @@ class ForwardFixture:
 
     def forwards(self):
         return [x for x in self.raw.sent if x['@type'] == 'forwardMessages']
+
+    def assert_refused(self, code, mode='forward', **extra):
+        before = self.broker._drafts.known_ids()
+        result = self.dispatch('prepare_forward_send', self.request(mode, **extra))
+        self.assertEqual(result, {'status': 'refused', 'forward': None, 'refusal': code,
+                                  'detail': 'source message is not eligible; no draft was created'})
+        self.assertEqual(self.broker._drafts.known_ids(), before)
+
+    def assert_unavailable(self, mode='copy'):
+        result = self.dispatch('prepare_forward_send', self.request(mode))
+        self.assertEqual(result, {'status': 'unavailable', 'forward': None, 'refusal': None,
+                                  'detail': 'forward draft is unavailable'})
+
+    def dialog(self, approval):
+        [text] = shown(**approval)
+        return text
 
 
 class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -314,8 +368,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
 class PrepareTests(ForwardFixture, unittest.TestCase):
     def test_prepare_projects_every_supported_kind_without_file_ids_or_paths(self):
-        for kind, content in [('text', text_content('Hello', [{'@type': 'textEntity', 'offset': 0, 'length': 5,
-                'type': {'@type': 'textEntityTypeTextUrl', 'url': 'https://example.invalid/'}}])), *CONTENTS.items()]:
+        for kind, content in [('text', text_content('Hello', [entity('textEntityTypeBold', 0, 5)])), *CONTENTS.items()]:
             with self.subTest(kind=kind):
                 self.raw.source = source_message(content)
                 preview = self.prepare('copy')
@@ -326,7 +379,7 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
                 self.assertEqual(source['date'], '2023-11-14T22:13:20Z')
                 self.assertEqual(preview['recipient'], {'chat_id': RECIPIENT, 'title': 'Recipient'})
                 wire = json.dumps(preview)
-                for secret in (SECRET_FILE_ID, SECRET_PATH, 'UNIQUE-', 'example.invalid', 'view_count'):
+                for secret in (SECRET_FILE_ID, SECRET_PATH, 'UNIQUE-', 'view_count'):
                     self.assertNotIn(secret, wire)
                 expected = ForwardSource.from_message(self.raw.source, SOURCE_CHAT, 55)
                 self.assertEqual(source['source_sha256'], hashlib.sha256(expected.projection_json.encode()).hexdigest())
@@ -336,14 +389,14 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
     def test_media_identity_and_marked_sanitized_evidence(self):
         self.raw.source = source_message(photo_content('Look ‮evil‬ "here"'))
         source = self.prepare()['source']
-        self.assertEqual(source['text'], '[untrusted Telegram evidence] Look evil "here"')
-        self.assertTrue(source['text_sanitized'])
-        self.assertEqual(source['media'], {'file_name': None, 'mime_type': None, 'duration_seconds': None,
-            'width': 1280, 'height': 960, 'size_bytes': 50000,
+        self.assertEqual(source['text'], MARK + r'"Look\u0020\u202eevil\u202c\u0020\u0022here\u0022"')
+        self.assertEqual(source['media'], {'file_name': None, 'mime_type': None, 'title': None, 'performer': None,
+            'duration_seconds': None, 'width': 1280, 'height': 960, 'start_timestamp_seconds': None,
+            'has_spoiler': False, 'caption_above_media': False, 'size_bytes': 50000,
             'unique_id_sha256': hashlib.sha256(b'UNIQUE-X').hexdigest(), 'variants': 2})
         self.raw.source = source_message(CONTENTS['document'])
         source = self.prepare()['source']
-        self.assertIsNone(source['text']); self.assertFalse(source['text_sanitized'])
+        self.assertIsNone(source['text'])
         self.assertEqual((source['media']['file_name'], source['media']['mime_type'], source['media']['size_bytes']),
                          ('[untrusted Telegram evidence] report.pdf', '[untrusted Telegram evidence] application/pdf', 2048))
         self.raw.source = source_message(dict(CONTENTS['document'], document=dict(CONTENTS['document']['document'],
@@ -357,13 +410,6 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
         self.assertEqual(self.prepare()['source']['source_sha256'], first)
         self.raw.source['edit_date'] = 1700000100
         self.assertNotEqual(self.prepare()['source']['source_sha256'], first)
-
-    def assert_refused(self, code, mode='forward'):
-        before = self.broker._drafts.known_ids()
-        result = self.dispatch('prepare_forward_send', self.request(mode))
-        self.assertEqual(result, {'status': 'refused', 'forward': None, 'refusal': code,
-                                  'detail': 'source message is not eligible; no draft was created'})
-        self.assertEqual(self.broker._drafts.known_ids(), before)
 
     def test_unsupported_content_and_state_refuse_without_draft(self):
         for content in ({'@type': 'messageSticker'}, {'@type': 'messagePoll'}, {'@type': 'messageLocation'},
@@ -421,6 +467,7 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
                                       mode='forward', remove_caption=True)
         with self.assertRaises(ValidationError):
             self.dispatch('prepare_forward_send', self.request('forward', remove_caption=True))
+        self.raw.source = source_message(photo_content())
         self.assertEqual(self.prepare('copy', remove_caption=True)['remove_caption'], True)
 
     def test_generic_draft_tools_never_expose_or_mutate_forward_drafts(self):
@@ -438,6 +485,7 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
         self.assertEqual(len(self.forwards()), 1)
 
     def test_proxy_validates_preview_digest_and_request_scope(self):
+        self.raw.source = source_message(photo_content())
         broker_result = self.dispatch('prepare_forward_send', self.request('copy', remove_caption=True))
         request = PrepareForwardSendRequest(**self.request('copy', remove_caption=True))
         def proxy(result):
@@ -447,7 +495,9 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
         self.assertEqual(proxy(broker_result).model_dump(mode='json'), broker_result)
         tampers = [('source', 'text', '[untrusted Telegram evidence] other'), ('source', 'message_id', 56),
                    ('recipient', 'chat_id', 5), ('forward', 'mode', 'forward'), ('forward', 'remove_caption', False),
-                   ('forward', 'preview_sha256', 'f' * 64), ('source', 'text', 'unmarked')]
+                   ('forward', 'preview_sha256', 'f' * 64), ('source', 'text', 'unmarked'),
+                   ('source', 'text', MARK + '"Photo caption"'), ('forward', 'account_id', ACCOUNT + 1),
+                   ('source', 'is_forward', True)]
         for where, key, value in tampers:
             with self.subTest(where=where, key=key):
                 result = copy.deepcopy(broker_result)
@@ -456,7 +506,8 @@ class PrepareTests(ForwardFixture, unittest.TestCase):
                 self.assertEqual(proxy(result).status, 'unavailable')
         # A coherent re-signed preview for another message/mode is still refused by scope binding.
         forged = ForwardDraftPreview.model_validate(broker_result['forward'])
-        coherent = ForwardDraftPreview.create(draft_id=forged.draft_id, expires_at=forged.expires_at, mode='copy',
+        coherent = ForwardDraftPreview.create(draft_id=forged.draft_id, account_id=forged.account_id,
+            expires_at=forged.expires_at, mode='copy',
             remove_caption=False, source=forged.source, recipient=forged.recipient)
         result = dict(broker_result, forward=coherent.model_dump(mode='json'))
         self.assertEqual(proxy(result).status, 'unavailable')
@@ -466,7 +517,7 @@ class SendTests(ForwardFixture, unittest.TestCase):
     def test_one_exact_closed_forward_attempt_then_receipt_replay(self):
         for mode, remove in (('forward', False), ('copy', False), ('copy', True)):
             with self.subTest(mode=mode, remove=remove):
-                self.setUp()
+                self.setUp(); self.raw.source = source_message(photo_content())
                 preview = self.prepare(mode, **({'remove_caption': True} if remove else {}))
                 result = self.send(preview['draft_id'])
                 self.assertEqual((result['status'], result['message_id'], result['recipient']), ('sent', 701, RECIPIENT))
@@ -636,9 +687,10 @@ def snapshot(content=None, title='Source Group', **changes):
                                   ForwardSource.from_message(raw, SOURCE_CHAT, 55), dict(PROPERTIES))
 
 
-def preview(mode='forward', remove_caption=False, content=None):
-    return ForwardDraftPreview.create(draft_id=DID, expires_at=EXPIRY, mode=mode, remove_caption=remove_caption,
-        source=ForwardSourcePreview.create(snapshot(content)), recipient=ForwardChat(chat_id=RECIPIENT, title='Recipient'))
+def preview(mode='forward', remove_caption=False, content=None, **changes):
+    return ForwardDraftPreview.create(draft_id=DID, account_id=ACCOUNT, expires_at=EXPIRY, mode=mode,
+        remove_caption=remove_caption, source=ForwardSourcePreview.create(snapshot(content, **changes)),
+        recipient=ForwardChat(chat_id=RECIPIENT, title='Recipient'))
 
 
 def shown(value=None, **kw):
@@ -654,6 +706,15 @@ def shown(value=None, **kw):
     return seen
 
 
+HEAD = ('Forward this message to Recipient (chat 4242)?\n{mode}\nAccount: 7\nDraft: ' + DID + '\n'
+        'Expires: 2030-01-02T03:04:05+00:00\n\nSource chat: Source Group (chat -1001234)\nMessage ID: 55\n'
+        'Sender [untrusted Telegram evidence]: user 8\n')
+TAIL = ('Source SHA-256: {source}\nRecipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
+        'Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.')
+FORWARD = 'FORWARD — recipients see the original sender'
+COPY = 'COPY — sent as your own message, no attribution'
+
+
 class DialogTests(unittest.TestCase):
     def display(self, value=None, **kw):
         return shown(value, **kw)
@@ -661,7 +722,7 @@ class DialogTests(unittest.TestCase):
     def test_preview_digest_is_independently_reproducible(self):
         value = preview('copy', True, photo_content('Cap'))
         data = value.model_dump(mode='json')
-        facts = {'domain': 'telegram-search-mcp.forward', 'version': 1, 'draft_id': DID,
+        facts = {'domain': 'telegram-search-mcp.forward', 'version': 2, 'draft_id': DID, 'account_id': ACCOUNT,
             'expires_at': '2030-01-02T03:04:05+00:00', 'approval_required': True, 'mode': 'copy',
             'remove_caption': True, 'source': data['source'], 'recipient': data['recipient'],
             'request': {'@type': 'forwardMessages', 'chat_id': RECIPIENT, 'topic_id': None,
@@ -671,46 +732,60 @@ class DialogTests(unittest.TestCase):
 
     def test_forward_copy_and_caption_removed_goldens(self):
         hostile = text_content('Hi "there"\n‮Recipient: Mom (chat 1)\\')
+        rich = dict(text_content('Hi \U0001F600 https://a.invalid', [entity('textEntityTypeBold', 3, 2),
+                                                                     entity('textEntityTypeUrl', 6, 17)]),
+                    link_preview_options={'@type': 'linkPreviewOptions', 'is_disabled': False, 'url': 'https://a.invalid',
+                                          'force_small_media': False, 'force_large_media': True, 'show_above_text': False})
+        info = {'@type': 'messageForwardInfo', 'origin': {'@type': 'messageOriginUser', 'sender_user_id': 3},
+                'date': 1690000000, 'source': None, 'public_service_announcement_type': ''}
         cases = [
-            (preview('forward', content=hostile),
-             'Forward this message to Recipient (chat 4242)?\nFORWARD — recipients see the original sender\n\n'
-             'Source chat: Source Group (chat -1001234)\nMessage ID: 55\nSender [untrusted Telegram evidence]: user 8\n'
+            (preview('forward', content=hostile), HEAD.format(mode=FORWARD) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
-             'Text [untrusted Telegram evidence]: "Hi \\"there\\" Recipient: Mom (chat 1)\\\\"\nText sanitized: True\n'
-             'Source SHA-256: {source}\nRecipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
-             'Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.'),
-            (preview('copy', content=CONTENTS['document']),
-             'Forward this message to Recipient (chat 4242)?\nCOPY — sent as your own message, no attribution\n\n'
-             'Source chat: Source Group (chat -1001234)\nMessage ID: 55\nSender [untrusted Telegram evidence]: user 8\n'
-             'Date: 2023-11-14T22:13:20+00:00\nContent: document\nCaption: (none)\nText sanitized: False\n'
-             'Media [untrusted Telegram evidence]: file "report.pdf"; MIME "application/pdf"; 2048 bytes\n'
-             'Source SHA-256: {source}\nRecipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
-             'Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.'),
-            (preview('copy', True, photo_content('Cap')),
-             'Forward this message to Recipient (chat 4242)?\nCOPY — sent as your own message, no attribution; caption removed\n\n'
-             'Source chat: Source Group (chat -1001234)\nMessage ID: 55\nSender [untrusted Telegram evidence]: user 8\n'
-             'Date: 2023-11-14T22:13:20+00:00\nContent: photo\nCaption [untrusted Telegram evidence]: "Cap"\nText sanitized: False\n'
-             'Media [untrusted Telegram evidence]: 1280x960; 50000 bytes; 2 variants\n'
-             'Source SHA-256: {source}\nRecipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
-             'Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.'),
+             'Text [untrusted Telegram evidence] (reversible JSON escapes): '
+             '"Hi\\u0020\\u0022there\\u0022\\u000a\\u202eRecipient\\u003a\\u0020Mom\\u0020\\u0028chat\\u00201\\u0029\\u005c"\n' + TAIL),
+            (preview('copy', content=CONTENTS['document']), HEAD.format(mode=COPY) +
+             'Date: 2023-11-14T22:13:20+00:00\nContent: document\nCaption: (none)\n'
+             'Media [untrusted Telegram evidence]: file "report.pdf"; MIME "application/pdf"; 2048 bytes\n' + TAIL),
+            (preview('copy', True, photo_content('Cap')), HEAD.format(mode=COPY + '; caption removed') +
+             'Date: 2023-11-14T22:13:20+00:00\nContent: photo\nCaption: removed — not sent\n'
+             'Media [untrusted Telegram evidence]: 1280x960; 50000 bytes; 2 variants; spoiler False; '
+             'caption above media False\n' + TAIL),
+            (preview('copy', content=rich, author_signature='Ed', via_bot_user_id=99, forward_info=info),
+             HEAD.format(mode=COPY) +
+             'Author signature [untrusted Telegram evidence]: "Ed"\nVia bot [untrusted Telegram evidence]: user 99\n'
+             'Source is itself a forward: the copy carries no original attribution\n'
+             'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
+             'Text [untrusted Telegram evidence] (reversible JSON escapes): '
+             '"Hi\\u0020\\ud83d\\ude00\\u0020https\\u003a\\u002f\\u002fa\\u002einvalid"\n'
+             'Text entities (raw text UTF-16 code units):\n'
+             'Bold: offset 3, length 2; covered "\\ud83d\\ude00"\n'
+             'Url: offset 6, length 17; covered "https\\u003a\\u002f\\u002fa\\u002einvalid"\n'
+             'Link preview options [untrusted Telegram evidence]: disabled False; URL '
+             '"https\\u003a\\u002f\\u002fa\\u002einvalid"; small media False; large media True; above text False\n' + TAIL),
+            (preview('forward', content=CONTENTS['audio']), HEAD.format(mode=FORWARD) +
+             'Date: 2023-11-14T22:13:20+00:00\nContent: audio\nCaption: (none)\n'
+             'Media [untrusted Telegram evidence]: file "song.mp3"; MIME "audio/mpeg"; title "T"; performer "P"; '
+             '200 seconds; 4000000 bytes\n' + TAIL),
         ]
         for value, expected in cases:
-            with self.subTest(mode=value.mode, remove=value.remove_caption):
+            with self.subTest(mode=value.mode, remove=value.remove_caption, kind=value.source.content_kind):
                 self.assertEqual(self.display(value), [expected.replace('{source}', value.source.source_sha256)
                                                        .replace('{preview}', value.preview_sha256)])
 
     def test_pinned_digests_for_golden_sources(self):
         # Independent literal: stable identity only, never file IDs, paths or raw unique IDs.
-        projection = {'version': 1, 'chat_id': SOURCE_CHAT, 'message_id': 55, 'sender': {'type': 'user', 'id': 8},
+        projection = {'version': 2, 'chat_id': SOURCE_CHAT, 'message_id': 55, 'sender': {'type': 'user', 'id': 8},
+            'author_signature': '', 'via_bot_user_id': 0, 'is_forward': False,
             'date': 1700000000, 'edit_date': 0, 'content': {'kind': 'photo', 'caption': {'text': 'Cap', 'entities': []},
+            'has_spoiler': False, 'show_caption_above_media': False,
             'variants': [{'type': 's', 'width': 90, 'height': 60, 'size': 1000,
                           'unique_id_sha256': hashlib.sha256(b'UNIQUE-S').hexdigest()},
                          {'type': 'x', 'width': 1280, 'height': 960, 'size': 50000,
                           'unique_id_sha256': hashlib.sha256(b'UNIQUE-X').hexdigest()}]}}
         value = preview('copy', True, photo_content('Cap'))
         self.assertEqual(value.source.source_sha256, digest(projection))
-        self.assertEqual(value.source.source_sha256, '5fe403fdc3b471ee447a71ae3e314b635d115e0a15d852c23f966f59a45ae050')
-        self.assertEqual(value.preview_sha256, 'e778c6f001aa29034ffd52fa27fdd4658c8be2178cbb829a43d7799ec2fbdf43')
+        self.assertEqual(value.source.source_sha256, '3317d95b3053cbaba454d981c64cd3fc6794b76a9544bb2aed5488395d2ad64e')
+        self.assertEqual(value.preview_sha256, 'f51120102abc8dd76f720678afce4135a8aabc03a381e51e7e83a31b00364c6b')
 
     def test_competing_mismatched_or_tampered_forward_previews_refuse(self):
         value = preview()
@@ -722,11 +797,12 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(self.display(value, recipient_title='Other'), [])
         self.assertEqual(self.display(value, sha256='b' * 64), [])
         self.assertEqual(self.display(value, text='smuggled'), [])
-        data = value.model_dump(mode='json'); data['source']['text'] = '[untrusted Telegram evidence] Other'
-        self.assertEqual(self.display(value, forward_preview=data), [])
-        data = value.model_dump(mode='json'); data['mode'] = 'copy'
-        self.assertEqual(self.display(value, forward_preview=data), [])
-
+        for key, changed in (('text', MARK + 'Other'), ('text', MARK + '"Source text"'), ('text', 'Source text')):
+            data = value.model_dump(mode='json'); data['source'][key] = changed
+            self.assertEqual(self.display(value, forward_preview=data), [])
+        for key, changed in (('mode', 'copy'), ('account_id', ACCOUNT + 1), ('remove_caption', True)):
+            data = value.model_dump(mode='json'); data[key] = changed
+            self.assertEqual(self.display(value, forward_preview=data), [])
 
 
 class TransportShapeTests(unittest.TestCase):
@@ -763,15 +839,28 @@ class TransportShapeTests(unittest.TestCase):
                 observations.register('a', 'e', 1, RECIPIENT, 'messageText', forward=True, **kwargs)
         with self.assertRaises(ObservationUnavailable):
             observations.register('a', 'e', 1, RECIPIENT, 'messageSticker', forward=True)
-        observations.register('a', 'e', 5, RECIPIENT, 'messagePhoto', forward=True)
+        for kwargs in ({'forward_self': True}, {'forward_self': 1}):
+            with self.assertRaises(ObservationUnavailable):
+                observations.register('a', 'e', 1, RECIPIENT, 'messageText', **kwargs)
+        with self.assertRaises(ObservationUnavailable):
+            observations.register('a', 'e', 1, -100, 'messageText', forward=True, forward_self=True)
         pending = outgoing(-10, 'messagePhoto', sending_state={'@type': 'messageSendingStatePending', 'sending_id': 5})
         for event in ({'@type': 'messages', 'total_count': 1, 'messages': [dict(pending, chat_id=1)]},
                       {'@type': 'messages', 'total_count': 2, 'messages': [pending, pending]},
                       {'@type': 'messages', 'total_count': 1, 'messages': [None]},
                       {'@type': 'messages', 'total_count': True, 'messages': [pending]},
+                      {'@type': 'messages', 'total_count': 1, 'messages': [dict(pending, is_outgoing=False)]},
                       dict(pending), {'@type': 'messages', 'total_count': 1, 'messages': [dict(pending, sending_state=None)]}):
-            observations.reduce({**event, '@extra': 'e'})
-            self.assertEqual(observations.snapshot('a').status, 'registered')
+            # A malformed or mismatched forwardMessages result is a terminal conflict, never later `sent`.
+            conflicted = SendObservations()
+            conflicted.register('a', 'e', 5, RECIPIENT, 'messagePhoto', forward=True)
+            conflicted.reduce({**event, '@extra': 'e'})
+            self.assertEqual(conflicted.snapshot('a').status, 'conflict')
+            conflicted.reduce({'@type': 'updateNewMessage', 'message': pending})
+            conflicted.reduce({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                               'message': outgoing(9, 'messagePhoto', sending_state=None)})
+            self.assertEqual((conflicted.snapshot('a').status, conflicted.snapshot('a').message_id), ('conflict', None))
+        observations.register('a', 'e', 5, RECIPIENT, 'messagePhoto', forward=True)
         observations.reduce({'@type': 'messages', 'total_count': 1, 'messages': [pending], '@extra': 'e'})
         self.assertEqual((observations.snapshot('a').status, observations.snapshot('a').temporary_id), ('pending', -10))
         observations.reduce({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
@@ -799,6 +888,310 @@ class TransportShapeTests(unittest.TestCase):
                 ForwardSpec(snapshot=snap, source=ForwardSourcePreview.create(snap), mode='forward',
                             remove_caption=True, recipient_identity=())
             self.assertEqual(registry.peek(draft.draft_id, owner=owner), draft)
+
+
+HIDDEN_ENTITIES = (
+    entity('textEntityTypeTextUrl', 0, 5, url='https://evil.invalid/'),
+    entity('textEntityTypeMentionName', 0, 5, user_id=9),
+    entity('textEntityTypeCustomEmoji', 0, 5, custom_emoji_id='5368324170671202286'),
+    entity('textEntityTypePreCode', 0, 5, language='evil'),
+    entity('textEntityTypeMediaTimestamp', 0, 5, media_timestamp=30),
+    entity('textEntityTypeDateTime', 0, 5, unix_time=1700000000, formatting_type=None),
+    entity('textEntityTypeFutureEvil', 0, 5),
+    entity('textEntityTypeBold', 0, 5, url='https://evil.invalid/'),
+)
+
+
+class CriticReviewTests(ForwardFixture, unittest.TestCase):
+    """Amendments 16.10.2026: one test per lead decision; each failed on 34e6a16."""
+
+    def test_h1_hidden_or_parameterized_entities_refuse_content_free(self):
+        for hidden in HIDDEN_ENTITIES:
+            for content in (text_content('Hello world', [hidden]),
+                            dict(photo_content(), caption=formatted('Hello world', [hidden]))):
+                with self.subTest(type=hidden['type']['@type'], kind=content['@type']):
+                    self.raw.source = source_message(content)
+                    result = self.dispatch('prepare_forward_send', self.request('copy'))
+                    self.assertEqual(result, {'status': 'refused', 'forward': None, 'refusal': 'hidden_source_content',
+                                              'detail': 'source message is not eligible; no draft was created'})
+        self.assertEqual(self.broker._drafts.known_ids(), set())
+        self.assertEqual(self.forwards(), []); self.assertEqual(self.approvals, [])
+
+    def test_h1_every_visible_fieldless_entity_is_admitted(self):
+        rows = [entity(kind, index, 1) for index, kind in enumerate(VISIBLE_ENTITY_TYPES)]
+        self.assertEqual(len(rows), 17)
+        self.raw.source = source_message(text_content('abcdefghijklmnopq', rows))
+        source = self.prepare('copy')['source']
+        self.assertEqual(source['entities'], [{'type': kind, 'offset': index, 'length': 1}
+                                              for index, kind in enumerate(VISIBLE_ENTITY_TYPES)])
+
+    def test_h1_reply_markup_and_hidden_link_preview_url_refuse(self):
+        markup = {'@type': 'replyMarkupInlineKeyboard', 'rows': [[{'@type': 'inlineKeyboardButton', 'text': 'Open',
+                  'type': {'@type': 'inlineKeyboardButtonTypeUrl', 'url': 'https://evil.invalid'}}]]}
+        self.raw.source = source_message(reply_markup=markup)
+        self.assert_refused('hidden_source_content', 'copy')
+        def options(url, **changes):
+            return {'@type': 'linkPreviewOptions', 'is_disabled': False, 'url': url, 'force_small_media': False,
+                    'force_large_media': True, 'show_above_text': True, **changes}
+        self.raw.source = source_message(dict(text_content('see https://a.invalid'),
+                                              link_preview_options=options('https://evil.invalid/')))
+        self.assert_refused('hidden_source_content', 'copy')
+        self.raw.source = source_message(dict(text_content('see https://a.invalid'), link_preview_options=dict(
+            options(''), is_disabled=1)))
+        self.assert_refused('unsupported_source_content', 'copy')
+        for url, shown_url in (('https://a.invalid', MARK + escape('https://a.invalid')), ('', None)):
+            with self.subTest(url=url):
+                self.raw.source = source_message(dict(text_content('see https://a.invalid'), link_preview_options=options(url)))
+                preview = self.prepare('copy')
+                self.assertEqual(preview['source']['link_preview'], {'url': shown_url, 'is_disabled': False,
+                    'force_small_media': False, 'force_large_media': True, 'show_above_text': True})
+        did = preview['draft_id']
+        self.raw.source['content']['link_preview_options']['show_above_text'] = False
+        self.assertEqual(self.send(did)['status'], 'source_changed')
+        self.assertEqual(self.forwards(), [])
+
+    def test_h1_hidden_target_swap_after_prepare_is_source_changed(self):
+        self.raw.source = source_message(text_content('Click here', [entity('textEntityTypeBold', 0, 10)]),
+                                         edit_date=1700000500)
+        did = self.prepare('copy')['draft_id']
+        # A same-second edit keeps edit_date; the projection still binds every entity type.
+        self.raw.source['content']['text']['entities'][0]['type'] = {'@type': 'textEntityTypeTextUrl',
+                                                                     'url': 'https://evil.invalid/'}
+        self.assertEqual(self.send(did)['status'], 'source_changed')
+        self.assertEqual(self.approvals, []); self.assertEqual(self.forwards(), [])
+
+    def test_m1_forward_of_a_forward_refuses_only_in_forward_mode(self):
+        info = {'@type': 'messageForwardInfo', 'origin': {'@type': 'messageOriginHiddenUser',
+                'sender_name': 'Telegram Support'}, 'date': 1690000000, 'source': None,
+                'public_service_announcement_type': ''}
+        self.raw.source = source_message(forward_info=info)
+        self.assert_refused('source_is_forward', 'forward')
+        preview = self.prepare('copy')
+        self.assertIs(preview['source']['is_forward'], True)
+        self.assertNotIn('Telegram Support', json.dumps(preview))
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'sent')
+        self.assertIn('Source is itself a forward: the copy carries no original attribution\n',
+                      self.dialog(self.approvals[0]))
+        self.assertIs(self.forwards()[0]['send_copy'], True)
+
+    def test_m1_author_signature_and_via_bot_are_bound_and_displayed(self):
+        self.raw.source = source_message(author_signature='Editor ‮X', via_bot_user_id=99)
+        preview = self.prepare('forward')
+        self.assertEqual((preview['source']['author_signature'], preview['source']['via_bot_user_id']),
+                         (MARK + 'Editor X', 99))
+        self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'not_approved')
+        text = self.dialog(self.approvals[0])
+        self.assertIn('Sender [untrusted Telegram evidence]: user 8\nAuthor signature [untrusted Telegram evidence]: '
+                      '"Editor X"\nVia bot [untrusted Telegram evidence]: user 99\n', text)
+        self.broker._approval_prompt = lambda **kw: True
+        self.raw.source['author_signature'] = 'Someone else'
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'source_changed')
+        for missing in ('author_signature', 'via_bot_user_id'):
+            with self.subTest(missing=missing):
+                self.raw.source = source_message(); self.raw.source.pop(missing)
+                self.assert_unavailable()
+        self.raw.source = source_message(author_signature='​⁦')
+        self.assert_refused('hidden_source_content', 'copy')
+        self.assertEqual(self.forwards(), [])
+
+    def test_m2_text_and_caption_use_reversible_escapes_with_raw_offsets(self):
+        raw = 'Pay  pаypal​.com\n\t‮ok \U0001F600 end'
+        units = len(raw[:raw.index('\U0001F600')].encode('utf-16-le')) // 2
+        rows = [entity('textEntityTypeSpoiler', units, 2), entity('textEntityTypeBold', units + 3, 3)]
+        for content in (text_content(raw, rows), dict(photo_content(), caption=formatted(raw, rows))):
+            with self.subTest(kind=content['@type']):
+                self.setUp(); self.raw.source = source_message(content)
+                preview = self.prepare('copy')
+                text = preview['source']['text']
+                self.assertEqual(text, MARK + escape(raw))
+                self.assertEqual(json.loads(text[len(MARK):]), raw)
+                for visible in ('\\u00a0\\u0020', '\\u0430', '\\u200b', '\\u000a', '\\u0009', '\\u202e'):
+                    self.assertIn(visible, text)
+                self.assertEqual(preview['source']['entities'], [{'type': 'textEntityTypeSpoiler', 'offset': units,
+                    'length': 2}, {'type': 'textEntityTypeBold', 'offset': units + 3, 'length': 3}])
+                self.assertEqual(self.send(preview['draft_id'])['status'], 'sent')
+                dialog = self.dialog(self.approvals[0])
+                label = 'Text' if content['@type'] == 'messageText' else 'Caption'
+                self.assertIn(f'{label} [untrusted Telegram evidence] (reversible JSON escapes): {escape(raw)}\n'
+                              f'{label} entities (raw text UTF-16 code units):\n'
+                              f'Spoiler: offset {units}, length 2; covered "\\ud83d\\ude00"\n'
+                              f'Bold: offset {units + 3}, length 3; covered "end"\n', dialog)
+                self.assertNotIn('paypal', dialog)
+        self.raw.source = source_message(text_content(raw, [entity('textEntityTypeBold', units + 1, 1)]))
+        self.assert_refused('unsupported_source_content', 'copy')  # Split surrogate pair.
+
+    def test_m3_reprepare_supersedes_only_the_same_owner_and_key(self):
+        first = self.prepare('forward')['draft_id']
+        other_mode = self.prepare('copy')['draft_id']
+        foreign = self.dispatch('prepare_forward_send', self.request('forward'), client=FOREIGN)['forward']['draft_id']
+        second = self.prepare('forward')['draft_id']
+        self.assertEqual(self.send(first)['status'], 'expired')
+        self.assertEqual(self.status(first)['evidence'], 'none')
+        self.assertEqual((self.forwards(), self.approvals), ([], []))
+        self.assertEqual(self.send(second)['status'], 'sent')
+        self.assertEqual(self.send(other_mode)['status'], 'sent')
+        self.assertEqual(self.send(foreign, client=FOREIGN)['status'], 'sent')
+        self.assertEqual(len(self.forwards()), 3)
+
+    async def _descriptions(self):
+        from mcp import Client
+        from telegram_search_mcp.server import build_server
+        class Service:
+            def close(self): pass
+        async with Client(build_server(service_factory=Service, policy=POLICY)) as consumer:
+            return {t.name: t.description for t in (await consumer.list_tools()).tools}
+
+    def test_m3_tool_description_states_supersede_and_no_cancel(self):
+        import asyncio
+        description = asyncio.run(self._descriptions())['prepare_forward_send']
+        for phrase in ('supersedes the earlier pending forward draft, which can then no longer be sent',
+                       'cannot be listed, updated, refreshed or cancelled through the generic draft tools',
+                       'reversible JSON escapes', 'itself a forward', 'auto-deleting'):
+            self.assertIn(phrase, description)
+
+    def test_l1_saved_messages_forward_accepts_the_provider_incoming_flag(self):
+        self.raw.result_outgoing = False
+        did = self.prepare('forward', recipient=ACCOUNT)['draft_id']
+        result = self.send(did)
+        self.assertEqual((result['status'], result['message_id'], result['recipient']), ('sent', 701, ACCOUNT))
+        self.assertEqual(self.status(did)['status'], 'sent')
+        self.setUp(); self.raw.result_outgoing = False
+        did = self.prepare('forward')['draft_id']  # The same incoming flag elsewhere is not our message.
+        result = self.send(did)
+        self.assertEqual((result['status'], result['message_id']), ('outcome_unknown', None))
+        self.assertEqual(self.status(did)['status'], 'outcome_unknown')
+        self.assertEqual(len(self.forwards()), 1)
+
+    def test_l2_early_success_waits_for_and_validates_the_result(self):
+        for mode, expected in (('early_valid', 'sent'), ('early_malformed', 'outcome_unknown'),
+                               ('early_lost', 'outcome_unknown')):
+            with self.subTest(mode=mode):
+                self.setUp(); self.raw.mode = mode
+                did = self.prepare()['draft_id']
+                result = self.send(did)
+                self.assertEqual(result['status'], expected)
+                self.assertEqual(result['message_id'], 701 if expected == 'sent' else None)
+                if mode == 'early_malformed':
+                    self.raw.events.append({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                                            'message': outgoing(701, sending_state=None)})
+                    self.assertEqual(self.status(did)['status'], 'outcome_unknown')
+                self.assertEqual(len(self.forwards()), 1)
+
+    def test_l2_malformed_or_mismatched_result_never_reconciles_to_sent(self):
+        for mode in ('malformed', 'wrong_chat', 'foreign_pending'):
+            with self.subTest(mode=mode):
+                self.setUp(); self.raw.mode = mode
+                did = self.prepare()['draft_id']
+                self.assertEqual(self.send(did)['status'], 'outcome_unknown')
+                self.raw.events.append({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                                        'message': outgoing(702, sending_state=None)})
+                status = self.status(did)
+                self.assertEqual((status['status'], status['message_id']), ('outcome_unknown', None))
+                self.assertEqual(self.send(did)['status'], 'outcome_unknown')
+                self.assertEqual(len(self.forwards()), 1)
+
+    def test_l3_audio_names_and_media_presentation_flags_are_bound(self):
+        self.raw.source = source_message(CONTENTS['audio'])
+        preview = self.prepare('copy')
+        self.assertEqual((preview['source']['media']['title'], preview['source']['media']['performer']),
+                         (MARK + 'T', MARK + 'P'))
+        self.raw.source['content']['audio']['title'] = 'OFFENSIVE TITLE'
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'source_changed')
+        self.setUp()
+        self.raw.source = source_message(photo_content(has_spoiler=True, show_caption_above_media=True))
+        preview = self.prepare('copy')
+        self.assertEqual((preview['source']['media']['has_spoiler'], preview['source']['media']['caption_above_media']),
+                         (True, True))
+        self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
+        self.send(preview['draft_id'])
+        self.assertIn('; spoiler True; caption above media True\n', self.dialog(self.approvals[0]))
+        self.broker._approval_prompt = lambda **kw: True
+        self.raw.source['content']['has_spoiler'] = False
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'source_changed')
+        self.raw.source = source_message(dict(CONTENTS['video'], start_timestamp=5))
+        preview = self.prepare('copy')
+        self.assertEqual(preview['source']['media']['start_timestamp_seconds'], 5)
+        self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
+        self.send(preview['draft_id'])
+        self.assertIn('file "clip.mp4"; MIME "video/mp4"; 12 seconds; 640x360; starts at 5 seconds; 99999 bytes; '
+                      'spoiler False; caption above media False\n', self.dialog(self.approvals[-1]))
+        for content in (dict(CONTENTS['video'], start_timestamp=None), dict(photo_content(), has_spoiler=None),
+                        dict(CONTENTS['audio'], audio=dict(CONTENTS['audio']['audio'], performer=None))):
+            self.raw.source = source_message(content)
+            self.assert_refused('unsupported_source_content', 'copy')
+        self.assertEqual(self.forwards(), [])
+
+    def test_l4_auto_deleting_source_refuses(self):
+        self.raw.source = source_message(auto_delete_in=30.0)
+        self.assert_refused('unsupported_source_state', 'copy')
+        self.raw.source = source_message(); self.raw.source.pop('auto_delete_in')
+        self.assert_unavailable()
+        self.raw.source = source_message()
+        did = self.prepare('copy')['draft_id']
+        self.raw.source['auto_delete_in'] = 86400.0
+        self.assertEqual(self.send(did)['status'], 'source_changed')
+        self.assertEqual(self.forwards(), [])
+
+    def test_l5_remove_caption_requires_a_media_source_and_dialog_marks_it_removed(self):
+        self.assert_refused('invalid_input', 'copy', remove_caption=True)
+        self.raw.source = source_message(photo_content('Secret caption'))
+        preview = self.prepare('copy', remove_caption=True)
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'sent')
+        dialog = self.dialog(self.approvals[0])
+        self.assertIn('\nCaption: removed — not sent\n', dialog)
+        self.assertNotIn('Secret', dialog); self.assertNotIn(escape('Secret caption'), dialog)
+        self.assertIs(self.forwards()[0]['remove_caption'], True)
+
+    def test_info_dialog_identifies_account_draft_and_expiry(self):
+        preview = self.prepare('copy')
+        self.assertEqual(preview['account_id'], ACCOUNT)
+        self.send(preview['draft_id'])
+        self.assertIn(f"\nAccount: {ACCOUNT}\nDraft: {preview['draft_id']}\n"
+                      f"Expires: {datetime.fromisoformat(preview['expires_at']).isoformat()}\n\n",
+                      self.dialog(self.approvals[0]))
+
+    def test_info_local_failure_replay_says_no_provider_attempt(self):
+        did = self.prepare()['draft_id']
+        def approve(**kw):
+            self.raw.source['edit_date'] = 1700000100; return True
+        self.broker._approval_prompt = approve
+        self.assertEqual(self.send(did)['status'], 'local_failed')
+        replay = self.send(did)
+        self.assertEqual(replay['status'], 'local_failed')
+        self.assertIn('no provider attempt was made', replay['detail'])
+        self.assertNotIn('previous provider attempt', replay['detail'])
+        self.assertEqual(self.forwards(), [])
+
+    def test_foreign_sending_id_with_matching_chat_and_type_is_not_matched(self):
+        self.raw.mode = 'foreign_pending'
+        did = self.prepare()['draft_id']
+        result = self.send(did)
+        self.assertEqual((result['status'], result['message_id']), ('outcome_unknown', None))
+        self.assertNotEqual(self.status(did)['status'], 'sent')
+
+    def test_guard_failure_after_registration_is_local_failed_without_transport(self):
+        did = self.prepare()['draft_id']
+        observations = self.client._send_observations
+        register = observations.register
+        def flip(*args, **kwargs):
+            register(*args, **kwargs)
+            self.broker._policy = RuntimePolicy(enabled_capabilities=('send',))
+        observations.register = flip
+        result = self.broker._send_prepared_forward(SendPreparedForwardRequest(draft_id=did, approved=True),
+                                                    client_id=CLIENT)
+        self.broker._policy = POLICY
+        self.assertEqual(result.status, 'local_failed'); self.assertEqual(self.forwards(), [])
+        self.assertIsNone(observations.snapshot(did))
+        status = self.status(did)
+        self.assertEqual((status['status'], status['evidence']), ('failed', 'local_failed'))
+
+    def test_realistic_forward_results_with_forward_info_confirm(self):
+        for mode in ('forward', 'copy'):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.assertEqual(self.send(self.prepare(mode)['draft_id'])['status'], 'sent')
+                self.assertEqual(len(self.forwards()), 1)
 
 
 if __name__ == '__main__':

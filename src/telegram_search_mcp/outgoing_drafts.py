@@ -345,6 +345,13 @@ class OutgoingDraftRegistry:
                 caption="", recipient=recipient, expires_at=now + self._max_ttl_seconds,
                 recipient_title=recipient_title, kind="forward", forward=forward,
             )
+            # Preparing again supersedes the same owner's pending draft for the same
+            # source, recipient, mode and caption choice; it can no longer be claimed.
+            for entry in self._entries.values():
+                old = entry.draft
+                if (entry.owner == owner and entry.state == "pending" and old.kind == "forward" and
+                        old.recipient == recipient and old.forward.supersede_key == forward.supersede_key):
+                    entry.state = "superseded"
             self._entries[draft_id] = _Entry(draft=draft, owner=owner)
             record_selection_draft(draft_id)
             return draft

@@ -1573,11 +1573,14 @@ class TDLibClient:
                     raise ValueError('forward authority changed')
             except Exception as error:
                 raise MessageSendNotAttempted('forward revalidation failed') from error
+            # The account's own Saved Messages chat has the account user ID.
+            to_self = chat_id == expected_account_id and expected_recipient_identity == ('chatTypePrivate', chat_id)
             return self._forward_transport(chat_id, snapshot.source, send_copy=mode == 'copy',
-                remove_caption=remove_caption, attempt_id=attempt_id, pre_transport_guard=pre_send_guard)
+                remove_caption=remove_caption, attempt_id=attempt_id, pre_transport_guard=pre_send_guard,
+                to_self=to_self)
 
     def _forward_transport(self, chat_id: int, source, *, send_copy: bool, remove_caption: bool,
-                           attempt_id: str, pre_transport_guard: Callable[[], bool]) -> int:
+                           attempt_id: str, pre_transport_guard: Callable[[], bool], to_self: bool = False) -> int:
         sending_id = secrets.randbelow((1 << 31) - 1) + 1
         for _ in range(8):
             if self._send_observations.sending_id_available(sending_id):
@@ -1601,7 +1604,7 @@ class TDLibClient:
                 raise MessageSendNotAttempted("forward provider is unavailable before send")
             try:
                 self._send_observations.register(attempt_id, extra, sending_id, chat_id,
-                                                 source.content_type, forward=True)
+                                                 source.content_type, forward=True, forward_self=to_self is True)
             except ObservationUnavailable as error:
                 raise MessageSendNotAttempted("send correlation is unavailable") from error
             try:
@@ -1619,6 +1622,7 @@ class TDLibClient:
             deadline = time.monotonic() + min(max(self._request_timeout, 30), 300)
             if aggregate_deadline is not None:
                 deadline = min(deadline, aggregate_deadline)
+            result_valid = False  # `sent` needs the exact forwardMessages result, even after an early success.
             while time.monotonic() < deadline:
                 try:
                     response = self._raw.receive(min(1.0, max(0.0, deadline - time.monotonic())))
@@ -1633,12 +1637,16 @@ class TDLibClient:
                 if observation is not None and observation.status == "failed":
                     provider_error = response if response.get("@type") == "error" else response.get("error")
                     raise MessageSendFailed("TDLib reported forward failure", provider_error=provider_error)
-                if (response.get("@extra") == extra and (observation is None or
-                        SendObservations.forward_result_message(response, observation) is None)):
-                    raise MessageSendOutcomeUnknown("TDLib returned an invalid forward result")
-                if observation is not None and observation.status == "sent":
-                    return observation.message_id
-                if (observation is not None and response.get("@type") == "updateMessageSendSucceeded"
+                if observation is None or observation.status == "conflict":
+                    raise MessageSendOutcomeUnknown("TDLib forward evidence is unavailable or conflicting")
+                if response.get("@extra") == extra:
+                    if SendObservations.forward_result_message(response, observation) is None:
+                        raise MessageSendOutcomeUnknown("TDLib returned an invalid forward result")
+                    result_valid = True
+                if observation.status == "sent":
+                    if result_valid:
+                        return observation.message_id
+                elif (response.get("@type") == "updateMessageSendSucceeded"
                         and type(response.get("old_message_id")) is int
                         and response["old_message_id"] == observation.temporary_id):
                     raise MessageSendOutcomeUnknown("TDLib returned an invalid final message")

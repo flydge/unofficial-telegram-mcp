@@ -1870,7 +1870,7 @@ class Broker(SelectionBrokerMixin):
         if draft.kind != 'forward' or not isinstance(spec, ForwardSpec):
             raise DraftError(FORWARD_UNAVAILABLE)
         self._require_forward_policy()
-        return ForwardDraftPreview.create(draft_id=draft.draft_id,
+        return ForwardDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
             expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc), mode=spec.mode,
             remove_caption=spec.remove_caption, source=spec.source,
             recipient=ForwardChat(chat_id=draft.recipient, title=draft.recipient_title))
@@ -1885,6 +1885,8 @@ class Broker(SelectionBrokerMixin):
             refusal = snapshot.refusal(request.mode)
             if refusal is not None:
                 raise ForwardRefusal(refusal)
+            if request.remove_caption and snapshot.source.content_type == 'messageText':
+                raise ForwardRefusal('invalid_input')  # A text message has no caption to remove.
             spec = ForwardSpec(snapshot=snapshot, source=ForwardSourcePreview.create(snapshot), mode=request.mode,
                                remove_caption=request.remove_caption, recipient_identity=recipient_identity)
             self._reply_budget_check(provider)
@@ -1921,8 +1923,10 @@ class Broker(SelectionBrokerMixin):
                 return result('error', 'draft kind does not match send tool')
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
-                return result('local_failed' if previous.evidence == 'local_failed' else previous.status,
-                              'previous provider attempt receipt; no new send was attempted',
+                if previous.evidence == 'local_failed':
+                    return result('local_failed', 'previous local failure receipt; no provider attempt was made '
+                                  'and no new send was attempted')
+                return result(previous.status, 'previous provider attempt receipt; no new send was attempted',
                               message_id=previous.message_id)
             with self._state_lock:
                 expected_title = self._draft_recipient_titles.get(draft_id)
@@ -1947,7 +1951,9 @@ class Broker(SelectionBrokerMixin):
                 return result('source_changed', 'source message changed; prepare a new forward draft')
             refusal = current.refusal(spec.mode)
             if refusal is not None:
-                return result(refusal, 'source is no longer eligible; no send was attempted')
+                # An unchanged projection keeps any other prepare-time refusal unreachable here.
+                return result(refusal if refusal in {'source_not_forwardable', 'protected_content'} else 'source_changed',
+                              'source is no longer eligible; no send was attempted')
             self._reply_budget_check(provider)
             if (self._forward_owner(client_id) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):

@@ -1241,13 +1241,19 @@ def build_server(
 
     @server.tool(name="prepare_forward_send", description=(
         "Prepare one exact forward (mode=forward: recipients see the original sender) or copy (mode=copy: "
-        "sent as your own message without attribution; remove_caption only with copy) of a single existing "
-        "message from source_chat to recipient. Requires default-off forward_send and send. Supported source "
-        "content: text, photo, document, voice note, video, audio and animation; self-destructing, ephemeral, "
-        "scheduled, still-sending, protected or non-forwardable sources are refused, as are secret chats. "
-        "Returns a content-free refusal or an immutable preview: sanitized, marked untrusted source evidence, "
-        "source_sha256 and preview_sha256. No send occurs; show the complete preview to the user. Forward drafts "
-        "are not listed, updated, refreshed or cancelled by the generic draft tools; prepare again to change one."),
+        "sent as your own message without attribution; remove_caption only with copy of a media source) of a "
+        "single existing message from source_chat to recipient. Requires default-off forward_send and send. "
+        "Supported source content: text, photo, document, voice note, video, audio and animation; "
+        "self-destructing, auto-deleting, ephemeral, scheduled, still-sending, protected or non-forwardable "
+        "sources are refused, as are secret chats, hidden or parameterized formatting (text links, mention "
+        "names, custom emoji, code languages, media timestamps), reply markup, a link-preview URL absent from "
+        "the text and, with mode=forward, a source that is itself a forward. Returns a content-free refusal or "
+        "an immutable preview: marked untrusted source evidence whose text or caption uses reversible JSON "
+        "escapes (entity offsets are raw UTF-16 code units), source_sha256 and preview_sha256. No send occurs; "
+        "show the complete preview to the user. Preparing again for the same source message, recipient, mode "
+        "and remove_caption supersedes the earlier pending forward draft, which can then no longer be sent. "
+        "Forward drafts cannot be listed, updated, refreshed or cancelled through the generic draft tools; "
+        "supersede one or let it expire."),
         annotations=_TRANSFER, structured_output=True)
     def prepare_forward_send(source_chat: ChatId, source_message_id: PositiveMessageId, recipient: ChatId,
                              mode: ForwardMode,

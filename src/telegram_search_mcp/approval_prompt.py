@@ -33,36 +33,59 @@ def _outgoing_style_detail(draft):
 
 
 def _forward_detail(validated) -> str:
-    """Untrusted Telegram strings stay marked and JSON-escaped on their own lines."""
+    """Untrusted Telegram strings stay marked on their own lines; outgoing text and
+    caption use the reversible reply-v23 escapes, so nothing invisible can hide."""
+    from .reply_drafts import EVIDENCE_MARKER
     source, recipient = validated.source, validated.recipient
     mode = ('FORWARD — recipients see the original sender' if validated.mode == 'forward' else
             'COPY — sent as your own message, no attribution' + ('; caption removed' if validated.remove_caption else ''))
     label = 'Text' if source.content_kind == 'text' else 'Caption'
     marker = '[untrusted Telegram evidence]'
-    if source.text is None:
+    def body(value):
+        return value[len(EVIDENCE_MARKER):]
+    def name(value):
+        return json.dumps(body(value), ensure_ascii=False)
+    if validated.remove_caption:
+        text = 'Caption: removed — not sent\n'
+    elif source.text is None:
         text = f'{label}: (none)\n'
     else:
-        from .reply_drafts import EVIDENCE_MARKER
-        body = source.text[len(EVIDENCE_MARKER):]
-        text = f'{label} {marker}: {json.dumps(body, ensure_ascii=False)}\n'
+        text = f'{label} {marker} (reversible JSON escapes): {body(source.text)}\n'
+        rows = source.entity_rows()
+        if rows:
+            text += (f'{label} entities (raw text UTF-16 code units):\n' +
+                     ''.join(f'{kind}: offset {offset}, length {length}; covered {covered}\n'
+                             for kind, offset, length, covered in rows))
+    link = ''
+    if source.link_preview is not None:
+        item = source.link_preview
+        link = (f'Link preview options {marker}: disabled {item.is_disabled}; URL '
+                f'{body(item.url) if item.url is not None else "(none)"}; small media {item.force_small_media}; '
+                f'large media {item.force_large_media}; above text {item.show_above_text}\n')
     media = ''
     if source.media is not None:
-        from .reply_drafts import EVIDENCE_MARKER
         item = source.media
-        def name(value):
-            return json.dumps(value[len(EVIDENCE_MARKER):], ensure_ascii=False)
-        parts = ([f'file {name(item.file_name)}'] if item.file_name is not None else []) + \
-            ([f'MIME {name(item.mime_type)}'] if item.mime_type is not None else []) + \
+        parts = [f'{key} {name(value)}' for key, value in (('file', item.file_name), ('MIME', item.mime_type),
+                 ('title', item.title), ('performer', item.performer)) if value is not None] + \
             ([f'{item.duration_seconds} seconds'] if item.duration_seconds is not None else []) + \
             ([f'{item.width}x{item.height}'] if item.width is not None and item.height is not None else []) + \
-            [f'{item.size_bytes} bytes'] + ([f'{item.variants} variants'] if item.variants > 1 else [])
+            ([f'starts at {item.start_timestamp_seconds} seconds'] if item.start_timestamp_seconds else []) + \
+            [f'{item.size_bytes} bytes'] + ([f'{item.variants} variants'] if item.variants > 1 else []) + \
+            ([f'spoiler {item.has_spoiler}; caption above media {item.caption_above_media}']
+             if item.has_spoiler is not None else [])
         media = f'Media {marker}: ' + '; '.join(parts) + '\n'
-    return (f"Forward this message to {recipient.title} (chat {recipient.chat_id})?\n{mode}\n\n"
+    attribution = ((f'Author signature {marker}: {name(source.author_signature)}\n'
+                    if source.author_signature is not None else '') +
+                   (f'Via bot {marker}: user {source.via_bot_user_id}\n' if source.via_bot_user_id is not None else '') +
+                   ('Source is itself a forward: the copy carries no original attribution\n' if source.is_forward else ''))
+    return (f"Forward this message to {recipient.title} (chat {recipient.chat_id})?\n{mode}\n"
+            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
+            f"Expires: {validated.expires_at.isoformat()}\n\n"
             f"Source chat: {source.chat.title} (chat {source.chat.chat_id})\n"
             f"Message ID: {source.message_id}\n"
-            f"Sender {marker}: {source.sender.kind} {source.sender.id}\n"
+            f"Sender {marker}: {source.sender.kind} {source.sender.id}\n{attribution}"
             f"Date: {source.date.isoformat()}\nContent: {source.content_kind}\n"
-            f"{text}Text sanitized: {source.text_sanitized}\n{media}"
+            f"{text}{link}{media}"
             f"Source SHA-256: {source.source_sha256}\n"
             f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"

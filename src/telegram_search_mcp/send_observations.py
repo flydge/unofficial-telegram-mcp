@@ -40,6 +40,7 @@ class SendObservation:
     outgoing_entities: FrozenOutgoingEntities = ()
     saved_messages_topic_id: int | None = None
     forward: bool = False
+    forward_self: bool = False  # Saved Messages: the provider may mark a forwarded copy incoming.
 
 
 FORWARD_CONTENT_TYPES = frozenset({'messageText', 'messagePhoto', 'messageDocument', 'messageVoiceNote',
@@ -147,12 +148,13 @@ class SendObservations:
         with self._lock:
             self._entries.clear()
 
-    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None, forward=False):
+    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None, forward=False, forward_self=False):
         if type(outgoing_entities) is not tuple or len(outgoing_entities) > 32:
             raise ObservationUnavailable('invalid frozen outgoing expectation')
         # Forward content is provider-produced: correlate by sending_id, chat and
         # returned temporary ID only; no outgoing content hash can apply.
-        if type(forward) is not bool or (forward and (
+        if type(forward) is not bool or type(forward_self) is not bool or (forward_self and (
+                not forward or not integer(chat_id, positive=True))) or (forward and (
                 content_type not in FORWARD_CONTENT_TYPES or not integer(chat_id) or
                 any(value is not None for value in (text_sha256, reply_anchor, caption_sha256, voice_duration,
                     waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or outgoing_entities)):
@@ -203,7 +205,7 @@ class SendObservations:
             if (attempt_id in self._entries or len(self._entries) >= self._capacity or
                     any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
-            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward)
+            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward,forward_self=forward_self)
 
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
@@ -281,7 +283,8 @@ class SendObservations:
     def _message(value, observation, *, final=False):
         return (isinstance(value,dict) and value.get("@type") == "message"
             and integer(value.get("chat_id")) and value["chat_id"] == observation.chat_id
-            and integer(value.get("id"),positive=final) and value.get("is_outgoing") is True
+            and integer(value.get("id"),positive=final)
+            and (value.get("is_outgoing") is True or (observation.forward_self and value.get("is_outgoing") is False))
             and isinstance(value.get("content"),dict)
             and value["content"].get("@type") == observation.content_type
             and SendObservations._text_matches(value["content"], observation.text_sha256, observation.outgoing_entities)
@@ -326,7 +329,13 @@ class SendObservations:
         with self._lock:
             self._prune()
             for key,old in list(self._entries.items()):
-                if old.status in {"sent","failed"}:
+                if old.forward and old.status == "sent" and event.get("@extra") == old.extra:
+                    # A success that overtook the forwardMessages result stands only
+                    # with an exact result; anything else makes the outcome a conflict.
+                    if self.forward_result_message(event, old) is None:
+                        self._entries[key] = replace(old,status="conflict",message_id=None)
+                    continue
+                if old.status in {"sent","failed","conflict"}:
                     continue
                 updated = old
                 kind = event.get("@type")
@@ -335,8 +344,9 @@ class SendObservations:
                         updated = replace(old,status="failed")
                     elif old.forward:
                         value = self.forward_result_message(event, old)
-                        if value is not None:
-                            updated = replace(old,temporary_id=value["id"],status="pending")
+                        # A malformed or mismatched result never later reconciles to sent.
+                        updated = (replace(old,temporary_id=value["id"],status="pending") if value is not None
+                                   else replace(old,status="conflict"))
                     elif self._message(event,old):
                         state = event.get("sending_state")
                         if (isinstance(state,dict) and state.get("@type") == "messageSendingStatePending"
