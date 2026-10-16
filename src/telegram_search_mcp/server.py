@@ -29,7 +29,8 @@ from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
 from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
-                       TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES)
+                       TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
+                       SEND_DEPENDENT_CAPABILITIES)
 from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPageResponse,
     PageSelection, AttachmentCursor)
 from .spreadsheet_models import (ReadSpreadsheetRequest, ReadSpreadsheetResponse,
@@ -48,6 +49,10 @@ from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendRespon
     SendPreparedForwardResponse, ForwardMode, PositiveMessageId)
 from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
     SendPreparedVideoResponse)
+from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveResponse, ApplyPreparedArchiveRequest,
+    ApplyPreparedArchiveResponse, ChatList)
+from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
+    ApplyPreparedTextEditResponse, NewText)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -147,6 +152,10 @@ _TOOL_NAMES = [
     "send_prepared_forward",
     "prepare_video_send",
     "send_prepared_video",
+    "prepare_chat_archive",
+    "apply_prepared_archive",
+    "prepare_text_edit",
+    "apply_prepared_text_edit",
 ]
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -157,6 +166,13 @@ _READ_ONLY = ToolAnnotations(
 _TRANSFER = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+# Replacing an own message's text overwrites provider state the tool cannot restore.
+_OVERWRITE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
     idempotentHint=False,
     openWorldHint=True,
 )
@@ -346,7 +362,9 @@ def build_server(
                 "secret chats",
                 "global public search and searchPublicChats",
                 "raw execute or bridge calls",
-                "mutations including edits, deletes, reactions, and moderation operations",
+                "mutations other than one approved Main/Archive move or one approved plain-text edit of an own "
+                "text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, "
+                "bulk and moderation operations",
                 "unapproved sends and automatic send retries",
                 "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
                 "video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
@@ -1306,13 +1324,68 @@ def build_server(
                             approved: Annotated[bool, Field(strict=True)]) -> SendPreparedVideoResponse:
         return get_service().send_prepared_video(SendPreparedVideoRequest(draft_id=draft_id, approved=approved))
 
+    @server.tool(name="prepare_chat_archive", description=(
+        "Prepare moving exactly one chat between the Main and Archive chat lists (target_list archive or main). "
+        "Requires default-off archive_chats and send. Secret chats and chats in neither list are refused as "
+        "unsupported_chat; a chat already in target_list returns already_in_target without a draft. Returns an "
+        "immutable preview: account, chat ID, sanitized title and kind, current and target list, a note that "
+        "Telegram may move an archived chat with notifications enabled back to Main on new messages, and "
+        "preview_sha256. Nothing changes; show the complete preview to the user. Preparing again for the same "
+        "chat supersedes the earlier pending archive draft. Archive drafts cannot be listed, updated, refreshed "
+        "or cancelled through the generic draft tools; supersede one or let it expire."),
+        annotations=_TRANSFER, structured_output=True)
+    def prepare_chat_archive(chat: ChatId, target_list: ChatList) -> PrepareChatArchiveResponse:
+        return get_service().prepare_chat_archive(PrepareChatArchiveRequest(chat=chat, target_list=target_list))
+
+    @server.tool(name="apply_prepared_archive", description=(
+        "After the user explicitly approves this exact archive preview, revalidate the account, the chat identity, "
+        "title and current list, show the local owner dialog, then make exactly one addChatToList attempt and "
+        "read the chat's list for up to 10 seconds. applied means the target list was observed right after the "
+        "call; otherwise outcome_unknown, which must never be retried automatically. Changes return "
+        "chat_changed or already_in_target without an attempt. A repeated call replays the receipt."),
+        annotations=_TRANSFER, structured_output=True)
+    def apply_prepared_archive(draft_id: DraftId,
+                               approved: Annotated[bool, Field(strict=True)]) -> ApplyPreparedArchiveResponse:
+        return get_service().apply_prepared_archive(ApplyPreparedArchiveRequest(draft_id=draft_id, approved=approved))
+
+    @server.tool(name="prepare_text_edit", description=(
+        "Prepare replacing the whole text of exactly one of your own outgoing text messages with new_text "
+        "(plain text, normalized like prepare_text_send; no styles). Requires default-off edit_own_text and "
+        "send. Incoming, non-text, forwarded, reply-markup, self-destructing, auto-deleting, scheduled or "
+        "still-sending messages, messages Telegram no longer lets you edit, hidden or parameterized formatting "
+        "and an unchanged text are refused with a content-free code. Returns an immutable preview: current and "
+        "new text as marked untrusted evidence in reversible JSON escapes, the current formatting this edit "
+        "removes (raw UTF-16 offsets), the current edit_date, source_sha256 and preview_sha256. Nothing changes; "
+        "show the complete preview to the user. Preparing again for the same message supersedes the earlier "
+        "pending text edit draft. Text edit drafts cannot be listed, updated, refreshed or cancelled through the "
+        "generic draft tools; supersede one or let it expire."),
+        annotations=_TRANSFER, structured_output=True)
+    def prepare_text_edit(chat: ChatId, message_id: PositiveMessageId, new_text: NewText) -> PrepareTextEditResponse:
+        return get_service().prepare_text_edit(PrepareTextEditRequest(chat=chat, message_id=message_id,
+                                                                      new_text=new_text))
+
+    @server.tool(name="apply_prepared_text_edit", description=(
+        "After the user explicitly approves this exact text edit preview, revalidate the account, the chat, the "
+        "message projection and its edit permission, show the local owner dialog, then make exactly one "
+        "editMessageText attempt. applied requires the returned message to carry exactly the new text and a "
+        "non-zero edit_date; otherwise outcome_unknown, which must never be retried automatically. Recipients "
+        "see the message marked edited. Changes return message_changed without an attempt. A repeated call "
+        "replays the receipt."),
+        annotations=_OVERWRITE, structured_output=True)
+    def apply_prepared_text_edit(draft_id: DraftId,
+                                 approved: Annotated[bool, Field(strict=True)]) -> ApplyPreparedTextEditResponse:
+        return get_service().apply_prepared_text_edit(ApplyPreparedTextEditRequest(draft_id=draft_id,
+                                                                                   approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
             ("get_reply_draft",GetReplyDraftRequest),("update_reply_draft",UpdateReplyDraftRequest),
             ("refresh_reply_draft",RefreshReplyDraftRequest),("prepare_forward_send",PrepareForwardSendRequest),
             ("send_prepared_forward",SendPreparedForwardRequest),("prepare_video_send",PrepareVideoSendRequest),
-            ("send_prepared_video",SendPreparedVideoRequest)):
+            ("send_prepared_video",SendPreparedVideoRequest),("prepare_chat_archive",PrepareChatArchiveRequest),
+            ("apply_prepared_archive",ApplyPreparedArchiveRequest),("prepare_text_edit",PrepareTextEditRequest),
+            ("apply_prepared_text_edit",ApplyPreparedTextEditRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):
@@ -1374,7 +1447,7 @@ def build_server(
                         raise CompatibilityError("client_schema_mismatch")
                     require_current(runtime_policy)
                     if (_capability not in runtime_policy.enabled_capabilities or
-                            (_capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in runtime_policy.enabled_capabilities)):
+                            (_capability in SEND_DEPENDENT_CAPABILITIES and "send" not in runtime_policy.enabled_capabilities)):
                         raise CompatibilityError("capability_disabled")
                     if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
                         raise CompatibilityError('capability_disabled')

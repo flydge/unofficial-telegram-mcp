@@ -231,7 +231,7 @@ class ExactSearchRegistrationTests(unittest.IsolatedAsyncioTestCase):
             policy=RuntimePolicy(enabled_capabilities=('search_messages',)) if enabled else RuntimePolicy(enabled_capabilities=('read','read_history'))
             async with Client(build_server(service_factory=Service,policy=policy)) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),51,'current retained-selection tool inventory changed')
+                self.assertEqual(len(tools),55,'current retained-selection tool inventory changed')
                 tool=next(t for t in tools if t.name=='search_messages');self.assertEqual(tool.name,'search_messages')
                 self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 self.assertFalse(tool.input_schema['additionalProperties'])

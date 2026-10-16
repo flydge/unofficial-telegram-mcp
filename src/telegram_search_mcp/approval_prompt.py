@@ -18,6 +18,11 @@ _SCRIPT = '''on run argv
     end try
     return "DENIED"
 end run'''
+# Archive moves and own text edits change Telegram state without sending: same Cancel default
+# and 120-second give-up, worded as a change.
+_CHANGE_SCRIPT = (_SCRIPT.replace('approve send', 'approve change')
+                  .replace('{"Cancel", "Send"}', '{"Cancel", "Apply"}').replace('is "Send"', 'is "Apply"'))
+_LIST_NAMES = {'main': 'Main', 'archive': 'Archive'}
 
 
 def _outgoing_style_detail(draft):
@@ -129,6 +134,52 @@ def _video_detail(validated) -> str:
             "then make one upload/send attempt as a native video.")
 
 
+def _archive_detail(validated) -> str:
+    """The untrusted chat title is enclosed in « » and rendered by `readable` under the
+    `READABLE_RULE` legend, so it cannot close its span early or start a fake line."""
+    from .forward_drafts import READABLE_RULE, readable
+    chat = validated.chat
+    note = f'Note: {validated.note} (Telegram behaviour).\n' if validated.note is not None else ''
+    return (f"Move chat «{readable(chat.title)}» (chat {chat.chat_id}, {chat.kind}) from "
+            f"{_LIST_NAMES[validated.current_list]} to {_LIST_NAMES[validated.target_list]}?\n"
+            f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
+            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
+            f"Expires: {validated.expires_at.isoformat()}\n\n"
+            f"Current list: {_LIST_NAMES[validated.current_list]}\n"
+            f"Target list: {_LIST_NAMES[validated.target_list]}\n{note}"
+            f"Preview SHA-256: {validated.preview_sha256}\n\n"
+            "Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one "
+            "move attempt and report the list it observes right after.")
+
+
+def _text_edit_detail(validated) -> str:
+    """The chat title, current text, covered spans and new text are enclosed in « » and rendered
+    by `readable` under the `READABLE_RULE` legend line, like every other untrusted span."""
+    from datetime import datetime, timezone
+    from .forward_drafts import READABLE_RULE, readable
+    chat = validated.chat
+    marker = '[untrusted Telegram evidence]'
+    rows = validated.entity_rows()
+    formatting = (('Current formatting, removed by this plain-text edit (raw text UTF-16 code units):\n' +
+                   ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
+                           for kind, offset, length, covered in rows)) if rows else '')
+    edited = (datetime.fromtimestamp(validated.current_edit_date, tz=timezone.utc).isoformat()
+              if validated.current_edit_date else 'never')
+    return (f"Edit your message {validated.message_id} in «{readable(chat.title)}» (chat {chat.chat_id})?\n"
+            f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
+            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
+            f"Expires: {validated.expires_at.isoformat()}\n\n"
+            f"Current text {marker} (exact): «{readable(validated.raw_current_text)}»\n{formatting}"
+            f"New text (exact): «{readable(validated.raw_new_text)}»\n"
+            f"Last edited: {edited}\n"
+            f"Source SHA-256: {validated.source_sha256}\n"
+            f"Preview SHA-256: {validated.preview_sha256}\n\n"
+            "The new text is plain text without formatting; Telegram may detect links in it and show a "
+            "link preview. Recipients see the message marked \"edited\".\n"
+            "Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit "
+            "permission, then make one edit attempt.")
+
+
 def confirm_approved_send(
     *, recipient_title: str, recipient: int, display_name: str,
     size_bytes: int, sha256: str, caption: str,
@@ -139,14 +190,40 @@ def confirm_approved_send(
     topic_preview: dict | None = None,
     forward_preview: dict | None = None,
     video_preview: dict | None = None,
+    archive_preview: dict | None = None,
+    text_edit_preview: dict | None = None,
 ) -> bool:
-    """Ask the signed-in macOS user; failure or timeout means no send."""
+    """Ask the signed-in macOS user; failure or timeout means no send or change."""
     if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview, forward_preview,
-                                           video_preview)) > 1:
+                                           video_preview, archive_preview, text_edit_preview)) > 1:
         return False
-    if (kind == 'forward') != (forward_preview is not None) or (kind == 'video') != (video_preview is not None):
+    if ((kind == 'forward') != (forward_preview is not None) or (kind == 'video') != (video_preview is not None) or
+            (kind == 'archive') != (archive_preview is not None) or
+            (kind == 'text_edit') != (text_edit_preview is not None)):
         return False
-    if video_preview is not None:
+    script = _SCRIPT
+    if archive_preview is not None or text_edit_preview is not None:
+        script = _CHANGE_SCRIPT
+        try:
+            if archive_preview is not None:
+                from .archive_drafts import ArchiveDraftPreview, archive_digest
+                validated = ArchiveDraftPreview.model_validate(archive_preview)
+                chat = validated.chat
+                expected_sha256 = archive_digest(chat.chat_id, chat.kind, validated.current_list,
+                                                 validated.target_list)
+            else:
+                from .edit_drafts import TextEditDraftPreview
+                validated = TextEditDraftPreview.model_validate(text_edit_preview)
+                chat = validated.chat
+                expected_sha256 = validated.source_sha256
+            if (chat.chat_id != recipient or chat.title != recipient_title or sha256 != expected_sha256 or
+                    text not in ('', None) or caption not in ('', None) or duration_seconds is not None or
+                    source_sha256 is not None or source_display_name is not None):
+                return False
+        except (ValueError, TypeError):
+            return False
+        preview = _archive_detail(validated) if archive_preview is not None else _text_edit_detail(validated)
+    elif video_preview is not None:
         from .video_drafts import VideoDraftPreview
         try:
             validated = VideoDraftPreview.model_validate(video_preview)
@@ -267,7 +344,7 @@ def confirm_approved_send(
         )
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-e", _SCRIPT, "--", preview],
+            ["/usr/bin/osascript", "-e", script, "--", preview],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=125, check=False,
         )

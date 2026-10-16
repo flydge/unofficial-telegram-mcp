@@ -30,7 +30,7 @@ from .broker_protocol import (
 )
 from .config import RuntimePolicy, load_runtime_policy
 from .contract import (CompatibilityError, COMPATIBILITY_CODES, contract_descriptor, require_compatible, fingerprint,
-                       require_current, OPERATION_CAPABILITIES)
+                       require_current, OPERATION_CAPABILITIES, SEND_DEPENDENT_CAPABILITIES)
 from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, send_status
 from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareReplyArtifactSendResponse,
     GetReplyArtifactDraftRequest, GetReplyArtifactDraftResponse, UpdateReplyArtifactDraftRequest,
@@ -45,6 +45,10 @@ from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendRespon
     SendPreparedForwardResponse, UNAVAILABLE as FORWARD_UNAVAILABLE)
 from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
     SendPreparedVideoResponse, UNAVAILABLE as VIDEO_UNAVAILABLE)
+from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveResponse, ApplyPreparedArchiveRequest,
+    ApplyPreparedArchiveResponse, UNAVAILABLE as ARCHIVE_UNAVAILABLE)
+from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
+    ApplyPreparedTextEditResponse, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE)
 from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, CreateLocalArtifactRequest, CreateLocalArtifactResponse,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, SendPreparedArtifactRequest, SendPreparedArtifactResponse,
@@ -350,11 +354,11 @@ class BrokerClient(SelectionClientMixin):
             local = contract_descriptor(self._policy)
             capability = OPERATION_CAPABILITIES.get(operation)
             if capability is not None and (capability not in self._policy.enabled_capabilities or
-                    (capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in self._policy.enabled_capabilities)):
+                    (capability in SEND_DEPENDENT_CAPABILITIES and "send" not in self._policy.enabled_capabilities)):
                 raise CompatibilityError("capability_disabled")
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None
-        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
+        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send", "prepare_chat_archive", "prepare_text_edit", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
         try:
             connection = self._connector(self._socket_path)
         except OSError:
@@ -1762,6 +1766,59 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError, ValueError):
             return SendPreparedVideoResponse(status="outcome_unknown", draft_id=request.draft_id,
                                              detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_chat_archive(self, request: PrepareChatArchiveRequest) -> PrepareChatArchiveResponse:
+        try:
+            response = PrepareChatArchiveResponse.model_validate(
+                self._request("prepare_chat_archive", request.model_dump(mode="json")))
+            if response.archive is not None and (response.archive.chat.chat_id != request.chat or
+                                                 response.archive.target_list != request.target_list):
+                raise BrokerUnavailable("archive preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareChatArchiveResponse(status="unavailable", detail=ARCHIVE_UNAVAILABLE)
+
+    def apply_prepared_archive(self, request: ApplyPreparedArchiveRequest) -> ApplyPreparedArchiveResponse:
+        try:
+            response = ApplyPreparedArchiveResponse.model_validate(
+                self._request("apply_prepared_archive", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("archive receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return ApplyPreparedArchiveResponse(status="error", draft_id=request.draft_id,
+                                                detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return ApplyPreparedArchiveResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                                detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_text_edit(self, request: PrepareTextEditRequest) -> PrepareTextEditResponse:
+        from .edit_drafts import normalized_text
+        try:
+            response = PrepareTextEditResponse.model_validate(
+                self._request("prepare_text_edit", request.model_dump(mode="json")))
+            if response.text_edit is not None:
+                preview = response.text_edit
+                if (preview.chat.chat_id != request.chat or preview.message_id != request.message_id or
+                        preview.raw_new_text != normalized_text(request.new_text)):
+                    raise BrokerUnavailable("text edit preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareTextEditResponse(status="unavailable", detail=TEXT_EDIT_UNAVAILABLE)
+
+    def apply_prepared_text_edit(self, request: ApplyPreparedTextEditRequest) -> ApplyPreparedTextEditResponse:
+        try:
+            response = ApplyPreparedTextEditResponse.model_validate(
+                self._request("apply_prepared_text_edit", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("text edit receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return ApplyPreparedTextEditResponse(status="error", draft_id=request.draft_id,
+                                                 detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return ApplyPreparedTextEditResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                                 detail="broker response is unavailable; do not retry automatically")
 
     def check(self) -> str:
         result = self._request("check", {})

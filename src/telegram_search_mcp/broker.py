@@ -39,7 +39,8 @@ from .broker_protocol import (
     send_frame,
 )
 from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, RuntimePolicy, load_runtime_policy
-from .contract import CompatibilityError, contract_descriptor, require_compatible, require_current, OPERATION_CAPABILITIES
+from .contract import (CompatibilityError, contract_descriptor, require_compatible, require_current, OPERATION_CAPABILITIES,
+                       SEND_DEPENDENT_CAPABILITIES)
 from .document_reader import read_document
 from .media_analyzer import analyze_media
 from .local_upload import LocalUploadRegistry, UploadError
@@ -74,7 +75,7 @@ from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftReques
                            CancelDraftRequest, CancelDraftResponse, DraftPreview, DraftSummary,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
 from .search_service import ReadOnlyTelegramClient, SearchService
-from .tdjson import AuthorizationBlocked, MessageNotFound, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, TDLibClient, TDLibError
+from .tdjson import AuthorizationBlocked, MessageNotFound, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, SecretChatRejected, TDLibClient, TDLibError
 from .forward_sources import ForwardRefusal, chat_identity
 from .forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview, ForwardSpec,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest, SendPreparedForwardResponse,
@@ -83,6 +84,14 @@ from .video_probe import VideoProbeError, probe_video
 from .video_drafts import (MAX_VIDEO_BYTES, VideoDraftPreview, VideoRecipient, VideoRefusal, VideoSpec,
     PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest, SendPreparedVideoResponse,
     PREPARED as VIDEO_PREPARED, REFUSED as VIDEO_REFUSED, UNAVAILABLE as VIDEO_UNAVAILABLE)
+from .archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveRefusal, ArchiveSpec, PrepareChatArchiveRequest,
+    PrepareChatArchiveResponse, ApplyPreparedArchiveRequest, ApplyPreparedArchiveResponse,
+    PREPARED as ARCHIVE_PREPARED, ALREADY as ARCHIVE_ALREADY, REFUSED as ARCHIVE_REFUSED,
+    UNAVAILABLE as ARCHIVE_UNAVAILABLE)
+from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditSpec, PrepareTextEditRequest,
+    PrepareTextEditResponse, ApplyPreparedTextEditRequest, ApplyPreparedTextEditResponse, evidence_fits,
+    normalized_text, PREPARED as TEXT_EDIT_PREPARED, REFUSED as TEXT_EDIT_REFUSED,
+    UNAVAILABLE as TEXT_EDIT_UNAVAILABLE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 
@@ -456,7 +465,7 @@ class Broker(SelectionBrokerMixin):
         operation = request['operation']
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {'reply_text_send', 'reply_artifact_send', 'forward_send', 'video_send'} and 'send' not in self._policy.enabled_capabilities)):
+                (capability in SEND_DEPENDENT_CAPABILITIES and 'send' not in self._policy.enabled_capabilities)):
             raise CompatibilityError('capability_disabled')
         remaining = request['deadline'] - time.monotonic()
         if remaining <= 0:
@@ -585,7 +594,7 @@ class Broker(SelectionBrokerMixin):
         operation = request["operation"]
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in self._policy.enabled_capabilities)):
+                (capability in SEND_DEPENDENT_CAPABILITIES and "send" not in self._policy.enabled_capabilities)):
             raise CompatibilityError("capability_disabled")
         self._expire_contexts()
         payload = request["payload"]
@@ -734,6 +743,20 @@ class Broker(SelectionBrokerMixin):
         if operation == "send_prepared_video":
             model = SendPreparedVideoRequest.model_validate(payload)
             return self._send_prepared_video(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_chat_archive":
+            model = PrepareChatArchiveRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_chat_archive(model, client_id=client_id).model_dump(mode="json")
+        if operation == "apply_prepared_archive":
+            model = ApplyPreparedArchiveRequest.model_validate(payload)
+            return self._apply_prepared_archive(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_text_edit":
+            model = PrepareTextEditRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_text_edit(model, client_id=client_id).model_dump(mode="json")
+        if operation == "apply_prepared_text_edit":
+            model = ApplyPreparedTextEditRequest.model_validate(payload)
+            return self._apply_prepared_text_edit(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -1044,6 +1067,10 @@ class Broker(SelectionBrokerMixin):
             self._require_forward_policy()  # Status and receipts stay bound to forward_send.
         elif kind == 'video':
             self._require_video_policy()  # Status and receipts stay bound to video_send.
+        elif kind == 'archive':
+            self._require_change_policy('archive_chats')  # Status and receipts stay bound to archive_chats.
+        elif kind == 'text_edit':
+            self._require_change_policy('edit_own_text')  # Status and receipts stay bound to edit_own_text.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         require_current(self._policy)
@@ -1111,7 +1138,7 @@ class Broker(SelectionBrokerMixin):
             return ListDraftsResponse(status="unavailable", detail="drafts are unavailable")
 
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
-        if draft.reply_source is not None or draft.kind in ("forward", "video"):
+        if draft.reply_source is not None or draft.kind in ("forward", "video", "archive", "text_edit"):
             raise DraftError("draft is unavailable")
         self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
@@ -1662,7 +1689,7 @@ class Broker(SelectionBrokerMixin):
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
-            if kind in ("forward", "video") or (kind == "text") != text_only:
+            if kind in ("forward", "video", "archive", "text_edit") or (kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             self._require_topic_policy(request.draft_id, owner)
@@ -1688,7 +1715,7 @@ class Broker(SelectionBrokerMixin):
                                                     detail="draft is unavailable after expiry or restart")
             # The recipient is resolved again immediately before the single provider attempt.
             entry = self._drafts.peek(request.draft_id, owner=owner)
-            if entry.kind in ("forward", "video") or (entry.kind == "text") != text_only:
+            if entry.kind in ("forward", "video", "archive", "text_edit") or (entry.kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             chat = self._shared_client().resolve_target(entry.recipient)
@@ -2238,6 +2265,329 @@ class Broker(SelectionBrokerMixin):
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return result('expired', 'draft is unavailable or no longer valid')
+
+    def _require_change_policy(self, capability: str) -> None:
+        require_current(self._policy)
+        if capability not in ('archive_chats', 'edit_own_text') or not {'send', capability} <= set(
+                self._policy.enabled_capabilities):
+            raise CompatibilityError('capability_disabled')
+
+    def _change_owner(self, client_id: str, capability: str) -> DraftOwner:
+        owner = self._draft_owner(client_id)
+        self._require_change_policy(capability)
+        return owner
+
+    def _change_attempted(self, draft_id: str, client_id: str, kind: str, result):
+        """A consumed claim never reads as expired after a lost authority (attempt_outcome)."""
+        outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
+        if outcome == 'local_failed':
+            return result('local_failed', 'local revalidation failed; no provider change was attempted')
+        if outcome == 'attempted':
+            return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+        return result('expired', 'draft is unavailable or no longer valid')
+
+    def _archive_preview(self, draft, owner: DraftOwner) -> ArchiveDraftPreview:
+        spec = draft.archive
+        if draft.kind != 'archive' or not isinstance(spec, ArchiveSpec):
+            raise DraftError(ARCHIVE_UNAVAILABLE)
+        self._require_change_policy('archive_chats')
+        snapshot = spec.snapshot
+        return ArchiveDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            chat=ArchiveChat(chat_id=draft.recipient, title=draft.recipient_title, kind=snapshot.kind),
+            current_list=snapshot.current_list, target_list=spec.target_list)
+
+    def _prepare_chat_archive(self, request: PrepareChatArchiveRequest, *, client_id: str) -> PrepareChatArchiveResponse:
+        try:
+            owner = self._change_owner(client_id, 'archive_chats')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                snapshot = provider.read_chat_list_state(request.chat)
+            except SecretChatRejected:
+                raise ArchiveRefusal('unsupported_chat') from None
+            if snapshot.current_list == 'none':
+                raise ArchiveRefusal('unsupported_chat')  # Neither Main nor Archive carries the chat.
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'archive_chats') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(ARCHIVE_UNAVAILABLE)
+            if snapshot.current_list == request.target_list:
+                return PrepareChatArchiveResponse(status='already_in_target', detail=ARCHIVE_ALREADY)
+            spec = ArchiveSpec(snapshot=snapshot, target_list=request.target_list)
+            previews = []
+            draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.title,
+                change=spec, evidence=lambda candidate: previews.append(self._archive_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PrepareChatArchiveResponse(status='prepared', archive=preview, detail=ARCHIVE_PREPARED)
+        except ArchiveRefusal as refusal:
+            return PrepareChatArchiveResponse(status='refused', refusal=refusal.code, detail=ARCHIVE_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PrepareChatArchiveResponse(status='unavailable', detail=ARCHIVE_UNAVAILABLE)
+
+    def _apply_prepared_archive(self, request: ApplyPreparedArchiveRequest, *, client_id: str,
+                                deadline: float | None = None) -> ApplyPreparedArchiveResponse:
+        if request.approved is not True:
+            return ApplyPreparedArchiveResponse(status='not_approved', draft_id=request.draft_id,
+                                                detail='explicit approval was not given')
+        # Capture once: account reads, owner confirmation, the attempt and its observation share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._apply_prepared_archive_impl(request, client_id=client_id)
+
+    def _apply_prepared_archive_impl(self, request: ApplyPreparedArchiveRequest, *,
+                                     client_id: str) -> ApplyPreparedArchiveResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return ApplyPreparedArchiveResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._change_owner(client_id, 'archive_chats')
+            if self._drafts.kind(draft_id, owner=owner) != 'archive':
+                return result('error', 'draft kind does not match apply tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                return self._archive_receipt(previous, result, replay=True)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.archive
+            if entry.kind != 'archive' or not isinstance(spec, ArchiveSpec):
+                return result('error', 'draft kind does not match apply tool')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                current = provider.read_chat_list_state(entry.recipient)
+            except (SecretChatRejected, ValueError):
+                return result('chat_changed', 'chat changed; prepare a new archive draft', chat_id=entry.recipient)
+            reviewed = spec.snapshot
+            if (current.identity != reviewed.identity or current.kind != reviewed.kind or
+                    current.title != reviewed.title or current.title != expected_title):
+                return result('chat_changed', 'chat identity or title changed; prepare a new archive draft',
+                              chat_id=entry.recipient)
+            if current.current_list == spec.target_list:
+                return result('already_in_target', 'chat is already in the target list; no change was attempted',
+                              chat_id=entry.recipient)
+            if current.current_list != reviewed.current_list:
+                return result('chat_changed', 'chat list changed; prepare a new archive draft', chat_id=entry.recipient)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'archive_chats') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(ARCHIVE_UNAVAILABLE)
+            preview = self._archive_preview(entry, owner).model_dump(mode='json')
+            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
+                    caption='', kind='archive', archive_preview=preview):
+                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            # The local dialog may remain open while account, policy or provider change.
+            if self._change_owner(client_id, 'archive_chats') != owner:
+                raise DraftError(ARCHIVE_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(ARCHIVE_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            def archive_guard():
+                require_current(self._policy)
+                return ({'send', 'archive_chats'} <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.change_claim_current(draft_id, owner=owner, kind='archive', provider=provider,
+                                                          provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the change'
+            try:
+                mover = getattr(provider, 'move_chat_to_list', None)
+                if not callable(mover):
+                    raise MessageSendNotAttempted('archive provider is unavailable')
+                observed = mover(entry.recipient, target_list=spec.target_list, expected=reviewed,
+                                 expected_account_id=owner.account_id, pre_send_guard=archive_guard)
+                if observed == spec.target_list:
+                    receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed=observed)
+                else:
+                    receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                failure_detail = self._change_failure(error)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider change was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._change_owner(client_id, 'archive_chats') != owner:
+                    raise DraftError(ARCHIVE_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            return self._archive_receipt(receipt, result, failure_detail=failure_detail, chat_id=entry.recipient)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._change_attempted(draft_id, client_id, 'archive', result)
+
+    @staticmethod
+    def _change_failure(error: MessageSendFailed) -> str:
+        code = error.provider_code
+        return 'TDLib rejected the change' if code is None else f'TDLib rejected the change (code {code})'
+
+    @staticmethod
+    def _archive_receipt(receipt, result, *, replay: bool = False, failure_detail: str = 'TDLib rejected the change',
+                         chat_id: int | None = None):
+        if receipt.evidence == 'local_failed':
+            return result('local_failed', 'previous local failure receipt; no provider change was attempted')
+        if replay:
+            values = {'observed_list': receipt.observed} if receipt.status == 'applied' else {}
+            return result(receipt.status, 'previous provider attempt receipt; no new change was attempted', **values)
+        if receipt.status == 'applied':
+            return result('applied', 'TDLib applied the move; list observed right after the call',
+                          chat_id=chat_id, observed_list=receipt.observed)
+        if receipt.status == 'failed':
+            return result('failed', failure_detail, chat_id=chat_id)
+        return result('outcome_unknown', 'the target list was not observed; do not retry automatically', chat_id=chat_id)
+
+    def _text_edit_preview(self, draft, owner: DraftOwner) -> TextEditDraftPreview:
+        spec = draft.text_edit
+        if draft.kind != 'text_edit' or not isinstance(spec, TextEditSpec):
+            raise DraftError(TEXT_EDIT_UNAVAILABLE)
+        self._require_change_policy('edit_own_text')
+        return TextEditDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title), snapshot=spec.snapshot,
+            new_text=spec.new_text)
+
+    def _prepare_text_edit(self, request: PrepareTextEditRequest, *, client_id: str) -> PrepareTextEditResponse:
+        try:
+            owner = self._change_owner(client_id, 'edit_own_text')
+            try:
+                new_text = normalized_text(request.new_text)
+            except ValueError:
+                raise EditRefusal('invalid_input') from None
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            snapshot = provider.read_own_text_message(request.chat, request.message_id)
+            refusal = snapshot.refusal()
+            if refusal is not None:
+                raise EditRefusal(refusal)
+            if not evidence_fits(snapshot):
+                raise EditRefusal('unsupported_source_content')
+            if new_text == snapshot.raw_text:
+                raise EditRefusal('unchanged_text')
+            spec = TextEditSpec(snapshot=snapshot, new_text=new_text)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'edit_own_text') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(TEXT_EDIT_UNAVAILABLE)
+            previews = []
+            draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.chat_title,
+                change=spec, evidence=lambda candidate: previews.append(self._text_edit_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PrepareTextEditResponse(status='prepared', text_edit=preview, detail=TEXT_EDIT_PREPARED)
+        except EditRefusal as refusal:
+            return PrepareTextEditResponse(status='refused', refusal=refusal.code, detail=TEXT_EDIT_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PrepareTextEditResponse(status='unavailable', detail=TEXT_EDIT_UNAVAILABLE)
+
+    def _apply_prepared_text_edit(self, request: ApplyPreparedTextEditRequest, *, client_id: str,
+                                  deadline: float | None = None) -> ApplyPreparedTextEditResponse:
+        if request.approved is not True:
+            return ApplyPreparedTextEditResponse(status='not_approved', draft_id=request.draft_id,
+                                                 detail='explicit approval was not given')
+        # Capture once: account reads, owner confirmation and transport share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._apply_prepared_text_edit_impl(request, client_id=client_id)
+
+    def _apply_prepared_text_edit_impl(self, request: ApplyPreparedTextEditRequest, *,
+                                       client_id: str) -> ApplyPreparedTextEditResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return ApplyPreparedTextEditResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._change_owner(client_id, 'edit_own_text')
+            if self._drafts.kind(draft_id, owner=owner) != 'text_edit':
+                return result('error', 'draft kind does not match apply tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                if previous.evidence == 'local_failed':
+                    return result('local_failed', 'previous local failure receipt; no provider change was attempted')
+                return result(previous.status, 'previous provider attempt receipt; no new change was attempted',
+                              **({'edit_date': previous.observed} if previous.status == 'applied' else {}))
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.text_edit
+            if entry.kind != 'text_edit' or not isinstance(spec, TextEditSpec):
+                return result('error', 'draft kind does not match apply tool')
+            chat_id, message_id = spec.snapshot.anchor
+            changed = dict(chat_id=chat_id, message_id=message_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                current = provider.read_own_text_message(chat_id, message_id)
+            except (EditRefusal, MessageNotFound, SecretChatRejected, ValueError):
+                return result('message_changed', 'message changed; prepare a new text edit draft', **changed)
+            if (current.source != spec.snapshot.source or current.chat_identity != spec.snapshot.chat_identity or
+                    current.chat_title != spec.snapshot.chat_title or current.chat_title != expected_title):
+                return result('message_changed', 'message changed; prepare a new text edit draft', **changed)
+            if not current.can_be_edited:
+                return result('message_changed', 'message can no longer be edited; no change was attempted', **changed)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'edit_own_text') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(TEXT_EDIT_UNAVAILABLE)
+            preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
+            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
+                    caption='', kind='text_edit', text_edit_preview=preview):
+                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            # The local dialog may remain open while account, policy or provider change.
+            if self._change_owner(client_id, 'edit_own_text') != owner:
+                raise DraftError(TEXT_EDIT_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(TEXT_EDIT_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            def edit_guard():
+                require_current(self._policy)
+                return ({'send', 'edit_own_text'} <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.change_claim_current(draft_id, owner=owner, kind='text_edit', provider=provider,
+                                                          provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the change'
+            try:
+                editor = getattr(provider, 'edit_own_text', None)
+                if not callable(editor):
+                    raise MessageSendNotAttempted('edit provider is unavailable')
+                edit_date = editor(chat_id, message_id, new_text=spec.new_text, expected=spec.snapshot,
+                                   expected_account_id=owner.account_id, pre_send_guard=edit_guard)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed=edit_date)
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                failure_detail = self._change_failure(error)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider change was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._change_owner(client_id, 'edit_own_text') != owner:
+                    raise DraftError(TEXT_EDIT_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            if receipt.status == 'applied':
+                return result('applied', 'TDLib returned the edited message with the new text', edit_date=receipt.observed,
+                              **changed)
+            if receipt.status == 'failed':
+                return result('failed', failure_detail, **changed)
+            return result('outcome_unknown', 'the edit result is unconfirmed; do not retry automatically', **changed)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._change_attempted(draft_id, client_id, 'text_edit', result)
 
     @staticmethod
     def _error_code(error: BaseException) -> str:

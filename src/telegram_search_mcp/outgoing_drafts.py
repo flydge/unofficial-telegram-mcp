@@ -29,7 +29,7 @@ DRAFT_TTL_SECONDS = 15 * 60
 DEFAULT_CAPACITY = 4096
 _MIME_TYPE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+\Z")
 _DRAFT_ID = re.compile(r"draft_[0-9a-f]{32}\Z")
-ReceiptStatus = Literal["sent", "failed", "outcome_unknown"]
+ReceiptStatus = Literal["sent", "failed", "outcome_unknown", "applied"]
 
 
 class DraftError(RuntimeError):
@@ -97,7 +97,7 @@ class OutgoingDraft:
     expires_at: float
     recipient_title: str = ""
     approval_required: bool = True
-    kind: Literal["document", "photo", "voice_note", "text", "forward", "video"] = "document"
+    kind: Literal["document", "photo", "voice_note", "text", "forward", "video", "archive", "text_edit"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -113,11 +113,15 @@ class OutgoingDraft:
     formatting_provider_epoch: object | None = None
     forward: object | None = None  # forward_drafts.ForwardSpec; never artifact-backed
     video: object | None = None  # video_drafts.VideoSpec; artifact-backed
+    archive: object | None = None  # archive_drafts.ArchiveSpec; never artifact-backed
+    text_edit: object | None = None  # edit_drafts.TextEditSpec; never artifact-backed
 
 
-_UNBACKED_KINDS = frozenset({"text", "forward"})
+# Provider state changes with a dedicated apply tool; a receipt may be `applied`.
+_CHANGE_KINDS = frozenset({"archive", "text_edit"})
+_UNBACKED_KINDS = frozenset({"text", "forward"}) | _CHANGE_KINDS
 # Kinds with a dedicated send tool; the generic draft tools never list, revise or cancel them.
-_DEDICATED_KINDS = frozenset({"forward", "video"})
+_DEDICATED_KINDS = frozenset({"forward", "video"}) | _CHANGE_KINDS
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,7 @@ class SendReceipt:
     message_id: int | None
     finished_at: float
     evidence: str = "none"
+    observed: object | None = None  # `applied` only: the provider state observed right after the call.
 
 
 @dataclass
@@ -421,6 +426,49 @@ class OutgoingDraftRegistry:
             record_selection_draft(draft_id)
             return draft
 
+    def prepare_change(self, *, owner: DraftOwner, chat_id: int, chat_title: str, change: object,
+                       evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
+        """Record one archive move or own text edit; generic draft tools never expose these kinds.
+
+        `evidence` builds and validates the public preview of the exact candidate before
+        insertion; if it raises, nothing is inserted and no pending draft is superseded."""
+        from .archive_drafts import ArchiveSpec
+        from .edit_drafts import TextEditSpec
+        self._validate_owner(owner)
+        if type(chat_id) is not int or chat_id == 0:
+            raise ValueError("chat must be a nonzero numeric chat ID")
+        kind = "archive" if isinstance(change, ArchiveSpec) else "text_edit" if isinstance(change, TextEditSpec) else None
+        if (kind is None or type(chat_title) is not str or not chat_title or
+                (change.snapshot.chat_id if kind == "archive" else change.snapshot.anchor[0]) != chat_id):
+            raise DraftError("change draft is unavailable")
+        now = self._clock()
+        draft = OutgoingDraft(
+            draft_id=f"draft_{uuid.uuid4().hex}", artifact_id="", sha256=change.sha256, size_bytes=change.size_bytes,
+            display_name="Chat list move" if kind == "archive" else "Text edit", mime_type="application/json",
+            caption="", recipient=chat_id, expires_at=now + self._max_ttl_seconds, recipient_title=chat_title,
+            kind=kind, **{kind: change},
+        )
+        if evidence is not None:
+            evidence(draft)
+        draft_id = draft.draft_id
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
+            self._prune_locked(now)
+            if len(self._entries) >= self._capacity:
+                raise DraftError("draft capacity is exhausted")
+            if draft_id in self._entries:
+                raise DraftError("draft ID collision")
+            # Preparing again supersedes the same owner's pending draft for the same chat
+            # (archive) or the same message (text edit); it can no longer be claimed.
+            for entry in self._entries.values():
+                old = entry.draft
+                if (entry.owner == owner and entry.state == "pending" and old.kind == kind and
+                        old.recipient == chat_id and getattr(old, kind).supersede_key == change.supersede_key):
+                    entry.state = "superseded"
+            self._entries[draft_id] = _Entry(draft=draft, owner=owner)
+            record_selection_draft(draft_id)
+            return draft
+
     def revise(self, draft_id: str, *, owner: DraftOwner, recipient_title: str,
                text: str | None = None, caption: str | None = None,
                reply: bool = False, reply_source: ReplySource | None = None,
@@ -598,6 +646,15 @@ class OutgoingDraftRegistry:
                 entry.draft.video is not None and self._clock() < entry.draft.expires_at and
                 entry.provider is provider and entry.provider_epoch is provider_epoch)
 
+    def change_claim_current(self, draft_id: str, *, owner: DraftOwner, kind: str,
+                             provider: object, provider_epoch: object) -> bool:
+        """Final local prewire check for the one consumed archive or text edit claim."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (kind in _CHANGE_KINDS and entry.state == 'claimed' and entry.draft.kind == kind and
+                getattr(entry.draft, kind) is not None and self._clock() < entry.draft.expires_at and
+                entry.provider is provider and entry.provider_epoch is provider_epoch)
+
     def topic_claim_current(self, draft_id: str, *, owner: DraftOwner,
                             provider: object, provider_epoch: object) -> bool:
         """Final local prewire check; expiry never turns into send authority."""
@@ -664,20 +721,26 @@ class OutgoingDraftRegistry:
         message_id: int | None = None,
         evidence: str | None = None,
         claim: ClaimedDraft | None = None,
+        observed: object | None = None,
     ) -> SendReceipt:
         """Finalize the original consumed claim, independent of public grants.
 
         Captured claim identity/provider evidence never authorizes new redemption,
         disclosure or another send. Public receipt reads still require authority.
+        `applied` (archive/text edit only) carries the provider state observed after the call.
         """
-        if status not in {"sent", "failed", "outcome_unknown"}:
+        if status not in {"sent", "failed", "outcome_unknown", "applied"}:
             raise ValueError("invalid receipt status")
         if message_id is not None and (type(message_id) is not int or message_id <= 0):
             raise ValueError("message_id must be a positive integer")
         if status == "sent" and message_id is None:
             raise ValueError("sent requires a positive final message ID")
+        if (status == "applied") != (observed is not None) or (status == "applied" and message_id is not None):
+            raise ValueError("only an applied change carries observed state")
         with self._lock:
             entry = self._get(draft_id, owner, require_current=False)
+            if (status == "applied") != (entry.draft.kind in _CHANGE_KINDS) and status in {"sent", "applied"}:
+                raise ValueError("receipt status does not match the draft kind")
             if claim is not None:
                 if (claim.draft is not entry.draft or claim.claim_token is not entry.claim_token or
                         entry.claim_token is None or claim.provider is not entry.provider or
@@ -694,7 +757,9 @@ class OutgoingDraftRegistry:
                 status=status,
                 message_id=message_id,
                 finished_at=self._clock(),
-                evidence=evidence or {"sent":"provider_confirmed", "failed":"provider_failed", "outcome_unknown":"none"}[status],
+                evidence=evidence or {"sent":"provider_confirmed", "applied":"provider_confirmed",
+                                      "failed":"provider_failed", "outcome_unknown":"none"}[status],
+                observed=observed,
             )
             entry.receipt = receipt
             entry.state = "finished"
@@ -721,6 +786,8 @@ class OutgoingDraftRegistry:
             raise ValueError("invalid terminal observation")
         with self._lock:
             entry = self._get(draft_id, owner)
+            if entry.draft.kind in _CHANGE_KINDS:
+                raise DraftError("draft is unavailable")  # A change never reconciles from a send observation.
             if (entry.provider is not provider or entry.provider_epoch is not provider_epoch or entry.attempted_at != attempted_at or
                     self._attempt_clock() >= attempted_at + 900):
                 raise DraftError("draft is unavailable")

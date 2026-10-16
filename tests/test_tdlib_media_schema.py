@@ -43,6 +43,55 @@ class PinnedMediaSchemaTests(unittest.TestCase):
                 self.assertEqual(content[field]["@type"], nested_type)
                 self.assertEqual(set(content[field]) - {"@type"}, set(fields(nested_type)))
 
+    def test_archive_and_text_edit_requests_match_native_constructor_fields(self) -> None:
+        header_path = TDLIB_LIBRARY.resolve().parent.parent / "include/td/telegram/td_api.h"
+        if not header_path.is_file():
+            self.skipTest("pinned TDLib development header is not installed")
+        header = header_path.read_text()
+
+        def fields(class_name: str) -> dict[str, str]:
+            declaration = header.split(f"class {class_name} final", 1)[1].split("\n};", 1)[0]
+            return {name: kind for kind, name in re.findall(r"^\s+([^\n]+?)\s+(\w+)_;$", declaration, re.MULTILINE)}
+
+        from telegram_search_mcp.archive_drafts import ArchiveSnapshot
+        from telegram_search_mcp.edit_drafts import EditSnapshot
+        client = TDLibClient(raw=Mock())
+        archive = ArchiveSnapshot(chat_id=-100, identity=("chatTypeSupergroup", 1, False), title="T",
+                                  kind="supergroup", current_list="main")
+        edit = Mock(spec=EditSnapshot, anchor=(-100, 1048576), can_be_edited=True, raw_text="old", edit_date=0)
+        message = {"@type": "message", "id": 1048576, "chat_id": -100, "edit_date": 5,
+                   "content": {"@type": "messageText", "text": {"@type": "formattedText", "text": "new", "entities": []}}}
+        requests = []
+        def transport(payload, **_):
+            requests.append(payload)
+            return {"@type": "ok"} if payload["@type"] == "addChatToList" else message
+        with patch.object(client, "_change_transport", side_effect=transport), \
+                patch.object(client, "get_account_id", return_value=7), \
+                patch.object(client, "read_chat_list_state", return_value=archive), \
+                patch.object(client, "read_own_text_message", return_value=edit), \
+                patch.object(client, "_observe_chat_list", return_value="archive"):
+            client.move_chat_to_list(-100, target_list="archive", expected=archive, expected_account_id=7,
+                                     pre_send_guard=lambda: True)
+            client.edit_own_text(-100, 1048576, new_text="new", expected=edit, expected_account_id=7,
+                                 pre_send_guard=lambda: True)
+        add, edit_request = requests
+        self.assertEqual(set(add) - {"@type"}, set(fields("addChatToList")))
+        self.assertEqual(fields("addChatToList")["chat_list"], "object_ptr<ChatList>")
+        self.assertIn(f"class {add['chat_list']['@type']} final : public ChatList", header)
+        self.assertEqual(fields(add["chat_list"]["@type"]), {})
+        self.assertEqual(set(edit_request) - {"@type"}, set(fields("editMessageText")))
+        content = edit_request["input_message_content"]
+        self.assertEqual(fields("editMessageText")["input_message_content"], "object_ptr<InputMessageContent>")
+        self.assertIn(f"class {content['@type']} final : public InputMessageContent", header)
+        self.assertEqual(set(content) - {"@type"}, set(fields(content["@type"])))
+        self.assertEqual(fields(content["@type"])["text"], f"object_ptr<{content['text']['@type']}>")
+        self.assertEqual(set(content["text"]) - {"@type"}, set(fields(content["text"]["@type"])))
+        # The verification reads: chat positions and the message edit date and edit permission.
+        self.assertIn("positions", fields("chat"))
+        self.assertEqual(set(fields("chatPosition")), {"list", "order", "is_pinned", "source"})
+        self.assertEqual(fields("message")["edit_date"], "int32")
+        self.assertEqual(fields("messageProperties")["can_be_edited"], "bool")
+
     def test_media_rejects_files_outside_approved_staging(self) -> None:
         raw = Mock()
         client = TDLibClient(raw=raw)

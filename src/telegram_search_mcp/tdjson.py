@@ -54,8 +54,13 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "cancelDownloadFile",
         "sendMessage",
         "forwardMessages",
+        "addChatToList",
+        "editMessageText",
     }
 )
+
+# State changes travel only through the dedicated one-attempt transport, never `_call`.
+_CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText"})
 
 _AUTHORIZATION_CONTROL_TYPES = frozenset(
     {"getAuthorizationState", "setTdlibParameters", "checkDatabaseEncryptionKey"}
@@ -191,6 +196,14 @@ def _bounded_text_entities(formatted):
             native_outgoing_entities(_native_outgoing_entity_expectation(
                 formatted['text'], entities)) == entities)
     except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+
+
+def _normalized_message_text(value: str) -> bool:
+    try:
+        from .outgoing_drafts import _safe_message_text
+        return _safe_message_text(value) == value
+    except (ValueError, TypeError, UnicodeError):
         return False
 
 
@@ -387,6 +400,33 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             or (payload["remove_caption"] and not payload["send_copy"])
         ):
             raise ForbiddenTDLibRequest("TDLib forward request shape is not allowed")
+    if request_type == "addChatToList" and (
+        set(payload) != {"@type", "chat_id", "chat_list"}
+        or not _is_forum_chat_id(payload.get("chat_id"))
+        or type(payload.get("chat_list")) is not dict
+        or payload["chat_list"] not in ({"@type": "chatListMain"}, {"@type": "chatListArchive"})
+    ):
+        raise ForbiddenTDLibRequest("TDLib chat list request shape is not allowed")
+    if request_type == "editMessageText":
+        content = payload.get("input_message_content")
+        text = content.get("text") if isinstance(content, dict) else None
+        if (
+            set(payload) != {"@type", "chat_id", "message_id", "reply_markup", "input_message_content"}
+            or not _is_forum_chat_id(payload.get("chat_id"))
+            or not _is_integer_in_range(payload.get("message_id"), 1, 2**53 - 1)
+            or payload.get("reply_markup") is not None
+            or type(content) is not dict
+            or set(content) != {"@type", "text", "link_preview_options", "clear_draft"}
+            or content.get("@type") != "inputMessageText"
+            or content.get("link_preview_options") is not None
+            or content.get("clear_draft") is not False
+            or type(text) is not dict or set(text) != {"@type", "text", "entities"}
+            or text.get("@type") != "formattedText"
+            or type(text.get("text")) is not str or not 0 < len(text["text"]) <= 4096
+            or type(text.get("entities")) is not list or text["entities"] != []
+            or not _normalized_message_text(text["text"])
+        ):
+            raise ForbiddenTDLibRequest("TDLib edit request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
         file_id = payload.get("file_id")
         if not _is_strict_integer(file_id) or not 0 < file_id <= (1 << 31) - 1:
@@ -943,7 +983,8 @@ class TDLibClient:
 
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         request_type = payload.get("@type")
-        if not isinstance(request_type, str) or request_type not in _ALLOWED_REQUEST_TYPES:
+        if (not isinstance(request_type, str) or request_type not in _ALLOWED_REQUEST_TYPES or
+                request_type in _CHANGE_REQUEST_TYPES):
             raise ForbiddenTDLibRequest("TDLib request is not allowed")
         _validate_bounded_request(payload)
         aggregate_deadline = getattr(self._request_context, "deadline", None)
@@ -1676,6 +1717,151 @@ class TDLibClient:
                         and response["old_message_id"] == observation.temporary_id):
                     raise MessageSendOutcomeUnknown("TDLib returned an invalid final message")
             raise MessageSendOutcomeUnknown("TDLib forward confirmation timed out")
+
+    # Bounded observation of the chat list after one addChatToList attempt.
+    CHANGE_OBSERVATION_SECONDS = 10.0
+    CHANGE_POLL_SECONDS = 0.25
+
+    def read_chat_list_state(self, chat_id: int):
+        """One serialized read of chat identity, title, kind and current Main/Archive list."""
+        from .archive_drafts import ArchiveSnapshot
+        if not _is_forum_chat_id(chat_id):
+            raise ValueError("archive chat is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            return ArchiveSnapshot.create(self.resolve_target(chat_id), chat_id)
+
+    def move_chat_to_list(self, chat_id: int, *, target_list: str, expected, expected_account_id: int,
+                          pre_send_guard: Callable[[], bool]) -> str:
+        """Revalidate the reviewed chat under the provider lock, make one addChatToList attempt,
+        then observe the chat's list with bounded getChat reads outside the lock.
+
+        Every refusal before the raw send is no-attempt evidence; nothing is retried. Returns the
+        observed list ('main', 'archive', 'none') or 'unknown' when it could not be read."""
+        from .archive_drafts import LIST_TYPES, ArchiveSnapshot
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(expected, ArchiveSnapshot) or expected.chat_id != chat_id or
+                        target_list not in LIST_TYPES or expected.current_list not in LIST_TYPES or
+                        expected.current_list == target_list or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                return (self.read_chat_list_state(chat_id) == expected and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError("archive authority changed")
+            except Exception as error:
+                raise MessageSendNotAttempted("archive revalidation failed") from error
+            response = self._change_transport({"@type": "addChatToList", "chat_id": chat_id,
+                                               "chat_list": {"@type": LIST_TYPES[target_list]}},
+                                              pre_transport_guard=pre_send_guard)
+            if response.get("@type") != "ok" or set(response) - {"@type", "@extra"}:
+                raise MessageSendOutcomeUnknown("TDLib returned an invalid chat list result")
+        return self._observe_chat_list(chat_id, target_list)
+
+    def _observe_chat_list(self, chat_id: int, target_list: str) -> str:
+        observed = "unknown"
+        deadline = time.monotonic() + self.CHANGE_OBSERVATION_SECONDS
+        aggregate_deadline = getattr(self._request_context, "deadline", None)
+        if aggregate_deadline is not None:
+            deadline = min(deadline, aggregate_deadline)
+        for _ in range(64):
+            try:
+                observed = self.read_chat_list_state(chat_id).current_list
+            except Exception:
+                observed = "unknown"
+            if observed == target_list or time.monotonic() + self.CHANGE_POLL_SECONDS >= deadline:
+                break
+            time.sleep(self.CHANGE_POLL_SECONDS)
+        return observed
+
+    def read_own_text_message(self, chat_id: int, message_id: int):
+        """One serialized read of chat identity, the own-text projection and edit permission."""
+        from .edit_drafts import EditSnapshot
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError("edit message is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            chat = self.resolve_target(chat_id)
+            message = self.get_message(chat_id, message_id)
+            properties = self._call({"@type": "getMessageProperties", "chat_id": chat_id, "message_id": message_id})
+            return EditSnapshot.create(chat, chat_id, message, message_id, properties)
+
+    def edit_own_text(self, chat_id: int, message_id: int, *, new_text: str, expected, expected_account_id: int,
+                      pre_send_guard: Callable[[], bool]) -> int:
+        """Revalidate the reviewed projection and edit permission under the provider lock, make
+        one editMessageText attempt and return the validated edit_date of the returned message.
+
+        Every refusal before the raw send is no-attempt evidence; a result that is not exactly
+        the edited message is an unknown outcome. Nothing is retried."""
+        from .edit_drafts import EditSnapshot, edit_request, edited_text_result
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(expected, EditSnapshot) or expected.anchor != (chat_id, message_id) or
+                        not expected.can_be_edited or type(new_text) is not str or new_text == expected.raw_text or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                return (self.read_own_text_message(chat_id, message_id) == expected and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError("edit authority changed")
+            except Exception as error:
+                raise MessageSendNotAttempted("edit revalidation failed") from error
+            response = self._change_transport(edit_request(chat_id, message_id, new_text),
+                                              pre_transport_guard=pre_send_guard)
+        edit_date = edited_text_result(response, chat_id=chat_id, message_id=message_id, new_text=new_text,
+                                       previous_edit_date=expected.edit_date)
+        if edit_date is None:
+            raise MessageSendOutcomeUnknown("TDLib returned an invalid edit result")
+        return edit_date
+
+    def _change_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:
+        """One raw state-change request and its direct result; no send observation is involved."""
+        try:
+            _validate_bounded_request(payload)
+            if payload.get("@type") not in _CHANGE_REQUEST_TYPES:
+                raise ForbiddenTDLibRequest("TDLib change request is not allowed")
+        except ForbiddenTDLibRequest as error:
+            raise MessageSendNotAttempted("change request shape is not allowed") from error
+        with self._serialized_reply_call():
+            extra = f"telegram-search-mcp-{next(self._ids)}"
+            aggregate_deadline = getattr(self._request_context, "deadline", None)
+            if not self._ready or (aggregate_deadline is not None and time.monotonic() >= aggregate_deadline):
+                raise MessageSendNotAttempted("change provider is unavailable before transport")
+            try:
+                if pre_transport_guard() is not True:
+                    raise ValueError("change scope changed")
+                if aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+                    raise ValueError("change request deadline expired")
+            except Exception as error:
+                raise MessageSendNotAttempted("change scope changed before transport") from error
+            try:
+                self._raw.send({**payload, "@extra": extra})
+            except Exception as error:
+                raise MessageSendOutcomeUnknown("TDLib change transport failed") from error
+            deadline = time.monotonic() + min(max(self._request_timeout, 30), 300)
+            if aggregate_deadline is not None:
+                deadline = min(deadline, aggregate_deadline)
+            while time.monotonic() < deadline:
+                try:
+                    response = self._raw.receive(min(1.0, max(0.0, deadline - time.monotonic())))
+                except Exception as error:
+                    raise MessageSendOutcomeUnknown("TDLib change result transport was lost") from error
+                if response is None:
+                    continue
+                self._reduce_receive_event(response)
+                if not self._ready:
+                    raise MessageSendOutcomeUnknown("authorization changed before the change result")
+                if response.get("@extra") != extra:
+                    continue
+                if response.get("@type") == "error":
+                    raise MessageSendFailed("TDLib rejected the change", provider_error=response)
+                return response
+            raise MessageSendOutcomeUnknown("TDLib change result timed out")
 
     def read_topic_snapshot(self, chat_id: int, topic_id: int, *, expected_account_id: int,
                             expected_recipient_title: str):

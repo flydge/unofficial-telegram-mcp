@@ -488,6 +488,10 @@ client.close()
             "send_prepared_forward",
             "prepare_video_send",
             "send_prepared_video",
+            "prepare_chat_archive",
+            "apply_prepared_archive",
+            "prepare_text_edit",
+            "apply_prepared_text_edit",
         ]
         self.assertEqual([tool.name for tool in first_tools.tools], expected_tools)
         self.assertEqual([tool.name for tool in second_tools.tools], expected_tools)

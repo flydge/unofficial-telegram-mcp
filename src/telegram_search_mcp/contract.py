@@ -15,6 +15,8 @@ OPERATION_CAPABILITIES = {
     "retain_selection": "retained_selections",
     **{name: "forward_send" for name in ("prepare_forward_send", "send_prepared_forward")},
     **{name: "video_send" for name in ("prepare_video_send", "send_prepared_video")},
+    **{name: "archive_chats" for name in ("prepare_chat_archive", "apply_prepared_archive")},
+    **{name: "edit_own_text" for name in ("prepare_text_edit", "apply_prepared_text_edit")},
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},
     **{name: "reply_text_send" for name in ("prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft")},
     "read_presentation": "presentations",
@@ -39,6 +41,9 @@ OPERATION_CAPABILITIES = {
     "prepare_text_send": "send", "send_prepared_text": "send",
     "prepare_artifact_send": "send", "send_prepared_artifact": "send",
 }
+# Default-off capabilities that change Telegram state; each also requires `send`.
+SEND_DEPENDENT_CAPABILITIES = frozenset({"reply_text_send", "reply_artifact_send", "forward_send", "video_send",
+                                         "archive_chats", "edit_own_text"})
 TOOL_OPERATIONS = {"resolve_target": "resolve", "discover_targets": "discover", "search_correspondence": "search",
                    **{name: name for name in OPERATION_CAPABILITIES if name not in {"resolve", "discover", "search"}}}
 # Supplier transport is capability-checked but deliberately absent from MCP tools.

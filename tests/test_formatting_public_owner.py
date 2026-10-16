@@ -170,7 +170,7 @@ class SDKFormattingTests(unittest.IsolatedAsyncioTestCase):
    def update_reply_draft(self,r):self.calls.append(r.model_dump(mode='json'));return {'status':'unavailable','detail':'synthetic no broker'}
   s=Service();server=build_server(service_factory=lambda:s,policy=RuntimePolicy(enabled_capabilities=CAPS))
   async with Client(server) as client:
-   tools={t.name:t for t in (await client.list_tools()).tools};self.assertEqual(len(tools),51)
+   tools={t.name:t for t in (await client.list_tools()).tools};self.assertEqual(len(tools),55)
    for name,base in [('prepare_text_send',{'recipient':CHAT,'text':TEXT}),('prepare_reply_text_send',{'recipient':CHAT,'text':TEXT,'reply_to':target()['anchor']}),('update_draft',{'draft_id':DID,'text':TEXT}),('update_reply_draft',{'draft_id':DID,'text':TEXT})]:
     with self.subTest(tool=name):
      self.assertIn('outgoing_entities',tools[name].input_schema['properties'],'FEATURE ABSENT: typed formatting SDK input')

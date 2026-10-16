@@ -74,7 +74,7 @@ class ChatListBoundaryTests(unittest.IsolatedAsyncioTestCase):
             p=Provider();service=SearchService(client=p,owns_client=False)
             policy=RuntimePolicy(enabled_capabilities=('list_chats',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
-                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),51)
+                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),55)
                 tool=next(t for t in tools if t.name=='list_chats');self.assertFalse(tool.input_schema['additionalProperties'])
                 self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 result=await consumer.call_tool('list_chats',{'scope':'main','limit':1})

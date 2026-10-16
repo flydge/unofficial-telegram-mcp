@@ -90,7 +90,7 @@ class UploadAuthorityTests(unittest.TestCase):
 
     def test_registration_has_exact_three_public_tools_no_helper_operations(self):
         names={t.name for t in build_server(policy=RuntimePolicy())._tool_manager.list_tools()}
-        self.assertEqual(len(names),51)
+        self.assertEqual(len(names),55)
         self.assertTrue({'issue_local_upload_authority','consume_local_upload_result','cancel_local_upload_authority'}<=names)
         self.assertFalse({'redeem_local_upload_authority','append_authorized_local_upload','finish_authorized_local_upload'}&names)
 
@@ -560,7 +560,7 @@ class UploadAuthoritySDKTests(unittest.IsolatedAsyncioTestCase):
         async with Client(server) as client:
             tools=(await client.list_tools()).tools
             names={t.name for t in tools}
-            self.assertEqual(len(names),51)
+            self.assertEqual(len(names),55)
             self.assertFalse(names & set(HELPER_OPERATION_CAPABILITIES))
             self.assertFalse(set(TOOL_OPERATIONS) & set(HELPER_OPERATION_CAPABILITIES))
             issue=next(t for t in tools if t.name=='issue_local_upload_authority')
@@ -570,7 +570,7 @@ class UploadAuthoritySDKTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(manifest['additionalProperties'])
             self.assertEqual(set(manifest['required']),{'file_name','kind','size_bytes','sha256'})
             local=(await client.call_tool('_manifest',{})).structured_content
-            self.assertEqual(len(local['tools']),51)
+            self.assertEqual(len(local['tools']),55)
         document=schema_document(server)
         self.assertEqual(document['tool_operations'],TOOL_OPERATIONS)
         # Private evidence, produced only by the guarded focused runner.

@@ -277,8 +277,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     return SendPreparedVideoResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                self.assertEqual(len(tools), 51)
-                self.assertEqual(list(tools)[-2:], ['prepare_video_send', 'send_prepared_video'])
+                self.assertEqual(len(tools), 55)
+                self.assertEqual(list(tools)[-6:], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
+                                                    'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
                 self.assertEqual(set(tools['prepare_video_send'].input_schema['properties']),
                                  {'artifact_id', 'recipient', 'caption'})
                 self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})

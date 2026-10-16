@@ -331,7 +331,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     return SendPreparedForwardResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                self.assertEqual(len(tools), 51)
+                self.assertEqual(len(tools), 55)
                 for name in ('prepare_forward_send', 'send_prepared_forward'):
                     self.assertFalse(tools[name].input_schema['additionalProperties'])
                     self.assertFalse(tools[name].annotations.read_only_hint)
