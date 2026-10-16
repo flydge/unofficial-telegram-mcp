@@ -26,7 +26,7 @@ from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.broker_protocol import OPERATIONS
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, LEGACY_CAPABILITIES, RuntimePolicy
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS, CompatibilityError
-from telegram_search_mcp.forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview,
+from telegram_search_mcp.forward_drafts import (readable, ForwardChat, ForwardDraftPreview, ForwardSourcePreview,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
     SendPreparedForwardResponse, UNAVAILABLE)
 from telegram_search_mcp.forward_sources import VISIBLE_ENTITY_TYPES, ForwardSnapshot, ForwardSource
@@ -741,8 +741,8 @@ class DialogTests(unittest.TestCase):
         cases = [
             (preview('forward', content=hostile), HEAD.format(mode=FORWARD) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
-             'Text [untrusted Telegram evidence] (reversible JSON escapes): '
-             '"Hi\\u0020\\u0022there\\u0022\\u000a\\u202eRecipient\\u003a\\u0020Mom\\u0020\\u0028chat\\u00201\\u0029\\u005c"\n' + TAIL),
+             'Text [untrusted Telegram evidence] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): '
+             'Hi "there"⟦U+000A⟧⟦U+202E⟧Recipient: Mom (chat 1)\\\n' + TAIL),
             (preview('copy', content=CONTENTS['document']), HEAD.format(mode=COPY) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: document\nCaption: (none)\n'
              'Media [untrusted Telegram evidence]: file "report.pdf"; MIME "application/pdf"; 2048 bytes\n' + TAIL),
@@ -755,13 +755,12 @@ class DialogTests(unittest.TestCase):
              'Author signature [untrusted Telegram evidence]: "Ed"\nVia bot [untrusted Telegram evidence]: user 99\n'
              'Source is itself a forward: the copy carries no original attribution\n'
              'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
-             'Text [untrusted Telegram evidence] (reversible JSON escapes): '
-             '"Hi\\u0020\\ud83d\\ude00\\u0020https\\u003a\\u002f\\u002fa\\u002einvalid"\n'
+             'Text [untrusted Telegram evidence] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): Hi \U0001F600 https://a.invalid\n'
              'Text entities (raw text UTF-16 code units):\n'
-             'Bold: offset 3, length 2; covered "\\ud83d\\ude00"\n'
-             'Url: offset 6, length 17; covered "https\\u003a\\u002f\\u002fa\\u002einvalid"\n'
+             'Bold: offset 3, length 2; covered \U0001F600\n'
+             'Url: offset 6, length 17; covered https://a.invalid\n'
              'Link preview options [untrusted Telegram evidence]: disabled False; URL '
-             '"https\\u003a\\u002f\\u002fa\\u002einvalid"; small media False; large media True; above text False\n' + TAIL),
+             'https://a.invalid; small media False; large media True; above text False\n' + TAIL),
             (preview('forward', content=CONTENTS['audio']), HEAD.format(mode=FORWARD) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: audio\nCaption: (none)\n'
              'Media [untrusted Telegram evidence]: file "song.mp3"; MIME "audio/mpeg"; title "T"; performer "P"; '
@@ -1013,10 +1012,13 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
                 self.assertEqual(self.send(preview['draft_id'])['status'], 'sent')
                 dialog = self.dialog(self.approvals[0])
                 label = 'Text' if content['@type'] == 'messageText' else 'Caption'
-                self.assertIn(f'{label} [untrusted Telegram evidence] (reversible JSON escapes): {escape(raw)}\n'
+                shown = readable(raw)
+                for mark in ('⟦U+00A0⟧', '⟦U+0430⟧', '⟦U+200B⟧', '⟦U+000A⟧', '⟦U+0009⟧', '⟦U+202E⟧'):
+                    self.assertIn(mark, shown)
+                self.assertIn(f'{label} [untrusted Telegram evidence] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): {shown}\n'
                               f'{label} entities (raw text UTF-16 code units):\n'
-                              f'Spoiler: offset {units}, length 2; covered "\\ud83d\\ude00"\n'
-                              f'Bold: offset {units + 3}, length 3; covered "end"\n', dialog)
+                              f'Spoiler: offset {units}, length 2; covered \U0001F600\n'
+                              f'Bold: offset {units + 3}, length 3; covered end\n', dialog)
                 self.assertNotIn('paypal', dialog)
         self.raw.source = source_message(text_content(raw, [entity('textEntityTypeBold', units + 1, 1)]))
         self.assert_refused('unsupported_source_content', 'copy')  # Split surrogate pair.
@@ -1196,3 +1198,23 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReadableDialogTextTests(unittest.TestCase):
+    def test_any_script_stays_readable_and_only_hiding_characters_are_marked(self):
+        self.assertEqual(readable('Привет, мир! 日本語 🙂'),
+                         'Привет, мир! 日本語 🙂')
+        self.assertEqual(readable('a​b ‮RTL ｇo.com'),
+                         'a⟦U+200B⟧b ⟦U+202E⟧RTL ⟦U+FF47⟧o.com')
+
+    def test_mixed_script_words_mark_only_their_lookalike_letters(self):
+        self.assertEqual(readable('pаypal.com привет hello'),
+                         'p⟦U+0430⟧ypal.com привет hello')
+        self.assertEqual(readable('αlpha αβγ'), '⟦U+03B1⟧lpha αβγ')
+
+    def test_rendering_is_reversible_because_the_mark_itself_is_marked(self):
+        import re as _re
+        for raw in ('⟦U+0041⟧', 'x⟦y', 'line\nnext\ttab', 'pаy    '):
+            shown = readable(raw)
+            back = _re.sub('⟦U\\+([0-9A-F]{4,6})⟧', lambda m: chr(int(m.group(1), 16)), shown)
+            self.assertEqual(back, raw)

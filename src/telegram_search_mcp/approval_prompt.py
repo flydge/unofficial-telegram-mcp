@@ -34,7 +34,9 @@ def _outgoing_style_detail(draft):
 
 def _forward_detail(validated) -> str:
     """Untrusted Telegram strings stay marked on their own lines; outgoing text and
-    caption use the reversible reply-v23 escapes, so nothing invisible can hide."""
+    caption are shown readable in any script, with invisible, direction-changing and
+    look-alike characters as reversible ⟦U+XXXX⟧ marks, so nothing can hide."""
+    from .forward_drafts import readable, unescaped
     from .reply_drafts import EVIDENCE_MARKER
     source, recipient = validated.source, validated.recipient
     mode = ('FORWARD — recipients see the original sender' if validated.mode == 'forward' else
@@ -50,17 +52,18 @@ def _forward_detail(validated) -> str:
     elif source.text is None:
         text = f'{label}: (none)\n'
     else:
-        text = f'{label} {marker} (reversible JSON escapes): {body(source.text)}\n'
+        text = (f'{label} {marker} (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): '
+                f'{readable(unescaped(source.text))}\n')
         rows = source.entity_rows()
         if rows:
             text += (f'{label} entities (raw text UTF-16 code units):\n' +
-                     ''.join(f'{kind}: offset {offset}, length {length}; covered {covered}\n'
+                     ''.join(f'{kind}: offset {offset}, length {length}; covered {readable(json.loads(covered))}\n'
                              for kind, offset, length, covered in rows))
     link = ''
     if source.link_preview is not None:
         item = source.link_preview
         link = (f'Link preview options {marker}: disabled {item.is_disabled}; URL '
-                f'{body(item.url) if item.url is not None else "(none)"}; small media {item.force_small_media}; '
+                f'{readable(unescaped(item.url)) if item.url is not None else "(none)"}; small media {item.force_small_media}; '
                 f'large media {item.force_large_media}; above text {item.show_above_text}\n')
     media = ''
     if source.media is not None:

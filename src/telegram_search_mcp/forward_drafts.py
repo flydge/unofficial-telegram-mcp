@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -54,6 +56,31 @@ def _utc(value: object) -> datetime:
 def escaped(raw: str) -> str:
     """Marked reversible evidence: decoding one JSON layer yields the exact raw string."""
     return EVIDENCE_MARKER + _inert_json_string(raw)
+
+
+_MARK_OPEN = '\u27e6'
+
+
+def readable(raw: str) -> str:
+    """For the human dialog: letters of every script stay literal, so Cyrillic or CJK text
+    is readable, while anything invisible, direction-changing or changed by NFKC (look-alike
+    compatibility forms) is shown as ⟦U+XXXX⟧, as are Cyrillic/Greek letters inside a word
+    that also has ASCII letters (the classic look-alike domain). The literal ⟦ is marked too,
+    so the rendering is reversible. The MCP preview keeps the full JSON escapes."""
+    def lookalike(char):
+        return char.isalpha() and not char.isascii() and unicodedata.name(char, '').startswith(('CYRILLIC', 'GREEK'))
+    out = []
+    for token in re.split(r'(\s+)', raw):
+        mixed = any(char.isascii() and char.isalpha() for char in token) and any(map(lookalike, token))
+        for char in token:
+            category = unicodedata.category(char)
+            if (char == _MARK_OPEN or category in ('Cc', 'Cf', 'Co', 'Cn', 'Cs', 'Zl', 'Zp')
+                    or (category == 'Zs' and char != ' ') or unicodedata.normalize('NFKC', char) != char
+                    or (mixed and lookalike(char))):
+                out.append('\u27e6U+%04X\u27e7' % ord(char))
+            else:
+                out.append(char)
+    return ''.join(out)
 
 
 def unescaped(value: object) -> str:
