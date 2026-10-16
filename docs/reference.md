@@ -1940,13 +1940,14 @@ stickers, polls, locations, contacts and every other kind refuse
 A refusal is content-free: `status="refused"`, one of the codes below and a fixed
 detail; no draft ID, no source text. Checks run in this order and the first
 failure is reported: chat identities, source state, reply markup, content and
-formatting, provider eligibility, `remove_caption`, name bounds.
+formatting (including link-preview URLs), provider eligibility, `remove_caption`,
+names.
 
 | `refusal` | When |
 | --- | --- |
 | `unsupported_source_state` | Self-destructing (including secret photo/video/animation), auto-deleting (any non-zero `auto_delete_in`), ephemeral, scheduled or still-sending source. |
-| `hidden_source_content` | A reply markup (buttons carry targets the text does not show). Any text or caption entity outside the visible allowlist: only fieldless Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url, EmailAddress, PhoneNumber and BankCardNumber are admitted. TextUrl, MentionName, CustomEmoji, PreCode (language), MediaTimestamp, DateTime, unknown types and an allowlisted type carrying any field refuse. A link-preview URL that is not literally in the visible text. A non-blank name (file name, MIME type, audio title or performer, author signature) that sanitizes to nothing. |
-| `unsupported_source_content` | Content outside the supported kinds; limits above exceeded; entities that are not exact records on whole-scalar UTF-16 boundaries of the raw text; malformed link-preview options, flags, measures or file identity/size; a photo with an attached video; a displayed name over 255 characters; escaped text plus covered spans over 131072 characters. |
+| `hidden_source_content` | A reply markup (buttons carry targets the text does not show). Any text or caption entity outside the visible allowlist: only fieldless Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url, EmailAddress, PhoneNumber and BankCardNumber are admitted. TextUrl, MentionName, CustomEmoji, PreCode (language), MediaTimestamp, DateTime, unknown types and an allowlisted type carrying any field refuse. A link-preview-options URL or a link-card URL that is not exactly the covered text of a Url entity or a whole whitespace-delimited token of the visible text (a prefix, a substring of a longer link or an empty card URL refuses). A name (file name, MIME type, audio title or performer, author signature) that sanitizing would change: removed control or bidi characters, NFKC changes, collapsed or leading/trailing whitespace. |
+| `unsupported_source_content` | Content outside the supported kinds; limits above exceeded; entities that are not exact records on whole-scalar UTF-16 boundaries of the raw text; malformed link-preview options or link card, flags, measures or file identity/size; a photo with an attached video; a name over 255 characters; escaped text, covered spans and link-preview URLs over 131072 characters. |
 | `protected_content` | The source chat, or the message for the current or another user, has protected content. Applies to both modes. |
 | `source_not_forwardable` | The mode's property is false: `can_be_forwarded` for `forward`, `can_be_copied` for `copy`. |
 | `source_is_forward` | `mode="forward"` and the source carries forward information. |
@@ -1967,8 +1968,10 @@ preparation.
 - `chat` (`chat_id`, sanitized `title`), `message_id`, `sender` (`kind` user or
   chat plus numeric ID; names are not resolved), `date`, `content_kind`, `is_forward`;
 - `author_signature` and `via_bot_user_id`, present when non-empty or non-zero;
-- `text` (the text or caption) with `entities` (`type`, `offset`, `length`), and
-  `link_preview` (the admitted options, text sources only);
+- `text` (the text or caption) with `entities` (`type`, `offset`, `length`),
+  `link_preview` (the admitted options, text sources only) and
+  `link_preview_card_url` (the URL of the provider's link card, when present; its
+  title, description, site name and media are not included);
 - `media`: `size_bytes` and `unique_id_sha256` of the primary file (a hash of the
   provider's remote unique ID; file IDs and local paths are never projected),
   and where the kind has them `file_name`, `mime_type`, audio `title` and
@@ -1978,7 +1981,9 @@ preparation.
 - `source_sha256`.
 
 Telegram-originated values are untrusted evidence. Short names are marked
-`[untrusted Telegram evidence] ` plus the sanitized value. The text or caption is
+`[untrusted Telegram evidence] ` plus the exact name; a name that sanitizing would
+change is refused, so the marked value is what the provider forwards. The text or
+caption (and each link-preview URL) is
 that marker plus one JSON string in which only ASCII letters, digits, `_` and `-`
 stay literal: spaces, punctuation, look-alike letters, bidi and zero-width controls
 and newlines appear as `\uXXXX` (surrogate pairs for astral characters). Decoding
@@ -1988,16 +1993,19 @@ therefore hard to read in the MCP preview; the owner dialog renders it readably.
 Thumbnails, album and video covers, storyboards and alternative videos are neither
 projected nor shown.
 
-`source_sha256` is the SHA-256 of the canonical version-2 source projection: chat,
+`source_sha256` is the SHA-256 of the canonical version-3 source projection: chat,
 message ID, sender, signature, via-bot ID, forward flag, date, edit date and the
-content facts above. Volatile state such as views, reactions and rendered link
-previews is excluded. `preview_sha256` is a domain-separated version-2 SHA-256 over
+content facts above, including the link-card URL. Volatile state such as views,
+reactions and the link card's title, description and media is excluded; a card that
+appears or changes after preparation is `source_changed` at send. `preview_sha256` is
+a domain-separated version-3 SHA-256 over
 the draft ID, account, expiry, mode, `remove_caption`, the complete source and
 recipient evidence and the exact closed `forwardMessages` request (without the
 random `sending_id`). The proxy recomputes the digest and checks that source chat,
 message ID, recipient, mode and `remove_caption` match the request; otherwise the
 result is `unavailable`. Show the complete preview, including every entity with its
-covered text, the link-preview options and the media facts, and explain whether the
+covered text, the link-preview options, the link-card URL and the media facts, and
+explain whether the
 recipients will see the original sender (`forward`) or not (`copy`).
 
 ### Drafts, supersession and expiry
@@ -2073,11 +2081,13 @@ Sender [untrusted Telegram evidence]: user|chat <ID>
 [Source is itself a forward: the copy carries no original attribution]
 Date: <time>
 Content: <kind>
-Text|Caption [untrusted Telegram evidence] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): <text>
-  (or: Text|Caption: (none)   or: Caption: removed — not sent)
+Untrusted spans in « » below are exact; ⟦U+XXXX⟧ marks <the rule below>.
+Text|Caption [untrusted Telegram evidence] (exact): «<text>»
+  (or: Text|Caption: (none)   or: Caption: removed — not sent; then no legend line)
 [Text|Caption entities (raw text UTF-16 code units):
-<Type>: offset <N>, length <M>; covered <span>]
-[Link preview options [untrusted Telegram evidence]: disabled …; URL …; small media …; large media …; above text …]
+<Type>: offset <N>, length <M>; covered «<span>»]
+[Link preview options [untrusted Telegram evidence]: disabled …; URL «…» or (none); small media …; large media …; above text …]
+[Link preview card [untrusted Telegram evidence]: URL «…»; its title, description and media are not shown]
 [Media [untrusted Telegram evidence]: file "…"; MIME "…"; title "…"; performer "…"; N seconds; WxH; starts at N seconds; N bytes; N variants; spoiler …; caption above media …]
 Source SHA-256: <hash>
 Recipient: <title> (chat <ID>)
@@ -2087,10 +2097,17 @@ Unofficial Telegram MCP will revalidate the source, its permissions and the reci
 ```
 
 In the dialog, letters of every script stay literal, so Cyrillic or CJK text is
-readable. Control and format characters, newlines and tabs, bidi and zero-width
-characters, non-space whitespace, characters changed by NFKC (look-alike forms),
-Cyrillic or Greek letters inside a word that also has ASCII letters, and the mark
-bracket itself are shown as reversible `⟦U+XXXX⟧`. The dialog is mutually exclusive
+readable. The legend line states the exact rule: shown as reversible `⟦U+XXXX⟧` are
+control (including newlines and tabs), format (bidi, zero-width), private-use and
+unassigned characters; every Unicode 16 default-ignorable code point except one
+U+FE0E/U+FE0F right after a non-selector character (ordinary emoji presentation);
+line, paragraph and non-ASCII spaces; every repeated space; U+2800; characters that
+NFKC changes; combining marks after the second in a row; `« » ⟦ 〚 〛`; and, inside a
+word that also has ASCII letters, Cyrillic, Greek, Armenian, Cherokee and Lisu
+letters and non-ASCII Latin letters without a canonical decomposition (ɡ, ı, ɑ; é and
+ü stay literal). Look-alike words written in one script are not marked. Literal `«`,
+`»` and line breaks are always marked, so untrusted content cannot close its span or
+start a dialog line. The dialog is mutually exclusive
 with every other send preview; a recipient, hash or field that disagrees with the
 validated preview shows nothing and counts as declined.
 

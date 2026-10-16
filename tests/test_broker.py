@@ -486,6 +486,8 @@ client.close()
             "retain_selection",
             "prepare_forward_send",
             "send_prepared_forward",
+            "prepare_video_send",
+            "send_prepared_video",
         ]
         self.assertEqual([tool.name for tool in first_tools.tools], expected_tools)
         self.assertEqual([tool.name for tool in second_tools.tools], expected_tools)

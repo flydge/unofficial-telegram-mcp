@@ -324,6 +324,31 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
         )
         if reply_to is not None and valid_photo and (type(photo.get('width')) is not int or type(photo.get('height')) is not int):
             valid_photo=False
+        video = content.get("video") if isinstance(content, dict) else None
+        sides = (video.get("width"), video.get("height")) if isinstance(video, dict) else (None, None)
+        valid_video = (
+            isinstance(content, dict) and reply_to is None
+            and set(content) == {"@type", "video", "caption", "show_caption_above_media", "self_destruct_type", "has_spoiler"}
+            and content.get("@type") == "inputMessageVideo"
+            and isinstance(video, dict)
+            and set(video) == {"@type", "video", "thumbnail", "cover", "start_timestamp", "added_sticker_file_ids",
+                               "duration", "width", "height", "supports_streaming"}
+            and video.get("@type") == "inputVideo"
+            and _valid_staged_input_file(video.get("video"))
+            and video.get("thumbnail") is None and video.get("cover") is None
+            and type(video.get("start_timestamp")) is int and video["start_timestamp"] == 0
+            and type(video.get("added_sticker_file_ids")) is list and video["added_sticker_file_ids"] == []
+            and _is_integer_in_range(video.get("duration"), 1, 3 * 3600)
+            and all(_is_integer_in_range(side, 16, 8192) for side in sides)
+            and max(sides) <= 20 * min(sides)
+            and type(video.get("supports_streaming")) is bool
+            and content.get("show_caption_above_media") is False
+            and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
+            and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
+            and caption.get("@type") == "formattedText"
+            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+            and caption.get("entities") == []
+        )
         if (
             set(payload) != {"@type", "chat_id", "topic_id", "reply_to", "options", "reply_markup", "input_message_content"}
             or not _is_strict_nonzero_integer(payload.get("chat_id"))
@@ -340,7 +365,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             or ((reply_to is not None or payload.get('topic_id') is not None) and
                 (not strict_shape(options,expected_options) or not _is_forum_chat_id(payload.get("chat_id"))))
             or type(sending_id) is not int or not 0 < sending_id <= (1 << 31) - 1
-            or not (valid_text or valid_document or valid_photo or valid_voice)
+            or not (valid_text or valid_document or valid_photo or valid_voice or valid_video)
         ):
             raise ForbiddenTDLibRequest("TDLib send request shape is not allowed")
     if request_type == "forwardMessages":
@@ -1894,11 +1919,63 @@ class TDLibClient:
         }
         return self._send_message_content(chat_id, content, "messageVoiceNote", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
+    @staticmethod
+    def _video_content(path: Path, caption: str, *, duration_seconds: int, width: int, height: int,
+                       supports_streaming: bool) -> dict[str, Any]:
+        return {
+            "@type": "inputMessageVideo",
+            "video": {
+                "@type": "inputVideo", "video": {"@type": "inputFileLocal", "path": str(path)},
+                "thumbnail": None, "cover": None, "start_timestamp": 0, "added_sticker_file_ids": [],
+                "duration": duration_seconds, "width": width, "height": height,
+                "supports_streaming": supports_streaming,
+            },
+            "caption": {"@type": "formattedText", "text": caption, "entities": []},
+            "show_caption_above_media": False, "self_destruct_type": None, "has_spoiler": False,
+        }
+
+    def send_video_message(self, chat_id: int, path: Path, caption: str, *, duration_seconds: int, width: int,
+                           height: int, supports_streaming: bool, size_bytes: int, expected_account_id: int,
+                           expected_recipient_title: str, expected_recipient_identity: tuple, attempt_id: str,
+                           pre_send_guard: Callable[[], bool], pre_send_fence=None) -> int:
+        """Revalidate account and recipient under the provider lock, then make one native video attempt.
+
+        Every refusal before the raw send is no-attempt evidence; nothing is ever retried.
+        """
+        from .forward_sources import chat_identity
+        self._request_context.artifact_transport_attempted = False
+        try:
+            with self._serialized_reply_call():
+                def current_authority():
+                    if (type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                            type(expected_recipient_title) is not str or type(expected_recipient_identity) is not tuple or
+                            type(attempt_id) is not str or not attempt_id or not callable(pre_send_guard) or
+                            pre_send_guard() is not True or self.get_account_id() != expected_account_id):
+                        return False
+                    identity, title = chat_identity(self.resolve_target(chat_id), chat_id)
+                    return (identity == expected_recipient_identity and title == expected_recipient_title and
+                            self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                if not current_authority():
+                    raise ValueError("video authority changed")
+                content = self._video_content(path, caption, duration_seconds=duration_seconds, width=width,
+                                              height=height, supports_streaming=supports_streaming)
+                return self._send_message_content(chat_id, content, "messageVideo", attempt_id=attempt_id,
+                    pre_transport_guard=pre_send_guard, pre_transport_fence=pre_send_fence,
+                    video=(duration_seconds, width, height, size_bytes))
+        except (MessageSendOutcomeUnknown, MessageSendFailed):
+            raise
+        except Exception as error:
+            if getattr(self._request_context, "artifact_transport_attempted", False):
+                raise MessageSendOutcomeUnknown("video send observation was lost") from error
+            self._send_observations.discard_unattempted(attempt_id)
+            raise MessageSendNotAttempted("video send was refused before transport") from error
+
     def _send_message_content(
         self, chat_id: int, content: dict[str, Any], expected_type: str,
         *, attempt_id: str | None = None, reply_anchor: tuple[int,int] | None = None, artifact_reply: bool = False, pre_transport_guard: Callable[[],bool] | None = None,
         forum_topic_id: int | None = None, outgoing_entities: FrozenOutgoingEntities = (),
         saved_messages_topic_id: int | None = None, pre_transport_fence=None,
+        video: tuple[int, int, int, int] | None = None,
     ) -> int:
         sending_id = secrets.randbelow((1 << 31) - 1) + 1
         for _ in range(8):
@@ -1923,7 +2000,8 @@ class TDLibClient:
             extra = f"telegram-search-mcp-{next(self._ids)}"
             attempt_id = attempt_id if attempt_id is not None else extra
             aggregate_deadline = getattr(self._request_context, "deadline", None)
-            if (reply_anchor is not None or forum_topic_id is not None or outgoing_entities) and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+            bounded = reply_anchor is not None or forum_topic_id is not None or bool(outgoing_entities) or video is not None
+            if bounded and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
                 raise MessageSendNotAttempted("reply request deadline expired before send")
             try:
                 self._send_observations.register(attempt_id, extra, sending_id, chat_id, expected_type,
@@ -1932,6 +2010,7 @@ class TDLibClient:
                     **({'forum_topic_id': forum_topic_id} if forum_topic_id is not None else {}),
                     **({'outgoing_entities': outgoing_entities} if outgoing_entities else {}),
                     **({'saved_messages_topic_id': saved_messages_topic_id} if saved_messages_topic_id is not None else {}),
+                    **({'video': video} if video is not None else {}),
                     **({'caption_sha256':hashlib.sha256(content['caption']['text'].encode('utf-8')).hexdigest(),
                         'voice_duration':content['voice_note']['duration'] if expected_type=='messageVoiceNote' else None,
                         'waveform_sha256':hashlib.sha256(base64.b64decode(content['voice_note']['waveform'],validate=True)).hexdigest() if expected_type=='messageVoiceNote' else None,
@@ -1945,21 +2024,22 @@ class TDLibClient:
                 except Exception as error:
                     self._send_observations.discard_unattempted(attempt_id)
                     raise MessageSendNotAttempted("reply scope changed before transport") from error
-            if (reply_anchor is not None or forum_topic_id is not None or outgoing_entities) and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+            if bounded and aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
                 self._send_observations.discard_unattempted(attempt_id)
                 raise MessageSendNotAttempted("reply request deadline expired before transport")
             try:
                 # Pure lifecycle/epoch fence brackets raw dispatch only. Account
                 # acquisition occurs on context entry before its mutex is held.
                 with pre_transport_fence() if pre_transport_fence is not None else nullcontext():
-                    if artifact_reply:self._request_context.artifact_transport_attempted=True
+                    if artifact_reply or video is not None:self._request_context.artifact_transport_attempted=True
                     self._raw.send({**payload, "@extra": extra})
             except MessageSendNotAttempted:
                 self._send_observations.discard_unattempted(attempt_id)
                 raise
             except Exception as error:
                 raise MessageSendOutcomeUnknown("TDLib send transport failed") from error
-            deadline = time.monotonic() + min(max(self._request_timeout, 30), 300)
+            # A native video upload takes longer than text: wait up to 120 s, then reconcile by status.
+            deadline = time.monotonic() + (120 if video is not None else min(max(self._request_timeout, 30), 300))
             aggregate_deadline = getattr(self._request_context, "deadline", None)
             if aggregate_deadline is not None:
                 deadline = min(deadline, aggregate_deadline)

@@ -79,6 +79,10 @@ from .forward_sources import ForwardRefusal, chat_identity
 from .forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview, ForwardSpec,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest, SendPreparedForwardResponse,
     PREPARED as FORWARD_PREPARED, REFUSED as FORWARD_REFUSED, UNAVAILABLE as FORWARD_UNAVAILABLE)
+from .video_probe import VideoProbeError, probe_video
+from .video_drafts import (MAX_VIDEO_BYTES, VideoDraftPreview, VideoRecipient, VideoRefusal, VideoSpec,
+    PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest, SendPreparedVideoResponse,
+    PREPARED as VIDEO_PREPARED, REFUSED as VIDEO_REFUSED, UNAVAILABLE as VIDEO_UNAVAILABLE)
 
 
 class BrokerStartupError(RuntimeError):
@@ -411,6 +415,10 @@ class Broker(SelectionBrokerMixin):
             return send_status(payload['draft_id']).model_dump(mode='json')
         if operation == 'send_prepared_artifact':
             return SendPreparedArtifactResponse(status='expired', draft_id=payload['draft_id'], detail='draft is unavailable').model_dump(mode='json')
+        if operation == 'prepare_video_send':
+            return PrepareVideoSendResponse(status='unavailable', detail=VIDEO_UNAVAILABLE).model_dump(mode='json')
+        if operation == 'send_prepared_video':
+            return SendPreparedVideoResponse(status='expired', draft_id=payload['draft_id'], detail='draft is unavailable').model_dump(mode='json')
         raise ArtifactUnavailable('artifact is unavailable')
 
     def _dispatch(self, request: dict[str, Any], *, publish=None) -> dict[str, Any]:
@@ -422,7 +430,7 @@ class Broker(SelectionBrokerMixin):
         operation = request['operation']
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {'reply_text_send', 'reply_artifact_send', 'forward_send'} and 'send' not in self._policy.enabled_capabilities)):
+                (capability in {'reply_text_send', 'reply_artifact_send', 'forward_send', 'video_send'} and 'send' not in self._policy.enabled_capabilities)):
             raise CompatibilityError('capability_disabled')
         remaining = request['deadline'] - time.monotonic()
         if remaining <= 0:
@@ -446,7 +454,7 @@ class Broker(SelectionBrokerMixin):
             'append_local_upload', 'finish_local_upload', 'prepare_artifact_send', 'prepare_reply_artifact_send',
             'get_reply_artifact_draft', 'update_reply_artifact_draft', 'refresh_reply_artifact_draft',
             'list_drafts', 'get_draft', 'update_draft', 'refresh_draft', 'cancel_draft',
-            'send_prepared_artifact', 'get_send_status'}
+            'send_prepared_artifact', 'get_send_status', 'prepare_video_send', 'send_prepared_video'}
         if operation not in owned_operations:
             return finish(self._dispatch_owned(request))
         with self._artifact_authority.scope(request['client_id'], self._artifact_store) as scope:
@@ -455,7 +463,8 @@ class Broker(SelectionBrokerMixin):
                 # Preserve closed request validation even for unavailable IDs.
                 admission_models = {'read_attachment': ReadAttachmentRequest, 'analyze_media': AnalyzeMediaRequest,
                     'prepare_artifact_send': PrepareArtifactSendRequest,
-                    'prepare_reply_artifact_send': PrepareReplyArtifactSendRequest}
+                    'prepare_reply_artifact_send': PrepareReplyArtifactSendRequest,
+                    'prepare_video_send': PrepareVideoSendRequest}
                 if operation == 'read_attachment_page':
                     from .attachment_page_models import ReadAttachmentPageRequest
                     admission_models[operation] = ReadAttachmentPageRequest
@@ -544,7 +553,7 @@ class Broker(SelectionBrokerMixin):
         operation = request["operation"]
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in self._policy.enabled_capabilities)):
+                (capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in self._policy.enabled_capabilities)):
             raise CompatibilityError("capability_disabled")
         self._expire_contexts()
         payload = request["payload"]
@@ -686,6 +695,13 @@ class Broker(SelectionBrokerMixin):
         if operation == "send_prepared_forward":
             model = SendPreparedForwardRequest.model_validate(payload)
             return self._send_prepared_forward(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_video_send":
+            model = PrepareVideoSendRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_video_send(model, client_id=client_id).model_dump(mode="json")
+        if operation == "send_prepared_video":
+            model = SendPreparedVideoRequest.model_validate(payload)
+            return self._send_prepared_video(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -991,8 +1007,11 @@ class Broker(SelectionBrokerMixin):
         )
 
     def _require_topic_policy(self, draft_id: str, owner: DraftOwner) -> None:
-        if self._drafts.kind(draft_id, owner=owner) == 'forward':
+        kind = self._drafts.kind(draft_id, owner=owner)
+        if kind == 'forward':
             self._require_forward_policy()  # Status and receipts stay bound to forward_send.
+        elif kind == 'video':
+            self._require_video_policy()  # Status and receipts stay bound to video_send.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         require_current(self._policy)
@@ -1060,7 +1079,7 @@ class Broker(SelectionBrokerMixin):
             return ListDraftsResponse(status="unavailable", detail="drafts are unavailable")
 
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
-        if draft.reply_source is not None or draft.kind == "forward":
+        if draft.reply_source is not None or draft.kind in ("forward", "video"):
             raise DraftError("draft is unavailable")
         self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
@@ -1585,6 +1604,8 @@ class Broker(SelectionBrokerMixin):
             require_current(self._policy)
             if "send" not in self._policy.enabled_capabilities:
                 raise CompatibilityError("capability_disabled")
+            if claim.draft.kind == "video":
+                self._require_video_policy()
             if claim.draft.reply_source is not None:
                 self._require_reply_source_policy(claim.draft.reply_source)
                 if "reply_artifact_send" not in self._policy.enabled_capabilities:
@@ -1609,7 +1630,7 @@ class Broker(SelectionBrokerMixin):
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
-            if kind == "forward" or (kind == "text") != text_only:
+            if kind in ("forward", "video") or (kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             self._require_topic_policy(request.draft_id, owner)
@@ -1635,7 +1656,7 @@ class Broker(SelectionBrokerMixin):
                                                     detail="draft is unavailable after expiry or restart")
             # The recipient is resolved again immediately before the single provider attempt.
             entry = self._drafts.peek(request.draft_id, owner=owner)
-            if entry.kind == "forward" or (entry.kind == "text") != text_only:
+            if entry.kind in ("forward", "video") or (entry.kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             chat = self._shared_client().resolve_target(entry.recipient)
@@ -2001,6 +2022,177 @@ class Broker(SelectionBrokerMixin):
                 # Disclose observed evidence only to the same current account and policy.
                 if self._forward_owner(client_id) != owner:
                     raise DraftError(FORWARD_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', 'current receipt authority is unavailable; do not retry automatically')
+            return result(receipt.status,
+                          'TDLib confirmed delivery' if receipt.status == 'sent' else
+                          failure_detail if receipt.status == 'failed' else
+                          'delivery is unconfirmed; do not retry automatically',
+                          recipient=claim.draft.recipient, message_id=receipt.message_id)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return result('expired', 'draft is unavailable or no longer valid')
+
+    def _require_video_policy(self) -> None:
+        require_current(self._policy)
+        if not {'send', 'video_send'} <= set(self._policy.enabled_capabilities):
+            raise CompatibilityError('capability_disabled')
+
+    def _video_owner(self, client_id: str) -> DraftOwner:
+        owner = self._draft_owner(client_id)
+        self._require_video_policy()
+        return owner
+
+    def _video_preview(self, draft, owner: DraftOwner) -> VideoDraftPreview:
+        spec = draft.video
+        if draft.kind != 'video' or not isinstance(spec, VideoSpec):
+            raise DraftError(VIDEO_UNAVAILABLE)
+        self._require_video_policy()
+        return VideoDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            recipient=VideoRecipient(chat_id=draft.recipient, title=draft.recipient_title),
+            artifact_id=draft.artifact_id, display_name=draft.display_name, size_bytes=draft.size_bytes,
+            sha256=draft.sha256, facts=spec.facts, caption=draft.caption)
+
+    def _prepare_video_send(self, request: PrepareVideoSendRequest, *, client_id: str) -> PrepareVideoSendResponse:
+        try:
+            owner = self._video_owner(client_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            artifact = self._artifact_store.lookup(request.artifact_id)
+            if artifact is None:
+                raise DraftError(VIDEO_UNAVAILABLE)
+            if not 0 < artifact.size_bytes <= MAX_VIDEO_BYTES:
+                raise VideoRefusal('video_too_large')
+            try:
+                facts = probe_video(artifact.path, size_bytes=artifact.size_bytes)
+            except VideoProbeError:
+                raise VideoRefusal('unsupported_video') from None
+            metadata = self._attachment_metadata(request.artifact_id)
+            # The file name is display evidence only; the bytes and probed facts are bound by sha256.
+            display_name = metadata[1] if metadata is not None and isinstance(metadata[1], str) and metadata[1] else 'video.mp4'
+            recipient_identity, recipient_title = chat_identity(provider.resolve_target(request.recipient), request.recipient)
+            spec = VideoSpec(facts=facts, sha256=artifact.sha256, size_bytes=artifact.size_bytes,
+                             recipient_identity=recipient_identity)
+            self._reply_budget_check(provider)
+            if (self._video_owner(client_id) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(VIDEO_UNAVAILABLE)
+            draft = self._drafts.prepare_video(owner=owner, artifact_id=request.artifact_id, recipient=request.recipient,
+                recipient_title=recipient_title, display_name=display_name, caption=request.caption, video=spec)
+            preview = self._video_preview(draft, owner)
+            self._remember_draft_title(draft)
+            return PrepareVideoSendResponse(status='prepared', video=preview, detail=VIDEO_PREPARED)
+        except VideoRefusal as refusal:
+            return PrepareVideoSendResponse(status='refused', refusal=refusal.code, detail=VIDEO_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError,
+                ArtifactStoreError, ArtifactUnavailable):
+            return PrepareVideoSendResponse(status='unavailable', detail=VIDEO_UNAVAILABLE)
+
+    def _send_prepared_video(self, request: SendPreparedVideoRequest, *, client_id: str,
+                             deadline: float | None = None) -> SendPreparedVideoResponse:
+        if request.approved is not True:
+            return SendPreparedVideoResponse(status='not_approved', draft_id=request.draft_id,
+                                             detail='explicit approval was not given')
+        # Capture once: account reads, owner confirmation, staging and transport share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._send_prepared_video_impl(request, client_id=client_id)
+
+    def _send_prepared_video_impl(self, request: SendPreparedVideoRequest, *, client_id: str) -> SendPreparedVideoResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return SendPreparedVideoResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._video_owner(client_id)
+            if self._drafts.kind(draft_id, owner=owner) != 'video':
+                return result('error', 'draft kind does not match send tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                if previous.evidence == 'local_failed':
+                    return result('local_failed', 'previous local failure receipt; no provider attempt was made '
+                                  'and no new send was attempted')
+                return result(previous.status, 'previous provider attempt receipt; no new send was attempted',
+                              message_id=previous.message_id)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            # peek re-hashes the artifact against the draft's sha256 and size.
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.video
+            if entry.kind != 'video' or not isinstance(spec, VideoSpec):
+                return result('error', 'draft kind does not match send tool')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            identity, title = chat_identity(provider.resolve_target(entry.recipient), entry.recipient)
+            if title != expected_title or identity != spec.recipient_identity:
+                return result('recipient_changed', 'recipient changed; prepare a new video draft',
+                              recipient=entry.recipient)
+            self._reply_budget_check(provider)
+            if (self._video_owner(client_id) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(VIDEO_UNAVAILABLE)
+            preview = self._video_preview(entry, owner).model_dump(mode='json')
+            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
+                    caption=entry.caption, kind='video', video_preview=preview):
+                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            # The local dialog may remain open while account, policy or provider change.
+            if self._video_owner(client_id) != owner:
+                raise DraftError(VIDEO_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(VIDEO_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            scope = active_scope(self._artifact_store)
+            send_fence = (lambda: self._artifact_send_fence(scope, owner, provider, claim.provider_epoch, claim)) if scope is not None else None
+            def video_guard():
+                require_current(self._policy)
+                return ({'send', 'video_send'} <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.video_claim_current(draft_id, owner=owner, provider=provider,
+                                                         provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the send'
+            try:
+                staged_path = stage_approved_document(claim)
+            except (OSError, ValueError, ConfigurationError):
+                self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+                return result('local_failed', 'local staged file could not be prepared; no provider send was attempted')
+            try:
+                # Recheck after potentially long staging, before provider entry.
+                if send_fence is not None:
+                    with send_fence():
+                        pass
+                sender = getattr(provider, 'send_video_message', None)
+                if not callable(sender):
+                    raise MessageSendNotAttempted('video provider is unavailable')
+                facts = spec.facts
+                message_id = sender(claim.draft.recipient, staged_path, claim.draft.caption,
+                    duration_seconds=facts.duration_seconds, width=facts.width, height=facts.height,
+                    supports_streaming=facts.supports_streaming, size_bytes=claim.draft.size_bytes,
+                    expected_account_id=owner.account_id, expected_recipient_title=expected_title,
+                    expected_recipient_identity=spec.recipient_identity, attempt_id=draft_id,
+                    pre_send_guard=video_guard, pre_send_fence=send_fence)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='sent', message_id=message_id)
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                failure_detail = error.public_detail()
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.status in {'sent', 'failed'}:
+                try:
+                    retire_staged_document(staged_path)
+                except (OSError, ValueError):
+                    pass  # The receipt still owns the provider outcome; staging is TTL-bounded.
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider send was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._video_owner(client_id) != owner:
+                    raise DraftError(VIDEO_UNAVAILABLE)
             except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
                 return result('outcome_unknown', 'current receipt authority is unavailable; do not retry automatically')
             return result(receipt.status,

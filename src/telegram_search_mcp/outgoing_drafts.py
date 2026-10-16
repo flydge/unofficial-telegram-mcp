@@ -94,7 +94,7 @@ class OutgoingDraft:
     expires_at: float
     recipient_title: str = ""
     approval_required: bool = True
-    kind: Literal["document", "photo", "voice_note", "text", "forward"] = "document"
+    kind: Literal["document", "photo", "voice_note", "text", "forward", "video"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -109,9 +109,12 @@ class OutgoingDraft:
     formatting_provider: object | None = None
     formatting_provider_epoch: object | None = None
     forward: object | None = None  # forward_drafts.ForwardSpec; never artifact-backed
+    video: object | None = None  # video_drafts.VideoSpec; artifact-backed
 
 
 _UNBACKED_KINDS = frozenset({"text", "forward"})
+# Kinds with a dedicated send tool; the generic draft tools never list, revise or cancel them.
+_DEDICATED_KINDS = frozenset({"forward", "video"})
 
 
 @dataclass(frozen=True)
@@ -356,6 +359,59 @@ class OutgoingDraftRegistry:
             record_selection_draft(draft_id)
             return draft
 
+    def prepare_video(self, *, owner: DraftOwner, artifact_id: str, recipient: int, recipient_title: str,
+                      display_name: str, caption: str, video: object,
+                      local_admission_guard: Callable[[], None] | None = None) -> OutgoingDraft:
+        """Record one native video bound to the exact probed artifact bytes."""
+        from .video_drafts import MAX_VIDEO_BYTES, VideoSpec
+        self._validate_owner(owner)
+        if type(recipient) is not int or recipient == 0:
+            raise ValueError("recipient must be a nonzero numeric chat ID")
+        if (not isinstance(video, VideoSpec) or type(recipient_title) is not str or not recipient_title or
+                not isinstance(display_name, str) or not isinstance(caption, str) or len(caption) > 1024 or
+                "\x00" in caption):
+            raise DraftError("video draft is unavailable")
+        safe_name = _safe_display_name(display_name)
+        safe_caption = _safe_caption(caption)
+        mime_type = "video/quicktime" if safe_name.casefold().endswith(".mov") else "video/mp4"
+        try:
+            artifact = self._store.lookup(artifact_id)
+        except ArtifactStoreError as error:
+            raise DraftError("artifact is unavailable") from error
+        if (artifact is None or artifact.sha256 != video.sha256 or artifact.size_bytes != video.size_bytes or
+                not 0 < artifact.size_bytes <= MAX_VIDEO_BYTES):
+            raise DraftError("artifact is unavailable")
+        now = self._clock()
+        expires_at = min(now + self._max_ttl_seconds, artifact.expires_at)
+        if expires_at <= now:
+            raise DraftError("artifact has expired")
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
+            if local_admission_guard is not None:
+                local_admission_guard()
+            self._prune_locked(now)
+            if len(self._entries) >= self._capacity:
+                raise DraftError("draft capacity is exhausted")
+            draft_id = f"draft_{uuid.uuid4().hex}"
+            if draft_id in self._entries:
+                raise DraftError("draft ID collision")
+            draft = OutgoingDraft(
+                draft_id=draft_id, artifact_id=artifact_id, sha256=artifact.sha256, size_bytes=artifact.size_bytes,
+                display_name=safe_name, mime_type=mime_type, caption=safe_caption, recipient=recipient,
+                expires_at=expires_at, recipient_title=recipient_title, kind="video", video=video,
+            )
+            # Preparing again supersedes the same owner's pending draft for the same
+            # artifact and recipient; it can no longer be claimed.
+            for entry in self._entries.values():
+                old = entry.draft
+                if (entry.owner == owner and entry.state == "pending" and old.kind == "video" and
+                        old.recipient == recipient and old.artifact_id == artifact_id):
+                    entry.state = "superseded"
+            self._entries[draft_id] = _Entry(draft=draft, owner=owner, artifact_expires_at=artifact.expires_at,
+                                            artifact_authority=self._authority_stamp())
+            record_selection_draft(draft_id)
+            return draft
+
     def revise(self, draft_id: str, *, owner: DraftOwner, recipient_title: str,
                text: str | None = None, caption: str | None = None,
                reply: bool = False, reply_source: ReplySource | None = None,
@@ -371,7 +427,7 @@ class OutgoingDraftRegistry:
             entry = self._get(draft_id, owner)
             self._pending_locked(entry, verify_artifact=False)
             old = entry.draft
-            if old.kind == "forward" or (old.reply_source is not None) != reply:
+            if old.kind in _DEDICATED_KINDS or (old.reply_source is not None) != reply:
                 raise DraftError("draft is unavailable")
             changes = {}
             if reply_source is not None:
@@ -506,6 +562,15 @@ class OutgoingDraftRegistry:
             entry = self._get(draft_id, owner)
             return (entry.state == 'claimed' and entry.draft.kind == 'forward' and
                 entry.draft.forward is not None and self._clock() < entry.draft.expires_at and
+                entry.provider is provider and entry.provider_epoch is provider_epoch)
+
+    def video_claim_current(self, draft_id: str, *, owner: DraftOwner,
+                            provider: object, provider_epoch: object) -> bool:
+        """Final local prewire check for the one consumed video claim."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (entry.state == 'claimed' and entry.draft.kind == 'video' and
+                entry.draft.video is not None and self._clock() < entry.draft.expires_at and
                 entry.provider is provider and entry.provider_epoch is provider_epoch)
 
     def topic_claim_current(self, draft_id: str, *, owner: DraftOwner,
@@ -700,7 +765,7 @@ class OutgoingDraftRegistry:
             result = []
             for draft_id in sorted(self._entries):
                 entry = self._entries[draft_id]
-                if (entry.owner != owner or entry.draft.kind == "forward" or
+                if (entry.owner != owner or entry.draft.kind in _DEDICATED_KINDS or
                         (after_draft_id is not None and draft_id <= after_draft_id)):
                     continue
                 try:
@@ -716,7 +781,7 @@ class OutgoingDraftRegistry:
         """Only a pending draft can lose the race to a provider claim."""
         with self._lock:
             entry = self._get(draft_id, owner)
-            if (entry.draft.kind == "forward" or self._clock() >= entry.draft.expires_at or
+            if (entry.draft.kind in _DEDICATED_KINDS or self._clock() >= entry.draft.expires_at or
                     entry.state not in {"pending", "cancelled"}):
                 raise DraftError("draft is unavailable")
             entry.state = "cancelled"

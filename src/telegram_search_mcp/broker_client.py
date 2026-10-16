@@ -43,6 +43,8 @@ from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftReques
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
 from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
     SendPreparedForwardResponse, UNAVAILABLE as FORWARD_UNAVAILABLE)
+from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
+    SendPreparedVideoResponse, UNAVAILABLE as VIDEO_UNAVAILABLE)
 from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, CreateLocalArtifactRequest, CreateLocalArtifactResponse,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, SendPreparedArtifactRequest, SendPreparedArtifactResponse,
@@ -348,11 +350,11 @@ class BrokerClient(SelectionClientMixin):
             local = contract_descriptor(self._policy)
             capability = OPERATION_CAPABILITIES.get(operation)
             if capability is not None and (capability not in self._policy.enabled_capabilities or
-                    (capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in self._policy.enabled_capabilities)):
+                    (capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in self._policy.enabled_capabilities)):
                 raise CompatibilityError("capability_disabled")
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None
-        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
+        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
         try:
             connection = self._connector(self._socket_path)
         except OSError:
@@ -1732,6 +1734,34 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError, ValueError):
             return SendPreparedForwardResponse(status="outcome_unknown", draft_id=request.draft_id,
                                                detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_video_send(self, request: PrepareVideoSendRequest) -> PrepareVideoSendResponse:
+        from .outgoing_drafts import _safe_caption
+        try:
+            response = PrepareVideoSendResponse.model_validate(
+                self._request("prepare_video_send", request.model_dump(mode="json")))
+            if response.video is not None:
+                preview = response.video
+                if (preview.artifact_id != request.artifact_id or preview.recipient.chat_id != request.recipient or
+                        preview.raw_caption != _safe_caption(request.caption)):
+                    raise BrokerUnavailable("video preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareVideoSendResponse(status="unavailable", detail=VIDEO_UNAVAILABLE)
+
+    def send_prepared_video(self, request: SendPreparedVideoRequest) -> SendPreparedVideoResponse:
+        try:
+            response = SendPreparedVideoResponse.model_validate(
+                self._request("send_prepared_video", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("video receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return SendPreparedVideoResponse(status="error", draft_id=request.draft_id,
+                                             detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return SendPreparedVideoResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                             detail="broker response is unavailable; do not retry automatically")
 
     def check(self) -> str:
         result = self._request("check", {})

@@ -33,10 +33,14 @@ def _outgoing_style_detail(draft):
 
 
 def _forward_detail(validated) -> str:
-    """Untrusted Telegram strings stay marked on their own lines; outgoing text and
-    caption are shown readable in any script, with invisible, direction-changing and
-    look-alike characters as reversible ⟦U+XXXX⟧ marks, so nothing can hide."""
-    from .forward_drafts import readable, unescaped
+    """Untrusted Telegram strings stay marked on their own lines. The text or caption, each
+    entity's covered text and each link-preview URL are enclosed in « » and rendered by
+    `readable` below a legend line stating `READABLE_RULE`: letters of every script stay
+    literal, the listed invisible, spacing, stacking, bracket and mixed-word look-alike
+    characters become reversible ⟦U+XXXX⟧, and a literal « or » inside a span is marked, so
+    no span can be closed early or start a fake line. Look-alike words in one script are not
+    marked."""
+    from .forward_drafts import READABLE_RULE, readable, unescaped
     from .reply_drafts import EVIDENCE_MARKER
     source, recipient = validated.source, validated.recipient
     mode = ('FORWARD — recipients see the original sender' if validated.mode == 'forward' else
@@ -52,19 +56,23 @@ def _forward_detail(validated) -> str:
     elif source.text is None:
         text = f'{label}: (none)\n'
     else:
-        text = (f'{label} {marker} (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): '
-                f'{readable(unescaped(source.text))}\n')
+        text = (f'Untrusted spans in « » below are exact; {READABLE_RULE}.\n'
+                f'{label} {marker} (exact): «{readable(unescaped(source.text))}»\n')
         rows = source.entity_rows()
         if rows:
             text += (f'{label} entities (raw text UTF-16 code units):\n' +
-                     ''.join(f'{kind}: offset {offset}, length {length}; covered {readable(json.loads(covered))}\n'
+                     ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
                              for kind, offset, length, covered in rows))
     link = ''
     if source.link_preview is not None:
         item = source.link_preview
         link = (f'Link preview options {marker}: disabled {item.is_disabled}; URL '
-                f'{readable(unescaped(item.url)) if item.url is not None else "(none)"}; small media {item.force_small_media}; '
+                f'{"«" + readable(unescaped(item.url)) + "»" if item.url is not None else "(none)"}; '
+                f'small media {item.force_small_media}; '
                 f'large media {item.force_large_media}; above text {item.show_above_text}\n')
+    if source.link_preview_card_url is not None:
+        link += (f'Link preview card {marker}: URL «{readable(unescaped(source.link_preview_card_url))}»; '
+                 'its title, description and media are not shown\n')
     media = ''
     if source.media is not None:
         item = source.media
@@ -96,6 +104,28 @@ def _forward_detail(validated) -> str:
             "then make one forward attempt.")
 
 
+def _video_detail(validated) -> str:
+    """The untrusted file name and caption stay on their own marked lines, readable in any
+    script, with invisible, direction-changing and look-alike characters as ⟦U+XXXX⟧."""
+    from .forward_drafts import readable
+    recipient = validated.recipient
+    exact = '[untrusted] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧)'
+    caption = (f'Caption {exact}: {readable(validated.raw_caption)}\n' if validated.caption is not None
+               else 'Caption: (none)\n')
+    return (f"Send this native video to {recipient.title} (chat {recipient.chat_id})?\n"
+            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
+            f"Expires: {validated.expires_at.isoformat()}\n\n"
+            f"File name {exact}: {readable(validated.raw_display_name)}\n"
+            f"Bytes: {validated.size_bytes}\nSHA-256: {validated.sha256}\n"
+            f"Duration: {validated.duration_seconds} seconds\nDimensions: {validated.width}x{validated.height}\n"
+            f"Codec: {validated.codec}\nAudio: {'yes' if validated.has_audio else 'no'}\n"
+            f"Streaming: {'yes' if validated.supports_streaming else 'no'}\n{caption}"
+            f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
+            f"Preview SHA-256: {validated.preview_sha256}\n\n"
+            "Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, "
+            "then make one upload/send attempt as a native video.")
+
+
 def confirm_approved_send(
     *, recipient_title: str, recipient: int, display_name: str,
     size_bytes: int, sha256: str, caption: str,
@@ -105,13 +135,28 @@ def confirm_approved_send(
     reply_artifact_preview: dict | None = None,
     topic_preview: dict | None = None,
     forward_preview: dict | None = None,
+    video_preview: dict | None = None,
 ) -> bool:
     """Ask the signed-in macOS user; failure or timeout means no send."""
-    if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview, forward_preview)) > 1:
+    if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview, forward_preview,
+                                           video_preview)) > 1:
         return False
-    if (kind == 'forward') != (forward_preview is not None):
+    if (kind == 'forward') != (forward_preview is not None) or (kind == 'video') != (video_preview is not None):
         return False
-    if forward_preview is not None:
+    if video_preview is not None:
+        from .video_drafts import VideoDraftPreview
+        try:
+            validated = VideoDraftPreview.model_validate(video_preview)
+            if (validated.recipient.chat_id != recipient or validated.recipient.title != recipient_title or
+                    validated.sha256 != sha256 or validated.size_bytes != size_bytes or
+                    validated.raw_display_name != display_name or validated.raw_caption != (caption or '') or
+                    text not in ('', None) or duration_seconds is not None or source_sha256 is not None or
+                    source_display_name is not None):
+                return False
+        except (ValueError, TypeError):
+            return False
+        preview = _video_detail(validated)
+    elif forward_preview is not None:
         from .forward_drafts import ForwardDraftPreview
         try:
             validated = ForwardDraftPreview.model_validate(forward_preview)

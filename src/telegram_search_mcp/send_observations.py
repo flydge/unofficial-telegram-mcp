@@ -41,6 +41,7 @@ class SendObservation:
     saved_messages_topic_id: int | None = None
     forward: bool = False
     forward_self: bool = False  # Saved Messages: the provider may mark a forwarded copy incoming.
+    video: tuple[int, int, int, int] | None = None  # Reviewed (duration, width, height, size) of a native video.
 
 
 FORWARD_CONTENT_TYPES = frozenset({'messageText', 'messagePhoto', 'messageDocument', 'messageVoiceNote',
@@ -129,6 +130,24 @@ def _artifact_matches(content,observation):
     return (waveform is not None and len(waveform)==observation.waveform_size
         and hashlib.sha256(waveform).hexdigest()==observation.waveform_sha256)
 
+def _video_matches(content, expected):
+    """A final messageVideo must agree with the reviewed draft wherever the provider reports a fact."""
+    duration, width, height, size = expected
+    video = content.get('video')
+    if not (isinstance(video, dict) and video.get('@type') == 'video'):
+        return False
+    for key, value in (('duration', duration), ('width', width), ('height', height)):
+        if key in video and (type(video[key]) is not int or video[key] != value):
+            return False
+    if 'video' in video:
+        file = video['video']
+        # TDLib reports size 0 when it is unknown; any other reported size must match.
+        if not (isinstance(file, dict) and file.get('@type') == 'file') or (
+                'size' in file and (type(file['size']) is not int or file['size'] not in (0, size))):
+            return False
+    return True
+
+
 class SendObservations:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic,
                  capacity: int = MAX_OBSERVATIONS):
@@ -148,9 +167,20 @@ class SendObservations:
         with self._lock:
             self._entries.clear()
 
-    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None, forward=False, forward_self=False):
+    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None, forward=False, forward_self=False, video=None):
         if type(outgoing_entities) is not tuple or len(outgoing_entities) > 32:
             raise ObservationUnavailable('invalid frozen outgoing expectation')
+        # A native video correlates by sending_id, chat and returned temporary ID and
+        # checks the reviewed facts on the final message; it is never a reply or a topic send.
+        if video is not None:
+            if (type(video) is not tuple or len(video) != 4 or content_type != 'messageVideo' or forward or
+                    not _number(video[0], 3 * 3600, 1) or not _number(video[1], 8192, 16) or
+                    not _number(video[2], 8192, 16) or not _number(video[3], 64 * 1024 * 1024, 1) or
+                    any(value is not None for value in (text_sha256, reply_anchor, caption_sha256, voice_duration,
+                        waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or outgoing_entities):
+                raise ObservationUnavailable('invalid video observation')
+        elif content_type == 'messageVideo' and not forward:
+            raise ObservationUnavailable('video observation requires reviewed facts')
         # Forward content is provider-produced: correlate by sending_id, chat and
         # returned temporary ID only; no outgoing content hash can apply.
         if type(forward) is not bool or type(forward_self) is not bool or (forward_self and (
@@ -205,7 +235,7 @@ class SendObservations:
             if (attempt_id in self._entries or len(self._entries) >= self._capacity or
                     any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
-            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward,forward_self=forward_self)
+            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward,forward_self=forward_self,video=video)
 
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
@@ -298,6 +328,7 @@ class SendObservations:
                     'forum_topic_id': observation.forum_topic_id}) and
                 (observation.reply_anchor is not None or value.get('reply_to') is None)))
             and (observation.caption_sha256 is None or _artifact_matches(value['content'],observation))
+            and (not final or observation.video is None or _video_matches(value['content'],observation.video))
             and ((observation.reply_anchor is None and observation.forum_topic_id is None and not observation.outgoing_entities) or observation.caption_sha256 is not None or (
                 isinstance(value["content"].get("text"),dict)
                 and set(value["content"]["text"])=={"@type","text","entities"}

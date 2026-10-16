@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from .reply_formatted_sources import _boundaries
 
-PROJECTION_VERSION = 2
+PROJECTION_VERSION = 3
 MAX_PROJECTION_BYTES = 65536
 MAX_TEXT = 4096
 MAX_ENTITIES = 100
@@ -93,17 +93,44 @@ def _formatted(value: object) -> dict:
     return {'text': text, 'entities': rows}
 
 
-def _link_options(value: object, text: str) -> dict | None:
-    """A preview URL absent from the visible text would be a hidden link target."""
+def visible_url(url: object, text: str, entities) -> bool:
+    """A link target is reviewable only when it is exactly the covered text of a Url entity
+    or a whole whitespace-delimited token of the visible text; a prefix, a substring of a
+    longer link or anything spliced from several tokens is not."""
+    if type(url) is not str or not url:
+        return False
+    boundaries = _boundaries(text)
+    for row in entities:
+        start, end = boundaries.get(row['offset']), boundaries.get(row['offset'] + row['length'])
+        if row['type'] == 'textEntityTypeUrl' and start is not None and end is not None and text[start:end] == url:
+            return True
+    return url in text.split()
+
+
+def _link_options(value: object, text: dict) -> dict | None:
+    """A preview URL that is not a visible link of the text would be a hidden link target."""
     if value is None:
         return None
     if (type(value) is not dict or set(value) != {'@type', 'url', *LINK_OPTION_FLAGS} or
             value['@type'] != 'linkPreviewOptions' or not _string(value['url'], MAX_TEXT) or
             any(type(value[name]) is not bool for name in LINK_OPTION_FLAGS)):
         raise _content_refusal()
-    if value['url'] and value['url'] not in text:
+    if value['url'] and not visible_url(value['url'], text['text'], text['entities']):
         raise ForwardRefusal('hidden_source_content')
     return {name: value[name] for name in ('url', *LINK_OPTION_FLAGS)}
+
+
+def _link_card(value: object, text: dict) -> str | None:
+    """The provider's rendered link card travels with the message: only its URL is projected
+    and it must be a visible link of the text. Title, description and media are provider
+    data that stay unprojected and unshown."""
+    if value is None:
+        return None
+    if type(value) is not dict or value.get('@type') != 'linkPreview' or not _string(value.get('url'), MAX_TEXT):
+        raise _content_refusal()
+    if not visible_url(value['url'], text['text'], text['entities']):
+        raise ForwardRefusal('hidden_source_content')
+    return value['url']
 
 
 def _file(value: object) -> dict:
@@ -141,7 +168,8 @@ def _content(content: object) -> dict:
     if kind == 'text':
         text = _formatted(content.get('text'))
         return {'kind': 'text', 'text': text,
-                'link_preview_options': _link_options(content.get('link_preview_options'), text['text'])}
+                'link_preview_options': _link_options(content.get('link_preview_options'), text),
+                'link_preview_url': _link_card(content.get('link_preview'), text)}
     result = {'kind': kind, 'caption': _formatted(content.get('caption'))}
     if kind in ('photo', 'video', 'animation'):
         if content.get('is_secret') is True:

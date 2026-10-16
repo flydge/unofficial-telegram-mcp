@@ -11,7 +11,8 @@ from typing import Annotated, Literal
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .draft_models import _Closed, AccountId, DraftId, Hash
-from .forward_sources import MAX_ENTITIES, MAX_TEXT, VISIBLE_ENTITY_TYPES, ForwardRefusal, ForwardSnapshot
+from .forward_sources import (MAX_ENTITIES, MAX_TEXT, VISIBLE_ENTITY_TYPES, ForwardRefusal, ForwardSnapshot,
+                              visible_url)
 from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, digest
 from .reply_formatted_sources import _boundaries, _inert_json_string
 from .sanitize import sanitize_telegram_text
@@ -20,11 +21,11 @@ from .schemas import ChatId
 PREPARED = 'immutable forward draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'source message is not eligible; no draft was created'
 UNAVAILABLE = 'forward draft is unavailable'
-PREVIEW_VERSION = 2
+PREVIEW_VERSION = 3
 # One reversible JSON layer (the reply v23 encoding): only ASCII letters, digits, _ and -
 # stay literal, so one astral scalar costs 12 characters; plus the two quotes.
 MAX_ESCAPED = 12 * MAX_TEXT + 2
-MAX_EVIDENCE = 131072  # Escaped text plus every escaped covered span the dialog prints.
+MAX_EVIDENCE = 131072  # Escaped text, covered spans and link-preview URLs the dialog prints.
 MAX_NAME = 255
 
 ForwardMode = Literal['forward', 'copy']
@@ -58,28 +59,81 @@ def escaped(raw: str) -> str:
     return EVIDENCE_MARKER + _inert_json_string(raw)
 
 
-_MARK_OPEN = '\u27e6'
+# Unicode 16 Default_Ignorable_Code_Point, hard-coded so the rule never drifts with the runtime.
+_DEFAULT_IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+                      (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+                      (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+                      (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+# Unicode Variation_Selector: Mongolian free variation selectors, VS1-16, VS17-256.
+_VARIATION_SELECTORS = ((0x180B, 0x180D), (0x180F, 0x180F), (0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
+# The mark bracket, its look-alikes, the span delimiters and the blank braille cell.
+_ALWAYS_MARKED = frozenset('\u27e6\u301a\u301b\u00ab\u00bb\u2800')
+_LOOKALIKE_SCRIPTS = ('CYRILLIC', 'GREEK', 'ARMENIAN', 'CHEROKEE', 'LISU')
+_MARKED_CATEGORIES = frozenset({'Cc', 'Cf', 'Co', 'Cn', 'Cs', 'Zl', 'Zp'})
+# The exact rule, stated once for the docstring, the dialog legend and the docs.
+READABLE_RULE = ('⟦U+XXXX⟧ marks control, format, private-use, unassigned and default-ignorable characters '
+                 '(except one U+FE0E/U+FE0F right after a non-selector character), line, paragraph and non-ASCII '
+                 'spaces, every repeated space, U+2800, characters NFKC changes, combining marks after the second '
+                 'in a row, « » ⟦ 〚 〛, and Cyrillic, Greek, Armenian, Cherokee, Lisu or undecomposed non-ASCII '
+                 'Latin letters in a word that also has ASCII letters; look-alike words in one script are not marked')
+
+
+def _within(char: str, ranges) -> bool:
+    code = ord(char)
+    return any(low <= code <= high for low, high in ranges)
+
+
+def _lookalike(char: str) -> bool:
+    """Letters that pass for ASCII in a mixed word: the listed scripts, and non-ASCII Latin
+    letters without a canonical decomposition (ɡ, ı, ɑ; é and ü decompose and stay literal)."""
+    if not char.isalpha() or char.isascii():
+        return False
+    name = unicodedata.name(char, '')
+    decomposition = unicodedata.decomposition(char)
+    return name.startswith(_LOOKALIKE_SCRIPTS) or (
+        name.startswith('LATIN') and (not decomposition or decomposition.startswith('<')))
+
+
+def _presentation_selector(raw: str, index: int) -> bool:
+    """A single U+FE0E/U+FE0F directly after a non-selector character is ordinary emoji or
+    text presentation; a selector at the start or in a run of selectors is marked."""
+    return (raw[index] in '\ufe0e\ufe0f' and index > 0 and not _within(raw[index - 1], _VARIATION_SELECTORS)
+            and (index + 1 == len(raw) or not _within(raw[index + 1], _VARIATION_SELECTORS)))
 
 
 def readable(raw: str) -> str:
-    """For the human dialog: letters of every script stay literal, so Cyrillic or CJK text
-    is readable, while anything invisible, direction-changing or changed by NFKC (look-alike
-    compatibility forms) is shown as ⟦U+XXXX⟧, as are Cyrillic/Greek letters inside a word
-    that also has ASCII letters (the classic look-alike domain). The literal ⟦ is marked too,
-    so the rendering is reversible. The MCP preview keeps the full JSON escapes."""
-    def lookalike(char):
-        return char.isalpha() and not char.isascii() and unicodedata.name(char, '').startswith(('CYRILLIC', 'GREEK'))
-    out = []
+    """Render untrusted text for a human dialog (rule summarized in `READABLE_RULE`).
+
+    Letters of every script stay literal, so Cyrillic or CJK text is readable; the forward
+    dialog encloses each rendering between « and », which therefore never occur literally
+    inside it. Shown as reversible ⟦U+XXXX⟧ instead: control (Cc, including newline and
+    tab), format (Cf), private-use, unassigned and surrogate characters; every Unicode 16
+    Default_Ignorable_Code_Point except one U+FE0E/U+FE0F directly after a character that is
+    not a variation selector and not followed by one; line and paragraph separators and every
+    space other than U+0020; each U+0020 after the first in a run; U+2800; any character that
+    NFKC changes; each combining mark (Mn/Me) after the second in a consecutive run; the
+    brackets ⟦ 〚 〛 and the delimiters « »; and, inside a whitespace-delimited word that also
+    has ASCII letters, letters named CYRILLIC, GREEK, ARMENIAN, CHEROKEE or LISU and non-ASCII
+    LATIN letters without a canonical decomposition. Marking the literal ⟦ keeps the rendering
+    reversible. Look-alike words written entirely in one script are not marked. The MCP
+    preview keeps the full JSON escapes."""
+    mixed = []
     for token in re.split(r'(\s+)', raw):
-        mixed = any(char.isascii() and char.isalpha() for char in token) and any(map(lookalike, token))
-        for char in token:
-            category = unicodedata.category(char)
-            if (char == _MARK_OPEN or category in ('Cc', 'Cf', 'Co', 'Cn', 'Cs', 'Zl', 'Zp')
-                    or (category == 'Zs' and char != ' ') or unicodedata.normalize('NFKC', char) != char
-                    or (mixed and lookalike(char))):
-                out.append('\u27e6U+%04X\u27e7' % ord(char))
-            else:
-                out.append(char)
+        flag = any(char.isascii() and char.isalpha() for char in token) and any(map(_lookalike, token))
+        mixed.extend([flag] * len(token))
+    out = []
+    combining = 0
+    for index, char in enumerate(raw):
+        category = unicodedata.category(char)
+        combining = combining + 1 if category in ('Mn', 'Me') else 0
+        if (char in _ALWAYS_MARKED or category in _MARKED_CATEGORIES or (category == 'Zs' and char != ' ')
+                or (char == ' ' and index > 0 and raw[index - 1] == ' ')
+                or (_within(char, _DEFAULT_IGNORABLE) and not _presentation_selector(raw, index))
+                or unicodedata.normalize('NFKC', char) != char or combining > 2
+                or (mixed[index] and _lookalike(char))):
+            out.append('\u27e6U+%04X\u27e7' % ord(char))
+        else:
+            out.append(char)
     return ''.join(out)
 
 
@@ -156,13 +210,14 @@ def _marked(value: object) -> str | None:
 
 
 def _name(value: str) -> str | None:
-    """Short Telegram names stay sanitized evidence; nothing may vanish or be truncated."""
-    safe = sanitize_telegram_text(value, max_length=4 * MAX_NAME)
-    if len(safe) > MAX_NAME:
-        raise ForwardRefusal('unsupported_source_content')
-    if not safe and value.strip():
+    """A short Telegram name is admitted only when sanitizing leaves it unchanged, so the
+    marked evidence and the dialog show exactly what the provider forwards; nothing may be
+    removed, normalized, collapsed or truncated."""
+    if sanitize_telegram_text(value, max_length=len(value) + 1) != value:
         raise ForwardRefusal('hidden_source_content')
-    return EVIDENCE_MARKER + safe if safe else None
+    if len(value) > MAX_NAME:
+        raise ForwardRefusal('unsupported_source_content')
+    return EVIDENCE_MARKER + value if value else None
 
 
 def _check_marked(*values) -> None:
@@ -197,7 +252,8 @@ class ForwardMedia(_Frozen):
 
 
 class ForwardLinkPreview(_Frozen):
-    """Text-source link preview options; a URL is admitted only when visible in the text."""
+    """Text-source link preview options; a URL is admitted only when it is exactly a Url
+    entity's covered text or a whole whitespace-delimited token of the text."""
     url: Escaped | None = None
     is_disabled: StrictBool
     force_small_media: StrictBool
@@ -209,6 +265,12 @@ class ForwardLinkPreview(_Frozen):
         if self.url is not None:
             unescaped(self.url)
         return self
+
+
+def _evidence_size(text: str | None, rows, card: str | None, link: ForwardLinkPreview | None) -> int:
+    """Escaped length of every untrusted span the dialog prints: text, covered spans, URLs."""
+    url = link.url if link is not None else None
+    return len(text or '') + sum(len(row[3]) for row in rows) + len(card or '') + len(url or '')
 
 
 class ForwardSourcePreview(_Frozen):
@@ -224,6 +286,7 @@ class ForwardSourcePreview(_Frozen):
     text: Escaped | None = None
     entities: Annotated[list[ForwardEntity], Field(max_length=MAX_ENTITIES)] = Field(default_factory=list)
     link_preview: ForwardLinkPreview | None = None
+    link_preview_card_url: Escaped | None = None
     media: ForwardMedia | None = None
     source_sha256: Hash
 
@@ -237,13 +300,17 @@ class ForwardSourcePreview(_Frozen):
         _check_marked(self.author_signature)
         raw = self.raw_text
         rows = entity_rows(raw, self.entities)  # Offsets address the raw text, never a display form.
-        if len(self.text or '') + sum(len(row[3]) for row in rows) > MAX_EVIDENCE:
+        if _evidence_size(self.text, rows, self.link_preview_card_url, self.link_preview) > MAX_EVIDENCE:
             raise ValueError('source evidence exceeds the display bound')
         if (self.content_kind == 'text') != (self.media is None):
             raise ValueError('source media evidence disagrees with content kind')
+        visible = [entity.model_dump() for entity in self.entities]
         if self.link_preview is not None and (self.content_kind != 'text' or (
-                self.link_preview.url is not None and unescaped(self.link_preview.url) not in raw)):
+                self.link_preview.url is not None and not visible_url(unescaped(self.link_preview.url), raw, visible))):
             raise ValueError('link preview evidence is not visible in the text')
+        if self.link_preview_card_url is not None and (self.content_kind != 'text' or
+                not visible_url(unescaped(self.link_preview_card_url), raw, visible)):
+            raise ValueError('link preview card URL is not visible in the text')
         return self
 
     @property
@@ -264,16 +331,17 @@ class ForwardSourcePreview(_Frozen):
         formatted = content['text'] if kind == 'text' else content['caption']
         raw = formatted['text']
         text = escaped(raw) if raw else None
-        if len(text or '') + sum(len(row[3]) for row in entity_rows(raw, formatted['entities'])) > MAX_EVIDENCE:
-            raise ForwardRefusal('unsupported_source_content')
-        media = link = None
+        media = link = card = None
         if kind == 'text':
+            card = escaped(content['link_preview_url']) if content['link_preview_url'] is not None else None
             options = content['link_preview_options']
             if options is not None:
                 link = ForwardLinkPreview(url=escaped(options['url']) if options['url'] else None,
                     **{key: options[key] for key in ('is_disabled', 'force_small_media', 'force_large_media',
                                                      'show_above_text')})
-        else:
+        if _evidence_size(text, entity_rows(raw, formatted['entities']), card, link) > MAX_EVIDENCE:
+            raise ForwardRefusal('unsupported_source_content')
+        if kind != 'text':
             if kind == 'photo':
                 primary = max(content['variants'], key=lambda row: (
                     row['width'] * row['height'], row['size'], row['unique_id_sha256']))
@@ -297,7 +365,7 @@ class ForwardSourcePreview(_Frozen):
                    via_bot_user_id=value['via_bot_user_id'] or None, is_forward=value['is_forward'],
                    date=datetime.fromtimestamp(value['date'], tz=timezone.utc),
                    content_kind=kind, text=text, entities=formatted['entities'], link_preview=link,
-                   media=media, source_sha256=source.source_sha256)
+                   link_preview_card_url=card, media=media, source_sha256=source.source_sha256)
 
 
 def preview_facts(*, draft_id: str, account_id: int, expires_at: datetime, mode: str, remove_caption: bool,

@@ -1841,12 +1841,13 @@ the preview digest.
 
 The broker, not the caller, reads the source: one serialized provider read resolves
 the source chat (secret chats refused), reads the message and reads
-`getMessageProperties`. The message becomes a closed version-2 projection of at most
+`getMessageProperties`. The message becomes a closed version-3 projection of at most
 64 KiB: chat, message ID, typed sender, author signature, via-bot ID, forward flag,
 date, edit date, text or caption with entity types and raw UTF-16 offsets, admitted
-link-preview options and, for media, sizes, measures, names, presentation flags and
-a hash of each file's remote unique ID. File IDs, local paths and volatile state
-(views, reactions, interaction info, rendered link previews) never enter it.
+link-preview options and link-card URL and, for media, sizes, measures, names,
+presentation flags and a hash of each file's remote unique ID. File IDs, local paths
+and volatile state (views, reactions, interaction info, the link card's title,
+description, site name and media) never enter it.
 A missing or mistyped safety field (`self_destruct_in`, `auto_delete_in`, ephemeral
 and scheduling fields, `is_secret`, the property booleans) is never treated as
 safe: the source is unavailable or unsupported. `source_sha256` is shown to the
@@ -1863,8 +1864,11 @@ fieldless visible types (Bold, Italic, Underline, Strikethrough, Spoiler, Code,
 Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url,
 EmailAddress, PhoneNumber, BankCardNumber), so TextUrl, MentionName, CustomEmoji,
 PreCode, MediaTimestamp, DateTime, unknown types and allowlisted types carrying a
-field are refused; for a link-preview URL not literally present in the visible text;
-and for a non-blank name that sanitizes to nothing. Entities must be exact
+field are refused; for a link-preview-options URL or a link-card URL that is not
+exactly the covered text of a Url entity or a whole whitespace-delimited token of the
+visible text (a prefix or a substring of a longer link refuses); and for a name (file
+name, MIME type, audio title or performer, author signature) that sanitizing would
+change. Entities must be exact
 `textEntity` records on whole-scalar boundaries of the raw text, otherwise
 `unsupported_source_content`. A same-second edit that changes an entity type or adds
 a hidden target is caught at send time: the projection binds every entity type and
@@ -1886,14 +1890,22 @@ captions as a marked reversible JSON string in which only ASCII letters, digits,
 and `-` are literal, so homoglyphs, bidi and zero-width controls and whitespace are
 visible as `\uXXXX`; one decoded layer is exactly the hashed raw text, and entity
 offsets address it in UTF-16 code units. The local dialog is written for a human:
-letters of every script stay literal, while control, format, bidi, zero-width and
-non-space whitespace characters, NFKC-unstable look-alike forms, Cyrillic or Greek
-letters inside a word that also has ASCII letters and the mark bracket itself are
-rendered as reversible `⟦U+XXXX⟧`. It lists every entity with its covered span, the
-link-preview options and the media facts, and prints account, draft ID and expiry.
-Short names are sanitized and marked, and a name longer than 255 displayed
-characters refuses. The dialog is rebuilt from the stored immutable draft and
-validated against recipient, hash and mode before display; a mismatch is a decline.
+letters of every script stay literal, and the text or caption, each entity's covered
+span and each link-preview URL are enclosed in `« … »` below a legend line that states
+the rule. Rendered as reversible `⟦U+XXXX⟧` are control (including newline and tab),
+format, private-use and unassigned characters; every Unicode 16 default-ignorable code
+point except one U+FE0E/U+FE0F directly after a non-selector character (emoji
+presentation); line, paragraph and non-ASCII spaces; each U+0020 after the first in a
+run; U+2800; characters that NFKC changes; combining marks after the second in a row;
+the brackets `« » ⟦ 〚 〛`; and, inside a word that also has ASCII letters, Cyrillic,
+Greek, Armenian, Cherokee and Lisu letters and non-ASCII Latin letters without a
+canonical decomposition. Because literal `«`, `»` and line breaks are marked, untrusted
+content can neither close its span nor start a dialog line. The dialog lists every
+entity, the link-preview options, the link-card URL and the media facts, and prints
+account, draft ID and expiry. Names are admitted only when sanitizing leaves them
+unchanged, so they are shown exactly; one longer than 255 characters refuses. The
+dialog is rebuilt from the stored immutable draft and validated against recipient,
+hash and mode before display; a mismatch is a decline.
 
 Protected content cannot be forwarded or copied. `protected_content` applies to
 both modes when the source chat is protected or the message properties report
@@ -1923,12 +1935,17 @@ Residual risks, recorded rather than closed:
 
 - Thumbnails, album and video covers, storyboards and alternative videos are copied
   by the provider but neither projected nor shown, so the dialog cannot show them.
-- `import_info` sources are not refused, and a provider-rendered `link_preview`
-  on a text message is neither projected nor refused; only the link-preview-options
-  URL rule applies.
-- The dialog marks look-alike letters only for Cyrillic and Greek mixed with ASCII
-  and NFKC-unstable forms; other script look-alikes and script-pure look-alike words
-  appear literally. The escaped MCP preview and the hash cover them.
+- `import_info` sources are not refused. A link card's title, description, site name
+  and media are delivered with the message but neither projected nor shown; only its
+  URL is checked, bound and shown. A provider that normalizes the card URL (for
+  example adds a scheme to a bare domain) makes a legitimate message refuse.
+- The dialog marks look-alike letters only for the listed scripts and undecomposed
+  Latin letters inside a word with ASCII letters, plus NFKC-unstable forms; look-alike
+  words written entirely in one script appear literally, and legitimate letters such
+  as ß or ł are marked when mixed with ASCII. A single U+FE0E/U+FE0F after any
+  non-selector character stays literal, and dialog word wrapping can still put an
+  untrusted word at the start of a visual line inside a `« »` span. The escaped MCP
+  preview and the hash cover all of these.
 - The source and recipient reads are cached or offline provider evidence, not an
   atomic Telegram guarantee: a remote edit can race the final check, and the delivered
   message is whatever the provider holds at transport time.

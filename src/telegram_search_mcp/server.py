@@ -46,6 +46,8 @@ from .reply_drafts import (PrepareReplyTextSendRequest, PrepareReplyTextSendResp
 from .outgoing_entity_models import OutgoingEntityList
 from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
     SendPreparedForwardResponse, ForwardMode, PositiveMessageId)
+from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
+    SendPreparedVideoResponse)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -143,6 +145,8 @@ _TOOL_NAMES = [
     "retain_selection",
     "prepare_forward_send",
     "send_prepared_forward",
+    "prepare_video_send",
+    "send_prepared_video",
 ]
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -345,6 +349,7 @@ def build_server(
                 "mutations including edits, deletes, reactions, and moderation operations",
                 "unapproved sends and automatic send retries",
                 "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
+                "video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
                 "viewMessages and read receipts",
                 "caller-controlled attachment paths and file IDs",
                 "credentials, filesystem paths, and account wildcards in tool input",
@@ -1272,12 +1277,42 @@ def build_server(
                               approved: Annotated[bool, Field(strict=True)]) -> SendPreparedForwardResponse:
         return get_service().send_prepared_forward(SendPreparedForwardRequest(draft_id=draft_id, approved=approved))
 
+    @server.tool(name="prepare_video_send", description=(
+        "Prepare one owned MP4/MOV artifact of at most 64 MiB as a native Telegram video for recipient. "
+        "Requires default-off video_send and send. Duration, width, height, codec (H.264 or HEVC), audio "
+        "presence and streaming layout are read locally from the file's own ISO-BMFF boxes without decoding; "
+        "fragmented, unknown-codec, multi-video-track or otherwise unusual files are refused as unsupported_video, "
+        "larger files as video_too_large, and secret chats are unavailable. caption is optional plain text "
+        "without styles. Returns a content-free refusal or an immutable preview: the file name and caption "
+        "as marked untrusted evidence in reversible JSON escapes, bytes, sha256, the probed facts and "
+        "preview_sha256. No upload or send occurs; show the complete preview to the user. Preparing again for "
+        "the same artifact and recipient supersedes the earlier pending video draft, which can then no longer "
+        "be sent. Video drafts cannot be listed, updated, refreshed or cancelled through the generic draft "
+        "tools; supersede one or let it expire."),
+        annotations=_TRANSFER, structured_output=True)
+    def prepare_video_send(artifact_id: ArtifactId, recipient: ChatId,
+                           caption: Annotated[str, Field(strict=True, max_length=1024)] = "") -> PrepareVideoSendResponse:
+        return get_service().prepare_video_send(PrepareVideoSendRequest(artifact_id=artifact_id,
+            recipient=recipient, caption=caption))
+
+    @server.tool(name="send_prepared_video", description=(
+        "After the user explicitly approves this exact video preview, revalidate the account, the recipient and "
+        "the artifact bytes, show the local owner dialog, then make exactly one native video upload/send attempt. "
+        "A changed recipient returns recipient_changed without sending. Confirmation waits up to 120 seconds; a "
+        "repeated call replays the receipt and outcome_unknown must never be retried automatically. Inspect "
+        "later state with get_send_status."),
+        annotations=_TRANSFER, structured_output=True)
+    def send_prepared_video(draft_id: DraftId,
+                            approved: Annotated[bool, Field(strict=True)]) -> SendPreparedVideoResponse:
+        return get_service().send_prepared_video(SendPreparedVideoRequest(draft_id=draft_id, approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
             ("get_reply_draft",GetReplyDraftRequest),("update_reply_draft",UpdateReplyDraftRequest),
             ("refresh_reply_draft",RefreshReplyDraftRequest),("prepare_forward_send",PrepareForwardSendRequest),
-            ("send_prepared_forward",SendPreparedForwardRequest)):
+            ("send_prepared_forward",SendPreparedForwardRequest),("prepare_video_send",PrepareVideoSendRequest),
+            ("send_prepared_video",SendPreparedVideoRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):
@@ -1339,7 +1374,7 @@ def build_server(
                         raise CompatibilityError("client_schema_mismatch")
                     require_current(runtime_policy)
                     if (_capability not in runtime_policy.enabled_capabilities or
-                            (_capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in runtime_policy.enabled_capabilities)):
+                            (_capability in {"reply_text_send","reply_artifact_send","forward_send","video_send"} and "send" not in runtime_policy.enabled_capabilities)):
                         raise CompatibilityError("capability_disabled")
                     if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
                         raise CompatibilityError('capability_disabled')
