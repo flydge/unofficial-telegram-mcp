@@ -1,7 +1,7 @@
-"""Agent-facing connect/wait commands, the transient helper job and Terminal-only api-credentials.
+"""Agent-facing connect/wait/cancel commands, the transient helper job and Terminal-only api-credentials.
 
-`connect` and `wait` are safe in a captured agent shell: they take no secrets, print fixed
-JSON and never show the loopback URL or its token. The helper runs outside the agent's
+`connect`, `wait` and `cancel` are safe in a captured agent shell: they take no secrets, print
+fixed JSON and never show the loopback URL or its token. The helper runs outside the agent's
 process tree (launchd), opens the page through osascript's stdin (never argv) and owns the status file.
 A dedicated run/connect.lock (never the session lease) keeps it the only helper, and a reconnect
 that stopped the enrolled broker puts it back whenever no helper reaches Ready.
@@ -16,12 +16,15 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
-from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, run_connect,
-                           write_connect_status)
+from .broker_client import BrokerCompatibilityError, BrokerUnavailable
+from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, next_action,
+                           run_connect, valid_retry_after, write_connect_status)
 from .credentials import CredentialStoreError
 from .launch_agent import (CONNECT_JOB_LABEL, LAUNCH_AGENT_PLIST, LaunchAgentError, connect_job_state,
                            remove_connect_job, restore_enrolled_broker, start_connect_job, stop_connect_job,
@@ -35,21 +38,25 @@ HELPER_LIFETIME = 600  # Whole helper run, then expired (spec §3).
 HELPER_LINGER = 10  # Seconds the page stays up after a terminal phase.
 LINGER_WAIT = 15  # connect waits this long for a finished helper's linger before a fresh start.
 HELPER_LOCK_WAIT = 10  # A helper waits this long for connect.lock, else exits connect_in_progress.
-HUNG_GRACE = 60  # A non-terminal status this far past its expiry belongs to a dead or hung helper.
+# A non-terminal status this far past its expiry belongs to a dead or hung helper. The tail after
+# an observed Ready (teardown, a handoff of up to 30 s, the linger) can reach 60 s past expiry.
+HUNG_GRACE = 120
+PROBE_HANDSHAKE = 3  # Seconds for the broker handshake: a live broker answers at once.
+PROBE_CHECK = 25  # Seconds for check after a compatible handshake: the first one starts TDLib and re-verifies the bundle.
 _STEP = 0.1
 _POLL = 1.0
 _MAX_STATUS = 1024
-_STATUS_KEYS = frozenset({'phase', 'code', 'updated_at', 'expires_at'})
+_STATUS_KEYS = frozenset({'phase', 'code', 'updated_at', 'expires_at', 'retry_after'})
 _URL = re.compile(r'http://127\.0\.0\.1:[0-9]{1,5}/#t=[A-Za-z0-9_-]{43}')  # Our own server's shape.
 _TIME = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
-_ACTIONS = {'secure_terminal_required': 'run_in_foreground_native_terminal',
-            'connect_launch_failed': 'run_connect_in_native_terminal',
-            'enrollment_exists': 'run_connect',
-            'credential_invalid_record': 'repair_keychain_record_manually'}
 _IN_PROGRESS = {'status': 'connect_in_progress', 'next_action': 'wait'}
-_GENERIC = ConnectResult('failed', None).to_dict()['next_action']  # ConnectResult's fallback.
 _AGAIN = 'run_api_credentials_in_native_terminal'
+# api-credentials keeps these codes' table actions; any other refusal there means "run it again".
+_API_KEPT = frozenset({'secure_terminal_required', 'enrollment_exists', 'legacy_unmanaged',
+                       'enrollment_inconsistent', 'owner_busy', 'credential_invalid_record'})
 _STORE_CODES = frozenset({'denied', 'locked', 'unavailable', 'invalid_record', 'conflict'})
+# The OS refused a write (an agent sandbox, a read-only parent): not unsafe metadata.
+_DENIED = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 
 
 def job_plist_path(paths):
@@ -59,6 +66,12 @@ def job_plist_path(paths):
 def connect_lock_path(paths):
     """Single-helper lock, separate from the session lease (broker.lock)."""
     return paths.lock.parent / 'connect.lock'
+
+
+def _denied(error):
+    """An OwnerLeaseError raised because the OS refused to create or open a file, not for unsafe metadata."""
+    context = error.__cause__ or error.__context__
+    return isinstance(context, OSError) and context.errno in _DENIED
 
 
 def _take_connect_lock(paths):
@@ -97,53 +110,61 @@ def _connect_lock_held(paths):
         os.close(parent)
 
 
-def _next_action(code, fallback):
-    # ConnectResult's mapping stays the single source; only CLI-only codes are added here.
-    mapped = ConnectResult('failed', code).to_dict()['next_action']
-    return _ACTIONS.get(code) or (fallback if mapped == _GENERIC else mapped)
+def _refused(code, action=None):
+    return {'status': 'refused', 'code': code, 'next_action': action or next_action('failed', code)}, 2
 
 
-def _refused(code, fallback=_GENERIC):
-    return {'status': 'refused', 'code': code, 'next_action': _next_action(code, fallback)}, 2
-
-
-def _report(phase, code):
-    result = ConnectResult(phase, code)
-    action = result.to_dict()['next_action']
-    if phase != 'ready' and code == 'credential_invalid_record':
-        action = _ACTIONS[code]  # A corrupt Keychain record is never fixed by connecting again.
-    return {'status': phase, 'code': code, 'next_action': action}, result.exit_code
+def _report(phase, code, retry_after=None):
+    value = {'status': phase, 'code': code, 'next_action': next_action(phase, code)}
+    if code == 'flood_wait':
+        value['retry_after'] = retry_after  # Seconds Telegram asked to wait; None when it gave none.
+    return value, 0 if phase == 'ready' else 2
 
 
 # connect -----------------------------------------------------------------------------------
 
-def _probe_broker(paths, client_factory):
-    """'none' | 'ready' | 'blocked' | 'other'. Handshake and check only; nothing is started or stopped."""
+def _probe_broker(paths, client_factory, *, check_timeout=PROBE_CHECK, monotonic=time.monotonic):
+    """'none' | 'ready' | 'blocked' | 'starting' | 'other'. Handshake and check only; nothing is started or stopped.
+
+    The handshake has PROBE_HANDSHAKE seconds. Only a compatible broker gets check_timeout for its
+    check; a check that runs that budget out is 'starting'. Anything else is 'other'.
+    """
     if not (paths.lock.parent / 'broker.sock').exists():
         return 'none'
-    client = None
-    try:
-        client = client_factory(paths, 3)
-        client.handshake()
-        status = client.check()
-    except Exception:
-        return 'other'  # Incompatible, unreachable or unreadable policy: never a stop candidate.
-    finally:
-        if client is not None:
+    def ask(timeout, request):
+        client = client_factory(paths, timeout)
+        try:
+            return request(client)
+        finally:
             try:
                 client.close()
             except Exception:
                 pass
+    try:
+        ask(PROBE_HANDSHAKE, lambda client: client.handshake())
+    except Exception:
+        return 'other'  # Incompatible, unreachable or unreadable policy: never a stop candidate.
+    started = monotonic()
+    try:
+        status = ask(check_timeout, lambda client: client.check())
+    except BrokerCompatibilityError:
+        return 'other'
+    except BrokerUnavailable:
+        return 'starting' if monotonic() - started >= check_timeout - 1 else 'other'
+    except Exception:
+        return 'other'
     return status if status in ('ready', 'blocked') else 'other'
 
 
 def _lease(paths):
-    """'free' | 'busy' | 'unsafe'. Takes and immediately releases the owner lease."""
+    """'free' | 'busy' | 'denied' | 'unsafe'. Takes and immediately releases the owner lease."""
     try:
         with SessionOwnerLease(paths.lock):
             return 'free'
     except OwnerLeaseError as error:
-        return 'busy' if error.code == 'owner_busy' else 'unsafe'
+        if error.code == 'owner_busy':
+            return 'busy'
+        return 'denied' if _denied(error) else 'unsafe'
 
 
 def _await_free(paths, sleeper):
@@ -156,21 +177,39 @@ def _await_free(paths, sleeper):
 
 
 def _clear_status(paths):
-    """Remove a previous run's status so `wait` can never report a stale outcome."""
+    """'ok' | 'denied' | 'unsafe'. Remove a previous run's status so `wait` can never report a stale outcome."""
     try:
         parent = open_private_directory(paths.lock.parent, create=True)
-    except OwnerLeaseError:
-        return False
+    except OwnerLeaseError as error:
+        return 'denied' if _denied(error) else 'unsafe'
     try:
         try:
             os.unlink(connect_status_path(paths).name, dir_fd=parent)
         except FileNotFoundError:
             pass
-        return True
-    except OSError:
-        return False
+        return 'ok'
+    except OSError as error:
+        return 'denied' if error.errno in _DENIED else 'unsafe'
     finally:
         os.close(parent)
+
+
+def _forget_finished_run(paths):
+    """With a Ready broker and no helper holding connect.lock, a previous outcome must not reach `wait`.
+
+    connect.lock is held by every helper from before its first status write through its linger,
+    so taking it proves nothing will write the status meanwhile. Best effort; never raises.
+    """
+    try:
+        lock = _take_connect_lock(paths)
+    except Exception:
+        return
+    if lock is None:
+        return  # A live helper owns the status.
+    try:
+        _clear_status(paths)
+    finally:
+        os.close(lock)
 
 
 def _native(terminal):
@@ -181,14 +220,22 @@ def _native(terminal):
         return False
 
 
+def _write_denied(terminal):
+    """A write the OS refused before launchd was tried: an agent sandbox, unless this is native Terminal."""
+    return 'owner_unsafe' if _native(terminal) else 'connect_launch_failed'
+
+
 def connect(paths, *, client_factory, terminal, inline, runner=subprocess.run, uid=None,
             sleeper=time.sleep, python_executable=Path(sys.executable), broker_plist=LAUNCH_AGENT_PLIST,
-            clock=time.time):
-    """(JSON-able dict, exit code). Returns once the screen is requested, never waiting on the owner."""
+            clock=time.time, monotonic=time.monotonic):
+    """(JSON-able dict, exit code). Returns once the screen is requested, never waiting on the owner.
+
+    At most about 10 s, or about 40 s when a compatible broker's first check is still starting.
+    """
     try:
         return _connect(paths, client_factory=client_factory, terminal=terminal, inline=inline,
                         runner=runner, uid=uid, sleeper=sleeper, python_executable=python_executable,
-                        broker_plist=broker_plist, clock=clock)
+                        broker_plist=broker_plist, clock=clock, monotonic=monotonic)
     except KeyboardInterrupt:
         return _refused('cancelled')
     except Exception:
@@ -229,22 +276,41 @@ def _enter(paths, runner, uid, sleeper, clock):
     return None, (dict(_IN_PROGRESS), 0)
 
 
+def _starting(state, runner, uid, python_executable, broker_plist):
+    """A compatible broker whose check outlived PROBE_CHECK: only our enrolled, validated one is starting.
+
+    Read-only: nothing is stopped or started, whatever the validation finds.
+    """
+    if state == 'managed':
+        try:
+            validate_enrolled_broker(plist_path=broker_plist, python_executable=python_executable,
+                                     runner=runner, uid=uid)
+        except LaunchAgentError:
+            pass
+        else:
+            return _refused('broker_starting')
+    return _refused('owner_busy')
+
+
 def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, python_executable, broker_plist,
-             clock):
+             clock, monotonic):
     state = setup_status(paths)['state']
     if state == 'legacy_unmanaged':
         return _refused('legacy_unmanaged')
     if state == 'inconsistent':
         return _refused('enrollment_inconsistent')
-    probe = _probe_broker(paths, client_factory)
+    probe = _probe_broker(paths, client_factory, monotonic=monotonic)
     if probe == 'ready':
+        _forget_finished_run(paths)
         return {'status': 'already_connected'}, 0  # Repeat use never asks for a new login.
+    if probe == 'starting':
+        return _starting(state, runner, uid, python_executable, broker_plist)
     try:
         lock, response = _enter(paths, runner, uid, sleeper, clock)
     except LaunchAgentError:
         return _refused('connect_launch_failed')
-    except OwnerLeaseError:
-        return _refused('owner_unsafe')
+    except OwnerLeaseError as error:
+        return _refused(_write_denied(terminal) if _denied(error) else 'owner_unsafe')
     if lock is None:
         return response
     try:  # Released right after the bootstrap; an inline run holds it throughout.
@@ -263,7 +329,8 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
         # authorization is still not ready right now. Validation precedes the stop; any doubt keeps it.
         if state != 'managed':
             return _refused('owner_busy')
-        probe = _probe_broker(paths, client_factory)
+        # TDLib already answered once: the re-check gets the short budget.
+        probe = _probe_broker(paths, client_factory, check_timeout=PROBE_HANDSHAKE)
         if probe == 'ready':
             return {'status': 'already_connected'}, 0
     if probe == 'blocked':
@@ -282,9 +349,10 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
         return _restore(code, broker_plist, python_executable, runner, uid) if stopped else _refused(code)
     held = _await_free(paths, sleeper) if stopped else _lease(paths)
     if held != 'free':
-        return refuse('owner_busy' if held == 'busy' else 'owner_unsafe')
-    if not _clear_status(paths):  # Only now: no helper can be running (connect.lock, idle job).
-        return refuse('owner_unsafe')
+        return refuse({'busy': 'owner_busy', 'unsafe': 'owner_unsafe'}.get(held) or _write_denied(terminal))
+    cleared = _clear_status(paths)  # Only now: no helper can be running (connect.lock, idle job).
+    if cleared != 'ok':
+        return refuse('owner_unsafe' if cleared == 'unsafe' else _write_denied(terminal))
     if _native(terminal):  # Foreground in Terminal: nothing to hand to launchd; it restores on failure.
         try:
             result = inline()
@@ -293,7 +361,7 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
                 _restore_quietly(lambda: restore_enrolled_broker(
                     plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid))
             raise
-        value, code = _report(result.phase, result.code)
+        value, code = _report(result.phase, result.code, result.retry_after)
         if stopped and value['code'] == 'owner_busy':  # This run stopped (and restored) the broker.
             value['next_action'] = 'run_connect_again'
         return value, code
@@ -314,13 +382,11 @@ def _restore(code, broker_plist, python_executable, runner, uid):
     try:
         restore_enrolled_broker(plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid)
     except Exception:
-        return {'status': 'refused', 'code': 'broker_start_failed',
-                'next_action': 'run_connect_in_native_terminal'}, 2
+        return _refused('broker_start_failed')
     if code == 'connect_in_progress':
         return dict(_IN_PROGRESS), 0
     # Never 'check_existing_broker_without_stopping_it': this run did stop (and restart) it.
-    action = 'run_connect_in_native_terminal' if code == 'connect_launch_failed' else 'run_connect_again'
-    return {'status': 'refused', 'code': code, 'next_action': action}, 2
+    return _refused(code, 'run_connect_again' if code == 'owner_busy' else None)
 
 
 # wait --------------------------------------------------------------------------------------
@@ -332,7 +398,7 @@ def read_connect_status(paths):
 
 
 def _read_status(paths):
-    """(phase, code, expires_at epoch seconds) from a strictly valid status file, else None."""
+    """(phase, code, expires_at epoch seconds, retry_after) from a strictly valid status file, else None."""
     try:
         parent = open_private_directory(paths.lock.parent)
     except OwnerLeaseError:
@@ -363,11 +429,12 @@ def _read_status(paths):
                 or record['phase'] not in PHASES
                 or (record['code'] is not None and (type(record['code']) is not str
                                                     or record['code'] not in STATUS_CODES))
+                or not valid_retry_after(record['code'], record['retry_after'])
                 or any(type(record[name]) is not str or _TIME.fullmatch(record[name]) is None
                        for name in ('updated_at', 'expires_at'))):
             return None
         expires_at = calendar.timegm(time.strptime(record['expires_at'], '%Y-%m-%dT%H:%M:%SZ'))
-        return record['phase'], record['code'], expires_at
+        return record['phase'], record['code'], expires_at, record['retry_after']
     except (OSError, ValueError, OverflowError, UnicodeError, RecursionError):
         return None
     finally:
@@ -390,18 +457,29 @@ def _helper_alive(paths, runner, uid):
     return _connect_lock_held(paths)
 
 
-_EXITED = {'status': 'failed', 'code': 'helper_exited', 'next_action': 'run_connect_again'}
+def _exited():
+    # Never "connect again" from here: a helper that keeps dying would loop the agent.
+    return {'status': 'failed', 'code': 'helper_exited', 'next_action': next_action('failed', 'helper_exited')}, 2
+
+
+def _in_progress(phase, persisted=False):
+    """A non-terminal phase; a QR still unscanned after a whole wait may be on a screen nobody sees."""
+    action = 'scan_qr_on_this_mac_screen' if persisted and phase == 'waiting_for_scan' else next_action(phase, None)
+    return {'status': phase, 'next_action': action}, 0
 
 
 def wait(paths, *, runner=subprocess.run, uid=None, sleeper=time.sleep, monotonic=time.monotonic,
          clock=time.time, timeout=WAIT_SECONDS, poll=_POLL):
-    """(JSON-able dict, exit code). Returns on a terminal phase, a vanished or expired helper or the deadline."""
+    """(JSON-able dict, exit code). Returns on the next phase change, a terminal phase, a vanished or
+    expired helper or the deadline. The phase it started from is the one it does not report again,
+    so a fresh run's QR is announced within seconds and each later wait returns on the next step."""
     try:
         return _wait(paths, runner, uid, sleeper, monotonic, clock, timeout, poll)
     except KeyboardInterrupt:
         return _refused('cancelled')
     except Exception:
-        return {'status': 'failed', 'code': 'dependency_unavailable', 'next_action': 'run_connect_again'}, 2
+        return {'status': 'failed', 'code': 'dependency_unavailable',
+                'next_action': next_action('failed', 'dependency_unavailable')}, 2
 
 
 def _wait(paths, runner, uid, sleeper, monotonic, clock, timeout, poll):
@@ -409,15 +487,19 @@ def _wait(paths, runner, uid, sleeper, monotonic, clock, timeout, poll):
             or type(poll) not in (int, float) or not math.isfinite(poll) or poll <= 0):
         raise ValueError()
     deadline = monotonic() + timeout
-    phase, gone = 'starting', 0
+    start, phase, gone = None, 'starting', 0  # No status yet reads as starting.
     while True:
         record = _read_status(paths)
         if record is not None:
             phase = record[0]
             if phase in _TERMINAL:
-                return _report(*record[:2])
+                return _report(phase, record[1], record[3])
             if clock() > record[2] + HUNG_GRACE:  # Past its own lifetime: no live helper writes this.
-                return dict(_EXITED), 2
+                return _exited()
+        if start is None:
+            start = phase
+        elif phase != start:
+            return _in_progress(phase)
         if _helper_alive(paths, runner, uid):
             gone = 0
         else:
@@ -425,13 +507,46 @@ def _wait(paths, runner, uid, sleeper, monotonic, clock, timeout, poll):
             if gone >= 2:  # Two looks, so a helper still starting up is not mistaken for a dead one.
                 record = _read_status(paths)  # It may have finished between the look and the check.
                 if record is not None and record[0] in _TERMINAL:
-                    return _report(*record[:2])
-                return dict(_EXITED), 2
+                    return _report(record[0], record[1], record[3])
+                return _exited()
         left = deadline - monotonic()
         if left <= 0:
-            action = 'scan_qr_on_this_mac_screen' if phase == 'waiting_for_scan' else 'wait'
-            return {'status': phase, 'next_action': action}, 0
+            return _in_progress(phase, persisted=True)
         sleeper(min(poll, left))
+
+
+# cancel ------------------------------------------------------------------------------------
+
+def cancel(paths, *, runner=subprocess.run, uid=None, sleeper=time.sleep, clock=time.time,
+           restore_broker=restore_enrolled_broker):
+    """(JSON-able dict, exit code). Boots out our own running helper job, nothing else.
+
+    launchd's SIGTERM makes the helper cancel its run, which tears the auth client down and
+    writes `cancelled` itself. A helper that died without a terminal status gets one here, under
+    connect.lock, and an enrolled broker it may have stopped is put back (never created).
+    An inline run in the user's Terminal is not ours to stop: nothing_to_cancel.
+    """
+    try:
+        if connect_job_state(runner=runner, uid=uid) != 'busy':
+            return {'status': 'nothing_to_cancel'}, 0
+        stop_connect_job(runner=runner, uid=uid, sleeper=sleeper)
+    except (Exception, KeyboardInterrupt):  # launchd unusable here, or interrupted: the run expires by itself.
+        return _refused('cancel_failed')
+    try:
+        lock = _take_connect_lock(paths)
+    except Exception:
+        lock = None
+    if lock is not None:
+        try:
+            record = _read_status(paths)
+            if record is not None and record[0] not in _TERMINAL:
+                write_connect_status(paths, 'cancelled', 'cancelled', updated_at=clock(), expires_at=record[2])
+                _restore_quietly(restore_broker)
+        except Exception:
+            pass
+        finally:
+            os.close(lock)
+    return {'status': 'cancelled'}, 0
 
 
 # connect-helper ----------------------------------------------------------------------------
@@ -458,26 +573,61 @@ def _await_connect_lock(paths, sleeper):
     return None
 
 
+class _Terminated(Exception):
+    """SIGTERM during the linger: the run already ended and was reported; leave at once."""
+
+
+def _on_sigterm(ui, stopping):
+    """Install the helper's SIGTERM handler (launchd bootout); returns the previous disposition."""
+    def handler(signum, frame):
+        stopping['terminated'] = True
+        cancel_page = getattr(ui, 'request_cancel', None)
+        if cancel_page is not None:
+            # Never take the UI's lock inside the handler: the interrupted main thread may hold it.
+            threading.Thread(target=cancel_page, name='connect-cancel', daemon=True).start()
+        if stopping['lingering']:
+            raise _Terminated()
+    return signal.signal(signal.SIGTERM, handler)
+
+
+def _record_failure(paths, clock, expires_at, code):
+    """A helper that fails before run_connect reports must not leave `wait` to watch it vanish."""
+    try:
+        record = _read_status(paths)
+        if record is not None and record[0] in _TERMINAL:
+            return
+        write_connect_status(paths, 'cancelled' if code == 'cancelled' else 'failed', code,
+                             updated_at=clock(), expires_at=expires_at)
+    except Exception:
+        pass
+
+
 def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, ui_factory=None,
                    server_factory=None, run=run_connect, opener=open_url, clock=time.time,
                    sleeper=time.sleep, linger=HELPER_LINGER, lifetime=HELPER_LIFETIME, lock_held=False,
-                   restore_broker=restore_enrolled_broker):
+                   restore_broker=restore_enrolled_broker, handle_sigterm=False):
     """Serve the loopback screen and drive one run_connect; returns its ConnectResult.
 
     The single helper: it holds connect.lock for its whole run including the linger
     (inline, the calling connect already holds it), else ends connect_in_progress without
     touching the status or the screen. The URL exists only between the server and the
-    opener: it is never printed, logged or kept. run_connect owns the status file, except
-    for an owner_busy run, which writes none and is recorded here. A run that does not end
-    ready puts back an existing enrolled broker that is no longer loaded (restore_broker
-    never creates one). The page stays up briefly after a terminal phase, then the server
-    closes and our own launchd plist is removed.
+    opener: it is never printed, logged or kept. One deadline, taken once here, is both the
+    page's countdown and run_connect's expiry. run_connect owns the status file, except for
+    an owner_busy run, which writes none and is recorded here, and a failure before or
+    around the run, recorded here as a terminal status unless one exists. A run that does
+    not end ready puts back an existing enrolled broker that is no longer loaded
+    (restore_broker never creates one). With handle_sigterm (the launchd job), SIGTERM
+    cancels the run through the UI so the auth client is torn down normally, and skips the
+    linger. The page stays up briefly after a terminal phase, then the server closes and
+    our own launchd plist is removed.
     """
     if ui_factory is None or server_factory is None:
         from .connect_server import ConnectServer, LoopbackConnectUI
         ui_factory = ui_factory or LoopbackConnectUI
         server_factory = server_factory or ConnectServer
-    server, lock, result, ran = None, None, None, False
+    server, lock, result, ran, expires_at = None, None, None, False, None
+    stopping, previous, installed = {'terminated': False, 'lingering': False}, None, False
+    failure = 'dependency_unavailable'
     try:
         if not lock_held:
             try:
@@ -488,8 +638,10 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
             if lock is None:
                 return ConnectResult('failed', 'connect_in_progress')  # The lock holder owns the status.
         ran = True
-        expires_at = clock() + lifetime
+        expires_at = clock() + lifetime  # The one deadline of this run.
         ui = ui_factory()
+        if handle_sigterm:
+            previous, installed = _on_sigterm(ui, stopping), True
         server = server_factory(ui, expires_at)
         url = server.start()
         try:
@@ -499,29 +651,39 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
         finally:
             url = None
         result = run(paths, store, provider_factory, ui, handoff=lambda: handoff(paths=paths),
-                     lifetime=lifetime)
+                     expires_at=expires_at)
         if result.phase == 'failed' and result.code == 'owner_busy':
             try:  # We hold connect.lock, so this status is ours to write.
                 write_connect_status(paths, 'failed', 'owner_busy', updated_at=clock(), expires_at=expires_at)
             except Exception:
                 pass
-        try:
-            ui.notify(result.phase, result.code)  # A run that never took the lease did not tell the page.
+        try:  # A run that never took the lease did not tell the page.
+            ui.notify(result.phase, result.code, retry_after=result.retry_after)
         except Exception:
             pass
         if result.phase != 'ready':
             _restore_quietly(restore_broker)
-        sleeper(linger)
+        if not stopping['terminated']:
+            stopping['lingering'] = True
+            sleeper(linger)
         return result
+    except (KeyboardInterrupt, _Terminated):
+        failure = 'cancelled'
+        raise
     finally:
+        stopping['lingering'] = False  # A later SIGTERM must not interrupt the cleanup below.
         try:
             if ran and result is None:  # Raised or refused before a result: still never leave it stopped.
+                if expires_at is not None and (lock is not None or lock_held):
+                    _record_failure(paths, clock, expires_at, failure)
                 _restore_quietly(restore_broker)
             if server is not None:
                 server.close()
             if own_plist is not None:
                 remove_connect_job(own_plist)
         finally:
+            if installed:
+                signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
             if lock is not None:
                 os.close(lock)
 
@@ -550,7 +712,7 @@ class _WriteCounter:
 
 def api_credentials(paths, *, terminal, store_factory, timeout=120):
     """Owner override: store the Telegram API pair add-only. Native Terminal only, before first connect."""
-    refuse = lambda code: _refused(code, _AGAIN)
+    refuse = lambda code: _refused(code, None if code in _API_KEPT else _AGAIN)
     try:
         terminal.require_secure()
     except (Exception, KeyboardInterrupt):

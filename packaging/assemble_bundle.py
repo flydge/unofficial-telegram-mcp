@@ -298,8 +298,13 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
                 or manifest['schema_fingerprint']!=schema_fingerprint() or manifest['tools']!=actual_tools
                 or manifest['publication']!='unreleased' or manifest['source_completeness']!='incomplete'):
             raise ValueError
-        if (payload/'app/telegram_search_mcp/__init__.py').read_bytes() != Path(__import__('telegram_search_mcp').__file__).read_bytes():
-            raise ValueError
+        # The bundled package is exactly this checkout's: same .py set, same bytes; and the QR encoder ships.
+        package=Path(__import__('telegram_search_mcp').__file__).parent;prefix='app/telegram_search_mcp/'
+        expected={str(p.relative_to(package)):digest(p.read_bytes()) for p in sorted(package.rglob('*.py'))
+                  if '__pycache__' not in p.relative_to(package).parts}
+        bundled={f.name[len(prefix):]:f.sha256 for f in files if f.name.startswith(prefix)}
+        if bundled!=expected or not any(f.name=='app/segno/__init__.py' for f in files):
+            raise ReleasePackageError('payload_app_mismatch')
         lock_data=_bounded_input(payload/'tdlib-lock.json'); lock=parse_native_manifest(lock_data)
         if digest(lock_data)!=manifest['native_lock_sha256']:raise ValueError
         inventory={f.name:f for f in files}
@@ -349,6 +354,7 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
         _write_private(output/'provenance.json',provenance)
         return AssemblyResult(archive,index,output/'provenance.json',output/'preflight-audit.json',ah,
             digest(final),digest(provenance),len(files),unpacked,am.st_size)
+    except ReleasePackageError:raise  # Already a fixed, redacted code.
     except (OSError,ValueError,TypeError,KeyError,AttributeError,RuntimeError,tarfile.TarError,BundleError,NativeRuntimeError,ReleaseArchiveError):
         raise ReleasePackageError('bundle_producer_integrity_refused') from None
 

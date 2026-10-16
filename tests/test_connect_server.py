@@ -425,6 +425,27 @@ class StateTests(ScreenCase):
         self.ui.notify('expired', 'expired')
         self.assertEqual(self.state()['code'], 'expired')
 
+    def test_a_flood_wait_carries_telegrams_retry_time_to_the_page(self):
+        self.ui.notify('failed', 'flood_wait', retry_after=90)
+        state = self.state()
+        self.assertEqual((state['phase'], state['code'], state['retry_after']), ('failed', 'flood_wait', 90))
+        self.assertEqual(list(state)[-1], 'retry_after')
+        self.ui.notify('failed', 'flood_wait')  # Telegram gave no time: no field, the generic advice.
+        self.assertNotIn('retry_after', self.state())
+        for code, retry_after in [('flood_wait', 0), ('flood_wait', 86401), ('flood_wait', 2.5), ('flood_wait', True),
+                                  ('timeout', 30), (None, 30)]:
+            with self.subTest(code=code, retry_after=retry_after), self.assertRaises(ValueError):
+                self.ui.notify('failed', code, retry_after=retry_after)
+        self.ui.notify('failed', 'flood_wait', retry_after=90)
+        self.ui.notify('expired', 'expired')
+        self.assertNotIn('retry_after', self.state())  # Never shown beside another outcome.
+        js = connect_page.APP_JS
+        self.assertIn("state.code !== 'flood_wait'", js)
+        self.assertIn("T.retryAfter.replace('{n}', String(Math.max(1, Math.ceil(seconds / 60))))", js)
+        self.assertIn("end('bad', 'failedTitle', 'failedText', state.code, floodText(state))", js)
+        self.assertIn('Try again in {n} min.', connect_page.STRINGS['en']['retryAfter'])
+        self.assertIn('Повторите через {n} мин.', connect_page.STRINGS['ru']['retryAfter'])
+
     def test_notify_rejects_anything_outside_the_fixed_grammar(self):
         self.ui.notify('waiting_for_scan', None)
         for phase, code in [('nope', None), (None, None), ('failed', 'free text ' + LINK), ('failed', 5),

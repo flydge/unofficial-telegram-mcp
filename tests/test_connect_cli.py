@@ -5,12 +5,15 @@ Keychain are fakes, the browser opener is a recorder. Nothing here reaches launc
 or TDLib, and the "URL" and password-like strings are synthetic canaries.
 """
 import contextlib
+import errno
 import io
 import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
+import signal
 import stat
 import subprocess
 import sys
@@ -33,7 +36,8 @@ from telegram_search_mcp.credentials import SecretValue
 from telegram_search_mcp.enrollment import EnrollmentStore, SetupPaths
 from telegram_search_mcp.keychain import ApiCredentials
 from telegram_search_mcp.launch_agent import CONNECT_JOB_LABEL
-from telegram_search_mcp.session_owner import SessionOwnerLease, acquire_owner_lock, open_private_directory
+from telegram_search_mcp.session_owner import (OwnerLeaseError, SessionOwnerLease, acquire_owner_lock,
+                                               open_private_directory)
 
 UID = 501
 URL_CANARY = 'http://127.0.0.1:50999/#t=' + 'LEAKCANARYTOKEN-9d41' + 'x' * 23  # 43 token characters
@@ -186,12 +190,18 @@ class Harness(unittest.TestCase):
                              expires_at=now + 600 if expires_at is None else expires_at)
         connect_status_path(self.paths).chmod(mode)
 
-    def connect(self, launchd, *, broker=None, terminal=None, inline=None, sleeper=None):
+    def connect(self, launchd, *, broker=None, terminal=None, inline=None, sleeper=None, monotonic=time.monotonic,
+                client_factory=None):
         def no_inline():
             raise AssertionError('inline helper must not run')
-        return connect_cli.connect(self.paths, client_factory=lambda paths, timeout: broker,
+        return connect_cli.connect(self.paths, client_factory=client_factory or (lambda paths, timeout: broker),
             terminal=terminal if terminal is not None else Terminal(refused=True), inline=inline or no_inline,
-            runner=launchd, uid=UID, sleeper=sleeper or self.sleeps.append, broker_plist=self.broker_plist)
+            runner=launchd, uid=UID, sleeper=sleeper or self.sleeps.append, broker_plist=self.broker_plist,
+            monotonic=monotonic)
+
+    def wait_once(self, launchd=None):
+        return connect_cli.wait(self.paths, runner=launchd or self.launchd(job='absent'), uid=UID,
+                                sleeper=lambda _: None)
 
     def hold_connect_lock(self):
         """Stands in for another helper or connect: a separate open file description of connect.lock."""
@@ -240,14 +250,25 @@ class ConnectTests(Harness):
         self.enroll()
         self.socket()
         self.status_file('failed', 'owner_busy')
-        before = connect_status_path(self.paths).read_bytes()
         launchd, broker = self.launchd(broker_loaded=True), FakeBroker('ready')
         value, code = self.connect(launchd, broker=broker)
         self.assertEqual((code, value), (0, {'status': 'already_connected'}))
         self.assertEqual(launchd.calls, [])  # Not even a read-only launchctl print.
-        self.assertEqual(broker.events, ['handshake', 'check', 'close'])
-        self.assertEqual(connect_status_path(self.paths).read_bytes(), before)
+        self.assertEqual(broker.events, ['handshake', 'close', 'check', 'close'])
+        # No helper holds connect.lock: the old outcome is gone, so a following wait cannot replay it.
+        self.assertFalse(connect_status_path(self.paths).exists())
+        self.assertEqual(self.wait_once()[0]['code'], 'helper_exited')
         self.assertFalse(job_plist(self.paths).exists())
+
+    def test_already_connected_keeps_the_status_of_a_helper_that_still_holds_the_lock(self):
+        self.enroll()
+        self.socket()
+        self.status_file('ready')
+        before = connect_status_path(self.paths).read_bytes()
+        self.hold_connect_lock()  # A helper in its linger after its own Ready.
+        value, code = self.connect(self.launchd(broker_loaded=True), broker=FakeBroker('ready'))
+        self.assertEqual((code, value), (0, {'status': 'already_connected'}))
+        self.assertEqual(connect_status_path(self.paths).read_bytes(), before)
 
     def test_ready_is_never_stopped_even_with_a_matching_registration(self):
         self.enroll()
@@ -271,7 +292,7 @@ class ConnectTests(Harness):
             ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
         self.assertEqual(self.broker_plist.read_bytes(), plist)  # The broker definition is never unlinked.
         # The check is re-run right before the stop, and validation (read-only prints) precedes it.
-        self.assertEqual(broker.events, ['handshake', 'check', 'close'] * 2)
+        self.assertEqual(broker.events, ['handshake', 'close', 'check', 'close'] * 2)
         broker_calls = [call[1] for call in launchd.calls if call[2].endswith(LAUNCH_AGENT_LABEL)]
         self.assertEqual(broker_calls[:3], ['print', 'print', 'bootout'])
         self.assertFalse(launchd.bootstrapped[0][1], 'stale status must be gone before the helper starts')
@@ -577,7 +598,7 @@ class ConnectTests(Harness):
         self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
 
     def test_a_hung_helper_past_its_expiry_is_booted_out_and_replaced(self):
-        self.status_file('waiting_for_scan', expires_at=time.time() - 61)
+        self.status_file('waiting_for_scan', expires_at=time.time() - 121)
         release = self.hold_connect_lock()  # The hung helper holds connect.lock until it is killed.
         launchd = self.launchd(job='running')
         launchd.on_bootout = release
@@ -589,7 +610,8 @@ class ConnectTests(Harness):
         self.assertEqual(self.sleeps, [])  # No linger wait: an expired run is not lingering.
 
     def test_a_helper_within_its_grace_is_not_hung(self):
-        self.status_file('waiting_for_scan', expires_at=time.time() - 30)
+        self.assertEqual(connect_cli.HUNG_GRACE, 120)  # The post-Ready tail can reach 60 s past expiry.
+        self.status_file('waiting_for_scan', expires_at=time.time() - 90)
         self.hold_connect_lock()
         launchd = self.launchd(job='running')
         value, code = self.connect(launchd)
@@ -702,7 +724,10 @@ class WaitTests(Harness):
     def test_each_terminal_phase_is_reported_at_once_with_the_connect_result_mapping(self):
         cases = [('ready', None, 0, 'none'), ('failed', 'owner_busy', 2, 'check_existing_broker_without_stopping_it'),
                  ('failed', 'unsupported_auth_state', 2, 'use_terminal_setup_fallback'),
-                 ('failed', 'broker_incompatible', 2, 'use_matching_installed_package_and_policy'),
+                 ('failed', 'broker_incompatible', 2, 'run_connect_in_native_terminal'),
+                 ('failed', 'credential_conflict', 2, 'run_api_credentials_in_native_terminal'),
+                 ('failed', 'credential_locked', 2, 'unlock_keychain_then_connect_again'),
+                 ('failed', 'policy_unsafe', 2, 'stop_and_report'),
                  ('failed', 'password_submission_uncertain', 2, 'run_connect_again'),
                  ('expired', 'expired', 2, 'run_connect_again'), ('cancelled', 'cancelled', 2, 'run_connect_again')]
         for phase, error, exit_code, action in cases:
@@ -715,14 +740,32 @@ class WaitTests(Harness):
         self.assertEqual(set(p for p, _, _, _ in cases) | {'starting', 'waiting_for_scan', 'waiting_for_password',
                                                            'authorizing', 'handing_off'}, set(PHASES))
 
-    def test_phases_progress_until_a_terminal_one_arrives(self):
+    def test_each_wait_returns_at_the_next_phase_change_until_a_terminal_one_arrives(self):
         self.status_file('starting')
         clock = self.Clock()
-        clock.hooks = [lambda: self.status_file('waiting_for_scan'), lambda: self.status_file('authorizing'),
+        clock.hooks = [lambda: self.status_file('waiting_for_scan'), lambda: None, lambda: None,
+                       lambda: self.status_file('waiting_for_password'), lambda: self.status_file('authorizing'),
                        lambda: self.status_file('handing_off'), lambda: self.status_file('ready')]
+        launchd = self.launchd(job='running')
+        seen = [self.wait(launchd, clock)]
+        while seen[-1][0]['status'] not in ('ready', 'failed', 'expired', 'cancelled'):
+            seen.append(self.wait(launchd, clock))
+            self.assertLess(len(seen), 10)
+        self.assertEqual([(value['status'], value['next_action']) for value, _ in seen], [
+            ('waiting_for_scan', 'tell_user_to_scan_qr_then_wait'),
+            ('waiting_for_password', 'tell_user_to_enter_password_on_page_then_wait'),
+            ('authorizing', 'wait'), ('handing_off', 'wait'), ('ready', 'none')])
+        self.assertEqual(clock.now, 7.0)  # Within one poll of every change, never the 540 s deadline.
+
+    def test_a_fresh_run_announces_its_qr_within_seconds_and_a_missing_status_reads_as_starting(self):
+        clock = self.Clock()  # connect cleared the status; the helper has not written yet.
+        clock.hooks = [lambda: self.status_file('starting'), lambda: None, lambda: self.status_file('waiting_for_scan')]
         value, code = self.wait(self.launchd(job='running'), clock)
-        self.assertEqual((code, value['status']), (0, 'ready'))
-        self.assertEqual(clock.now, 4.0)
+        self.assertEqual((code, value), (0, {'status': 'waiting_for_scan', 'next_action': 'tell_user_to_scan_qr_then_wait'}))
+        self.assertEqual(clock.now, 3.0)
+        value, code = self.wait(self.launchd(job='running'), timeout=5)  # Unchanged since this wait began.
+        self.assertEqual((code, value), (0, {'status': 'waiting_for_scan', 'next_action': 'scan_qr_on_this_mac_screen'}))
+        self.assertEqual(self.clock.now, 5)
 
     def test_deadline_returns_the_current_phase_so_the_agent_can_wait_again(self):
         self.status_file('waiting_for_scan')
@@ -730,7 +773,8 @@ class WaitTests(Harness):
         self.assertEqual((code, value), (0, {'status': 'waiting_for_scan', 'next_action': 'scan_qr_on_this_mac_screen'}))
         self.assertEqual(self.clock.now, connect_cli.WAIT_SECONDS)
         self.assertEqual(connect_cli.WAIT_SECONDS, 540)
-        for phase, expected in [('waiting_for_password', 'wait'), ('authorizing', 'wait'), ('handing_off', 'wait')]:
+        for phase, expected in [('waiting_for_password', 'tell_user_to_enter_password_on_page_then_wait'),
+                                ('authorizing', 'wait'), ('handing_off', 'wait')]:
             with self.subTest(phase=phase):
                 self.status_file(phase)
                 value, code = self.wait(self.launchd(job='running'), timeout=5)
@@ -750,7 +794,7 @@ class WaitTests(Harness):
                         self.status_file(*states)
                     value, code = self.wait(self.launchd(job=job))
                     self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'helper_exited',
-                                                         'next_action': 'run_connect_again'}))
+                                                         'next_action': 'run_connect_in_native_terminal'}))
         connect_status_path(self.paths).unlink()
         launchd = self.launchd(job='absent')
         prints = []
@@ -804,13 +848,13 @@ class WaitTests(Harness):
         # A helper killed mid-handoff (or long ago) while a broker now holds the session.
         for phase in ('handing_off', 'waiting_for_scan', 'starting', 'authorizing'):
             with self.subTest(phase):
-                self.status_file(phase, expires_at=time.time() - 61)
+                self.status_file(phase, expires_at=time.time() - 121)
                 release = self.hold_connect_lock()
                 with SessionOwnerLease(self.paths.lock):
                     value, code = self.wait(self.launchd(job='running'))
                 release()
                 self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'helper_exited',
-                                                     'next_action': 'run_connect_again'}))
+                                                     'next_action': 'run_connect_in_native_terminal'}))
                 self.assertEqual(self.clock.now, 0.0)
         self.status_file('failed', 'owner_busy', expires_at=time.time() - 3600)  # Terminal always reports.
         self.assertEqual(self.wait(self.launchd(job='absent'))[0]['code'], 'owner_busy')
@@ -838,7 +882,7 @@ class WaitTests(Harness):
         run = self.run_dir()
         target = connect_status_path(self.paths)
         good = json.dumps({'phase': 'ready', 'code': None, 'updated_at': '2026-10-16T10:00:00Z',
-                           'expires_at': '2026-10-16T10:10:00Z'}).encode()
+                           'expires_at': '2026-10-16T10:10:00Z', 'retry_after': None}).encode()
         def bad(**changes):
             record = json.loads(good)
             record.update(changes)
@@ -846,6 +890,14 @@ class WaitTests(Harness):
         cases = {
             'not json': b'ready', 'empty': b'', 'list': b'[]', 'extra key': bad(extra=1),
             'missing key': json.dumps({'phase': 'ready'}).encode(),
+            'no retry_after key': json.dumps({'phase': 'ready', 'code': None, 'updated_at': '2026-10-16T10:00:00Z',
+                                              'expires_at': '2026-10-16T10:10:00Z'}).encode(),
+            'retry_after without flood_wait': bad(phase='failed', code='timeout', retry_after=30),
+            'retry_after zero': bad(phase='failed', code='flood_wait', retry_after=0),
+            'retry_after too long': bad(phase='failed', code='flood_wait', retry_after=86401),
+            'retry_after float': bad(phase='failed', code='flood_wait', retry_after=30.0),
+            'retry_after bool': bad(phase='failed', code='flood_wait', retry_after=True),
+            'retry_after text': bad(phase='failed', code='flood_wait', retry_after='30'),
             'duplicate key': good[:-1] + b',"phase":"failed"}', 'unknown phase': bad(phase='done'),
             'phase type': bad(phase=['ready']), 'unknown code': bad(phase='failed', code='made_up'),
             'code type': bad(code=7), 'time shape': bad(updated_at='yesterday'), 'time type': bad(expires_at=5),
@@ -1006,10 +1058,11 @@ class ApiCredentialsTests(Harness):
 
 class FakeUI:
     def __init__(self, log):
-        self.log, self.notices = log, []
-    def notify(self, phase, code):
+        self.log, self.notices, self.retry_afters = log, [], []
+    def notify(self, phase, code, retry_after=None):
         self.log.append('notify')
         self.notices.append((phase, code))
+        self.retry_afters.append(retry_after)
 
 
 class FakeServer:
@@ -1024,13 +1077,13 @@ class FakeServer:
         self.log.append('close')
 
 
-class HelperTests(Harness):
+class HelperHarness(Harness):
     def helper(self, *, run=None, opener=None, own_plist=None, start_error=None, result=None, sleeper=None,
-               **options):
+               ui_class=None, **options):
         self.log, self.opened, self.run_args, self.restored = [], [], [], []
         self.ui = None
         def ui_factory():
-            self.ui = FakeUI(self.log)
+            self.ui = (ui_class or FakeUI)(self.log)
             return self.ui
         def server_factory(ui, expires_at):
             self.server = FakeServer(ui, expires_at, self.log, start_error=start_error)
@@ -1051,6 +1104,8 @@ class HelperTests(Harness):
             own_plist=own_plist, ui_factory=ui_factory, server_factory=server_factory, run=run or default_run,
             opener=opener or default_opener, clock=lambda: 1000.0, sleeper=sleeper or default_sleeper, **options)
 
+
+class HelperTests(HelperHarness):
     def test_url_goes_only_to_the_opener_and_nothing_is_printed(self):
         plist = job_plist(self.paths)
         self.run_dir()
@@ -1064,7 +1119,8 @@ class HelperTests(Harness):
         self.assertEqual(self.server.expires_at, 1600.0)
         paths, store, provider, ui, options = self.run_args[0]
         self.assertEqual((paths, store, provider, ui), (self.paths, 'store', 'provider', self.ui))
-        self.assertEqual(options['lifetime'], 600)
+        self.assertEqual(options['expires_at'], 1600.0)  # The page's countdown and the run share one deadline.
+        self.assertNotIn('lifetime', options)
         self.assertEqual(self.ui.notices, [('ready', None)])
         options['handoff']()
         self.handoff.assert_called_once_with(paths=self.paths)
@@ -1291,7 +1347,8 @@ class SetupCliDispatchTests(Harness):
 
     def test_unknown_or_argument_bearing_forms_are_refused_without_echo(self):
         sentinel = 'SYNTHETIC_SECRET_SENTINEL'
-        for args in [['connect', sentinel], ['wait', '600'], ['wait', sentinel], ['api-credentials', sentinel],
+        for args in [['connect', sentinel], ['wait', '600'], ['wait', sentinel], ['cancel', sentinel], ['cancel', 'all'],
+                     ['api-credentials', sentinel],
                      ['connect-helper', sentinel], ['connect', '--url', sentinel], ['connect-helper', 'connect'],
                      [sentinel], ['Connect'], ['connect '], ['--connect'], ['status', 'connect']]:
             with self.subTest(args=args), mock.patch.object(connect_cli, 'connect') as connect, \
@@ -1338,6 +1395,7 @@ class SetupCliDispatchTests(Harness):
                 code, out, err = self.main(['connect-helper'])
             self.assertEqual((code, out, err), (expected, '', ''))
             self.assertEqual(helper.call_args.kwargs['own_plist'], job_plist(self.paths))
+            self.assertIs(helper.call_args.kwargs['handle_sigterm'], True)  # cancel's bootout reaches the run.
             self.assertNotIn('lock_held', helper.call_args.kwargs)  # Launchd mode takes the lock itself.
         with launchd_env, mock.patch.object(setup_cli, 'MacOSSecretStore'), mock.patch.object(setup_cli, 'LegacyTDJson'), \
              mock.patch.object(connect_cli, 'connect_helper', side_effect=RuntimeError(URL_CANARY)):
@@ -1381,7 +1439,7 @@ class SetupCliDispatchTests(Harness):
     def test_help_documents_the_new_commands_and_still_prints_no_state(self):
         code, out, _ = self.main(['--help'])
         self.assertEqual(code, 0)
-        for word in ['connect', 'wait', 'api-credentials', 'setup', 'resume', 'status']:
+        for word in ['connect', 'wait', 'cancel', 'api-credentials', 'setup', 'resume', 'status']:
             self.assertIn(word, out)
         self.assertNotIn('127.0.0.1', out)
 
@@ -1396,7 +1454,7 @@ class LauncherGrammarTests(unittest.TestCase):
 
     def test_closed_grammar_lists_exactly_the_documented_actions(self):
         self.assertEqual(self.launcher().ACTIONS, ('mcp', 'broker', 'setup', 'resume', 'status', 'connect', 'wait',
-                                                   'api-credentials', 'connect-helper'))
+                                                   'cancel', 'api-credentials', 'connect-helper'))
         self.assertEqual(set(self.launcher().ACTIONS), {'mcp', 'broker'} | set(setup_cli.COMMANDS))
 
     def test_new_actions_pass_the_grammar_and_everything_else_stops_before_any_admission(self):
@@ -1404,7 +1462,7 @@ class LauncherGrammarTests(unittest.TestCase):
         sentinel = 'SYNTHETIC_SECRET_SENTINEL'
         class Reached(Exception):
             pass
-        for args, admitted in [(['connect'], True), (['wait'], True), (['api-credentials'], True),
+        for args, admitted in [(['connect'], True), (['wait'], True), (['cancel'], True), (['api-credentials'], True),
                                (['connect-helper'], True), (['setup'], True),
                                (['connect', sentinel], False), (['wait', '10'], False), (['connect-helper', 'x'], False),
                                (['api-credentials', sentinel], False), (['Connect'], False), ([sentinel], False)]:
@@ -1413,7 +1471,7 @@ class LauncherGrammarTests(unittest.TestCase):
                 self.assertEqual(module.main(args), 2)
             self.assertEqual(reader.called, admitted)  # Only a known action reaches receipt admission.
             self.assertNotIn(sentinel, out.getvalue() + err.getvalue())
-            self.assertEqual(json.loads(err.getvalue()), {'status': 'refused', 'code': 'bundle_admission_or_install_failed'})
+            self.assertEqual(json.loads(err.getvalue()), {'status': 'refused', 'code': 'bundle_admission_failed'})
 
     def test_help_names_the_new_actions_without_credentials_wording(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1457,6 +1515,391 @@ class LauncherGrammarTests(unittest.TestCase):
                         setup.assert_called_once_with([action])
             finally:
                 sys.path[:] = saved_path
+
+
+# Integration review 16.10.2026 -------------------------------------------------------------------
+
+class SlowCheckBroker(FakeBroker):
+    """Compatible handshake; check runs `seconds` of the fake clock out, then gives up like a client timeout."""
+    def __init__(self, clock, seconds):
+        super().__init__('ready')
+        self.clock, self.seconds = clock, seconds
+
+    def check(self):
+        self.events.append('check')
+        self.clock[0] += self.seconds
+        raise BrokerUnavailable('request deadline expired')
+
+
+class BrokerProbeTests(Harness):
+    """M1: a fast handshake, then a long first check; only our validated broker is ever 'starting'."""
+    def recording_runner(self, launchd):
+        self.timeouts = []
+        def runner(args, **kwargs):
+            self.timeouts.append(kwargs.get('timeout'))
+            return launchd(args, **kwargs)
+        return runner
+
+    def test_the_handshake_gets_three_seconds_and_only_then_the_check_gets_twenty_five(self):
+        self.enroll()
+        self.socket()
+        asked = []
+        def factory(paths, timeout):
+            asked.append(timeout)
+            return broker
+        broker = FakeBroker('ready')
+        self.assertEqual(self.connect(self.launchd(), client_factory=factory), ({'status': 'already_connected'}, 0))
+        self.assertEqual(asked, [3, 25])
+        asked.clear()
+        broker = FakeBroker(handshake_error=BrokerUnavailable('silent'))
+        with SessionOwnerLease(self.paths.lock):
+            value, _ = self.connect(self.launchd(), client_factory=factory)
+        self.assertEqual((asked, value['code']), ([3], 'owner_busy'))  # No answer: never the long check.
+
+    def test_our_validated_broker_still_starting_is_broker_starting_and_is_never_stopped(self):
+        self.enroll()
+        self.socket()
+        plist = self.install_broker_plist()
+        self.status_file('waiting_for_scan')
+        before = connect_status_path(self.paths).read_bytes()
+        clock = [100.0]
+        launchd = self.launchd(broker_loaded=True)
+        runner = self.recording_runner(launchd)
+        with SessionOwnerLease(self.paths.lock):  # The starting broker holds the session.
+            value, code = self.connect(runner, broker=SlowCheckBroker(clock, 25), monotonic=lambda: clock[0])
+        self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'broker_starting',
+                                             'next_action': 'wait_then_connect_again'}))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+        self.assertTrue(all(call[2].endswith(LAUNCH_AGENT_LABEL) for call in launchd.calls))  # Read-only prints.
+        self.assertEqual((self.broker_plist.read_bytes(), connect_status_path(self.paths).read_bytes()), (plist, before))
+        self.assertEqual((self.sleeps, job_plist(self.paths).exists()), ([], False))
+        # Bounded: handshake, check and the read-only validation stay within the relaxed 40 s.
+        self.assertLessEqual(connect_cli.PROBE_HANDSHAKE + connect_cli.PROBE_CHECK + max(self.timeouts), 40)
+
+    def test_a_starting_broker_that_fails_validation_or_is_not_enrolled_is_owner_busy(self):
+        self.socket()
+        cases = {'not enrolled': dict(enroll=False, plist=True, exact=True, loaded=True),
+                 'no broker plist': dict(enroll=True, plist=False, exact=True, loaded=True),
+                 'live registration differs': dict(enroll=True, plist=True, exact=False, loaded=True),
+                 'service not loaded': dict(enroll=True, plist=True, exact=True, loaded=False)}
+        for name, case in cases.items():
+            with self.subTest(name):
+                if case['enroll'] and EnrollmentStore(self.paths).read() is None:
+                    self.enroll()
+                self.broker_plist.unlink(missing_ok=True)
+                if case['plist']:
+                    self.install_broker_plist()
+                clock = [0.0]
+                launchd = self.launchd(broker_loaded=case['loaded'], exact_registration=case['exact'])
+                with SessionOwnerLease(self.paths.lock):
+                    value, code = self.connect(launchd, broker=SlowCheckBroker(clock, 25), monotonic=lambda: clock[0])
+                self.assertEqual((code, value['code'], value['next_action']),
+                                 (2, 'owner_busy', 'check_existing_broker_without_stopping_it'))
+                self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+
+    def test_a_check_that_fails_before_its_budget_is_not_starting(self):
+        self.enroll()
+        self.socket()
+        self.install_broker_plist()
+        clock = [0.0]
+        with SessionOwnerLease(self.paths.lock):
+            value, _ = self.connect(self.launchd(broker_loaded=True), broker=SlowCheckBroker(clock, 5),
+                                    monotonic=lambda: clock[0])
+        self.assertEqual(value['code'], 'owner_busy')
+
+
+class FloodWaitReportTests(Harness):
+    """M3: Telegram's retry time travels from the status file to wait and to the inline result."""
+    def test_wait_reports_the_retry_time_of_a_flood_wait(self):
+        now = time.time()
+        for retry_after in (120, None):
+            with self.subTest(retry_after=retry_after):
+                write_connect_status(self.paths, 'failed', 'flood_wait', updated_at=now, expires_at=now + 600,
+                                     retry_after=retry_after)
+                value, code = self.wait_once()
+                self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'flood_wait', 'retry_after': retry_after,
+                                                     'next_action': 'wait_retry_after_then_connect_again'}))
+        self.status_file('failed', 'timeout')
+        self.assertNotIn('retry_after', self.wait_once()[0])  # Only flood_wait carries the field.
+
+    def test_the_inline_result_carries_the_retry_time(self):
+        value, code = self.connect(self.launchd(), terminal=Terminal(),
+                                   inline=lambda: ConnectResult('failed', 'flood_wait', True, True, 300))
+        self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'flood_wait', 'retry_after': 300,
+                                             'next_action': 'wait_retry_after_then_connect_again'}))
+
+
+class SandboxedWriteTests(Harness):
+    """M5: a refused write before launchd is tried is connect_launch_failed, never owner_unsafe."""
+    def read_only_parent(self):
+        parent = self.root / 'ro'
+        parent.mkdir(mode=0o500)
+        self.addCleanup(parent.chmod, 0o700)
+        return SetupPaths(parent / 'TelegramSearchMCP')
+
+    def test_a_run_directory_that_cannot_be_created_is_connect_launch_failed(self):
+        self.paths = self.read_only_parent()
+        launchd = self.launchd()
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'connect_launch_failed',
+                                             'next_action': 'run_connect_in_native_terminal'}))
+        self.assertEqual(launchd.calls, [])  # Refused before launchd was even asked.
+        self.assertFalse(self.paths.root.exists())
+        # In native Terminal there is no sandbox to blame: the same refusal is owner_unsafe.
+        self.assertEqual(self.connect(self.launchd(), terminal=Terminal())[0]['code'], 'owner_unsafe')
+
+    def test_a_denied_connect_lock_or_status_removal_is_connect_launch_failed(self):
+        def denied(path):
+            try:
+                raise PermissionError(errno.EPERM, 'Operation not permitted')
+            except OSError:
+                raise OwnerLeaseError() from None
+        self.run_dir()
+        launchd = self.launchd()
+        with mock.patch.object(connect_cli, 'acquire_owner_lock', side_effect=denied):
+            value, code = self.connect(launchd)
+        self.assertEqual((code, value['code'], launchd.calls), (2, 'connect_launch_failed', []))
+        self.status_file('failed', 'expired')
+        launchd = self.launchd()
+        real_unlink = os.unlink
+        def unlink(name, *args, **kwargs):
+            if name == connect_status_path(self.paths).name:
+                raise PermissionError(errno.EPERM, 'Operation not permitted')
+            return real_unlink(name, *args, **kwargs)
+        with mock.patch.object(connect_cli.os, 'unlink', side_effect=unlink):
+            value, code = self.connect(launchd)
+        self.assertEqual((code, value['code']), (2, 'connect_launch_failed'))
+        self.assertEqual(launchd.verbs('bootstrap'), [])
+
+    def test_unsafe_metadata_stays_owner_unsafe(self):
+        self.run_dir().chmod(0o755)
+        self.addCleanup(self.paths.lock.parent.chmod, 0o700)
+        launchd = self.launchd()
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value['code'], value['next_action']), (2, 'owner_unsafe', 'stop_and_report'))
+
+
+class CancelTests(Harness):
+    """`cancel` boots out our own running helper job and nothing else."""
+    def cancel(self, launchd):
+        self.restored = []
+        return connect_cli.cancel(self.paths, runner=launchd, uid=UID, sleeper=lambda _: None, clock=time.time,
+                                  restore_broker=lambda: self.restored.append(1))
+
+    def test_a_running_helper_is_booted_out_and_cancels_its_own_run(self):
+        self.status_file('waiting_for_scan')
+        launchd = self.launchd(job='running')
+        launchd.on_bootout = lambda: self.status_file('cancelled', 'cancelled')  # The helper's SIGTERM path.
+        self.assertEqual(self.cancel(launchd), ({'status': 'cancelled'}, 0))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [['bootout', 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)]])
+        self.assertFalse(any(call[2].endswith(LAUNCH_AGENT_LABEL) for call in launchd.calls))  # Never the broker.
+        self.assertEqual(self.restored, [])  # The helper restored for itself.
+        self.assertEqual(self.wait_once()[0], {'status': 'cancelled', 'code': 'cancelled',
+                                               'next_action': 'run_connect_again'})
+
+    def test_a_helper_killed_without_a_terminal_status_is_recorded_cancelled_and_its_broker_put_back(self):
+        self.status_file('waiting_for_scan')
+        launchd = self.launchd(job='running')
+        self.assertEqual(self.cancel(launchd), ({'status': 'cancelled'}, 0))
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('cancelled', 'cancelled'))
+        self.assertEqual(self.restored, [1])
+        self.assertTrue(self.connect_lock_free())
+
+    def test_nothing_running_or_an_inline_terminal_run_is_nothing_to_cancel(self):
+        self.status_file('waiting_for_scan')
+        before = connect_status_path(self.paths).read_bytes()
+        for job in ['absent', 'not running', 'exited']:
+            with self.subTest(job=job):
+                launchd = self.launchd(job=job)
+                self.assertEqual(self.cancel(launchd), ({'status': 'nothing_to_cancel'}, 0))
+                self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+        self.hold_connect_lock()  # The user's own Terminal run: theirs to stop with Ctrl-C.
+        self.assertEqual(self.cancel(self.launchd()), ({'status': 'nothing_to_cancel'}, 0))
+        self.assertEqual((connect_status_path(self.paths).read_bytes(), self.restored), (before, []))
+
+    def test_an_unusable_launchctl_or_a_job_that_survives_bootout_is_cancel_failed(self):
+        launchd = self.launchd(raises=PermissionError())
+        self.assertEqual(self.cancel(launchd), ({'status': 'refused', 'code': 'cancel_failed', 'next_action': 'wait'}, 2))
+        launchd = self.launchd(job='running')
+        real = launchd.__call__
+        def stubborn(args, **kwargs):
+            if args[1] == 'bootout':
+                launchd.calls.append(list(args))
+                return completed(args, 5)
+            return real(args, **kwargs)
+        self.assertEqual(self.cancel(stubborn)[0]['code'], 'cancel_failed')
+
+    def test_setup_cli_routes_cancel_and_prints_only_its_fixed_json(self):
+        with mock.patch.object(setup_cli, 'SetupPaths', return_value=self.paths), \
+             mock.patch.object(connect_cli, 'cancel', return_value=({'status': 'nothing_to_cancel'}, 0)) as command, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(setup_cli.main(['cancel']), 0)
+        self.assertEqual(out.getvalue(), '{"status": "nothing_to_cancel"}\n')
+        command.assert_called_once_with(self.paths)
+
+
+class CancellableUI(FakeUI):
+    def __init__(self, log):
+        super().__init__(log)
+        self.cancel_requested = threading.Event()
+
+    def request_cancel(self):
+        self.log.append('request_cancel')
+        self.cancel_requested.set()
+
+
+class HelperFailureAndSignalTests(HelperHarness):
+    """M6 and cancel's helper side: every helper end leaves a terminal status; SIGTERM cancels the run."""
+    def test_a_server_that_cannot_start_leaves_a_terminal_failure_for_wait(self):
+        for error, expected in [(OSError('bind'), ('failed', 'dependency_unavailable')),
+                                (KeyboardInterrupt(), ('cancelled', 'cancelled'))]:
+            with self.subTest(error=type(error).__name__):
+                connect_status_path(self.paths).unlink(missing_ok=True)
+                with self.assertRaises(type(error)):
+                    self.helper(start_error=error)
+                self.assertEqual(connect_cli.read_connect_status(self.paths), expected)
+                record = json.loads(connect_status_path(self.paths).read_bytes())
+                self.assertEqual(record['expires_at'], '1970-01-01T00:26:40Z')  # The helper's one deadline (1600).
+                value, code = self.wait_once()
+                self.assertNotEqual(value['code'], 'helper_exited')
+
+    def test_a_ui_that_cannot_be_built_or_a_raising_run_leaves_a_terminal_failure(self):
+        def broken_ui(log):
+            raise RuntimeError('ui failed')
+        with self.assertRaises(RuntimeError):
+            self.helper(ui_class=broken_ui)
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('failed', 'dependency_unavailable'))
+        def raising_run(paths, store, provider_factory, ui, **options):
+            write_connect_status(paths, 'waiting_for_scan', None, updated_at=1000, expires_at=1600)
+            raise RuntimeError('run failed')
+        with self.assertRaises(RuntimeError):
+            self.helper(run=raising_run)
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('failed', 'dependency_unavailable'))
+        def finished_then_raising(paths, store, provider_factory, ui, **options):
+            write_connect_status(paths, 'expired', 'expired', updated_at=1000, expires_at=1600)
+            raise RuntimeError('late failure')
+        with self.assertRaises(RuntimeError):
+            self.helper(run=finished_then_raising)
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('expired', 'expired'))  # Never overwritten.
+
+    def test_a_helper_that_never_got_the_lock_writes_nothing(self):
+        self.status_file('waiting_for_scan')
+        before = connect_status_path(self.paths).read_bytes()
+        self.hold_connect_lock()
+        self.assertEqual(self.helper(sleeper=lambda _: None).code, 'connect_in_progress')
+        self.assertEqual(connect_status_path(self.paths).read_bytes(), before)
+
+    def test_sigterm_cancels_the_run_through_the_page_and_skips_the_linger(self):
+        before = signal.getsignal(signal.SIGTERM)
+        def run(paths, store, provider_factory, ui, **options):
+            self.assertIsNot(signal.getsignal(signal.SIGTERM), before)
+            os.kill(os.getpid(), signal.SIGTERM)  # What launchd's bootout sends.
+            self.assertTrue(ui.cancel_requested.wait(5))  # run_connect would now see cancelled() and tear down.
+            return ConnectResult('cancelled', 'cancelled', True, True)
+        result = self.helper(run=run, ui_class=CancellableUI, handle_sigterm=True)
+        self.assertEqual((result.phase, result.code), ('cancelled', 'cancelled'))
+        self.assertIn('request_cancel', self.log)
+        self.assertFalse(any(entry.startswith('linger') for entry in self.log))
+        self.assertEqual(self.log[-2:], ['restore', 'close'])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+
+    def test_sigterm_during_the_linger_leaves_at_once_with_everything_cleaned_up(self):
+        before = signal.getsignal(signal.SIGTERM)
+        plist = job_plist(self.paths)
+        self.run_dir()
+        plist.write_bytes(b'x')
+        def sleeper(seconds):
+            self.log.append('linger:%s' % seconds)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(1)  # Interrupted by the handler.
+            self.log.append('linger finished')
+        with self.assertRaises(connect_cli._Terminated):
+            self.helper(sleeper=sleeper, ui_class=CancellableUI, handle_sigterm=True, own_plist=plist)
+        self.assertNotIn('linger finished', self.log)
+        self.assertEqual(self.log[-1], 'close')
+        self.assertFalse(plist.exists())
+        self.assertTrue(self.connect_lock_free())
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+        self.assertEqual(connect_cli.read_connect_status(self.paths), None)  # The ready run's own status stands.
+
+    def test_without_handle_sigterm_no_handler_is_installed(self):
+        before = signal.getsignal(signal.SIGTERM)
+        seen = []
+        def run(paths, store, provider_factory, ui, **options):
+            seen.append(signal.getsignal(signal.SIGTERM))
+            return ConnectResult('ready', None, True, True)
+        self.helper(run=run)
+        self.assertEqual(seen, [before])
+
+
+class SetupSkillTests(unittest.TestCase):
+    """M4: the setup skill answers every status, code and next_action the connect chain can produce."""
+    def test_every_code_status_and_next_action_is_covered_by_the_setup_skill(self):
+        from telegram_search_mcp import connect_flow
+        text = (Path(__file__).parents[1] / 'skills/telegram-setup/SKILL.md').read_text()
+        named = set(re.findall(r'`([a-z0-9_-]+)`', text))
+        produced = (set(connect_flow.NEXT_ACTIONS) | set(connect_flow.NEXT_ACTIONS.values())
+                    | set(connect_flow.PHASE_ACTIONS.values()) | set(PHASES) - {'failed'} | {
+                        'scan_qr_on_this_mac_screen', 'screen_opened', 'connect_in_progress', 'already_connected',
+                        'nothing_to_cancel', 'cancel', 'bundle_admission_failed', 'bundle_admission_or_install_failed',
+                        'claude_registration_conflict', 'recovery_limit', 'stored', 'already_present', 'retry_after'})
+        self.assertEqual(produced - named, set())
+        self.assertIn('restarts Claude Code', text)  # /mcp cannot see a server added mid-session.
+        self.assertIn('run `cancel`, then use the Terminal fallback', text)
+
+
+class LauncherRefusalTests(unittest.TestCase):
+    """H1: a refused bootstrap-install names the installer's fixed code; nothing else is ever echoed."""
+    BOOTSTRAP = ['bootstrap-install', '--installation-root', '/x', '--codex-home', '/y', '--skills-root', '/z',
+                 '--index', '/i', '--trusted-index-sha256', '0' * 64]
+
+    def launcher(self):
+        path = Path(__file__).parents[1] / 'packaging/launcher.py'
+        spec = importlib.util.spec_from_file_location('connect_cli_launcher_refusal', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def install_refusal(self, error, admit=None):
+        from telegram_search_mcp import bundle_install
+        module = self.launcher()
+        saved = list(sys.path)
+        try:
+            with mock.patch.object(module, 'admit', side_effect=admit), \
+                 mock.patch.object(bundle_install, 'install', side_effect=error), \
+                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                code = module.main(list(self.BOOTSTRAP))
+        finally:
+            sys.path[:] = saved
+        self.assertEqual((code, out.getvalue()), (2, ''))
+        return err.getvalue()
+
+    def test_the_installers_fixed_codes_reach_the_output(self):
+        from telegram_search_mcp.bundle_install import InstallError
+        for name in ('claude_registration_conflict', 'recovery_limit', 'skill_conflict', 'foreign_telegram-setup'):
+            with self.subTest(name):
+                self.assertEqual(self.install_refusal(InstallError(name)),
+                                 json.dumps({'status': 'refused', 'code': name}) + '\n')
+
+    def test_anything_else_is_the_generic_code_and_carries_no_text(self):
+        from telegram_search_mcp.bundle_install import InstallError
+        secret = '/Users/SYNTHETIC_SECRET_SENTINEL/.codex'
+        generic = json.dumps({'status': 'refused', 'code': 'bundle_admission_or_install_failed'}) + '\n'
+        for error in [InstallError(secret), InstallError('made_up_code'), InstallError('recovery_limit', secret),
+                      RuntimeError(secret), KeyboardInterrupt()]:
+            with self.subTest(error=repr(error)[:40]):
+                self.assertEqual(self.install_refusal(error), generic)
+        self.assertEqual(self.install_refusal(None, admit=ValueError(secret)), generic)  # Admission refused first.
+
+    def test_every_code_the_installer_can_raise_is_in_the_closed_set(self):
+        source = (Path(__file__).parents[1] / 'src/telegram_search_mcp/bundle_install.py').read_text()
+        literal = set(re.findall(r"InstallError\('([a-z_]+)'\)", source))
+        published = set(re.findall(r"publish\('([a-z-]+)'", source)) | {
+            prefix + skill for prefix in ('', 'claude-') for skill in ('telegram-search', 'telegram-setup')}
+        self.assertIn("InstallError('foreign_'+name)", source)
+        expected = literal | {'foreign_' + name for name in published}
+        self.assertTrue({'claude_registration_conflict', 'recovery_limit'} <= expected)
+        self.assertLessEqual(expected, self.launcher().INSTALL_CODES)
 
 
 if __name__ == '__main__':

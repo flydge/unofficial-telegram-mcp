@@ -123,7 +123,7 @@ class QrRaw:
 class FakeUI(ConnectUI):
     def __init__(self, paths, passwords=(), *, cancel_on=None):
         self.paths, self.passwords, self.cancel_on = paths, list(passwords), cancel_on
-        self.published, self.hints, self.notices, self.statuses = [], [], [], []
+        self.published, self.hints, self.notices, self.statuses, self.retry_afters = [], [], [], [], []
         self.is_cancelled = False
 
     def publish_qr(self, link):
@@ -147,8 +147,9 @@ class FakeUI(ConnectUI):
     def cancelled(self):
         return self.is_cancelled
 
-    def notify(self, phase, code):
+    def notify(self, phase, code, retry_after=None):
         self.notices.append((phase, code))
+        self.retry_afters.append(retry_after)
         self.statuses.append(connect_status_path(self.paths).read_bytes())
 
 
@@ -191,7 +192,7 @@ class ConnectHarness(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o600)
         self.assertTrue(stat.S_ISREG(metadata.st_mode))
         record = json.loads(path.read_bytes())
-        self.assertEqual(set(record), {'phase', 'code', 'updated_at', 'expires_at'})
+        self.assertEqual(set(record), {'phase', 'code', 'updated_at', 'expires_at', 'retry_after'})
         return record
 
     def sent(self, kind, raw=None):
@@ -295,8 +296,13 @@ class ConnectFlowTests(ConnectHarness):
         ui = FakeUI(self.paths, [PASSWORD, PASSWORD])
         result, _ = self.connect([password_state(), READY], ui, raw_options={'outcomes': ['flood', 'ok']})
         self.assertEqual((result.phase, result.code, result.retry_after), ('failed', 'flood_wait', 30))
+        self.assertEqual(result.to_dict()['next_action'], 'wait_retry_after_then_connect_again')
         self.assertEqual(self.sent('checkAuthenticationPassword'), 1)
         self.assert_torn_down_pending(result)
+        # The retry time reaches the status file and the page, not only the in-process result.
+        self.assertEqual(self.status()['retry_after'], 30)
+        self.assertEqual((ui.notices[-1], ui.retry_afters[-1]), (('failed', 'flood_wait'), 30))
+        self.assertEqual(set(ui.retry_afters[:-1]), {None})
 
     # Unsupported, expiry, cancel ---------------------------------------------------------
 
@@ -462,6 +468,69 @@ class ConnectFlowTests(ConnectHarness):
                 self.assertEqual(result.code, 'invalid_input')
         self.assertFalse(self.root.exists())
 
+    # One deadline, wall clock (L1, L3) -----------------------------------------------------
+
+    def test_a_wall_clock_past_the_status_expiry_expires_the_run_even_if_the_monotonic_clock_lags(self):
+        # macOS's monotonic clock stops while the Mac sleeps; the status file's expires_at does not.
+        wall = [1000.0]
+        def jumping_wall():
+            wall[0] += 5  # Every look at the wall clock: 5 s later (a sleeping Mac); monotonic barely moves.
+            return wall[0]
+        started = time.monotonic()
+        result, ui = self.connect([PHONE, other_device(), READY], raw_options={'scan_after': None}, lifetime=30,
+                                  _wall=jumping_wall)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual((result.phase, result.code), ('expired', 'expired'))
+        self.assertEqual(ui.notices[-1], ('expired', 'expired'))
+        self.assert_torn_down_pending(result)
+
+    def test_the_given_deadline_is_the_status_expiry_and_the_run_lifetime(self):
+        now = time.time()
+        expires_at = now + 0.4
+        result, _ = self.connect([PHONE, other_device(), READY], raw_options={'scan_after': None}, expires_at=expires_at)
+        self.assertEqual((result.phase, result.code), ('expired', 'expired'))
+        self.assertEqual(self.status()['expires_at'], connect_flow._iso(expires_at))
+        expires_at = time.time() + 300
+        result, _ = self.connect([PHONE, other_device(), READY], expires_at=expires_at)
+        self.assertEqual(result.phase, 'ready')
+        self.assertEqual(self.status()['expires_at'], connect_flow._iso(expires_at))
+        for bad in [time.time() - 1, float('nan'), 'soon', time.time() + 3700]:
+            with self.subTest(expires_at=bad):
+                result, _ = self.connect([READY], expires_at=bad)
+                self.assertEqual(result.code, 'invalid_input')
+
+    # next_action table (M4) ----------------------------------------------------------------
+
+    def test_every_status_code_has_an_explicit_next_action_and_the_decided_ones_are_exact(self):
+        self.assertLessEqual(connect_flow.STATUS_CODES, set(connect_flow.NEXT_ACTIONS))
+        decided = {
+            'credential_conflict': 'run_api_credentials_in_native_terminal',
+            'app_identity_invalid': 'stop_and_report', 'policy_unsafe': 'stop_and_report',
+            'enrollment_missing': 'stop_and_report',
+            'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
+            'enrollment_inconsistent': 'review_enrollment_binding_without_resetting',
+            'identity_changed': 'review_enrollment_binding_without_resetting',
+            'broker_start_failed': 'run_connect_in_native_terminal',
+            'broker_readiness_timeout': 'run_connect_in_native_terminal',
+            'broker_incompatible': 'run_connect_in_native_terminal',
+            'credential_denied': 'unlock_keychain_then_connect_again',
+            'credential_locked': 'unlock_keychain_then_connect_again',
+            'password_submission_uncertain': 'run_connect_again', 'auth_request_failed': 'run_connect_again',
+            'timeout': 'run_connect_again', 'dependency_unavailable': 'run_connect_again',
+            'invalid_password': 'run_connect_again',
+            'auth_destroy_failed': 'exit_connect_process_then_run_connect_again',
+            'flood_wait': 'wait_retry_after_then_connect_again',
+            'helper_exited': 'run_connect_in_native_terminal', 'broker_starting': 'wait_then_connect_again',
+            'connect_launch_failed': 'run_connect_in_native_terminal',
+        }
+        for code, action in decided.items():
+            with self.subTest(code=code):
+                phase = code if code in ('expired', 'cancelled') else 'failed'
+                self.assertEqual(connect_flow.next_action(phase, code), action)
+                self.assertEqual(connect_flow.ConnectResult(phase, code).to_dict()['next_action'], action)
+        self.assertEqual(connect_flow.next_action('ready', None), 'none')
+        self.assertEqual(connect_flow.next_action('failed', 'not_a_code'), 'stop_and_report')  # Never a retry loop.
+
     # Status file -------------------------------------------------------------------------
 
     def test_status_write_is_closed_atomic_and_replaces_a_planted_link(self):
@@ -474,10 +543,17 @@ class ConnectFlowTests(ConnectHarness):
         write_connect_status(self.paths, 'waiting_for_scan', None, updated_at=0, expires_at=600)
         self.assertEqual(outside.read_bytes(), b'untouched')
         self.assertEqual(self.status(), {'phase': 'waiting_for_scan', 'code': None,
-            'updated_at': '1970-01-01T00:00:00Z', 'expires_at': '1970-01-01T00:10:00Z'})
+            'updated_at': '1970-01-01T00:00:00Z', 'expires_at': '1970-01-01T00:10:00Z', 'retry_after': None})
         for phase, code in [('scanning', None), ('failed', 'PASSWORD_HASH_INVALID'), ('failed', LINK)]:
             with self.assertRaises(ValueError):
                 write_connect_status(self.paths, phase, code, updated_at=0, expires_at=0)
+        write_connect_status(self.paths, 'failed', 'flood_wait', updated_at=0, expires_at=600, retry_after=86400)
+        self.assertEqual(self.status()['retry_after'], 86400)
+        for code, retry_after in [('flood_wait', 0), ('flood_wait', 86401), ('flood_wait', 1.5), ('flood_wait', True),
+                                  ('flood_wait', '30'), ('timeout', 30), (None, 30)]:
+            with self.subTest(code=code, retry_after=retry_after), self.assertRaises(ValueError):
+                write_connect_status(self.paths, 'failed', code, updated_at=0, expires_at=0, retry_after=retry_after)
+        self.assertEqual(self.status()['retry_after'], 86400)
         self.assertEqual(sorted(os.listdir(run)), ['connect-status.json'])
 
 

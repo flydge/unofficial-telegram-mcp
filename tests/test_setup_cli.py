@@ -227,11 +227,11 @@ class InstalledHandoffTests(unittest.TestCase):
 
 class ClosedGrammarTests(unittest.TestCase):
     def test_new_commands_are_part_of_the_closed_grammar_and_nothing_else_is(self):
-        self.assertEqual(setup_cli.COMMANDS, ('setup', 'resume', 'status', 'connect', 'wait', 'api-credentials',
-                                              'connect-helper'))
+        self.assertEqual(setup_cli.COMMANDS, ('setup', 'resume', 'status', 'connect', 'wait', 'cancel',
+                                              'api-credentials', 'connect-helper'))
         sentinel = 'SYNTHETIC_SECRET_SENTINEL'
         for args in [['connect', sentinel], ['wait', '5'], ['api-credentials', '--api-hash', sentinel],
-                     ['connect-helper', sentinel], ['connect', 'wait'], ['CONNECT']]:
+                     ['connect-helper', sentinel], ['connect', 'wait'], ['CONNECT'], ['cancel', sentinel]]:
             with self.subTest(args=args), contextlib.redirect_stdout(io.StringIO()) as output, \
                  contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(setup_cli.main(args), 2)
@@ -240,6 +240,6 @@ class ClosedGrammarTests(unittest.TestCase):
     def test_help_describes_connect_wait_and_api_credentials_without_the_internal_helper_contract(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(setup_cli.main(['--help']), 0)
-        for word in ['connect', 'wait', 'api-credentials', '540']:
+        for word in ['connect', 'wait', 'cancel', 'api-credentials', '540']:
             self.assertIn(word, output.getvalue())
         self.assertNotIn('osascript', output.getvalue())

@@ -21,7 +21,7 @@ import threading
 import time
 import unicodedata
 import segno
-from .connect_flow import PHASES, STATUS_CODES, ConnectUI
+from .connect_flow import PHASES, STATUS_CODES, ConnectUI, valid_retry_after
 from .connect_page import ASSETS
 from .credentials import SecretValue
 
@@ -75,7 +75,7 @@ class LoopbackConnectUI(ConnectUI):
 
     def __init__(self):
         self._cond = threading.Condition(threading.Lock())
-        self._phase, self._code = 'starting', None
+        self._phase, self._code, self._retry_after = 'starting', None, None
         self._qr = self._hint = self._slot = None
         self._wanted = self._pending = self._cancelled = self._closed = False
 
@@ -112,12 +112,12 @@ class LoopbackConnectUI(ConnectUI):
         with self._cond:
             return self._cancelled or self._closed  # A closed screen can no longer finish the run.
 
-    def notify(self, phase: str, code: str | None) -> None:
+    def notify(self, phase: str, code: str | None, retry_after: int | None = None) -> None:
         if type(phase) is not str or phase not in PHASES or (code is not None and (
-                type(code) is not str or code not in STATUS_CODES)):
+                type(code) is not str or code not in STATUS_CODES)) or not valid_retry_after(code, retry_after):
             raise ValueError('invalid_status')
         with self._cond:
-            self._phase, self._code = phase, code
+            self._phase, self._code, self._retry_after = phase, code, retry_after
             if phase != 'waiting_for_password':
                 self._wanted, self._hint, self._slot = False, None, None
             if phase not in ('starting', 'waiting_for_scan'):
@@ -138,6 +138,8 @@ class LoopbackConnectUI(ConnectUI):
                 state['password_hint'] = self._hint
             state['password_error'] = phase == 'waiting_for_password' and code is not None
             state['password_pending'] = self._pending
+            if phase == 'failed' and self._retry_after is not None:  # Only flood_wait carries one.
+                state['retry_after'] = self._retry_after
             return state
 
     def accept_password(self, value: bytes) -> bool:

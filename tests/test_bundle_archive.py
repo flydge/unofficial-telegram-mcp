@@ -165,6 +165,39 @@ class AssemblerAppIdentityTests(unittest.TestCase):
                     self.assertNotIn(secret, repr(error.args) + str(error))
                 self.assertFalse((root / 'output').exists())
 
+    def test_the_bundled_package_must_be_exactly_this_checkouts_and_carry_segno(self):
+        import telegram_search_mcp
+        module = self.assembler()
+        source = Path(telegram_search_mcp.__file__).parent
+        changes = {
+            'missing module': lambda app: (app / 'connect_cli.py').unlink(),
+            'stale module': lambda app: (app / 'connect_cli.py').write_bytes(b'# an older build\n'),
+            'extra module': lambda app: (app / 'leftover.py').write_bytes(b''),
+            'extra non-python file': lambda app: (app / 'notes.txt').write_bytes(b'x'),
+            'missing segno': lambda app: ((app.parent / 'segno/__init__.py').unlink(), (app.parent / 'segno').rmdir()),
+        }
+        for label, change in changes.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve(); payload = self.payload(root)
+                app = payload / 'app/telegram_search_mcp'
+                self.assertEqual(sorted(p.name for p in app.iterdir()), sorted(p.name for p in source.glob('*.py')))
+                change(app)
+                for path in app.parent.rglob('*'):
+                    if path.is_file(): path.chmod(0o600)
+                with self.assertRaises(module.ReleasePackageError) as caught:
+                    module.assemble_bundle(payload, root / 'output')
+                self.assertEqual(str(caught.exception), 'payload_app_mismatch')
+                self.assertIsNone(caught.exception.__cause__)
+                self.assertNotIn('connect_cli', repr(caught.exception.args))
+                self.assertFalse((root / 'output').exists())
+        with tempfile.TemporaryDirectory() as tmp:  # The exact checkout package passes.
+            root = Path(tmp).resolve()
+            result = module.assemble_bundle(self.payload(root), root / 'output')
+            index = load_archive_index(result.index.read_bytes())
+            bundled = {f.path for f in index.files if f.path.startswith('app/telegram_search_mcp/')}
+            self.assertEqual(bundled, {'app/telegram_search_mcp/' + p.name for p in source.glob('*.py')})
+            self.assertIn('app/segno/__init__.py', {f.path for f in index.files})
+
     def test_command_line_exposes_the_flag_only_as_an_explicit_switch(self):
         import re
         text = (Path(__file__).parents[1] / 'packaging/assemble_bundle.py').read_text()

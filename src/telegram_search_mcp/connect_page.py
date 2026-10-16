@@ -37,6 +37,7 @@ STRINGS = {
         'readyTitle': 'Connected. You can close this tab and return to your assistant.',
         'failedTitle': 'Connection failed',
         'failedText': 'Run connect again from your assistant.',
+        'retryAfter': 'Telegram asked to wait. Try again in {n} min.',
         'codeLabel': 'Code:',
         'expiredTitle': 'This screen has expired',
         'cancelledTitle': 'Connection cancelled',
@@ -70,6 +71,7 @@ STRINGS = {
         'readyTitle': 'Подключено. Можно закрыть эту вкладку и вернуться к ассистенту.',
         'failedTitle': 'Не удалось подключиться',
         'failedText': 'Запустите connect заново из вашего ассистента.',
+        'retryAfter': 'Telegram попросил подождать. Повторите через {n} мин.',
         'codeLabel': 'Код:',
         'expiredTitle': 'Время экрана истекло',
         'cancelledTitle': 'Подключение отменено',
@@ -240,18 +242,25 @@ _JS_TEMPLATE = r"""'use strict';
     window.clearInterval(ticker);
     stored('clear');
   }
-  function end(kind, titleKey, textKey, code) {
+  function end(kind, titleKey, textKey, code, override) {
     stop();
     $('end-icon').className = 'icon icon-' + kind;
     $('end-title').textContent = T[titleKey];
     var body = $('end-text');
-    body.hidden = !textKey;
-    body.textContent = textKey ? T[textKey] : '';
+    var text = override || (textKey ? T[textKey] : '');
+    body.hidden = !text;
+    body.textContent = text;
     var line = $('end-code');
     var safe = typeof code === 'string' && /^[a-z0-9_]{1,64}$/.test(code);
     line.hidden = !safe;
     line.textContent = safe ? T.codeLabel + ' ' + code : '';
     show('end');
+  }
+  // flood_wait: Telegram's own retry time, shown in whole minutes (at least one).
+  function floodText(state) {
+    var seconds = state.retry_after;
+    if (state.code !== 'flood_wait' || typeof seconds !== 'number' || !isFinite(seconds) || seconds <= 0) { return ''; }
+    return T.retryAfter.replace('{n}', String(Math.max(1, Math.ceil(seconds / 60))));
   }
   function closed() {
     if (cancelling) { end('idle', 'cancelledTitle', 'retryText', null); } else { end('idle', 'closedTitle', 'closedText', null); }
@@ -297,7 +306,7 @@ _JS_TEMPLATE = r"""'use strict';
     } else if (phase === 'ready') {
       end('ok', 'readyTitle', null, null);
     } else if (phase === 'failed') {
-      end('bad', 'failedTitle', 'failedText', state.code);
+      end('bad', 'failedTitle', 'failedText', state.code, floodText(state));
     } else if (phase === 'expired') {
       end('idle', 'expiredTitle', 'retryText', null);
     } else if (phase === 'cancelled') {

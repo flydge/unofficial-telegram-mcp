@@ -60,12 +60,18 @@ The installer registers, with ownership receipts:
   (otherwise the receipt records `claude_skills: skipped`).
 
 It refuses foreign registrations, skills, runtime roots and existing services.
-Recovery retains one lease, journal, original config bytes and exact receipts;
+A refused install prints only `{"status":"refused","code":...}` on stderr: the installer's
+fixed code (for example `claude_registration_conflict` or `recovery_limit`), or
+`bundle_admission_or_install_failed` for anything else; other launcher actions refuse as
+`bundle_admission_failed`. Recovery retains one lease, journal, original config bytes and exact receipts;
 repeating the same admitted installation verifies/reuses it, without consulting the
 `claude` CLI again. Apart from those registration commands it performs no login,
-Keychain operation, service start/stop or session mutation. A launch checks the
-receipt, the Codex registration, the `~/.agents/skills` copies and only the shape of the
-Claude records; it never re-reads the Claude registration or the `~/.claude/skills` copies.
+Keychain operation, service start/stop or session mutation. A launch checks the release
+tree, index, receipt, pointer, transaction journal and home binding, and only the shape of
+the client records. It never reads the Codex `config.toml`, the Claude registration or the
+skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
+state cannot stop the installed runtime from starting; a repeat install verifies the Codex
+registration and the `~/.agents/skills` copies and refuses drift there.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
@@ -94,9 +100,13 @@ step takes a secret.
    QR. It refreshes by itself and shows a countdown. If you use two-step verification, type
    the password on that page only (never to the assistant). The page is in Russian or English
    following your browser language.
-3. Your assistant runs the same command with `wait` in place of `connect`. One call blocks
-   up to 540 seconds and reports the current phase; it repeats until `ready`, `failed`,
-   `expired` or `cancelled`. The whole run lives at most 600 seconds.
+3. Your assistant runs the same command with `wait` in place of `connect`. One call returns
+   at the next phase change (the first one usually reports `waiting_for_scan` within
+   seconds), or after at most 540 seconds, with the phase and a `next_action`; it repeats
+   until `ready`, `failed`, `expired` or `cancelled`. The whole run lives at most 600 seconds,
+   counted on the wall clock, so a Mac that sleeps does not extend it. `cancel` closes a
+   screen that `connect` opened (the background job is stopped and tears its temporary
+   Telegram client down first) and reports `cancelled` or `nothing_to_cancel`.
 4. On `ready`, reconnect the MCP client (Claude Code: `/mcp`; Codex: restart it), have the
    assistant call `_manifest` with `check_broker=true`, and make one bounded own-chat
    read or search. That, not the installer or `ready` alone, is the end-to-end check.
@@ -109,9 +119,17 @@ flow on the existing managed enrollment and hand off again; a foreign, incompati
 owner is never stopped. An existing unmanaged session is never touched (`legacy_unmanaged`).
 A new policy enables only `read` and `artifacts`.
 
-If the background job cannot start (`connect_launch_failed`) or no page can open (headless,
-SSH), run the same command from a native Apple Terminal window on this Mac, or use the
-Terminal fallback below.
+If the broker answers but its first check (which starts TDLib and re-verifies the bundle) is
+still running after 25 seconds, `connect` reports `broker_starting` with
+`next_action: wait_then_connect_again` and stops nothing. If Telegram rate-limits a 2FA
+attempt, the result is `flood_wait` with `retry_after` in seconds (the page shows the wait in
+minutes); connect again only after that. Every code maps to one fixed `next_action`, the
+same in `wait`, the inline result and refusals.
+
+If the background job cannot start, or the assistant's sandbox refuses to create the files
+`connect` needs (`connect_launch_failed`), if the job ends without reporting a result
+(`helper_exited`), or no page can open (headless, SSH: run `cancel` first), run the same
+command from a native Apple Terminal window on this Mac, or use the Terminal fallback below.
 
 **Application identity.** With no API pair of your own, `connect` uses the application
 identity shipped in the bundle (`app-identity.json`, owner-only and hash-authenticated like
@@ -140,8 +158,8 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 
 ### Terminal fallback: phone and code setup
 
-The same launcher accepts `setup`, `resume`, `api-credentials` and `status` besides `connect`
-and `wait`. Run setup, resume and api-credentials yourself in foreground, uncaptured native
+The same launcher accepts `setup`, `resume`, `api-credentials` and `status` besides `connect`,
+`wait` and `cancel`. Run setup, resume and api-credentials yourself in foreground, uncaptured native
 Apple Terminal; `resume` recovers a managed interrupted enrollment, `status` reads bounded
 enrollment/handshake metadata. After confirmed native teardown and owner handoff, require the
 matching broker's fresh Ready, reconnect the client, check the installed manifest and perform

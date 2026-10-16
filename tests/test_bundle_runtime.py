@@ -52,22 +52,79 @@ class BundleRuntimeTests(BundleInstallTests):
         selection = self.selected()
         with self.assertRaises(bundle_runtime.BundleError): bundle_runtime.activate(selection.root,selection.index_sha256)
 
-    def test_matching_pointer_cannot_mask_registration_or_paired_skill_drift(self):
+    def test_matching_pointer_cannot_mask_receipt_home_drift(self):
         from telegram_search_mcp import bundle_runtime
-        for kind in ['registration','skill','skill_extra','skill_removed','receipt_home','receipt_claude_root']:
+        for kind in ['receipt_home','receipt_claude_root','receipt_codex_home','journal','registration_record']:
             with self.subTest(kind=kind):
                 self.setUp();selection=self.selected()
-                if kind=='registration':
-                    p=self.codex/'config.toml';p.write_text('[mcp_servers.telegram_search]\ncommand="/foreign"\n')
-                elif kind=='skill':(self.skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
-                elif kind=='skill_extra':(self.skills/'telegram-search/extra').write_bytes(b'x')
-                elif kind=='skill_removed':
-                    (self.skills/'telegram-search/SKILL.md').unlink();(self.skills/'telegram-search').rmdir()
-                elif kind=='receipt_claude_root':
-                    p=self.runtime/'receipt.json';value=json.loads(p.read_text());value['claude_skills_root']=str(self.base/'elsewhere');p.write_text(json.dumps(value))
-                else:
-                    p=self.runtime/'receipt.json';value=json.loads(p.read_text());value['user_home']='/foreign';p.write_text(json.dumps(value))
+                p=self.runtime/'receipt.json';value=json.loads(p.read_text())
+                if kind=='receipt_claude_root':value['claude_skills_root']=str(self.base/'elsewhere')
+                elif kind=='receipt_codex_home':value['codex_home']=str(self.base/'elsewhere')
+                elif kind=='journal':
+                    tx=self.runtime/'transactions'/('install_'+selection.index_sha256[:24])
+                    journal=json.loads((tx/'journal.json').read_text());journal['user_home']='/foreign'
+                    (tx/'journal.json').write_text(json.dumps(journal))
+                elif kind=='registration_record':value['registration_sha256']='0'*64
+                else:value['user_home']='/foreign'
+                p.write_text(json.dumps(value))
                 with self.assertRaises(bundle_runtime.BundleError):selection.check()
+
+    def client_drift(self, kind):
+        """Changes a user may make to client state the installer published (never to the runtime)."""
+        import shutil
+        if kind=='registration':
+            p=self.codex/'config.toml';p.write_text('[mcp_servers.telegram_search]\ncommand="/foreign"\n')
+        elif kind=='registration_removed':(self.codex/'config.toml').unlink()
+        elif kind=='skill':(self.skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
+        elif kind=='skill_extra':(self.skills/'telegram-search/extra').write_bytes(b'x')
+        elif kind=='skill_removed':shutil.rmtree(self.skills/'telegram-search')
+        else:shutil.rmtree(self.home/'.agents')
+
+    def test_codex_registration_and_agents_skill_drift_never_fail_a_launch(self):
+        # A launch runs every time and must not depend on mutable client state (integration review M2).
+        for kind in ['registration','registration_removed','skill','skill_extra','skill_removed','agents_wiped']:
+            with self.subTest(kind=kind):
+                self.setUp();selection=self.selected()
+                self.client_drift(kind)
+                selection.check()
+                self.assertEqual(selection.arguments('broker')[-1],'broker')
+
+    def test_the_installer_still_refuses_codex_registration_and_agents_skill_drift_on_repeat(self):
+        for kind in ['registration','skill','skill_extra','skill_removed']:
+            with self.subTest(kind=kind):
+                self.setUp();self.selected()
+                self.client_drift(kind)
+                with self.assertRaises(self.packet_[0].InstallError):self.install(self.packet_)
+
+    def test_launch_check_never_reads_client_state(self):
+        from telegram_search_mcp import bundle_runtime
+        selection=self.selected()
+        receipt=json.loads((self.runtime/'receipt.json').read_text())
+        real=bundle_runtime.read
+        def guarded(path,*args,**kwargs):
+            for root in ('codex_home','skills_root','claude_skills_root'):
+                self.assertFalse(Path(path).is_relative_to(receipt[root]),'launch read client state: %s'%path)
+            return real(path,*args,**kwargs)
+        with mock.patch.object(bundle_runtime,'read',side_effect=guarded),\
+             mock.patch.object(bundle_runtime,'require_object_binding',wraps=bundle_runtime.require_object_binding) as bound:
+            selection.check()
+        self.assertEqual([call.args[0] for call in bound.call_args_list],[selection.root])
+
+    def test_agents_skill_records_are_still_shape_checked(self):
+        from telegram_search_mcp import bundle_runtime
+        selection=self.selected()
+        receipt_path=self.runtime/'receipt.json'
+        original=json.loads(receipt_path.read_text())
+        objects=original['publication_objects']
+        broken={'missing agents skill':{k:v for k,v in objects.items() if k!='telegram-search'},
+                'staging path':{**objects,'telegram-setup':{**objects['telegram-setup'],'staged':'/x'}},
+                'no child binding':{**objects,'telegram-search':{'object':objects['telegram-search']['object']}}}
+        for label,value in broken.items():
+            with self.subTest(label):
+                receipt_path.write_text(json.dumps({**original,'publication_objects':value}))
+                with self.assertRaises(bundle_runtime.BundleError):selection.check()
+        receipt_path.write_text(json.dumps(original))
+        selection.check()
 
     def test_claude_registration_record_is_validated_by_shape_and_never_by_the_live_cli(self):
         from telegram_search_mcp import bundle_runtime, claude_registration

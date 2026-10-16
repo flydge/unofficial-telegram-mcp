@@ -17,7 +17,11 @@ def make_payload(root):
              'installer/tomlkit/__init__.py': b'', 'notices/LICENSE': b'license', 'notices/NOTICE': b'notice',
              'provenance/source-completeness.json': b'{}',
              'skills/telegram-search/SKILL.md': b'search-skill', 'skills/telegram-setup/SKILL.md': b'setup-skill',
-             'app/telegram_search_mcp/__init__.py': Path(telegram_search_mcp.__file__).read_bytes()}
+             'app/segno/__init__.py': b'# inert stand-in for the pinned QR encoder\n'}
+    # The assembler requires the checkout's exact package: every .py file, byte for byte.
+    package = Path(telegram_search_mcp.__file__).parent
+    files.update({'app/telegram_search_mcp/' + str(path.relative_to(package)): path.read_bytes()
+                  for path in sorted(package.rglob('*.py')) if '__pycache__' not in path.relative_to(package).parts})
     natives = {name: (name.encode() + b'-inert-native-bytes-padding-0123456789')[:48].ljust(48, b'.') for name in NAMES}
     files.update({'native/' + name: data for name, data in natives.items()})
     lock = dict(manifest_version=1, target='macos-arm64', platform='Darwin', architecture='arm64', minimum_os='26.0',

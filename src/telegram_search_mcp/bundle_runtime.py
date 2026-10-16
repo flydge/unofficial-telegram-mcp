@@ -8,7 +8,6 @@ from pathlib import Path
 import platform
 import stat
 import sys
-import tomllib
 
 from .bundle_paths import (open_owned_file, open_owned_directory, file_metadata_identity,
                            require_object_binding, RuntimePathError)
@@ -166,18 +165,19 @@ class Selection:
                 or receipt['installation_root']!=str(installation) or receipt['package_version']!=manifest['package_version']
                 or receipt['status']!='activation_required' or receipt['skills']!=manifest['skills']
                 or not _hash(receipt['registration_sha256'])
-                # Claude Code's entry and `~/.claude/skills` belong to an external client the user may
-                # reconfigure or wipe: only the records' shape is checked here, never the live entry,
-                # the CLI or those skill copies (a launch must not depend on, or reach for, them).
+                # Client registrations (Codex config.toml, Claude Code's entry) and the skill copies in
+                # `~/.agents/skills` and `~/.claude/skills` belong to external clients the user may
+                # reconfigure or wipe. A launch, which runs every time, checks only the records' shape and
+                # never reads, drives or depends on them; the installer verifies them at install and repeat time.
                 or type(receipt['claude_code']) is not str or receipt['claude_code'] not in CLAUDE_STATUSES
                 or type(receipt['claude_skills']) is not str or receipt['claude_skills'] not in ('installed','skipped')):
             raise BundleError('receipt_mismatch')
         try:
             objects=receipt['publication_objects']
-            names={'release','telegram-search','telegram-setup'}
-            claude_names={'claude-telegram-search','claude-telegram-setup'} if receipt['claude_skills']=='installed' else set()
-            if (type(objects) is not dict or set(objects)!=names|claude_names
-                    or not all(_skill_binding(objects[name]) for name in claude_names)):
+            skill_names={'telegram-search','telegram-setup'}
+            if receipt['claude_skills']=='installed':skill_names|={'claude-telegram-search','claude-telegram-setup'}
+            if (type(objects) is not dict or set(objects)!={'release'}|skill_names
+                    or not all(_skill_binding(objects[name]) for name in skill_names)):
                 raise BundleError('publication_mismatch')
             require_object_binding(self.root,objects['release']['object'])
             paths={k:Path(receipt[k]) for k in ('codex_home','skills_root','claude_skills_root','user_home')}
@@ -187,18 +187,6 @@ class Selection:
             # user's home; no receipt field changes that session selection.
             owned=read(installation/'transactions'/('install_'+self.index_sha256[:24])/'registration.json',mode=0o600)
             if digest(owned)!=receipt['registration_sha256']:raise BundleError('registration_mismatch')
-            config=tomllib.loads(read(paths['codex_home']/'config.toml',1024*1024,mode=0o600).decode())
-            expected={'command':str(self.root/'python/bin/python3'),
-                'args':['-I','-S','-B',str(self.root/'launcher.py'),'mcp'],
-                'enabled':True,'required':True,'startup_timeout_sec':30,'tool_timeout_sec':600,'enabled_tools':manifest['tools']}
-            if config.get('mcp_servers',{}).get('telegram_search')!=expected:raise BundleError('registration_mismatch')
-            for skill in manifest['skills']:
-                directory=paths['skills_root']/skill['id'];bound=objects[skill['id']]
-                require_object_binding(directory,bound['object'])
-                require_object_binding(directory/'SKILL.md',bound['child'])
-                with open_owned_directory(directory,private=True):pass
-                if (set(p.name for p in directory.iterdir())!={'SKILL.md'}
-                        or digest(read(directory/'SKILL.md',mode=0o600))!=skill['sha256']):raise BundleError('skill_mismatch')
             # Bind receipt's home to the transaction's immutable declaration,
             # without using it as an environment or MCP-driven home override.
             journal=unique_json(read(installation/'transactions'/('install_'+self.index_sha256[:24])/'journal.json',mode=0o600))

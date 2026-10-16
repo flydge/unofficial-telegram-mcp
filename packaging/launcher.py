@@ -19,7 +19,13 @@ import sys
 class AdmissionError(ValueError): pass
 
 # Closed grammar. connect-helper is internal: only the transient launchd job runs it.
-ACTIONS=('mcp','broker','setup','resume','status','connect','wait','api-credentials','connect-helper')
+ACTIONS=('mcp','broker','setup','resume','status','connect','wait','cancel','api-credentials','connect-helper')
+# The installer's closed refusal codes, echoed by a refused bootstrap-install; anything else is generic.
+INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','initialization_conflict',
+    'installation_refused','metadata_conflict','overlapping_paths','recovery_limit','registration_conflict',
+    'runtime_conflict','service_conflict','skill_conflict','target_conflict','transaction_conflict'}
+    |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
+                             'claude-telegram-search','claude-telegram-setup')})
 
 
 def _acl(fd):
@@ -167,9 +173,12 @@ def dispatch_mcp():
 def main(argv=None):
     args=list(sys.argv[1:] if argv is None else argv)
     if args==['--help']:
-        print('Unreleased 0.52.0.dev0: mcp | broker | setup | resume | status | connect | wait | api-credentials. '
-              'setup, resume and api-credentials require native Apple Terminal; connect and wait take no credentials.')
+        print('Unreleased 0.52.0.dev0: mcp | broker | setup | resume | status | connect | wait | cancel | '
+              'api-credentials. setup, resume and api-credentials require native Apple Terminal; connect, wait '
+              'and cancel take no credentials.')
         return 0
+    # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
+    code='bundle_admission_or_install_failed' if args and args[0]=='bootstrap-install' else 'bundle_admission_failed'
     try:
         root=Path(__file__).absolute().parent
         if args and args[0]=='bootstrap-install':
@@ -179,9 +188,14 @@ def main(argv=None):
             values=dict(zip(options[::2],options[1::2])); pin=values['--trusted-index-sha256']
             admit(root,Path(values['--index']),pin,False)
             sys.path[:]=[str(root/'app'),str(root/'installer')]+[p for p in sys.path if Path(p).is_relative_to(root/'python')]
-            from telegram_search_mcp.bundle_install import install
-            result=install(root,Path(values['--index']),pin,installation_root=Path(values['--installation-root']),
-                codex_home=Path(values['--codex-home']),skills_root=Path(values['--skills-root']),user_home=Path.home())
+            from telegram_search_mcp import bundle_install
+            try:
+                result=bundle_install.install(root,Path(values['--index']),pin,installation_root=Path(values['--installation-root']),
+                    codex_home=Path(values['--codex-home']),skills_root=Path(values['--skills-root']),user_home=Path.home())
+            except bundle_install.InstallError as error:
+                named=error.args[0] if len(error.args)==1 else None
+                if type(named) is str and named in INSTALL_CODES: code=named
+                raise
             print(json.dumps(result,sort_keys=True)); return 0
         if args not in [[v] for v in ACTIONS]: raise AdmissionError()
         receipt=_json(_read(root.parent.parent/'receipt.json',mode=0o600)); pin=receipt.get('index_sha256')
@@ -198,7 +212,7 @@ def main(argv=None):
         from telegram_search_mcp.setup_cli import main as dispatch
         return dispatch(args)
     except (Exception,KeyboardInterrupt):
-        print(json.dumps({'status':'refused','code':'bundle_admission_or_install_failed'}),file=sys.stderr)
+        print(json.dumps({'status':'refused','code':code}),file=sys.stderr)
         return 2
 
 

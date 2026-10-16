@@ -14,12 +14,13 @@ from .session_owner import SessionOwnerLease, OwnerLeaseError
 from .setup_wizard import run_setup, setup_status
 from .tdjson import LegacyTDJson
 
-_HELP = '''Usage: telegram-search-setup {connect|wait|setup|resume|status|api-credentials}
+_HELP = '''Usage: telegram-search-setup {connect|wait|cancel|setup|resume|status|api-credentials}
 
 Unreleased technical support for a new default session on Apple ARM64 macOS.
 connect opens the local QR screen on this Mac and returns at once; wait reports
-its progress (up to 540 s per call; repeat until ready, failed, expired or
-cancelled). Both are safe from a captured agent shell and take no credentials.
+its next phase change (up to 540 s per call; repeat until ready, failed, expired
+or cancelled); cancel stops a screen opened by connect. All three are safe from a
+captured agent shell and take no credentials.
 setup/resume/api-credentials require a foreground, uncaptured native Apple Terminal.
 API credentials, phone, Telegram code and optional 2FA use hidden prompts.
 Never pass secrets as arguments, environment variables or piped input.
@@ -30,7 +31,7 @@ it does not initialize TDLib, read Keychain, start services or prove Ready.
 connect-helper is internal: connect starts it as a transient launchd job.
 Pinned TDLib and an installed matching Python package remain prerequisites.
 '''
-COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'api-credentials', 'connect-helper')
+COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
 
 
 def _client(paths, timeout):
@@ -112,7 +113,7 @@ def _connect_command(command, paths):
                               'next_action': 'run_connect'}, sort_keys=True))
             return 2
         try:
-            return helper(own_plist=connect_cli.job_plist_path(paths)).exit_code
+            return helper(own_plist=connect_cli.job_plist_path(paths), handle_sigterm=True).exit_code
         except (Exception, KeyboardInterrupt):
             return 2
     if command == 'connect':
@@ -121,6 +122,8 @@ def _connect_command(command, paths):
                                           inline=lambda: helper(lock_held=True))
     elif command == 'wait':
         value, code = connect_cli.wait(paths)
+    elif command == 'cancel':
+        value, code = connect_cli.cancel(paths)
     else:
         value, code = connect_cli.api_credentials(paths, terminal=NativeTerminal(),
                                                   store_factory=MacOSSecretStore)
@@ -137,7 +140,7 @@ def main(argv=None) -> int:
         return 0
     if args not in [[command] for command in COMMANDS]:
         print(json.dumps({'status': 'refused', 'code': 'invalid_arguments',
-                          'detail': 'Use connect, wait, setup, resume, status, api-credentials or --help; '
+                          'detail': 'Use connect, wait, cancel, setup, resume, status, api-credentials or --help; '
                                     'never pass secrets.'}))
         return 2
     paths = SetupPaths()
@@ -146,7 +149,7 @@ def main(argv=None) -> int:
         status['broker'] = existing_broker_status(paths)
         print(json.dumps(status, sort_keys=True))
         return 0 if status['state'] != 'inconsistent' else 2
-    if args[0] in ('connect', 'wait', 'api-credentials', 'connect-helper'):
+    if args[0] in ('connect', 'wait', 'cancel', 'api-credentials', 'connect-helper'):
         return _connect_command(args[0], paths)
     terminal = NativeTerminal()
     try:

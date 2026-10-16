@@ -35,6 +35,45 @@ _CODES = frozenset({'owner_busy', 'owner_unsafe', 'legacy_unmanaged', 'enrollmen
     'password_submission_uncertain', 'expired', 'cancelled', 'auth_close_failed', 'auth_destroy_failed',
     'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout'})
 STATUS_CODES = _CODES  # Public: the fixed codes a UI may display.
+MAX_RETRY_AFTER = 86400  # Seconds; a flood_wait retry time outside 1..this is never written.
+# The one next_action table: ConnectResult.to_dict, connect's inline result and every `wait` and
+# refusal of the connect CLI read it, so a code means the same thing wherever it is reported.
+# The CLI-only codes at the end never appear in the status file.
+NEXT_ACTIONS = {
+    'legacy_unmanaged': 'preserve_existing_session_and_use_legacy_install_path',
+    'enrollment_inconsistent': 'review_enrollment_binding_without_resetting',
+    'identity_changed': 'review_enrollment_binding_without_resetting',
+    'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
+    'enrollment_missing': 'stop_and_report', 'app_identity_invalid': 'stop_and_report',
+    'policy_unsafe': 'stop_and_report', 'owner_unsafe': 'stop_and_report',
+    'credential_unavailable': 'stop_and_report',
+    'credential_invalid_record': 'repair_keychain_record_manually',
+    'owner_busy': 'check_existing_broker_without_stopping_it',
+    'credential_conflict': 'run_api_credentials_in_native_terminal',
+    'credential_denied': 'unlock_keychain_then_connect_again',
+    'credential_locked': 'unlock_keychain_then_connect_again',
+    'app_identity_missing': 'use_terminal_setup_fallback',
+    'unsupported_auth_state': 'use_terminal_setup_fallback',
+    'broker_start_failed': 'run_connect_in_native_terminal',
+    'broker_readiness_timeout': 'run_connect_in_native_terminal',
+    'broker_incompatible': 'run_connect_in_native_terminal',
+    'flood_wait': 'wait_retry_after_then_connect_again',
+    'auth_destroy_failed': 'exit_connect_process_then_run_connect_again',
+    'invalid_password': 'run_connect_again', 'invalid_input': 'run_connect_again',
+    'password_submission_uncertain': 'run_connect_again', 'auth_request_failed': 'run_connect_again',
+    'timeout': 'run_connect_again', 'dependency_unavailable': 'run_connect_again',
+    'auth_close_failed': 'run_connect_again', 'expired': 'run_connect_again', 'cancelled': 'run_connect_again',
+    # CLI only.
+    'secure_terminal_required': 'run_in_foreground_native_terminal',
+    'connect_launch_failed': 'run_connect_in_native_terminal',
+    'helper_exited': 'run_connect_in_native_terminal',  # Inline, the run shows its real refusal.
+    'broker_starting': 'wait_then_connect_again',
+    'connect_in_progress': 'wait', 'cancel_failed': 'wait',
+    'enrollment_exists': 'run_connect', 'connect_helper_requires_launchd': 'run_connect',
+}
+# A run still in progress: what the agent does with a non-terminal phase that `wait` reports.
+PHASE_ACTIONS = {'waiting_for_scan': 'tell_user_to_scan_qr_then_wait',
+                 'waiting_for_password': 'tell_user_to_enter_password_on_page_then_wait'}
 PASSWORD_ATTEMPTS = 5  # Submissions per run; Telegram's flood control is the security bound.
 _SLICE = 1.0  # Longest wait between cancel/expiry checks.
 _STEP = 30  # Cap for one provider request inside the run lifetime.
@@ -59,7 +98,8 @@ class ConnectUI(ABC):
     def cancelled(self) -> bool: ...
 
     @abstractmethod
-    def notify(self, phase: str, code: str | None) -> None: ...
+    def notify(self, phase: str, code: str | None, retry_after: int | None = None) -> None:
+        """retry_after: seconds Telegram asked to wait, only with flood_wait."""
 
 
 @dataclass(frozen=True)
@@ -74,19 +114,18 @@ class ConnectResult:
     def exit_code(self): return 0 if self.phase == 'ready' else 2
 
     def to_dict(self):
-        actions = {'owner_busy': 'check_existing_broker_without_stopping_it',
-            'legacy_unmanaged': 'preserve_existing_session_and_use_legacy_install_path',
-            'enrollment_inconsistent': 'review_enrollment_binding_without_resetting',
-            'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
-            'unsupported_auth_state': 'use_terminal_setup_fallback',
-            'app_identity_missing': 'use_terminal_setup_fallback',
-            'identity_changed': 'review_enrollment_binding_without_resetting',
-            'auth_destroy_failed': 'exit_connect_process_then_run_connect_again',
-            'broker_incompatible': 'use_matching_installed_package_and_policy'}
-        return dict(phase=self.phase, code=self.code,
-            next_action='none' if self.phase == 'ready' else actions.get(self.code, 'run_connect_again'),
+        return dict(phase=self.phase, code=self.code, next_action=next_action(self.phase, self.code),
             auth_client_closed=self.auth_client_closed, auth_client_destroyed=self.auth_client_destroyed,
             retry_after=self.retry_after)
+
+
+def next_action(phase, code):
+    """From NEXT_ACTIONS; an unmapped terminal code stops instead of inviting a retry loop."""
+    if phase == 'ready':
+        return 'none'
+    if phase in _TERMINAL:
+        return NEXT_ACTIONS.get(code, 'stop_and_report')
+    return PHASE_ACTIONS.get(phase, 'wait')
 
 
 def _failed(code, *, closed=False, destroyed=None, retry_after=None):
@@ -110,12 +149,19 @@ def connect_status_path(paths):
     return paths.lock.parent / 'connect-status.json'
 
 
-def write_connect_status(paths, phase, code, *, updated_at, expires_at):
+def valid_retry_after(code, retry_after):
+    """None, or whole seconds in 1..MAX_RETRY_AFTER carried only by flood_wait."""
+    return retry_after is None or (type(retry_after) is int and 1 <= retry_after <= MAX_RETRY_AFTER
+                                   and code == 'flood_wait')
+
+
+def write_connect_status(paths, phase, code, *, updated_at, expires_at, retry_after=None):
     """Atomic 0600 replace in the private run directory; fixed fields only."""
-    if phase not in PHASES or (code is not None and code not in _CODES):
+    if phase not in PHASES or (code is not None and code not in _CODES) or not valid_retry_after(code, retry_after):
         raise ValueError('invalid_status')
     data = json.dumps({'phase': phase, 'code': code, 'updated_at': _iso(updated_at),
-                       'expires_at': _iso(expires_at)}, sort_keys=True, separators=(',', ':')).encode('ascii')
+                       'expires_at': _iso(expires_at), 'retry_after': retry_after},
+                      sort_keys=True, separators=(',', ':')).encode('ascii')
     target = connect_status_path(paths)
     parent = open_private_directory(target.parent, create=True)
     temporary = '.connect-status-' + secrets.token_hex(16)
@@ -146,18 +192,20 @@ class _Progress:
         self.paths, self.ui, self.wall, self.expires_at = paths, ui, wall, expires_at
         self.current = None
 
-    def __call__(self, phase, code=None):
-        if (phase, code) == self.current:
+    def __call__(self, phase, code=None, retry_after=None):
+        if (phase, code, retry_after) == self.current:
             return
-        self.current = (phase, code)
+        self.current = (phase, code, retry_after)
         try:
-            write_connect_status(self.paths, phase, code, updated_at=self.wall(), expires_at=self.expires_at)
+            write_connect_status(self.paths, phase, code, updated_at=self.wall(), expires_at=self.expires_at,
+                                 retry_after=retry_after)
         finally:
-            self.ui.notify(phase, code)  # The page must learn the phase even if the file write fails.
+            # The page must learn the phase even if the file write fails.
+            self.ui.notify(phase, code, retry_after=retry_after)
 
-    def final(self, phase, code):
+    def final(self, phase, code, retry_after=None):
         try:
-            self(phase, code)
+            self(phase, code, retry_after)
         except Exception:
             pass
 
@@ -259,26 +307,37 @@ def _await_change(transport, ui, previous, remaining):
 
 
 def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, close_timeout=10,
-                bundled_loader=bundled_app_identity, _clock=time.monotonic, _wall=time.time) -> ConnectResult:
+                bundled_loader=bundled_app_identity, expires_at=None, _clock=time.monotonic,
+                _wall=time.time) -> ConnectResult:
     """No terminal: secrets come only through the UI port, credentials only from the bound identity.
 
     A run that cannot take the owner lease writes no status: the lease holder owns it.
     Handing-off and its outcome are written after the lease is released (the broker
     takes it); the connect CLI guarantees a single helper and clears stale status.
+    With expires_at (epoch seconds, the helper's one deadline) the lifetime is what is left
+    of it now, and the status carries exactly that expiry. The run also expires once the wall
+    clock passes it, so a sleeping Mac cannot keep it alive past the time the status shows.
     """
+    if expires_at is not None and type(expires_at) in (int, float) and math.isfinite(expires_at):
+        lifetime = expires_at - _wall()
+    elif expires_at is not None:
+        lifetime = None
     if (type(paths) is not SetupPaths or not isinstance(ui, ConnectUI)
             or type(lifetime) not in (int, float) or not math.isfinite(lifetime) or not 0 < lifetime <= 3600
             or type(close_timeout) not in (int, float) or not math.isfinite(close_timeout)
             or not 0 < close_timeout <= 60):
         return _failed('invalid_input')
     deadline = _clock() + lifetime
-    progress = _Progress(paths, ui, _wall, _wall() + lifetime)
+    wall_deadline = _wall() + lifetime if expires_at is None else expires_at
+    progress = _Progress(paths, ui, _wall, wall_deadline)
+    def left():
+        return min(deadline - _clock(), wall_deadline - _wall())
     def remaining(cap):
-        left = deadline - _clock()
-        if left <= 0: raise TimeoutError()
-        return min(cap, left)
+        value = left()
+        if value <= 0: raise TimeoutError()
+        return min(cap, value)
     def expired_or(code):
-        return 'expired' if code == 'timeout' and deadline - _clock() <= 0 else code
+        return 'expired' if code == 'timeout' and left() <= 0 else code
     transport, result = None, _failed('dependency_unavailable')
     enrollment = EnrollmentStore(paths)
     acquired = False
@@ -343,7 +402,7 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
                     else:
                         result = ConnectResult(result.phase, result.code, True, True, result.retry_after)
                 if result.phase in _TERMINAL:
-                    progress.final(result.phase, result.code)
+                    progress.final(result.phase, result.code, result.retry_after)
                 lease.check()
     except OwnerLeaseError as error:
         if not acquired:
