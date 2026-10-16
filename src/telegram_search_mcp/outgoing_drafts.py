@@ -332,8 +332,11 @@ class OutgoingDraftRegistry:
             return draft
 
     def prepare_forward(self, *, owner: DraftOwner, recipient: int, recipient_title: str,
-                        forward: object) -> OutgoingDraft:
-        """Record one exact forward/copy; generic draft tools never expose this kind."""
+                        forward: object, evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
+        """Record one exact forward/copy; generic draft tools never expose this kind.
+
+        `evidence` builds and validates the public preview of the exact candidate before
+        insertion; if it raises, nothing is inserted and no pending draft is superseded."""
         from .forward_drafts import ForwardSpec
         self._validate_owner(owner)
         if type(recipient) is not int or recipient == 0:
@@ -342,20 +345,22 @@ class OutgoingDraftRegistry:
             raise DraftError("forward draft is unavailable")
         projection = forward.snapshot.source.projection_json.encode("utf-8")
         now = self._clock()
+        draft = OutgoingDraft(
+            draft_id=f"draft_{uuid.uuid4().hex}", artifact_id="", sha256=forward.snapshot.source.source_sha256,
+            size_bytes=len(projection), display_name="Forwarded message", mime_type="application/json",
+            caption="", recipient=recipient, expires_at=now + self._max_ttl_seconds,
+            recipient_title=recipient_title, kind="forward", forward=forward,
+        )
+        if evidence is not None:
+            evidence(draft)
+        draft_id = draft.draft_id
         from .selection_broker import record_selection_draft, selected_admission_fence
         with self._lock, selected_admission_fence():
             self._prune_locked(now)
             if len(self._entries) >= self._capacity:
                 raise DraftError("draft capacity is exhausted")
-            draft_id = f"draft_{uuid.uuid4().hex}"
             if draft_id in self._entries:
                 raise DraftError("draft ID collision")
-            draft = OutgoingDraft(
-                draft_id=draft_id, artifact_id="", sha256=forward.snapshot.source.source_sha256,
-                size_bytes=len(projection), display_name="Forwarded message", mime_type="application/json",
-                caption="", recipient=recipient, expires_at=now + self._max_ttl_seconds,
-                recipient_title=recipient_title, kind="forward", forward=forward,
-            )
             # Preparing again supersedes the same owner's pending draft for the same
             # source, recipient, mode and caption choice; it can no longer be claimed.
             for entry in self._entries.values():

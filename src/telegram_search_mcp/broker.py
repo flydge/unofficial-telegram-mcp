@@ -1973,9 +1973,13 @@ class Broker(SelectionBrokerMixin):
             if (self._forward_owner(client_id) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch):
                 raise DraftError(FORWARD_UNAVAILABLE)
+            previews = []
+            # The preview is built and validated before insertion: a refused preview leaves
+            # no orphan draft and supersedes nothing.
             draft = self._drafts.prepare_forward(owner=owner, recipient=request.recipient,
-                                                 recipient_title=recipient_title, forward=spec)
-            preview = self._forward_preview(draft, owner)
+                recipient_title=recipient_title, forward=spec,
+                evidence=lambda candidate: previews.append(self._forward_preview(candidate, owner)))
+            [preview] = previews
             self._remember_draft_title(draft)
             return PrepareForwardSendResponse(status='prepared', forward=preview, detail=FORWARD_PREPARED)
         except ForwardRefusal as refusal:
@@ -1997,10 +2001,12 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return SendPreparedForwardResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        held = False
         try:
             owner = self._forward_owner(client_id)
             if self._drafts.kind(draft_id, owner=owner) != 'forward':
                 return result('error', 'draft kind does not match send tool')
+            held = True  # The current owner holds this draft; a lost claim race is routed below.
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
                 if previous.evidence == 'local_failed':
@@ -2089,7 +2095,20 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return result('expired', 'draft is unavailable or no longer valid')
+            return self._send_claim_lost(draft_id, client_id, 'forward', result, held=held)
+
+    def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, held: bool):
+        """A call that lost the claim to a concurrent or repeated call made no attempt, but the
+        draft may have been sent: outcome_unknown, never expired (as `_change_attempted`). Only a
+        call whose owner (and, for a video, artifact lifecycle) held the draft is routed; a later
+        call without it keeps the content-free `expired`, as does a draft never claimed."""
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
+                   if held else None)
+        if outcome == 'local_failed':
+            return result('local_failed', 'local revalidation failed; no provider send was attempted')
+        if outcome == 'attempted':
+            return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+        return result('expired', 'draft is unavailable or no longer valid')
 
     def _require_video_policy(self) -> None:
         require_current(self._policy)
@@ -2165,10 +2184,12 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return SendPreparedVideoResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        held = False
         try:
             owner = self._video_owner(client_id)
             if self._drafts.kind(draft_id, owner=owner) != 'video':
                 return result('error', 'draft kind does not match send tool')
+            held = True  # The current owner and artifact lifecycle hold this draft.
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
                 if previous.evidence == 'local_failed':
@@ -2264,7 +2285,7 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return result('expired', 'draft is unavailable or no longer valid')
+            return self._send_claim_lost(draft_id, client_id, 'video', result, held=held)
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)

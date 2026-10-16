@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import tempfile
+import threading
 import time
 import unittest
 from collections import deque
@@ -1100,6 +1101,59 @@ class TransportShapeTests(unittest.TestCase):
                     client.send_video_message(RECIPIENT, path, '', **{**arguments, **changes})
                 self.assertEqual([x for x in raw.sent if x['@type'] == 'sendMessage'], [])
                 self.assertIsNone(client._send_observations.snapshot('attempt'))
+
+
+class FinalReviewTests(VideoFixture, unittest.TestCase):
+    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8)."""
+
+    def assert_unknown(self, result, did):
+        self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
+                                  'message_id': None, 'detail': UNKNOWN})
+
+    def test_concurrent_sends_make_one_attempt(self):
+        # The second caller made no attempt but reads outcome_unknown, never sent or expired.
+        did = self.prepare()['draft_id']
+        gate = threading.Event(); results = []
+        def prompt(**kw):
+            self.approvals.append(kw); gate.wait(5); return True
+        self.broker._approval_prompt = prompt
+        threads = [threading.Thread(target=lambda: results.append(self.send(did))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        while len(self.approvals) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.set()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(sorted(result['status'] for result in results), ['outcome_unknown', 'sent'])
+        self.assert_unknown(next(result for result in results if result['status'] != 'sent'), did)
+        self.assertEqual(len(self.sends()), 1)
+
+    def test_dialog_that_outlives_the_winning_send_reads_outcome_unknown(self):
+        did = self.prepare()['draft_id']
+        opened, release, calls, results = threading.Event(), threading.Event(), [], {}
+        def prompt(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                opened.set(); release.wait(10)
+            return True
+        self.broker._approval_prompt = prompt
+        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
+        loser.start(); self.assertTrue(opened.wait(10))
+        winner = self.send(did)
+        release.set(); loser.join(10)
+        self.assertEqual((winner['status'], winner['message_id']), ('sent', 701))
+        self.assert_unknown(results['loser'], did)
+        self.assertEqual((self.send(did)['status'], len(self.sends())), ('sent', 1))  # Receipt replay.
+
+    def test_repeated_call_during_an_inflight_claim_reads_outcome_unknown_without_dialog(self):
+        did = self.prepare()['draft_id']
+        self.broker._drafts.claim(did, owner=DraftOwner(CLIENT, ACCOUNT), approved=True, provider=self.client,
+                                  provider_epoch=self.client.send_observation_epoch)
+        self.assert_unknown(self.send(did), did)
+        self.assertEqual(self.send(did, client=FOREIGN)['status'], 'expired')
+        self.assertEqual((self.approvals, self.sends()), ([], []))
 
 
 if __name__ == '__main__':

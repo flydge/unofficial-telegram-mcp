@@ -243,6 +243,13 @@ managed key and both metadata bindings for recovery: **older binaries using an
 empty key cannot open a newly encrypted managed session**. This rollback boundary
 does not migrate or alter legacy databases.
 
+Before upgrading from 0.51, keep copies of `enrollment.json` and `runtime.toml`. Once this
+candidate writes the session state (setup, resume or `connect`), a pre-0.52 `enrollment.json`
+gains `credential_source` and `identity_fingerprint`, and 0.51 binaries refuse it. A
+`runtime.toml` naming any new capability (`forward_send`, `video_send`, `archive_chats`,
+`edit_own_text`, …) is refused by 0.51 too. Roll back only with the preserved pre-upgrade files;
+see [rollback](security.md#rollback).
+
 
 ## Published 0.51: prepare the legacy runtime
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import tempfile
+import threading
 import time
 import unittest
 from collections import deque
@@ -863,6 +864,16 @@ class TransportShapeTests(unittest.TestCase):
         with self.assertRaises(ForbiddenTDLibRequest):
             _validate_bounded_request(missing)
 
+    def test_generic_call_never_carries_a_forward_even_in_its_exact_shape(self):
+        # Defence in depth: only the dedicated forward transport may send forwardMessages.
+        raw = Raw(); client = TDLibClient(raw=raw); client._ready = True
+        for payload in (self.valid(), self.valid(send_copy=False), self.valid(remove_caption=True)):
+            _validate_bounded_request(payload)
+            with self.subTest(send_copy=payload['send_copy'], remove_caption=payload['remove_caption']), \
+                    self.assertRaises(ForbiddenTDLibRequest):
+                client._call(payload)
+        self.assertEqual(raw.sent, [])
+
     def test_forward_observation_is_correlation_only_and_exact(self):
         observations = SendObservations()
         for kwargs in ({'text_sha256': 'a' * 64}, {'reply_anchor': (RECIPIENT, 1)}, {'caption_sha256': 'a' * 64}):
@@ -1448,6 +1459,103 @@ class ReReviewTests(ForwardFixture, unittest.TestCase):
         self.assertEqual(self.send(newer[0])['status'], 'sent')
         self.assertEqual(self.send(did)['status'], 'expired')
         self.assertEqual(len(self.forwards()), 1)
+
+
+UNKNOWN = 'current receipt authority is unavailable; do not retry automatically'
+
+
+class FinalReviewTests(ForwardFixture, unittest.TestCase):
+    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8)."""
+
+    def assert_unknown(self, result, did):
+        self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
+                                  'message_id': None, 'detail': UNKNOWN})
+
+    def test_concurrent_sends_make_one_attempt(self):
+        # The second caller made no attempt but reads outcome_unknown, never sent or expired.
+        did = self.prepare()['draft_id']
+        gate = threading.Event(); results = []
+        def prompt(**kw):
+            self.approvals.append(kw); gate.wait(5); return True
+        self.broker._approval_prompt = prompt
+        threads = [threading.Thread(target=lambda: results.append(self.send(did))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        while len(self.approvals) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.set()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(sorted(result['status'] for result in results), ['outcome_unknown', 'sent'])
+        self.assert_unknown(next(result for result in results if result['status'] != 'sent'), did)
+        self.assertEqual(len(self.forwards()), 1)
+
+    def test_dialog_that_outlives_the_winning_send_reads_outcome_unknown(self):
+        did = self.prepare()['draft_id']
+        opened, release, calls, results = threading.Event(), threading.Event(), [], {}
+        def prompt(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                opened.set(); release.wait(10)
+            return True
+        self.broker._approval_prompt = prompt
+        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
+        loser.start(); self.assertTrue(opened.wait(10))
+        winner = self.send(did)
+        release.set(); loser.join(10)
+        self.assertEqual((winner['status'], winner['message_id']), ('sent', 701))
+        self.assert_unknown(results['loser'], did)
+        self.assertEqual((self.send(did)['status'], len(self.forwards())), ('sent', 1))  # Receipt replay.
+
+    def test_loser_after_a_local_failure_reads_local_failed(self):
+        did = self.prepare()['draft_id']
+        opened, release, calls, results = threading.Event(), threading.Event(), [], {}
+        def prompt(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                opened.set(); release.wait(10)
+            else:
+                self.raw.source['edit_date'] = 1700000100  # The winner's post-approval revalidation fails.
+            return True
+        self.broker._approval_prompt = prompt
+        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
+        loser.start(); self.assertTrue(opened.wait(10))
+        self.assertEqual(self.send(did)['status'], 'local_failed')
+        release.set(); loser.join(10)
+        self.assertEqual(results['loser'], {'status': 'local_failed', 'draft_id': did, 'recipient': None,
+            'message_id': None, 'detail': 'local revalidation failed; no provider send was attempted'})
+        self.assertEqual(self.forwards(), [])
+
+    def test_repeated_call_during_an_inflight_claim_reads_outcome_unknown_without_dialog(self):
+        did = self.prepare()['draft_id']
+        self.broker._drafts.claim(did, owner=DraftOwner(CLIENT, ACCOUNT), approved=True, provider=self.client,
+                                  provider_epoch=self.client.send_observation_epoch)
+        self.assert_unknown(self.send(did), did)
+        self.assertEqual(self.send(did, client=FOREIGN)['status'], 'expired')
+        self.assertEqual((self.approvals, self.forwards()), ([], []))
+
+    def test_later_call_under_another_account_keeps_the_content_free_expired(self):
+        # Only a call whose owner held the draft is routed; another account learns nothing.
+        did = self.prepare()['draft_id']
+        real = self.raw.send
+        def send(request):
+            real(request)
+            if request['@type'] == 'forwardMessages':
+                self.raw.account = 8
+        self.raw.send = send
+        self.assert_unknown(self.send(did), did)
+        self.assertEqual(self.broker._drafts._entries[did].receipt.status, 'sent')  # Kept, never disclosed here.
+        self.assertEqual(self.send(did)['status'], 'expired')
+        self.assertEqual(len(self.forwards()), 1)
+
+    def test_preview_failure_leaves_no_orphan_and_supersedes_nothing(self):
+        first = self.prepare()['draft_id']
+        with patch('telegram_search_mcp.broker.ForwardDraftPreview.create', side_effect=ValueError('synthetic refusal')):
+            self.assert_unavailable('forward')
+        self.assertEqual(self.broker._drafts.known_ids(), {first})
+        self.assertEqual(self.broker._drafts._entries[first].state, 'pending')
+        self.assertEqual(self.send(first)['status'], 'sent')
 
 
 if __name__ == '__main__':

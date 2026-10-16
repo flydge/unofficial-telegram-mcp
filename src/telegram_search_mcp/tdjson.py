@@ -61,6 +61,8 @@ _ALLOWED_REQUEST_TYPES = frozenset(
 
 # State changes travel only through the dedicated one-attempt transport, never `_call`.
 _CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText"})
+# Only the dedicated forward transport may send a forward; `_call` refuses it in any shape.
+_CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages"}
 
 _AUTHORIZATION_CONTROL_TYPES = frozenset(
     {"getAuthorizationState", "setTdlibParameters", "checkDatabaseEncryptionKey"}
@@ -990,7 +992,7 @@ class TDLibClient:
     def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
         request_type = payload.get("@type")
         if (not isinstance(request_type, str) or request_type not in _ALLOWED_REQUEST_TYPES or
-                request_type in _CHANGE_REQUEST_TYPES):
+                request_type in _CALL_REFUSED_TYPES):
             raise ForbiddenTDLibRequest("TDLib request is not allowed")
         _validate_bounded_request(payload)
         aggregate_deadline = getattr(self._request_context, "deadline", None)

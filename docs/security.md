@@ -355,6 +355,8 @@ The `--check` path uses the broker to verify TDLib authorization without reading
 
 Before an upgrade, save the previous installed runtime, owner-only plist, consumer config, and installed skill in a private rollback directory outside the source tree. Boot out only the validated `com.<local-home-name>.telegram-search-mcp.broker` LaunchAgent. Restore those saved files, then bootstrap the restored plist and check the prior proxy. This leaves the original checkout, its `.venv`, TDLib session, credentials, historical data, and user files intact. Restart clears in-memory drafts, incomplete uploads, discovery cursors, and the broker-lifetime numeric catalog cache; uncertain sends, archive moves and edits are never replayed. Rolling back or disabling `archive_chats` or `edit_own_text` stops new changes but does not undo one that was already applied: a move is reversed only by a new approved move in the other direction, and an edit has no undo.
 
+Rolling back from the 0.52 candidate to 0.51 needs the preserved pre-upgrade files. Once the candidate writes the session state (setup, resume or `connect`), a pre-0.52 `enrollment.json` gains `credential_source` and `identity_fingerprint`, and 0.51 binaries refuse it; a `runtime.toml` naming any capability 0.51 does not know (`forward_send`, `video_send`, `archive_chats`, `edit_own_text` and the other new ones) is refused by 0.51 as well. Restore the saved pre-upgrade `enrollment.json` and `runtime.toml` together with the runtime, never the candidate-written ones.
+
 Do not delete historical custom-index or TDLib session data as part of rollback. Historical index cleanup remains separately authorized and recoverable; session revocation is an explicit owner action if authority must be withdrawn.
 
 ## Optional local media prerequisites
@@ -1807,7 +1809,9 @@ The whole run lives 600 seconds on the wall clock, so a sleeping Mac does not ex
 terminal phase the page stays up 10 seconds, the server closes and the helper removes its own
 plist. `cancel` boots out only this job; the helper's SIGTERM handler cancels the run through the
 page so the temporary auth client is closed and destroyed normally and the status becomes
-`cancelled`.
+`cancelled`. The page address, token fragment included, may remain in the browser's history; the
+token is valid for that one run only (at most 600 seconds) and the server is closed afterwards, so
+the stored address opens nothing later.
 
 `connect` never stops a foreign, incompatible or Ready owner. The one exception is an enrolled,
 receipt-bound broker that answers a compatible handshake but whose Telegram authorization is not
