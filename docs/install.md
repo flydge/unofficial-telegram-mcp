@@ -38,25 +38,34 @@ The installer registers, with ownership receipts:
 
 - Codex: only its owned `mcp_servers.telegram_search` subtree in `~/.codex/config.toml`;
   neighboring TOML is preserved.
-- Claude Code: a user-scope server `telegram_search`, added with
-  `claude mcp add-json --scope user` and confirmed with `claude mcp get`. The `claude` CLI
+- Claude Code: a user-scope server `telegram_search`. Its state is read only from the
+  `mcpServers` object of `~/.claude.json` (a bounded, no-follow, strict-JSON read that never
+  starts a process). A different `telegram_search` entry there (for example the 0.51
+  manual `claude mcp add`) refuses the install as `claude_registration_conflict` before
+  anything is created; remove it yourself with `claude mcp remove telegram_search -s user`.
+  An identical entry is reused. Otherwise the entry is added once with
+  `claude mcp add-json --scope user` and confirmed by re-reading the file. The `claude` CLI
   is looked up only at `~/.local/bin/claude`, `~/.claude/local/claude`,
-  `/opt/homebrew/bin/claude` and `/usr/local/bin/claude` (a regular executable owned by
-  you or root; `PATH` is never searched). If none exists, Claude Code registration is
-  skipped and the receipt records `claude_code: not_found`; that is not a failure. An
-  identical existing entry is reused; a different `telegram_search` entry is refused as
-  `claude_registration_conflict` and is never overwritten or removed. If the install
-  refuses after the installer added the entry, only that entry is removed.
-- The paired `telegram-search` and `telegram-setup` skills under both `~/.agents/skills`
-  and `~/.claude/skills` (created owner-only if absent).
+  `/opt/homebrew/bin/claude` and `/usr/local/bin/claude`; every path component and link
+  must be owned by you or root and not group/world-writable (`PATH` is never searched),
+  and the resolved file runs with only `HOME`, `PATH=<its directory>:/usr/bin:/bin:/usr/sbin:/sbin`
+  and `LC_ALL=C`. Claude Code registration never blocks the install otherwise: the result
+  records `claude_code` as `registered`, `reused`, `failed`, `unavailable` (unreadable
+  `~/.claude.json`) or `not_found` (no CLI), and for the last three returns a nonsecret
+  `claude_registration_command` argv you can run yourself. The outcome is final for that
+  installation; a repeat or resumed install never re-runs it. Only an entry the installer
+  has just added, before its outcome is recorded, is ever removed on a refusal.
+- The paired `telegram-search` and `telegram-setup` skills under `~/.agents/skills`, and
+  under `~/.claude/skills` only when `~/.claude` already exists or the CLI was found
+  (otherwise the receipt records `claude_skills: skipped`).
 
 It refuses foreign registrations, skills, runtime roots and existing services.
 Recovery retains one lease, journal, original config bytes and exact receipts;
 repeating the same admitted installation verifies/reuses it, without consulting the
 `claude` CLI again. Apart from those registration commands it performs no login,
 Keychain operation, service start/stop or session mutation. A launch checks the
-receipt, the Codex registration, both skill copies and the shape of the Claude receipt
-record only; it never re-reads the Claude registration.
+receipt, the Codex registration, the `~/.agents/skills` copies and only the shape of the
+Claude records; it never re-reads the Claude registration or the `~/.claude/skills` copies.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
@@ -66,7 +75,7 @@ filesystem objects before rename or replacement. The runtime's parent directory
 must already exist safely; the default macOS Application Support parent is used.
 
 Installation returns `status: activation_required`, `next_action: run_activation_then_wait`,
-`claude_code` (`registered`, `reused` or `not_found`) and the nonsecret
+`claude_code`, `claude_skills` and the nonsecret
 `activation_command` and `activation_arguments`: the installed Python and isolated
 launcher (`-I -S -B`, a closed app path) ending in `connect`. Installation, a started
 screen or a launch is not Ready.

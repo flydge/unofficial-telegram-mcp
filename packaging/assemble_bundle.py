@@ -8,7 +8,7 @@ rights. Failed private output directories are retained for diagnosis/quarantine.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import gzip
 import hashlib
 import io
@@ -62,7 +62,8 @@ class _File:
     metadata: os.stat_result
     sha256: str
     executable: bool
-    data: bytes | None = None  # Generated in memory (never read from the payload); source is a label only.
+    # Generated in memory (never read from the payload); source is a label only. Never in repr.
+    data: bytes | None = field(default=None, repr=False)
 
     def record(self):
         return {'path': self.name, 'bytes': self.metadata.st_size,

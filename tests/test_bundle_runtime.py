@@ -12,7 +12,7 @@ from test_bundle_install import BundleInstallTests
 class BundleRuntimeTests(BundleInstallTests):
     def selected(self, **install_options):
         from telegram_search_mcp import bundle_runtime
-        packet = self.fixture()
+        packet = self.packet_ = self.fixture()
         result = self.install(packet, **install_options)
         selection = bundle_runtime.Selection(Path(result['release_root']),packet[3])
         patcher = mock.patch.object(bundle_runtime,'_SELECTION',selection)
@@ -54,16 +54,15 @@ class BundleRuntimeTests(BundleInstallTests):
 
     def test_matching_pointer_cannot_mask_registration_or_paired_skill_drift(self):
         from telegram_search_mcp import bundle_runtime
-        for kind in ['registration','skill','claude_skill','claude_skill_extra','claude_skill_removed','receipt_home','receipt_claude_root']:
+        for kind in ['registration','skill','skill_extra','skill_removed','receipt_home','receipt_claude_root']:
             with self.subTest(kind=kind):
                 self.setUp();selection=self.selected()
                 if kind=='registration':
                     p=self.codex/'config.toml';p.write_text('[mcp_servers.telegram_search]\ncommand="/foreign"\n')
                 elif kind=='skill':(self.skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
-                elif kind=='claude_skill':(self.claude_skills/'telegram-setup/SKILL.md').write_bytes(b'stale skill')
-                elif kind=='claude_skill_extra':(self.claude_skills/'telegram-search/extra').write_bytes(b'x')
-                elif kind=='claude_skill_removed':
-                    (self.claude_skills/'telegram-search/SKILL.md').unlink();(self.claude_skills/'telegram-search').rmdir()
+                elif kind=='skill_extra':(self.skills/'telegram-search/extra').write_bytes(b'x')
+                elif kind=='skill_removed':
+                    (self.skills/'telegram-search/SKILL.md').unlink();(self.skills/'telegram-search').rmdir()
                 elif kind=='receipt_claude_root':
                     p=self.runtime/'receipt.json';value=json.loads(p.read_text());value['claude_skills_root']=str(self.base/'elsewhere');p.write_text(json.dumps(value))
                 else:
@@ -77,8 +76,9 @@ class BundleRuntimeTests(BundleInstallTests):
         original = json.loads(receipt_path.read_text())
         self.assertEqual(original['claude_code'], 'registered')
         self.claude().entry = None  # The external CLI's entry vanished: a launch must not notice or care.
-        with mock.patch.object(claude_registration, '_run', side_effect=AssertionError('check must not drive the CLI')):
-            for value in ('registered', 'reused', 'not_found'):
+        with mock.patch.object(claude_registration, '_run', side_effect=AssertionError('check must not drive the CLI')), \
+                mock.patch.object(claude_registration, 'state', side_effect=AssertionError('check must not read Claude state')):
+            for value in ('registered', 'reused', 'failed', 'unavailable', 'not_found'):
                 receipt_path.write_text(json.dumps({**original, 'claude_code': value}))
                 selection.check()
             for value in ('', 'maybe', None, True, 1, ['registered'], {'status': 'registered'}):
@@ -91,8 +91,49 @@ class BundleRuntimeTests(BundleInstallTests):
 
     def test_installation_without_a_claude_cli_still_passes_every_launch_check(self):
         selection = self.selected(claude_candidates=())
-        self.assertEqual(json.loads((self.runtime / 'receipt.json').read_text())['claude_code'], 'not_found')
+        receipt = json.loads((self.runtime / 'receipt.json').read_text())
+        self.assertEqual((receipt['claude_code'], receipt['claude_skills']), ('not_found', 'skipped'))
+        self.assertEqual(set(receipt['publication_objects']), {'release', 'telegram-search', 'telegram-setup'})
+        self.assertFalse((self.home / '.claude').exists())  # Never created for a client that is not there.
         self.assertEqual(self.claude().calls, [])
+        selection.check()
+
+    def test_claude_skill_copies_are_never_verified_at_launch_and_may_be_wiped(self):
+        import shutil
+        from telegram_search_mcp import bundle_runtime
+        for kind in ['stale', 'extra', 'removed', 'wiped']:
+            with self.subTest(kind=kind):
+                self.setUp(); selection = self.selected()
+                self.assertEqual(json.loads((self.runtime / 'receipt.json').read_text())['claude_skills'], 'installed')
+                if kind == 'stale': (self.claude_skills / 'telegram-setup/SKILL.md').write_bytes(b'stale skill')
+                elif kind == 'extra': (self.claude_skills / 'telegram-search/extra').write_bytes(b'x')
+                elif kind == 'removed': shutil.rmtree(self.claude_skills / 'telegram-search')
+                else: shutil.rmtree(self.home / '.claude')  # The user wipes their Claude Code directory.
+                selection.check()
+                again = self.install(self.packet_)  # A repeat install neither re-verifies nor recreates them.
+                self.assertEqual((again['installation'], again['claude_skills']), ('reused', 'installed'))
+                selection.check()
+                if kind == 'wiped': self.assertFalse((self.home / '.claude').exists())
+
+    def test_claude_records_are_shape_checked(self):
+        from telegram_search_mcp import bundle_runtime
+        selection = self.selected()
+        receipt_path = self.runtime / 'receipt.json'
+        original = json.loads(receipt_path.read_text())
+        broken = {'unknown skills status': {**original, 'claude_skills': 'maybe'},
+                  'skipped but objects listed': {**original, 'claude_skills': 'skipped'},
+                  'installed without objects': {**original, 'publication_objects': {
+                      k: v for k, v in original['publication_objects'].items() if not k.startswith('claude-')}},
+                  'staging path in a binding': {**original, 'publication_objects': {**original['publication_objects'],
+                      'claude-telegram-search': {**original['publication_objects']['claude-telegram-search'], 'staged': '/x'}}},
+                  'non-integer inode': {**original, 'publication_objects': {**original['publication_objects'],
+                      'claude-telegram-setup': {**original['publication_objects']['claude-telegram-setup'],
+                                                'object': {**original['publication_objects']['claude-telegram-setup']['object'], 'ino': '1'}}}}}
+        for label, value in broken.items():
+            with self.subTest(label):
+                receipt_path.write_text(json.dumps(value))
+                with self.assertRaises(bundle_runtime.BundleError): selection.check()
+        receipt_path.write_text(json.dumps(original))
         selection.check()
 
     def test_bundled_manifest_names_actual_native_pin_without_loading_provider(self):

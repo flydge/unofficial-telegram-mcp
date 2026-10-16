@@ -131,7 +131,7 @@ class RecoveryTests(BundleInstallTests):
                         tx=self.runtime/'transactions'/('install_'+pin[:24]);target=self.codex/'config.toml'
                         target.write_bytes((tx/'config.candidate').read_bytes());target.chmod(0o600);foreign=(target,target.stat().st_ino)
                     if kind in ('skill','claude_skill') and stage=='registration':
-                        target=(self.skills if kind=='skill' else self.claude_skills)/'telegram-search';target.mkdir(mode=0o700)
+                        target=(self.skills if kind=='skill' else self.claude_skills)/'telegram-search';target.mkdir(mode=0o700,parents=True)
                         (target/'SKILL.md').write_bytes((source/'skills/telegram-search/SKILL.md').read_bytes());(target/'SKILL.md').chmod(0o600)
                         foreign=(target,target.stat().st_ino)
                 with self.assertRaises(module.InstallError):self.install(packet,checkpoint=actor)

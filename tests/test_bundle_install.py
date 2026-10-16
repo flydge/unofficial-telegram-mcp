@@ -33,7 +33,7 @@ class InstallHarness:
         """The fake `claude` CLI for the current home (rebuilt when a subtest resets the fixture)."""
         if getattr(self, '_claude_base', None) != self.base:
             self._claude_base = self.base
-            self._claude = FakeClaude()
+            self._claude = FakeClaude(self.home)
             self.claude_cli = self.base / 'bin' / 'claude'
             self.claude_cli.parent.mkdir(mode=0o700)
             self.claude_cli.write_bytes(b'#!/bin/sh\n# inert placeholder; the fake runner never executes it\n')
@@ -283,6 +283,17 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
         payload['ProgramArguments'][-1]='setup';plist.write_bytes(plistlib.dumps(payload))
         with self.assertRaises(packet[0].InstallError):self.install(packet)
         self.assertEqual(plistlib.loads(plist.read_bytes())['ProgramArguments'][-1],'setup')
+
+
+class AssemblyIdentityReprTests(unittest.TestCase):
+    def test_generated_identity_file_repr_never_carries_its_bytes(self):
+        from bundle_payload import keychain_runner, load_assembler
+        api_hash = 'fedcba9876543210fedcba9876543210'
+        file = load_assembler()._app_identity_file(keychain_runner(2468013, api_hash))
+        self.assertIn(api_hash.encode(), file.data)
+        for text in (repr(file), str(file)):
+            self.assertNotIn(api_hash, text)
+            self.assertNotIn('2468013', text)
 
 
 if __name__ == '__main__': unittest.main()

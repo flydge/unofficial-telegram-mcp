@@ -129,6 +129,22 @@ def _hash(value):
     return type(value) is str and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
 
 
+CLAUDE_STATUSES = ('registered', 'reused', 'failed', 'unavailable', 'not_found')
+_BINDING_KEYS = {'directory': {'kind', 'dev', 'ino', 'uid', 'mode'},
+                 'file': {'kind', 'dev', 'ino', 'uid', 'mode', 'bytes', 'nlink'}}
+
+
+def _binding(value, kind):
+    return (type(value) is dict and value.get('kind') == kind and set(value) == _BINDING_KEYS[kind]
+            and all(type(value[k]) is int and value[k] >= 0 for k in _BINDING_KEYS[kind] - {'kind'}))
+
+
+def _skill_binding(value):
+    """Shape of a recorded skill publication: directory plus its SKILL.md, no staging path."""
+    return (type(value) is dict and set(value) == {'object', 'child'}
+            and _binding(value['object'], 'directory') and _binding(value['child'], 'file'))
+
+
 @dataclass(frozen=True)
 class Selection:
     root: Path
@@ -145,20 +161,23 @@ class Selection:
         index,manifest=validate_tree(self.root, self.root / 'bundle-index.json', self.index_sha256, installed=True)
         keys={'schema_version','index_sha256','release_root','installation_root','codex_home','skills_root',
               'claude_skills_root','user_home','package_version','registration_sha256','skills','publication_objects',
-              'claude_code','status'}
+              'claude_code','claude_skills','status'}
         if (set(receipt)!=keys or type(receipt['schema_version']) is not int or receipt['schema_version']!=1
                 or receipt['installation_root']!=str(installation) or receipt['package_version']!=manifest['package_version']
                 or receipt['status']!='activation_required' or receipt['skills']!=manifest['skills']
                 or not _hash(receipt['registration_sha256'])
-                # The Claude entry is owned by an external CLI: only the record's shape is checked here,
-                # never its live registration (a launch must not depend on, or reach for, that CLI).
-                or type(receipt['claude_code']) is not str
-                or receipt['claude_code'] not in ('registered','reused','not_found')):
+                # Claude Code's entry and `~/.claude/skills` belong to an external client the user may
+                # reconfigure or wipe: only the records' shape is checked here, never the live entry,
+                # the CLI or those skill copies (a launch must not depend on, or reach for, them).
+                or type(receipt['claude_code']) is not str or receipt['claude_code'] not in CLAUDE_STATUSES
+                or type(receipt['claude_skills']) is not str or receipt['claude_skills'] not in ('installed','skipped')):
             raise BundleError('receipt_mismatch')
         try:
             objects=receipt['publication_objects']
-            if type(objects) is not dict or set(objects)!={'release','telegram-search','telegram-setup',
-                                                          'claude-telegram-search','claude-telegram-setup'}:
+            names={'release','telegram-search','telegram-setup'}
+            claude_names={'claude-telegram-search','claude-telegram-setup'} if receipt['claude_skills']=='installed' else set()
+            if (type(objects) is not dict or set(objects)!=names|claude_names
+                    or not all(_skill_binding(objects[name]) for name in claude_names)):
                 raise BundleError('publication_mismatch')
             require_object_binding(self.root,objects['release']['object'])
             paths={k:Path(receipt[k]) for k in ('codex_home','skills_root','claude_skills_root','user_home')}
@@ -173,14 +192,13 @@ class Selection:
                 'args':['-I','-S','-B',str(self.root/'launcher.py'),'mcp'],
                 'enabled':True,'required':True,'startup_timeout_sec':30,'tool_timeout_sec':600,'enabled_tools':manifest['tools']}
             if config.get('mcp_servers',{}).get('telegram_search')!=expected:raise BundleError('registration_mismatch')
-            for prefix,root_key in (('','skills_root'),('claude-','claude_skills_root')):
-                for skill in manifest['skills']:
-                    directory=paths[root_key]/skill['id'];bound=objects[prefix+skill['id']]
-                    require_object_binding(directory,bound['object'])
-                    require_object_binding(directory/'SKILL.md',bound['child'])
-                    with open_owned_directory(directory,private=True):pass
-                    if (set(p.name for p in directory.iterdir())!={'SKILL.md'}
-                            or digest(read(directory/'SKILL.md',mode=0o600))!=skill['sha256']):raise BundleError('skill_mismatch')
+            for skill in manifest['skills']:
+                directory=paths['skills_root']/skill['id'];bound=objects[skill['id']]
+                require_object_binding(directory,bound['object'])
+                require_object_binding(directory/'SKILL.md',bound['child'])
+                with open_owned_directory(directory,private=True):pass
+                if (set(p.name for p in directory.iterdir())!={'SKILL.md'}
+                        or digest(read(directory/'SKILL.md',mode=0o600))!=skill['sha256']):raise BundleError('skill_mismatch')
             # Bind receipt's home to the transaction's immutable declaration,
             # without using it as an environment or MCP-driven home override.
             journal=unique_json(read(installation/'transactions'/('install_'+self.index_sha256[:24])/'journal.json',mode=0o600))

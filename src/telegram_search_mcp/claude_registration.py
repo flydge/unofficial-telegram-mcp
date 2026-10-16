@@ -1,23 +1,31 @@
-"""Claude Code user-scope MCP registration through the `claude` CLI.
+"""Claude Code user-scope MCP registration.
 
-The CLI is found only at a fixed list of locations (no PATH search). Every call is an
-argv list with no shell, a bounded timeout and a private working directory; output is
-parsed for a few fixed fields and never returned, logged or placed in an exception.
+State is read only from the user-scope `mcpServers` object of `<home>/.claude.json`: a
+bounded, no-follow, owner-checked, strict-JSON read that never starts a process. The
+`claude` CLI is used only to write (`mcp add-json|remove --scope user`). It is found only at
+a fixed list of locations (no PATH search); every path component and link hop is checked
+without following links and the resolved target itself is executed with an explicit
+minimal environment. Calls are argv lists with no shell, a bounded timeout and a private
+working directory; output is discarded, never parsed, returned, logged or raised.
 The runner is injectable so tests never touch the real CLI or its configuration.
 """
 from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import subprocess
 
+from .bundle_paths import (MissingRuntimePath, RuntimePathError, open_owned_file, file_metadata_identity,
+                           _safe_metadata, _validate_descriptor_acl, _path_binding_identity)
+
 SERVER_NAME = 'telegram_search'
-GET_TIMEOUT = 60  # `claude mcp get` also health-checks the server it describes.
 WRITE_TIMEOUT = 30
-_MAX_OUTPUT = 64 * 1024
-_FIELD = re.compile(r'  ([A-Za-z][A-Za-z ]{0,31}): ?(.*)')
+MAX_CONFIG_BYTES = 64 * 1024 * 1024
+SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+_MAX_LINKS = 16
+_MAX_STEPS = 256
+_EXACT_KEYS = {'type', 'command', 'args', 'env'}
 
 
 class ClaudeCliError(RuntimeError):
@@ -34,58 +42,162 @@ def candidate_paths(home):
             Path('/opt/homebrew/bin/claude'), Path('/usr/local/bin/claude'))
 
 
+def config_path(home):
+    return Path(home) / '.claude.json'
+
+
+def payload(command, args):
+    return json.dumps({'type': 'stdio', 'command': command, 'args': list(args)}, separators=(',', ':'))
+
+
+def manual_command(command, args):
+    """Nonsecret argv the user can run themselves to register this server."""
+    return ['claude', 'mcp', 'add-json', '--scope', 'user', SERVER_NAME, payload(command, args)]
+
+
+# --- reads: ~/.claude.json only ------------------------------------------------------------
+
+def _strict_json(data):
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out: raise ValueError('duplicate')
+            out[key] = value
+        return out
+    def constant(_): raise ValueError('constant')
+    value = json.loads(data, object_pairs_hook=pairs, parse_constant=constant)
+    if type(value) is not dict: raise ValueError('shape')
+    return value
+
+
+def _servers(home):
+    """The user-scope `mcpServers` dict ({} when the file or key is absent), else None (unavailable)."""
+    try:
+        with open_owned_file(config_path(home)) as stream:
+            before = os.fstat(stream.fileno())
+            if before.st_size > MAX_CONFIG_BYTES: return None
+            data = stream.read(MAX_CONFIG_BYTES + 1)
+            if len(data) != before.st_size or file_metadata_identity(before) != file_metadata_identity(os.fstat(stream.fileno())):
+                return None
+    except MissingRuntimePath:
+        return {}
+    except (OSError, RuntimePathError, ValueError):
+        return None
+    try:
+        servers = _strict_json(data).get('mcpServers', {})
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        return None
+    return servers if type(servers) is dict else None
+
+
+def _exact(value, command, args):
+    # `args` is compared as a JSON list, so a joined or re-split lookalike never matches.
+    return (type(value) is dict and set(value) <= _EXACT_KEYS and value.get('type', 'stdio') == 'stdio'
+            and type(value.get('command')) is str and value['command'] == command
+            and type(value.get('args')) is list and value['args'] == list(args)
+            and value.get('env', {}) == {} and type(value.get('env', {})) is dict)
+
+
+def state(home, command, args):
+    """'absent', 'exact' (stdio, this command and argument list, no env or url), 'different' or 'unavailable'."""
+    servers = _servers(home)
+    if servers is None: return 'unavailable'
+    if SERVER_NAME not in servers: return 'absent'
+    return 'exact' if _exact(servers[SERVER_NAME], command, args) else 'different'
+
+
+# --- locating the CLI ----------------------------------------------------------------------
+
+def _admit(path, metadata, *, leaf):
+    """Owner root or the user, not group/world-writable, deny-only ACL, bound to an opened descriptor."""
+    if leaf:
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid not in (0, os.getuid())
+                or stat.S_IMODE(metadata.st_mode) & 0o022):
+            raise RuntimePathError('unsafe executable')
+    else:
+        _safe_metadata(path, metadata)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | (0 if leaf else os.O_DIRECTORY)
+    descriptor = os.open(path, flags)
+    try:
+        if _path_binding_identity(os.fstat(descriptor)) != _path_binding_identity(metadata):
+            raise RuntimePathError('binding changed')
+        _validate_descriptor_acl(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _resolve(candidate):
+    """Resolve link by link from `/`, admitting every directory, link and the final file without following links."""
+    path = Path(candidate)
+    if not path.is_absolute() or '\x00' in str(path):
+        raise RuntimePathError('candidate must be absolute')
+    current = Path('/')
+    _admit(current, current.lstat(), leaf=False)
+    pending = list(reversed(path.parts[1:]))
+    links = steps = 0
+    while pending:
+        steps += 1
+        if steps > _MAX_STEPS: raise RuntimePathError('too many components')
+        part = pending.pop()
+        if part == '..':
+            current = current.parent  # `current` is an admitted real directory.
+            continue
+        child = current / part
+        metadata = child.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            links += 1
+            if links > _MAX_LINKS or metadata.st_uid not in (0, os.getuid()):
+                raise RuntimePathError('unsafe link')
+            target = os.readlink(child)
+            after = child.lstat()
+            if (after.st_dev, after.st_ino) != (metadata.st_dev, metadata.st_ino) or not target or '\x00' in target:
+                raise RuntimePathError('link changed')
+            target = Path(target)
+            if target.is_absolute():
+                current = Path('/')
+                pending.extend(reversed(target.parts[1:]))
+            else:
+                pending.extend(reversed(target.parts))
+            continue
+        if pending:
+            _admit(child, metadata, leaf=False)
+        current = child
+    _admit(current, current.lstat(), leaf=True)
+    if not os.access(current, os.X_OK):
+        raise RuntimePathError('not executable')
+    return current
+
+
 def locate(candidates):
-    """First candidate that resolves to a regular executable owned by the user or root, else None."""
-    for path in candidates:
+    """Resolved target of the first safe executable candidate, else None. PATH is never searched."""
+    for candidate in candidates:
         try:
-            metadata = Path(path).resolve(strict=True).stat()
-            if (stat.S_ISREG(metadata.st_mode) and metadata.st_uid in (0, os.getuid())
-                    and not metadata.st_mode & 0o022 and os.access(path, os.X_OK)):
-                return Path(path)
-        except (OSError, RuntimeError, ValueError):
+            return _resolve(candidate)
+        except (OSError, RuntimePathError, RuntimeError, ValueError):
             continue
     return None
 
 
-def _run(runner, cli, home, arguments, timeout):
+# --- writes: the CLI -----------------------------------------------------------------------
+
+def environment(cli, home):
+    return {'HOME': str(home), 'PATH': str(Path(cli).parent) + ':' + SYSTEM_PATH, 'LC_ALL': 'C'}
+
+
+def _run(runner, cli, home, arguments):
     try:
-        return runner([str(cli), 'mcp', *arguments], capture_output=True, text=True, errors='replace',
-                      check=False, timeout=timeout, cwd=str(home), stdin=subprocess.DEVNULL)
+        result = runner([str(cli), 'mcp', *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, check=False, timeout=WRITE_TIMEOUT, cwd=str(home),
+                        env=environment(cli, home))
     except (OSError, ValueError, subprocess.SubprocessError):
         raise ClaudeCliError() from None
-
-
-def _matches(output, command, args):
-    if type(output) is not str:
-        return False
-    text = output[:_MAX_OUTPUT]
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != SERVER_NAME + ':':
-        return False
-    fields = {}
-    for line in lines[1:]:
-        found = _FIELD.fullmatch(line.rstrip())
-        if found and found.group(1) not in fields:
-            fields[found.group(1)] = found.group(2).strip()
-    return (fields.get('Scope', '').startswith('User') and fields.get('Type') == 'stdio'
-            and fields.get('Command') == command and fields.get('Args') == ' '.join(args)
-            and 'Environment' not in fields and 'URL' not in fields)
-
-
-def state(runner, cli, home, command, args):
-    """'absent' (the CLI reports no such server), 'exact' (user scope, this command and args) or 'different'."""
-    result = _run(runner, cli, home, ['get', SERVER_NAME], GET_TIMEOUT)
-    if result.returncode != 0:
-        return 'absent'  # A failing add (it never overwrites) and the confirming get decide the rest.
-    return 'exact' if _matches(result.stdout, command, args) else 'different'
+    if getattr(result, 'returncode', None) != 0:
+        raise ClaudeCliError()
 
 
 def add(runner, cli, home, command, args):
-    payload = json.dumps({'type': 'stdio', 'command': command, 'args': list(args)}, separators=(',', ':'))
-    if _run(runner, cli, home, ['add-json', '--scope', 'user', SERVER_NAME, payload], WRITE_TIMEOUT).returncode != 0:
-        raise ClaudeCliError()
+    _run(runner, cli, home, ['add-json', '--scope', 'user', SERVER_NAME, payload(command, args)])
 
 
 def remove(runner, cli, home):
-    if _run(runner, cli, home, ['remove', '--scope', 'user', SERVER_NAME], WRITE_TIMEOUT).returncode != 0:
-        raise ClaudeCliError()
+    _run(runner, cli, home, ['remove', '--scope', 'user', SERVER_NAME])

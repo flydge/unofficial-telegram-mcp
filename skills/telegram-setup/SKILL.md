@@ -19,8 +19,9 @@ step seems to need one, stop and use the Terminal fallback at the end.
    foreign runtime, registration, service or skill conflicts (including
    `claude_registration_conflict`); never stop an existing owner to make an install pass.
    Success is `status: activation_required` with a nonsecret `activation_command`.
-   `claude_code` says whether the Claude Code entry was `registered`, `reused` or `not_found`
-   (no Claude Code CLI at its usual places; tell the user, Codex is still registered).
+   `claude_code` is `registered` or `reused` when Claude Code has the entry; `failed`,
+   `unavailable` and `not_found` are handled below (Codex is registered either way).
+   `claude_skills: skipped` means no Claude Code was found, so no copies went to `~/.claude/skills`.
 2. **Connect.** Run `activation_command` exactly as returned; it ends in `connect`. It is safe in
    a captured shell, returns at once and never prints the page address.
 3. **Tell the user** a browser window opened on this Mac: in Telegram on their phone open
@@ -28,7 +29,9 @@ step seems to need one, stop and use the Terminal fallback at the end.
    they type that password on the page, never in this chat.
 4. **Wait.** Run the same command with `wait` in place of `connect`. One call blocks up to
    9 minutes, so give the shell call a 10-minute timeout (Claude Code Bash: `timeout: 600000`;
-   the default would cut it at 2 minutes). Repeat while the status is not terminal. Terminal statuses are `ready`, `failed`,
+   the default would cut it at 2 minutes). Codex needs the same: its `tool_timeout_sec` setting
+   does not apply to shell commands, so use Codex's own long-running command support.
+   Repeat while the status is not terminal. Terminal statuses are `ready`, `failed`,
    `expired` and `cancelled`; act on the returned `code` and `next_action`.
 5. **On `ready`**, ask the user to reconnect the MCP client: Claude Code `/mcp`, Codex restart.
    Then call `_manifest(check_broker=true)` and require `compatible`. Finish with one bounded,
@@ -38,6 +41,9 @@ step seems to need one, stop and use the Terminal fallback at the end.
 
 | Result | What to do |
 |---|---|
+| `claude_code`: `failed`, `unavailable` or `not_found` | Claude Code is not registered. Offer the returned `claude_registration_command` (an argv list; quote each element as one shell word) for the user to run in their own terminal, then `/mcp`. If it says `telegram_search` already exists (for example from the 0.51 manual `claude mcp add`), the user removes that entry themselves with `claude mcp remove telegram_search -s user` and runs the command again. Never remove or overwrite it for them. |
+| `claude_registration_conflict` | Nothing was installed: Claude Code already has a different `telegram_search` entry, often the 0.51 manual `claude mcp add`. Ask the user to remove it themselves with `claude mcp remove telegram_search -s user`, then install again. Never remove it for them. |
+| `recovery_limit` | The installer's bounded retries are used up. Stop and report it with the retained transaction evidence; do not retry. |
 | `already_connected` | Skip to step 5. |
 | `connect_in_progress` | A page is already open. Do not start another; go to step 4. |
 | `connect_launch_failed` | The background job could not start. Ask the user to run the same command in native Apple Terminal and tell you when it ends, then check with `wait`. |

@@ -1,77 +1,102 @@
-"""Behavioural stand-in for `claude mcp get|add-json|remove` over one MCP server name.
+"""Behavioural stand-in for `claude mcp add-json|remove --scope user` over one MCP server name.
 
 Never the real CLI: tests hand an instance to the installer as its runner and point the
-fixed-location lookup at a harmless executable file. The text format mirrors the fields
-the installer reads; everything else about the real CLI is out of scope here.
+fixed-location lookup at a harmless executable file. Like the real CLI it keeps user-scope
+servers in the top-level `mcpServers` object of `<home>/.claude.json` (mode 0600, replaced
+atomically, neighbouring keys preserved); an entry added without env is exactly
+`{"type": "stdio", "command": ..., "args": [...]}`. Reads never start a process, so a `get`
+(or any other verb) fails the test.
 """
 import json
+import os
+from pathlib import Path
 import subprocess
 
 NAME = 'telegram_search'
-SCOPES = {'user': 'User config (available in all your projects)',
-          'local': 'Local config (private to you in this project)',
-          'project': 'Project config (shared via .mcp.json)'}
 
 
-def entry(command, args, *, scope='user', type='stdio', env=None, url=None):
-    return dict(command=command, args=list(args), scope=scope, type=type, env=dict(env or {}), url=url)
+def entry(command=None, args=(), *, type='stdio', env=None, url=None):
+    """A `mcpServers` value in the CLI's on-disk shape; env/url only when given."""
+    value = {'type': type}
+    if command is not None:
+        value.update(command=command, args=list(args))
+    if env is not None:
+        value['env'] = dict(env)
+    if url is not None:
+        value['url'] = url
+    return value
 
 
 class FakeClaude:
-    def __init__(self, existing=None):
-        self.entry = existing
+    def __init__(self, home):
+        self.home = Path(home)
         self.calls = []          # argv[1:] of every call, in order
+        self.argv0 = []          # argv[0] of every call
         self.kwargs = []         # keyword arguments of every call
-        self.fail = set()        # verbs that exit non-zero: 'get', 'add-json', 'remove'
+        self.fail = set()        # verbs that exit non-zero: 'add-json', 'remove'
+        self.returncode = 1      # exit status used for `fail` (127: an interpreter the CLI needs is missing)
         self.timeout = set()     # verbs that time out
         self.lose_add = False    # add-json exits zero but stores nothing
         self.mutate_after_add = None  # callable(self) run right after a successful add-json
+
+    @property
+    def path(self):
+        return self.home / '.claude.json'
+
+    def document(self):
+        return json.loads(self.path.read_text()) if self.path.exists() else None
+
+    def write_document(self, value):
+        temporary = self.home / ('.claude.json.tmp-%d' % os.getpid())
+        temporary.write_text(json.dumps(value, indent=2))
+        temporary.chmod(0o600)
+        os.replace(temporary, self.path)
+
+    @property
+    def entry(self):
+        document = self.document()
+        return None if document is None else document.get('mcpServers', {}).get(NAME)
+
+    @entry.setter
+    def entry(self, value):
+        document = self.document() or {'numStartups': 3, 'projects': {}}
+        servers = dict(document.get('mcpServers', {}))
+        if value is None:
+            servers.pop(NAME, None)
+        else:
+            servers[NAME] = value
+        self.write_document({**document, 'mcpServers': servers})
 
     def verbs(self):
         return [call[1] for call in self.calls]
 
     def __call__(self, argv, **kwargs):
+        assert isinstance(argv, list), argv
         self.calls.append(list(argv[1:]))
+        self.argv0.append(argv[0])
         self.kwargs.append(kwargs)
-        assert argv[1] == 'mcp' and isinstance(argv, list), argv
+        assert argv[1] == 'mcp', argv
         assert kwargs.get('check') is False and kwargs.get('timeout', 0) > 0 and 'shell' not in kwargs, kwargs
+        assert type(kwargs.get('env')) is dict, kwargs
         verb = argv[2]
+        assert verb in ('add-json', 'remove'), 'the installer may only write through the CLI: %r' % (argv,)
         if verb in self.timeout:
             raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
         if verb in self.fail:
-            return subprocess.CompletedProcess(argv, 1, '', 'synthetic failure')
-        if verb == 'get':
-            assert argv[3:] == [NAME], argv
-            if self.entry is None:
-                return subprocess.CompletedProcess(argv, 1, '', 'No MCP server found with name: ' + NAME)
-            return subprocess.CompletedProcess(argv, 0, self.render(), '')
+            return subprocess.CompletedProcess(argv, self.returncode)
         if verb == 'add-json':
             assert argv[3:5] == ['--scope', 'user'] and argv[5] == NAME and len(argv) == 7, argv
-            if self.entry is not None and self.entry['scope'] == 'user':
-                return subprocess.CompletedProcess(argv, 1, '', 'already exists')
+            if self.entry is not None:
+                return subprocess.CompletedProcess(argv, 1)
             value = json.loads(argv[6])
             assert list(value) == ['type', 'command', 'args'] and value['type'] == 'stdio', value
             if not self.lose_add:
                 self.entry = entry(value['command'], value['args'])
             if self.mutate_after_add is not None:
                 self.mutate_after_add(self)
-            return subprocess.CompletedProcess(argv, 0, 'added', '')
-        if verb == 'remove':
-            assert argv[3:] == ['--scope', 'user', NAME], argv
-            if self.entry is None or self.entry['scope'] != 'user':
-                return subprocess.CompletedProcess(argv, 1, '', 'not found')
-            self.entry = None
-            return subprocess.CompletedProcess(argv, 0, 'removed', '')
-        raise AssertionError('unexpected claude subcommand: %r' % (argv,))
-
-    def render(self):
-        e = self.entry
-        lines = [NAME + ':', '  Scope: ' + SCOPES[e['scope']], '  Status: ✗ Failed to connect', '  Type: ' + e['type']]
-        if e['type'] == 'stdio':
-            lines += ['  Command: ' + e['command'], '  Args: ' + ' '.join(e['args'])]
-        else:
-            lines.append('  URL: ' + str(e['url']))
-        if e['env']:
-            lines.append('  Environment:')
-            lines += ['    %s=%s' % item for item in sorted(e['env'].items())]
-        return '\n'.join(lines) + '\n\nTo remove this server, run: claude mcp remove "%s" -s %s\n' % (NAME, e['scope'])
+            return subprocess.CompletedProcess(argv, 0)
+        assert argv[3:] == ['--scope', 'user', NAME], argv
+        if self.entry is None:
+            return subprocess.CompletedProcess(argv, 1)
+        self.entry = None
+        return subprocess.CompletedProcess(argv, 0)
