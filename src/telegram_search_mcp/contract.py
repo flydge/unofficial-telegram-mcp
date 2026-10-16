@@ -13,6 +13,7 @@ OPERATION_CAPABILITIES = {
     **{name: 'artifacts' for name in ('issue_local_upload_authority', 'consume_local_upload_result',
                                     'cancel_local_upload_authority')},
     "retain_selection": "retained_selections",
+    **{name: "forward_send" for name in ("prepare_forward_send", "send_prepared_forward")},
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},
     **{name: "reply_text_send" for name in ("prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft")},
     "read_presentation": "presentations",

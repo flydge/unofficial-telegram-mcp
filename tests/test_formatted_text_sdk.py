@@ -105,7 +105,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                 proxy = h.start_ipc()
                 async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
                     tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                    self.assertEqual(len(tools), 47)
+                    self.assertEqual(len(tools), 49)
                     for name in ('prepare_text_send', 'prepare_reply_text_send', 'update_draft', 'update_reply_draft'):
                         self.assertIn('outgoing_entities', tools[name].input_schema['properties'])
                     payload = {'recipient': CHAT, 'text': TEXT, 'outgoing_entities': copy.deepcopy(STYLES[::-1])}
@@ -189,7 +189,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                 proxy = h.start_ipc()
                 async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
                     tools = {tool.name: tool for tool in (await consumer.list_tools()).tools}
-                    self.assertEqual(len(tools), 47)
+                    self.assertEqual(len(tools), 49)
                     initial = [{'offset': 3, 'length': 2, 'type': {'@type': kind}} for kind in kinds]
                     payload = {'recipient': CHAT, 'text': 'ﬃ🙂B', 'outgoing_entities': initial[::-1]}
                     if h.is_topic: payload['topic'] = copy.deepcopy(TOPIC)

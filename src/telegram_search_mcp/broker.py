@@ -74,7 +74,11 @@ from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftReques
                            CancelDraftRequest, CancelDraftResponse, DraftPreview, DraftSummary,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
 from .search_service import ReadOnlyTelegramClient, SearchService
-from .tdjson import AuthorizationBlocked, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, TDLibClient, TDLibError
+from .tdjson import AuthorizationBlocked, MessageNotFound, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, TDLibClient, TDLibError
+from .forward_sources import ForwardRefusal, chat_identity
+from .forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview, ForwardSpec,
+    PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest, SendPreparedForwardResponse,
+    PREPARED as FORWARD_PREPARED, REFUSED as FORWARD_REFUSED, UNAVAILABLE as FORWARD_UNAVAILABLE)
 
 
 class BrokerStartupError(RuntimeError):
@@ -418,7 +422,7 @@ class Broker(SelectionBrokerMixin):
         operation = request['operation']
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {'reply_text_send', 'reply_artifact_send'} and 'send' not in self._policy.enabled_capabilities)):
+                (capability in {'reply_text_send', 'reply_artifact_send', 'forward_send'} and 'send' not in self._policy.enabled_capabilities)):
             raise CompatibilityError('capability_disabled')
         remaining = request['deadline'] - time.monotonic()
         if remaining <= 0:
@@ -540,7 +544,7 @@ class Broker(SelectionBrokerMixin):
         operation = request["operation"]
         capability = OPERATION_CAPABILITIES.get(operation)
         if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in {"reply_text_send","reply_artifact_send"} and "send" not in self._policy.enabled_capabilities)):
+                (capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in self._policy.enabled_capabilities)):
             raise CompatibilityError("capability_disabled")
         self._expire_contexts()
         payload = request["payload"]
@@ -675,6 +679,13 @@ class Broker(SelectionBrokerMixin):
             model=(UpdateReplyDraftRequest if operation=="update_reply_draft" else RefreshReplyDraftRequest).model_validate(payload)
             with self._shared_client().request_budget(min(request["deadline"],time.monotonic()+30)):
                 return self._revise_reply_draft(model,client_id=client_id).model_dump(mode="json")
+        if operation == "prepare_forward_send":
+            model = PrepareForwardSendRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_forward_send(model, client_id=client_id).model_dump(mode="json")
+        if operation == "send_prepared_forward":
+            model = SendPreparedForwardRequest.model_validate(payload)
+            return self._send_prepared_forward(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -980,6 +991,8 @@ class Broker(SelectionBrokerMixin):
         )
 
     def _require_topic_policy(self, draft_id: str, owner: DraftOwner) -> None:
+        if self._drafts.kind(draft_id, owner=owner) == 'forward':
+            self._require_forward_policy()  # Status and receipts stay bound to forward_send.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         require_current(self._policy)
@@ -1047,7 +1060,7 @@ class Broker(SelectionBrokerMixin):
             return ListDraftsResponse(status="unavailable", detail="drafts are unavailable")
 
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
-        if draft.reply_source is not None:
+        if draft.reply_source is not None or draft.kind == "forward":
             raise DraftError("draft is unavailable")
         self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
@@ -1595,7 +1608,8 @@ class Broker(SelectionBrokerMixin):
                                                 detail="explicit approval was not given")
         try:
             owner = self._draft_owner(client_id)
-            if (self._drafts.kind(request.draft_id, owner=owner) == "text") != text_only:
+            kind = self._drafts.kind(request.draft_id, owner=owner)
+            if kind == "forward" or (kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             self._require_topic_policy(request.draft_id, owner)
@@ -1621,7 +1635,7 @@ class Broker(SelectionBrokerMixin):
                                                     detail="draft is unavailable after expiry or restart")
             # The recipient is resolved again immediately before the single provider attempt.
             entry = self._drafts.peek(request.draft_id, owner=owner)
-            if (entry.kind == "text") != text_only:
+            if entry.kind == "forward" or (entry.kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             chat = self._shared_client().resolve_target(entry.recipient)
@@ -1840,6 +1854,156 @@ class Broker(SelectionBrokerMixin):
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
             return SendPreparedArtifactResponse(status="expired", draft_id=request.draft_id,
                                                 detail="draft is unavailable or no longer valid")
+
+    def _require_forward_policy(self) -> None:
+        require_current(self._policy)
+        if not {'send', 'forward_send'} <= set(self._policy.enabled_capabilities):
+            raise CompatibilityError('capability_disabled')
+
+    def _forward_owner(self, client_id: str) -> DraftOwner:
+        owner = self._draft_owner(client_id)
+        self._require_forward_policy()
+        return owner
+
+    def _forward_preview(self, draft, owner: DraftOwner) -> ForwardDraftPreview:
+        spec = draft.forward
+        if draft.kind != 'forward' or not isinstance(spec, ForwardSpec):
+            raise DraftError(FORWARD_UNAVAILABLE)
+        self._require_forward_policy()
+        return ForwardDraftPreview.create(draft_id=draft.draft_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc), mode=spec.mode,
+            remove_caption=spec.remove_caption, source=spec.source,
+            recipient=ForwardChat(chat_id=draft.recipient, title=draft.recipient_title))
+
+    def _prepare_forward_send(self, request: PrepareForwardSendRequest, *, client_id: str) -> PrepareForwardSendResponse:
+        try:
+            owner = self._forward_owner(client_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            recipient_identity, recipient_title = chat_identity(provider.resolve_target(request.recipient), request.recipient)
+            snapshot = provider.read_forward_source(request.source_chat, request.source_message_id)
+            refusal = snapshot.refusal(request.mode)
+            if refusal is not None:
+                raise ForwardRefusal(refusal)
+            spec = ForwardSpec(snapshot=snapshot, source=ForwardSourcePreview.create(snapshot), mode=request.mode,
+                               remove_caption=request.remove_caption, recipient_identity=recipient_identity)
+            self._reply_budget_check(provider)
+            if (self._forward_owner(client_id) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(FORWARD_UNAVAILABLE)
+            draft = self._drafts.prepare_forward(owner=owner, recipient=request.recipient,
+                                                 recipient_title=recipient_title, forward=spec)
+            preview = self._forward_preview(draft, owner)
+            self._remember_draft_title(draft)
+            return PrepareForwardSendResponse(status='prepared', forward=preview, detail=FORWARD_PREPARED)
+        except ForwardRefusal as refusal:
+            return PrepareForwardSendResponse(status='refused', refusal=refusal.code, detail=FORWARD_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PrepareForwardSendResponse(status='unavailable', detail=FORWARD_UNAVAILABLE)
+
+    def _send_prepared_forward(self, request: SendPreparedForwardRequest, *, client_id: str,
+                               deadline: float | None = None) -> SendPreparedForwardResponse:
+        if request.approved is not True:
+            return SendPreparedForwardResponse(status='not_approved', draft_id=request.draft_id,
+                                               detail='explicit approval was not given')
+        # Capture once: account reads, owner confirmation and transport share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._send_prepared_forward_impl(request, client_id=client_id)
+
+    def _send_prepared_forward_impl(self, request: SendPreparedForwardRequest, *, client_id: str) -> SendPreparedForwardResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return SendPreparedForwardResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._forward_owner(client_id)
+            if self._drafts.kind(draft_id, owner=owner) != 'forward':
+                return result('error', 'draft kind does not match send tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                return result('local_failed' if previous.evidence == 'local_failed' else previous.status,
+                              'previous provider attempt receipt; no new send was attempted',
+                              message_id=previous.message_id)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.forward
+            if entry.kind != 'forward' or not isinstance(spec, ForwardSpec):
+                return result('error', 'draft kind does not match send tool')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            identity, title = chat_identity(provider.resolve_target(entry.recipient), entry.recipient)
+            if title != expected_title or identity != spec.recipient_identity:
+                return result('recipient_changed', 'recipient changed; prepare a new forward draft',
+                              recipient=entry.recipient)
+            try:
+                current = provider.read_forward_source(*spec.snapshot.source.anchor)
+            except (ForwardRefusal, MessageNotFound):
+                return result('source_changed', 'source message changed; prepare a new forward draft')
+            if (current.source != spec.snapshot.source or current.chat_identity != spec.snapshot.chat_identity
+                    or current.chat_title != spec.snapshot.chat_title):
+                return result('source_changed', 'source message changed; prepare a new forward draft')
+            refusal = current.refusal(spec.mode)
+            if refusal is not None:
+                return result(refusal, 'source is no longer eligible; no send was attempted')
+            self._reply_budget_check(provider)
+            if (self._forward_owner(client_id) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(FORWARD_UNAVAILABLE)
+            preview = self._forward_preview(entry, owner).model_dump(mode='json')
+            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
+                    caption='', kind='forward', forward_preview=preview):
+                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            # The local dialog may remain open while account, policy or provider change.
+            if self._forward_owner(client_id) != owner:
+                raise DraftError(FORWARD_UNAVAILABLE)
+            provider_after = self._shared_client()
+            if provider_after is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(FORWARD_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            def forward_guard():
+                require_current(self._policy)
+                return ({'send', 'forward_send'} <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.forward_claim_current(draft_id, owner=owner, provider=provider,
+                                                           provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the forward'
+            try:
+                sender = getattr(provider, 'forward_message', None)
+                if not callable(sender):
+                    raise MessageSendNotAttempted('forward provider is unavailable')
+                message_id = sender(claim.draft.recipient, snapshot=spec.snapshot, mode=spec.mode,
+                    remove_caption=spec.remove_caption, expected_account_id=owner.account_id,
+                    expected_recipient_title=expected_title, expected_recipient_identity=spec.recipient_identity,
+                    attempt_id=draft_id, pre_send_guard=forward_guard)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='sent', message_id=message_id)
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                failure_detail = error.public_detail()
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider send was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._forward_owner(client_id) != owner:
+                    raise DraftError(FORWARD_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', 'current receipt authority is unavailable; do not retry automatically')
+            return result(receipt.status,
+                          'TDLib confirmed delivery' if receipt.status == 'sent' else
+                          failure_detail if receipt.status == 'failed' else
+                          'delivery is unconfirmed; do not retry automatically',
+                          recipient=claim.draft.recipient, message_id=receipt.message_id)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return result('expired', 'draft is unavailable or no longer valid')
 
     @staticmethod
     def _error_code(error: BaseException) -> str:

@@ -94,7 +94,7 @@ class OutgoingDraft:
     expires_at: float
     recipient_title: str = ""
     approval_required: bool = True
-    kind: Literal["document", "photo", "voice_note", "text"] = "document"
+    kind: Literal["document", "photo", "voice_note", "text", "forward"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -108,6 +108,10 @@ class OutgoingDraft:
     outgoing_entities: FrozenOutgoingEntities = ()
     formatting_provider: object | None = None
     formatting_provider_epoch: object | None = None
+    forward: object | None = None  # forward_drafts.ForwardSpec; never artifact-backed
+
+
+_UNBACKED_KINDS = frozenset({"text", "forward"})
 
 
 @dataclass(frozen=True)
@@ -316,6 +320,35 @@ class OutgoingDraftRegistry:
             record_selection_draft(draft_id)
             return draft
 
+    def prepare_forward(self, *, owner: DraftOwner, recipient: int, recipient_title: str,
+                        forward: object) -> OutgoingDraft:
+        """Record one exact forward/copy; generic draft tools never expose this kind."""
+        from .forward_drafts import ForwardSpec
+        self._validate_owner(owner)
+        if type(recipient) is not int or recipient == 0:
+            raise ValueError("recipient must be a nonzero numeric chat ID")
+        if not isinstance(forward, ForwardSpec) or type(recipient_title) is not str or not recipient_title:
+            raise DraftError("forward draft is unavailable")
+        projection = forward.snapshot.source.projection_json.encode("utf-8")
+        now = self._clock()
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
+            self._prune_locked(now)
+            if len(self._entries) >= self._capacity:
+                raise DraftError("draft capacity is exhausted")
+            draft_id = f"draft_{uuid.uuid4().hex}"
+            if draft_id in self._entries:
+                raise DraftError("draft ID collision")
+            draft = OutgoingDraft(
+                draft_id=draft_id, artifact_id="", sha256=forward.snapshot.source.source_sha256,
+                size_bytes=len(projection), display_name="Forwarded message", mime_type="application/json",
+                caption="", recipient=recipient, expires_at=now + self._max_ttl_seconds,
+                recipient_title=recipient_title, kind="forward", forward=forward,
+            )
+            self._entries[draft_id] = _Entry(draft=draft, owner=owner)
+            record_selection_draft(draft_id)
+            return draft
+
     def revise(self, draft_id: str, *, owner: DraftOwner, recipient_title: str,
                text: str | None = None, caption: str | None = None,
                reply: bool = False, reply_source: ReplySource | None = None,
@@ -331,7 +364,7 @@ class OutgoingDraftRegistry:
             entry = self._get(draft_id, owner)
             self._pending_locked(entry, verify_artifact=False)
             old = entry.draft
-            if (old.reply_source is not None) != reply:
+            if old.kind == "forward" or (old.reply_source is not None) != reply:
                 raise DraftError("draft is unavailable")
             changes = {}
             if reply_source is not None:
@@ -459,6 +492,15 @@ class OutgoingDraftRegistry:
                 entry.provider_epoch is provider_epoch and entry.draft.formatting_provider is provider and
                 entry.draft.formatting_provider_epoch is provider_epoch)
 
+    def forward_claim_current(self, draft_id: str, *, owner: DraftOwner,
+                              provider: object, provider_epoch: object) -> bool:
+        """Final local prewire check for the one consumed forward claim."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (entry.state == 'claimed' and entry.draft.kind == 'forward' and
+                entry.draft.forward is not None and self._clock() < entry.draft.expires_at and
+                entry.provider is provider and entry.provider_epoch is provider_epoch)
+
     def topic_claim_current(self, draft_id: str, *, owner: DraftOwner,
                             provider: object, provider_epoch: object) -> bool:
         """Final local prewire check; expiry never turns into send authority."""
@@ -544,7 +586,7 @@ class OutgoingDraftRegistry:
                         entry.claim_token is None or claim.provider is not entry.provider or
                         claim.provider_epoch is not entry.provider_epoch):
                     raise DraftError("captured claim is unavailable")
-            elif active_scope(self._store) is not None and entry.draft.kind != 'text':
+            elif active_scope(self._store) is not None and entry.draft.kind not in _UNBACKED_KINDS:
                 raise DraftError("captured claim is unavailable")
             if entry.receipt is not None:
                 return entry.receipt
@@ -602,7 +644,7 @@ class OutgoingDraftRegistry:
 
     def _require_artifact_authority(self, entry):
         scope = active_scope(self._store)
-        if scope is None or entry.draft.kind == 'text':
+        if scope is None or entry.draft.kind in _UNBACKED_KINDS:
             return
         if entry.artifact_authority is None:
             raise DraftError('draft is unavailable')
@@ -620,7 +662,7 @@ class OutgoingDraftRegistry:
         self._require_artifact_authority(entry)
         if entry.state != "pending" or self._clock() >= entry.draft.expires_at:
             raise DraftError("draft is unavailable")
-        if entry.draft.kind == "text" or not verify_artifact:
+        if entry.draft.kind in _UNBACKED_KINDS or not verify_artifact:
             return None
         artifact = self._artifact_locked(entry)
         if self._clock() >= entry.draft.expires_at:
@@ -651,7 +693,8 @@ class OutgoingDraftRegistry:
             result = []
             for draft_id in sorted(self._entries):
                 entry = self._entries[draft_id]
-                if entry.owner != owner or (after_draft_id is not None and draft_id <= after_draft_id):
+                if (entry.owner != owner or entry.draft.kind == "forward" or
+                        (after_draft_id is not None and draft_id <= after_draft_id)):
                     continue
                 try:
                     self._pending_locked(entry, verify_artifact=False)
@@ -666,7 +709,8 @@ class OutgoingDraftRegistry:
         """Only a pending draft can lose the race to a provider claim."""
         with self._lock:
             entry = self._get(draft_id, owner)
-            if self._clock() >= entry.draft.expires_at or entry.state not in {"pending", "cancelled"}:
+            if (entry.draft.kind == "forward" or self._clock() >= entry.draft.expires_at or
+                    entry.state not in {"pending", "cancelled"}):
                 raise DraftError("draft is unavailable")
             entry.state = "cancelled"
 

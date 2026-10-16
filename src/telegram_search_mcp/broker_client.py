@@ -41,6 +41,8 @@ from .reply_drafts import (PrepareReplyTextSendRequest, PrepareReplyTextSendResp
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
+from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
+    SendPreparedForwardResponse, UNAVAILABLE as FORWARD_UNAVAILABLE)
 from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, CreateLocalArtifactRequest, CreateLocalArtifactResponse,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, SendPreparedArtifactRequest, SendPreparedArtifactResponse,
@@ -346,11 +348,11 @@ class BrokerClient(SelectionClientMixin):
             local = contract_descriptor(self._policy)
             capability = OPERATION_CAPABILITIES.get(operation)
             if capability is not None and (capability not in self._policy.enabled_capabilities or
-                    (capability in {"reply_text_send","reply_artifact_send"} and "send" not in self._policy.enabled_capabilities)):
+                    (capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in self._policy.enabled_capabilities)):
                 raise CompatibilityError("capability_disabled")
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None
-        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
+        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
         try:
             connection = self._connector(self._socket_path)
         except OSError:
@@ -1701,6 +1703,35 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError):
             return SendPreparedArtifactResponse(status="outcome_unknown", draft_id=request.draft_id,
                                                 detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_forward_send(self, request: PrepareForwardSendRequest) -> PrepareForwardSendResponse:
+        try:
+            response = PrepareForwardSendResponse.model_validate(
+                self._request("prepare_forward_send", request.model_dump(mode="json")))
+            if response.forward is not None:
+                preview = response.forward
+                if (preview.source.chat.chat_id != request.source_chat or
+                        preview.source.message_id != request.source_message_id or
+                        preview.recipient.chat_id != request.recipient or preview.mode != request.mode or
+                        preview.remove_caption != request.remove_caption):
+                    raise BrokerUnavailable("forward preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareForwardSendResponse(status="unavailable", detail=FORWARD_UNAVAILABLE)
+
+    def send_prepared_forward(self, request: SendPreparedForwardRequest) -> SendPreparedForwardResponse:
+        try:
+            response = SendPreparedForwardResponse.model_validate(
+                self._request("send_prepared_forward", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("forward receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return SendPreparedForwardResponse(status="error", draft_id=request.draft_id,
+                                               detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return SendPreparedForwardResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                               detail="broker response is unavailable; do not retry automatically")
 
     def check(self) -> str:
         result = self._request("check", {})

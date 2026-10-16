@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 
@@ -31,6 +32,44 @@ def _outgoing_style_detail(draft):
                 for offset, length, kind, covered in rows) + '\n')
 
 
+def _forward_detail(validated) -> str:
+    """Untrusted Telegram strings stay marked and JSON-escaped on their own lines."""
+    source, recipient = validated.source, validated.recipient
+    mode = ('FORWARD — recipients see the original sender' if validated.mode == 'forward' else
+            'COPY — sent as your own message, no attribution' + ('; caption removed' if validated.remove_caption else ''))
+    label = 'Text' if source.content_kind == 'text' else 'Caption'
+    marker = '[untrusted Telegram evidence]'
+    if source.text is None:
+        text = f'{label}: (none)\n'
+    else:
+        from .reply_drafts import EVIDENCE_MARKER
+        body = source.text[len(EVIDENCE_MARKER):]
+        text = f'{label} {marker}: {json.dumps(body, ensure_ascii=False)}\n'
+    media = ''
+    if source.media is not None:
+        from .reply_drafts import EVIDENCE_MARKER
+        item = source.media
+        def name(value):
+            return json.dumps(value[len(EVIDENCE_MARKER):], ensure_ascii=False)
+        parts = ([f'file {name(item.file_name)}'] if item.file_name is not None else []) + \
+            ([f'MIME {name(item.mime_type)}'] if item.mime_type is not None else []) + \
+            ([f'{item.duration_seconds} seconds'] if item.duration_seconds is not None else []) + \
+            ([f'{item.width}x{item.height}'] if item.width is not None and item.height is not None else []) + \
+            [f'{item.size_bytes} bytes'] + ([f'{item.variants} variants'] if item.variants > 1 else [])
+        media = f'Media {marker}: ' + '; '.join(parts) + '\n'
+    return (f"Forward this message to {recipient.title} (chat {recipient.chat_id})?\n{mode}\n\n"
+            f"Source chat: {source.chat.title} (chat {source.chat.chat_id})\n"
+            f"Message ID: {source.message_id}\n"
+            f"Sender {marker}: {source.sender.kind} {source.sender.id}\n"
+            f"Date: {source.date.isoformat()}\nContent: {source.content_kind}\n"
+            f"{text}Text sanitized: {source.text_sanitized}\n{media}"
+            f"Source SHA-256: {source.source_sha256}\n"
+            f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
+            f"Preview SHA-256: {validated.preview_sha256}\n\n"
+            "Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, "
+            "then make one forward attempt.")
+
+
 def confirm_approved_send(
     *, recipient_title: str, recipient: int, display_name: str,
     size_bytes: int, sha256: str, caption: str,
@@ -39,11 +78,25 @@ def confirm_approved_send(
     source_display_name: str | None = None, reply_preview: dict | None = None,
     reply_artifact_preview: dict | None = None,
     topic_preview: dict | None = None,
+    forward_preview: dict | None = None,
 ) -> bool:
     """Ask the signed-in macOS user; failure or timeout means no send."""
-    if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview)) > 1:
+    if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview, forward_preview)) > 1:
         return False
-    if topic_preview is not None:
+    if (kind == 'forward') != (forward_preview is not None):
+        return False
+    if forward_preview is not None:
+        from .forward_drafts import ForwardDraftPreview
+        try:
+            validated = ForwardDraftPreview.model_validate(forward_preview)
+            if (validated.recipient.chat_id != recipient or validated.recipient.title != recipient_title or
+                    validated.source.source_sha256 != sha256 or text not in ('', None) or caption not in ('', None) or
+                    duration_seconds is not None or source_sha256 is not None or source_display_name is not None):
+                return False
+        except (ValueError, TypeError):
+            return False
+        preview = _forward_detail(validated)
+    elif topic_preview is not None:
         from .draft_models import DraftPreview
         try:
             validated = DraftPreview.model_validate(topic_preview)

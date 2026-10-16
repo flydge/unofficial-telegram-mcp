@@ -39,6 +39,11 @@ class SendObservation:
     forum_topic_id: int | None = None
     outgoing_entities: FrozenOutgoingEntities = ()
     saved_messages_topic_id: int | None = None
+    forward: bool = False
+
+
+FORWARD_CONTENT_TYPES = frozenset({'messageText', 'messagePhoto', 'messageDocument', 'messageVoiceNote',
+                                   'messageVideo', 'messageAudio', 'messageAnimation'})
 
 
 def integer(value, *, positive=False):
@@ -142,9 +147,16 @@ class SendObservations:
         with self._lock:
             self._entries.clear()
 
-    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None):
+    def register(self, attempt_id, extra, sending_id, chat_id, content_type, *, text_sha256=None, reply_anchor=None, caption_sha256=None, voice_duration=None, waveform_sha256=None, waveform_size=None, forum_topic_id=None, outgoing_entities: FrozenOutgoingEntities = (), saved_messages_topic_id=None, forward=False):
         if type(outgoing_entities) is not tuple or len(outgoing_entities) > 32:
             raise ObservationUnavailable('invalid frozen outgoing expectation')
+        # Forward content is provider-produced: correlate by sending_id, chat and
+        # returned temporary ID only; no outgoing content hash can apply.
+        if type(forward) is not bool or (forward and (
+                content_type not in FORWARD_CONTENT_TYPES or not integer(chat_id) or
+                any(value is not None for value in (text_sha256, reply_anchor, caption_sha256, voice_duration,
+                    waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or outgoing_entities)):
+            raise ObservationUnavailable('invalid forward observation')
         if outgoing_entities:
             styles = {'textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
                       'textEntityTypeStrikethrough', 'textEntityTypeSpoiler'}
@@ -191,7 +203,7 @@ class SendObservations:
             if (attempt_id in self._entries or len(self._entries) >= self._capacity or
                     any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
-            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id)
+            self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward)
 
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
@@ -292,6 +304,22 @@ class SendObservations:
                     strict_shape(value["content"]["link_preview_options"],LINK_OPTIONS))))
             and (not final or value.get("sending_state") is None))
 
+    @staticmethod
+    def forward_result_message(event, observation):
+        """The forwardMessages result must be exactly one pending message in the recipient chat."""
+        if not (observation.forward and isinstance(event, dict) and event.get('@type') == 'messages'
+                and type(event.get('total_count')) is int and event['total_count'] == 1
+                and type(event.get('messages')) is list and len(event['messages']) == 1):
+            return None
+        value = event['messages'][0]
+        state = value.get('sending_state') if isinstance(value, dict) else None
+        if (not SendObservations._message(value, observation) or not isinstance(state, dict)
+                or state.get('@type') != 'messageSendingStatePending'
+                or type(state.get('sending_id')) is not int or state['sending_id'] != observation.sending_id
+                or (observation.temporary_id is not None and observation.temporary_id != value['id'])):
+            return None
+        return value
+
     def reduce(self, event):
         if not isinstance(event,dict):
             return
@@ -305,6 +333,10 @@ class SendObservations:
                 if event.get("@extra") == old.extra:
                     if kind == "error" and type(event.get("code")) is int and 0 < event["code"] < 2**31:
                         updated = replace(old,status="failed")
+                    elif old.forward:
+                        value = self.forward_result_message(event, old)
+                        if value is not None:
+                            updated = replace(old,temporary_id=value["id"],status="pending")
                     elif self._message(event,old):
                         state = event.get("sending_state")
                         if (isinstance(state,dict) and state.get("@type") == "messageSendingStatePending"

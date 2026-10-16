@@ -53,6 +53,7 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "getFile",
         "cancelDownloadFile",
         "sendMessage",
+        "forwardMessages",
     }
 )
 
@@ -342,6 +343,25 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             or not (valid_text or valid_document or valid_photo or valid_voice)
         ):
             raise ForbiddenTDLibRequest("TDLib send request shape is not allowed")
+    if request_type == "forwardMessages":
+        options = payload.get("options")
+        sending_id = options.get("sending_id") if isinstance(options, dict) else None
+        message_ids = payload.get("message_ids")
+        if (
+            set(payload) != {"@type", "chat_id", "topic_id", "from_chat_id", "message_ids",
+                             "options", "send_copy", "remove_caption"}
+            or not _is_forum_chat_id(payload.get("chat_id"))
+            or not _is_forum_chat_id(payload.get("from_chat_id"))
+            or payload.get("topic_id") is not None
+            or type(message_ids) is not list or len(message_ids) != 1
+            or not _is_integer_in_range(message_ids[0], 1, 2**53 - 1)
+            or type(sending_id) is not int or not 0 < sending_id <= (1 << 31) - 1
+            or not strict_shape(options, {**SEND_OPTIONS, "sending_id": sending_id})
+            or type(payload.get("send_copy")) is not bool
+            or type(payload.get("remove_caption")) is not bool
+            or (payload["remove_caption"] and not payload["send_copy"])
+        ):
+            raise ForbiddenTDLibRequest("TDLib forward request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
         file_id = payload.get("file_id")
         if not _is_strict_integer(file_id) or not 0 < file_id <= (1 << 31) - 1:
@@ -1508,6 +1528,121 @@ class TDLibClient:
                     properties.get('can_be_replied') is not True):
                 raise TDLibError('reply eligibility is unavailable')
             return source
+
+    def read_forward_source(self, chat_id: int, message_id: int):
+        """One serialized read of source chat identity, projection and properties."""
+        from .forward_sources import ForwardSnapshot, ForwardSource, chat_identity
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError('forward source is unavailable')
+        with self._serialized_provider_call(getattr(self._request_context, 'deadline', None)):
+            chat = self.resolve_target(chat_id)
+            chat_identity(chat, chat_id)
+            source = ForwardSource.from_message(self.get_message(chat_id, message_id), chat_id, message_id)
+            properties = self._call({'@type': 'getMessageProperties', 'chat_id': chat_id,
+                'message_id': message_id})
+            return ForwardSnapshot.create(chat, chat_id, source, properties)
+
+    def forward_message(self, chat_id: int, *, snapshot, mode: str, remove_caption: bool,
+                        expected_account_id: int, expected_recipient_title: str,
+                        expected_recipient_identity: tuple, attempt_id: str,
+                        pre_send_guard: Callable[[], bool]) -> int:
+        """Revalidate the exact reviewed source and recipient, then make one attempt.
+
+        Every refusal before registration/rawsend is no-attempt evidence. The
+        provider forwards its own stored message; no content is reconstructed.
+        """
+        from .forward_sources import ForwardSnapshot, chat_identity
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(snapshot, ForwardSnapshot) or mode not in ('forward', 'copy') or
+                        type(remove_caption) is not bool or (remove_caption and mode != 'copy') or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        type(expected_recipient_title) is not str or type(expected_recipient_identity) is not tuple or
+                        type(attempt_id) is not str or not attempt_id or not callable(pre_send_guard) or
+                        pre_send_guard() is not True or self.get_account_id() != expected_account_id):
+                    return False
+                identity, title = chat_identity(self.resolve_target(chat_id), chat_id)
+                if identity != expected_recipient_identity or title != expected_recipient_title:
+                    return False
+                current = self.read_forward_source(*snapshot.source.anchor)
+                return (current.source == snapshot.source and current.chat_identity == snapshot.chat_identity and
+                        current.chat_title == snapshot.chat_title and current.refusal(mode) is None and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError('forward authority changed')
+            except Exception as error:
+                raise MessageSendNotAttempted('forward revalidation failed') from error
+            return self._forward_transport(chat_id, snapshot.source, send_copy=mode == 'copy',
+                remove_caption=remove_caption, attempt_id=attempt_id, pre_transport_guard=pre_send_guard)
+
+    def _forward_transport(self, chat_id: int, source, *, send_copy: bool, remove_caption: bool,
+                           attempt_id: str, pre_transport_guard: Callable[[], bool]) -> int:
+        sending_id = secrets.randbelow((1 << 31) - 1) + 1
+        for _ in range(8):
+            if self._send_observations.sending_id_available(sending_id):
+                break
+            sending_id = secrets.randbelow((1 << 31) - 1) + 1
+        else:
+            raise MessageSendNotAttempted("send correlation is unavailable")
+        from_chat_id, message_id = source.anchor
+        payload = {"@type": "forwardMessages", "chat_id": chat_id, "topic_id": None,
+                   "from_chat_id": from_chat_id, "message_ids": [message_id],
+                   "options": {**SEND_OPTIONS, "sending_id": sending_id},
+                   "send_copy": send_copy, "remove_caption": remove_caption}
+        try:
+            _validate_bounded_request(payload)
+        except ForbiddenTDLibRequest as error:
+            raise MessageSendNotAttempted("forward request shape is not allowed") from error
+        with self._serialized_reply_call():
+            extra = f"telegram-search-mcp-{next(self._ids)}"
+            aggregate_deadline = getattr(self._request_context, "deadline", None)
+            if not self._ready or (aggregate_deadline is not None and time.monotonic() >= aggregate_deadline):
+                raise MessageSendNotAttempted("forward provider is unavailable before send")
+            try:
+                self._send_observations.register(attempt_id, extra, sending_id, chat_id,
+                                                 source.content_type, forward=True)
+            except ObservationUnavailable as error:
+                raise MessageSendNotAttempted("send correlation is unavailable") from error
+            try:
+                if pre_transport_guard() is not True:
+                    raise ValueError("forward scope changed")
+                if aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+                    raise ValueError("forward request deadline expired")
+            except Exception as error:
+                self._send_observations.discard_unattempted(attempt_id)
+                raise MessageSendNotAttempted("forward scope changed before transport") from error
+            try:
+                self._raw.send({**payload, "@extra": extra})
+            except Exception as error:
+                raise MessageSendOutcomeUnknown("TDLib forward transport failed") from error
+            deadline = time.monotonic() + min(max(self._request_timeout, 30), 300)
+            if aggregate_deadline is not None:
+                deadline = min(deadline, aggregate_deadline)
+            while time.monotonic() < deadline:
+                try:
+                    response = self._raw.receive(min(1.0, max(0.0, deadline - time.monotonic())))
+                except Exception as error:
+                    raise MessageSendOutcomeUnknown("TDLib confirmation transport was lost") from error
+                if response is None:
+                    continue
+                self._reduce_receive_event(response)
+                if not self._ready:
+                    raise MessageSendOutcomeUnknown("authorization changed before confirmation")
+                observation = self._send_observations.snapshot(attempt_id)
+                if observation is not None and observation.status == "failed":
+                    provider_error = response if response.get("@type") == "error" else response.get("error")
+                    raise MessageSendFailed("TDLib reported forward failure", provider_error=provider_error)
+                if (response.get("@extra") == extra and (observation is None or
+                        SendObservations.forward_result_message(response, observation) is None)):
+                    raise MessageSendOutcomeUnknown("TDLib returned an invalid forward result")
+                if observation is not None and observation.status == "sent":
+                    return observation.message_id
+                if (observation is not None and response.get("@type") == "updateMessageSendSucceeded"
+                        and type(response.get("old_message_id")) is int
+                        and response["old_message_id"] == observation.temporary_id):
+                    raise MessageSendOutcomeUnknown("TDLib returned an invalid final message")
+            raise MessageSendOutcomeUnknown("TDLib forward confirmation timed out")
 
     def read_topic_snapshot(self, chat_id: int, topic_id: int, *, expected_account_id: int,
                             expected_recipient_title: str):

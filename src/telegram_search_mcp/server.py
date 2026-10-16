@@ -44,6 +44,8 @@ from .reply_drafts import (PrepareReplyTextSendRequest, PrepareReplyTextSendResp
     GetReplyDraftRequest, GetReplyDraftResponse, UpdateReplyDraftRequest, RefreshReplyDraftRequest,
     ReviseReplyDraftResponse, UNAVAILABLE as REPLY_UNAVAILABLE)
 from .outgoing_entity_models import OutgoingEntityList
+from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
+    SendPreparedForwardResponse, ForwardMode, PositiveMessageId)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -139,6 +141,8 @@ _TOOL_NAMES = [
     "update_draft",
     "refresh_draft",
     "retain_selection",
+    "prepare_forward_send",
+    "send_prepared_forward",
 ]
 _READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -340,6 +344,7 @@ def build_server(
                 "raw execute or bridge calls",
                 "mutations including edits, deletes, reactions, and moderation operations",
                 "unapproved sends and automatic send retries",
+                "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
                 "viewMessages and read receipts",
                 "caller-controlled attachment paths and file IDs",
                 "credentials, filesystem paths, and account wildcards in tool input",
@@ -1234,11 +1239,39 @@ def build_server(
     def retain_selection_tool(source: RetainSelectionSource) -> RetainSelectionResponse:
         return get_service().retain_selection(RetainSelectionRequest(source=source))
 
+    @server.tool(name="prepare_forward_send", description=(
+        "Prepare one exact forward (mode=forward: recipients see the original sender) or copy (mode=copy: "
+        "sent as your own message without attribution; remove_caption only with copy) of a single existing "
+        "message from source_chat to recipient. Requires default-off forward_send and send. Supported source "
+        "content: text, photo, document, voice note, video, audio and animation; self-destructing, ephemeral, "
+        "scheduled, still-sending, protected or non-forwardable sources are refused, as are secret chats. "
+        "Returns a content-free refusal or an immutable preview: sanitized, marked untrusted source evidence, "
+        "source_sha256 and preview_sha256. No send occurs; show the complete preview to the user. Forward drafts "
+        "are not listed, updated, refreshed or cancelled by the generic draft tools; prepare again to change one."),
+        annotations=_TRANSFER, structured_output=True)
+    def prepare_forward_send(source_chat: ChatId, source_message_id: PositiveMessageId, recipient: ChatId,
+                             mode: ForwardMode,
+                             remove_caption: Annotated[bool, Field(strict=True)] = False) -> PrepareForwardSendResponse:
+        return get_service().prepare_forward_send(PrepareForwardSendRequest(source_chat=source_chat,
+            source_message_id=source_message_id, recipient=recipient, mode=mode, remove_caption=remove_caption))
+
+    @server.tool(name="send_prepared_forward", description=(
+        "After the user explicitly approves this exact forward preview, revalidate recipient, source projection "
+        "and forward/copy permission, show the local owner dialog, then make exactly one forwardMessages attempt. "
+        "Changes return recipient_changed, source_changed, source_not_forwardable or protected_content without "
+        "sending. A repeated call replays the receipt; outcome_unknown must never be retried automatically. "
+        "Inspect later state with get_send_status."),
+        annotations=_TRANSFER, structured_output=True)
+    def send_prepared_forward(draft_id: DraftId,
+                              approved: Annotated[bool, Field(strict=True)]) -> SendPreparedForwardResponse:
+        return get_service().send_prepared_forward(SendPreparedForwardRequest(draft_id=draft_id, approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
             ("get_reply_draft",GetReplyDraftRequest),("update_reply_draft",UpdateReplyDraftRequest),
-            ("refresh_reply_draft",RefreshReplyDraftRequest)):
+            ("refresh_reply_draft",RefreshReplyDraftRequest),("prepare_forward_send",PrepareForwardSendRequest),
+            ("send_prepared_forward",SendPreparedForwardRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):
@@ -1300,7 +1333,7 @@ def build_server(
                         raise CompatibilityError("client_schema_mismatch")
                     require_current(runtime_policy)
                     if (_capability not in runtime_policy.enabled_capabilities or
-                            (_capability in {"reply_text_send","reply_artifact_send"} and "send" not in runtime_policy.enabled_capabilities)):
+                            (_capability in {"reply_text_send","reply_artifact_send","forward_send"} and "send" not in runtime_policy.enabled_capabilities)):
                         raise CompatibilityError("capability_disabled")
                     if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
                         raise CompatibilityError('capability_disabled')
