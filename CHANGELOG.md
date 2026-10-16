@@ -47,6 +47,27 @@
   without selection support is refused as `invalid_request` instead of failing internally when
   `retained_selections` was enabled.
 
+- Add F17a archive/unarchive of one chat and plain-text edit of one own text message (development;
+  [spec](docs/plans/0.54-archive-and-edit-spec.md)): tools `prepare_chat_archive`,
+  `apply_prepared_archive`, `prepare_text_edit` and `apply_prepared_text_edit` (55 tools) and the
+  default-off, independent capabilities `archive_chats` and `edit_own_text`, each of which also requires
+  `send`. An archive preview shows the chat, its current and target list and Telegram's return-to-Main
+  behaviour; an edit preview shows the chat and its kind, the complete current and new text, the
+  current formatting that a plain-text edit removes and the edit date. Applying revalidates the chat or
+  message and its edit permission, asks the local owner to confirm the same facts in a dedicated dialog
+  and makes one closed-shape `addChatToList` or `editMessageText` attempt with no retry. A move is
+  `applied` only after the target list is observed, an edit only when the returned message carries
+  exactly the new text and a non-zero edit date; anything else is `outcome_unknown`, and only a 4xx
+  provider error is `failed`. A new text with leading or trailing whitespace, or with a tab, U+2028 to
+  U+202E, U+030A, U+0333 or U+033F (which Telegram trims or rewrites), is refused instead of silently
+  changed; sponsored or announcement list positions are not list membership. The `_manifest`
+  `forbidden` list now names exactly these two mutations instead of all edits. `get_send_status` reads
+  coarsely and never `sent` for these drafts, the generic draft tools do not expose them, and enabling
+  either capability also lets its prepare tool reveal that chat's or message's content. The earlier 51
+  tool schemas are unchanged. Verified with a synthetic provider only; a real archive/unarchive and a
+  real edit are pending the owner. See [reference](docs/reference.md#archiveunarchive-and-own-text-edit-f17a)
+  and [security](docs/security.md#archive-and-own-text-edit-boundary-f17a-candidate).
+
 - Add QR-first Telegram login to the private candidate: `connect` opens a loopback
   QR screen on the Mac, `wait` reports progress, `cancel` closes the screen, 2FA is typed only on
   that page, `api-credentials` stores the owner's own API pair (native Terminal), and a

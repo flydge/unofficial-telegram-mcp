@@ -168,10 +168,10 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
 a `0700` directory) with `expected_package_version = "0.52.0.dev0"`,
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
-`forward_send`, `video_send` and every extended reader are off. To enable more, edit that file
+`forward_send`, `video_send`, `archive_chats`, `edit_own_text` and every extended reader are off. To enable more, edit that file
 yourself. Keep the pins as written and add only the capabilities you need from the
 [capability table below](#published-051-choose-capabilities) (for example `"send"` plus
-`"forward_send"` or `"video_send"`). The bundle has no `telegram-search-broker install`. Check
+`"forward_send"`, `"video_send"`, `"archive_chats"` or `"edit_own_text"`). The bundle has no `telegram-search-broker install`. Check
 pending send outcomes first, then restart the broker so it loads the new policy:
 
 ```bash
@@ -289,7 +289,7 @@ The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stder
 
 Merge the server block from [`.codex/config.toml.example`](../.codex/config.toml.example) into `.codex/config.toml` in the project where you want to use Unofficial Telegram MCP. Preserve any existing settings. Replace **both** absolute-path placeholders. The example does not expand `~` or shell variables.
 
-The current candidate example lists all 51 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
+The current candidate example lists all 55 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
 
 Install the optional skill by copying [the skill file](../skills/telegram-search/SKILL.md) to `~/.agents/skills/telegram-search/SKILL.md`. Back up an existing copy first. The skill supplies search and approval guidance; the broker enforces its own permissions.
 
@@ -344,6 +344,8 @@ The containing directory must be owned by you with mode `0700`; the regular poli
 | Text or attachment replies | `send` plus `reply_text_send` or `reply_artifact_send` respectively |
 | Exact forward/copy of one message (candidate) | `send` and `forward_send`; see the [forward/copy reference](reference.md#exact-forwardcopy-f14). Off by default; each send still needs the preview, approval and local confirmation |
 | One native MP4/MOV video of at most 64 MiB (candidate) | `send` and `video_send`, plus `artifacts` to supply the file; see the [native video reference](reference.md#native-video-send-f15a). Off by default; each send still needs the preview, approval and local confirmation |
+| Move one chat between Main and Archive (candidate) | `send` and `archive_chats`; see the [archive and edit reference](reference.md#archiveunarchive-and-own-text-edit-f17a). Off by default; each move still needs the preview, approval and local confirmation. Also lets `prepare_chat_archive` reveal that chat's title, kind and list membership without a read capability |
+| Edit the plain text of one own text message (candidate) | `send` and `edit_own_text`; see the [archive and edit reference](reference.md#archiveunarchive-and-own-text-edit-f17a). Off by default, independent of `archive_chats`; each edit still needs the preview, approval and local confirmation. Also lets `prepare_text_edit` reveal that message's text, formatting and edit date without a read capability |
 
 Replying to media or formatted sources can require additional source capabilities. Use the [reply reference](reference.md#prepared-same-chat-text-replies) for the exact combinations; do not enable every capability as a shortcut.
 

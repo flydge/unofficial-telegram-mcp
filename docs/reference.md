@@ -2,11 +2,11 @@
 
 # Unofficial Telegram MCP: tool reference
 
-Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message and native video sending. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
+Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message, native video sending, archive/unarchive of one chat and plain-text editing of one own message. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
 
 ## MCP surface
 
-The public surface of the current candidate contains fifty-one tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains fifty-five tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,7 +18,7 @@ The public surface of the current candidate contains fifty-one tools (published 
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 51-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 55-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -26,6 +26,8 @@ The public surface of the current candidate contains fifty-one tools (published 
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 - `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
+- `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+- `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -66,6 +68,8 @@ Package version 0.51.0 retains contract version 1, private IPC version 2 and the
 
 Development candidate `0.52.0.dev0` adds the tools `prepare_forward_send` and `send_prepared_forward` with the default-off capability `forward_send`, and the tools `prepare_video_send` and `send_prepared_video` with the default-off capability `video_send` (fifty-one tools in total). Contract 1 and private IPC 2 are unchanged; the new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. Existing tool schemas are byte-identical. `forward_send` and `video_send` are absent from the legacy defaults and each always requires `send` as well; see [Exact forward/copy (F14)](#exact-forwardcopy-f14) and [Native video send (F15a)](#native-video-send-f15a). The video slice also changes a response, not a schema: a `send_prepared_artifact` call that has already made its attempt no longer reads `expired` if artifact authority is lost afterwards (see [Development-candidate artifact ownership](#development-candidate-artifact-ownership)). This declaration does not establish release, owner-approved live delivery or consumer acceptance for either slice.
 
+The same candidate then adds the tools `prepare_chat_archive` and `apply_prepared_archive` with the default-off capability `archive_chats`, and the tools `prepare_text_edit` and `apply_prepared_text_edit` with the default-off capability `edit_own_text` (fifty-five tools in total, listed after the fifty-one above in this order). Contract 1 and private IPC 2 are unchanged; the four new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. The fifty-one earlier tool entries (name, input and output schema, annotations) are byte-identical. `archive_chats` and `edit_own_text` are absent from the legacy defaults, are independent of each other, and each always requires `send` as well; with only one of the two the tools stay listed but are refused at the SDK guard, the proxy (before it connects) and the broker. These are the first tools that change Telegram state without sending, so one visible runtime text changes: the `forbidden` list returned by `_manifest` no longer says "mutations including edits, deletes, reactions, and moderation operations" but "mutations other than one approved Main/Archive move or one approved plain-text edit of an own text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, bulk and moderation operations". Edits and archive moves are therefore no longer unconditionally forbidden, but only through these four tools and only when their capability is enabled. See [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a). This declaration does not establish release, owner-approved real archive or edit, or consumer acceptance.
+
 Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
 The schema fingerprint covers the finalized SDK input/output schemas, permission annotations, and the operation-to-capability mapping. A consumer may send its previously observed fingerprint as `expected_schema_fingerprint`. A mismatch reports `client_schema_mismatch` and blocks subsequent tool operations in that proxy until an explicit matching fingerprint recheck. A manifest without that token cannot detect an unreported consumer cache. Refresh the consumer's tool listing after upgrades; recreating a Codex conversation may be necessary. `package_mismatch`, `contract_mismatch`, `schema_mismatch`, and `config_mismatch` concern loaded runtime components; refreshing a cached tool list alone cannot repair them. `handshake_unavailable_or_legacy_broker` means the handshake was not established, including a legacy broker or transport failure; it is not proof of a particular cause.
@@ -82,7 +86,7 @@ max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
 ```
 
-`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. A policy written by the 0.52 candidate `connect` lists only `read` and `artifacts`; `send` must then be added explicitly (see [Enabling more capabilities](install.md#enabling-more-capabilities-candidate)). `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
+`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. A policy written by the 0.52 candidate `connect` lists only `read` and `artifacts`; `send` must then be added explicitly (see [Enabling more capabilities](install.md#enabling-more-capabilities-candidate)). `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `archive_chats` independently enables moving one chat between the Main and Archive lists (`prepare_chat_archive`, `apply_prepared_archive`) and `edit_own_text` independently enables replacing the plain text of one own outgoing text message (`prepare_text_edit`, `apply_prepared_text_edit`); each must be added explicitly together with `send`, no other capability enables either, neither enables the other, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. Either of them, together with `send`, also grants a narrow informational read through its prepare tool (see [Informational read side effect](#informational-read-side-effect)). `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
 
 Every operation performs a fresh handshake on its own owner-authenticated Unix connection and binds the next request to the broker's process generation. The broker rechecks policy freshness and the required capability immediately before dispatch. Generation changes never authorize replay of a send or reuse of lost state. A proven rejection before dispatch returns a safe error; lost responses after dispatch preserve the existing uncertain-outcome rule.
 
@@ -190,6 +194,10 @@ A native video draft (F15a) uses the same tool, statuses and evidence, but needs
 chat and temporary message ID plus a final `messageVideo`; see
 [Native video send (F15a)](#native-video-send-f15a).
 
+Archive and text-edit drafts (F17a) are not sends and have no message to correlate, so the
+same tool reports them only coarsely and never as `sent`; it needs `archive_chats` or
+`edit_own_text` in addition to `send`. See [Status of archive and edit drafts](#status-of-archive-and-edit-drafts).
+
 ## Inspect, revise or cancel an unsent draft
 
 Use the same running MCP proxy that prepared the draft. `list_drafts({"limit":20})`
@@ -258,6 +266,13 @@ either, and `send_prepared_text`, `send_prepared_artifact` and `send_prepared_fo
 return `error` for them. Prepare again for the same artifact and recipient to supersede
 one; see [Native video send (F15a)](#native-video-send-f15a).
 
+Archive and text-edit drafts from `prepare_chat_archive` and `prepare_text_edit` are not
+reachable through these tools either: `list_drafts` omits them, `get_draft`, `update_draft`,
+`refresh_draft`, `cancel_draft` and the reply-draft tools return `unavailable` for them, and
+`send_prepared_text`, `send_prepared_artifact`, `send_prepared_forward` and `send_prepared_video`
+return `error`. Prepare again for the same chat (archive) or the same message (edit) to
+supersede one; see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+
 ## Discovery and selection
 
 Catalog and global-message coverage progress independently in deterministic round-robin order. Per call, the server advances at most:
@@ -313,7 +328,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-one tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-five tools of the current candidate.
 
 ## Selected full messages
 
@@ -1854,7 +1869,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 51 tools. The three owner tools below use existing
+The candidate exposes 55 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: their tool descriptions and CLI help contain this complete sequence.
 
@@ -2473,3 +2488,422 @@ Accepted limits, recorded rather than closed:
 - A real owner-approved video send with readback has not been run; the evidence is a
   synthetic provider. Synthetic checks do not establish real delivery or consumer
   readiness.
+
+## Archive/unarchive and own text edit (F17a)
+
+Two independent features change Telegram state without sending a message. `prepare_chat_archive`
+and `apply_prepared_archive` move exactly one chat between the Main and Archive chat lists.
+`prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your
+own outgoing text messages. Each feature returns a complete before/after preview, repeats its
+checks at apply time, asks the local owner to confirm the same facts, makes one closed-shape
+`addChatToList` or `editMessageText` attempt and reports the provider state it then observes. Evidence
+so far is technical (synthetic provider); a real archive/unarchive and a real edit are still
+pending the owner.
+
+Enable `archive_chats` **and** `send` for the archive tools, and `edit_own_text` **and** `send`
+for the edit tools, in trusted runtime policy, restart matching components and add the tools to
+the consumer allowlist. The two capabilities are absent from the legacy defaults, independent of
+each other, and no read, reply or other send capability enables either. Without both of its
+capabilities a tool stays listed but is refused with `capability_disabled` at the SDK guard, the
+proxy (before it connects) and the broker; `get_send_status` for a draft of that feature needs
+both as well. Preparation does not need the read capabilities (see the
+[informational read side effect](#informational-read-side-effect)).
+
+```python
+prepared = prepare_chat_archive(chat=-100123, target_list="archive")
+# prepared.status == "prepared": show prepared.archive in full, obtain approval.
+result = apply_prepared_archive(draft_id=prepared.archive.draft_id, approved=True)
+
+edit = prepare_text_edit(chat=-100123, message_id=456, new_text="Corrected text")
+# edit.status == "prepared": show edit.text_edit in full, obtain approval.
+result = apply_prepared_text_edit(draft_id=edit.text_edit.draft_id, approved=True)
+```
+
+The IDs are synthetic; use observed numeric chat IDs and committed message IDs. All four tools
+are annotated non-read-only, non-idempotent and open-world; only `apply_prepared_text_edit`
+also carries `destructiveHint`, because it overwrites provider state (text, formatting, link
+preview settings) that no tool can restore.
+
+### Archive: inputs and refusals
+
+| Argument | Meaning |
+| --- | --- |
+| `chat` | Exact non-zero numeric chat ID. `@username` and aliases are not accepted. |
+| `target_list` | `archive` or `main`, exactly in lower case. Chat folders are never a target. |
+
+Unknown fields are rejected. The broker reads the chat itself (one serialized provider read,
+cached or offline state) and decides its current list from the chat's positions: only a
+`chatListMain` or `chatListArchive` position whose `source` is null counts. A position carrying
+any `chatSource*` (an MTProxy sponsor or a public-service announcement) is never membership, a
+malformed `source` makes the positions unavailable, and folder positions are ignored.
+
+A refusal is content-free: `status="refused"`, `refusal="unsupported_chat"` and the fixed detail
+`chat is not eligible; no draft was created`, with no draft ID, title or list. It is returned for
+a secret chat and for a chat that has no own Main or Archive position (it is in neither list, only
+in a folder, or only sponsored/PSA-listed). A chat that already is in `target_list` returns
+`status="already_in_target"` (fixed detail `chat is already in the target list; no draft was
+created`) without a draft. `status="unavailable"` (fixed detail `archive draft is unavailable`,
+no draft) covers an unreadable or deleted chat, malformed or ambiguous provider data (a missing,
+duplicated or malformed position, an own Main and an own Archive position at once, an empty or
+unsanitized title), exhausted draft capacity or request budget (preparation has a 30-second
+budget), and account, session or policy change during preparation.
+
+### Archive: preview and hash
+
+`prepared.archive` is the closed `ArchiveDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required` (always true), `chat` (`chat_id`, sanitized `title`, `kind`: `private`,
+`basic_group`, `supergroup` or `channel`), `current_list` and `target_list` (each `main` or
+`archive`, never equal), `note` and `preview_sha256`. `note` is the fixed sentence "Telegram may
+move an archived chat whose notifications are enabled back to Main when a new message arrives"
+when `target_list` is `archive`, and null otherwise. It states Telegram behaviour: `applied`
+reflects only the list observed right after the call.
+
+`preview_sha256` is a domain-separated version-1 SHA-256 over the draft ID, account, expiry, chat,
+both lists, the note and the exact closed `addChatToList` request. The proxy recomputes it and checks
+that chat and `target_list` match the request; otherwise the result is `unavailable`. The owner
+dialog (below) is validated against a second, draft-side binding of chat ID, kind and both lists.
+Show the complete preview and say plainly what changes: the chat leaves its current list, a pin it
+has there is lost, and an archived chat can come back to Main.
+
+### Archive: apply
+
+`apply_prepared_archive(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
+
+1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+2. Policy (`send` and `archive_chats`) and owner (proxy client and current account) are checked;
+   a draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
+3. A stored receipt is replayed; no dialog, no provider call.
+4. The in-memory chat record must exist (lost on broker restart: `expired`) and the draft must be
+   live, owned and not superseded.
+5. The chat is read again. A chat that is now secret or has malformed data, a different identity
+   (chat type or native ID), kind or sanitized title is `chat_changed`. A chat now in
+   `target_list` is `already_in_target`. Any other change of its list (to no own list, to another
+   list, to a sponsored or PSA position, to two lists) is `chat_changed`. A provider read failure
+   or timeout is `expired`.
+6. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+7. Owner, policy, provider session and account are checked again, then the single-use claim is
+   taken (loss of authority before this point is `expired`).
+8. Inside the serialized provider call the account, policy, claim, chat identity, title, kind and
+   current list are checked again, and the guard runs once more immediately before transport. Any
+   failure is `local_failed` with no transport.
+9. Exactly one `addChatToList` request is sent. Its direct result must be exactly `ok`.
+10. The call then reads the chat's list with `getChat` every 0.25 seconds for at most 10 seconds
+    (less if the remaining request budget is shorter); each read is its own serialized provider
+    call, so other operations are not blocked for the whole wait. `applied`
+    requires an own position in the target list; reading the other list, no list, a sponsored
+    position in the target list, a read error or the end of the wait is `outcome_unknown`.
+
+Dialog, attempt and observation share one budget of at most 330 seconds. The request has one closed
+shape, enforced before transport (see the [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate)):
+`chat_id` and `chat_list` exactly `{"@type":"chatListMain"}` or `{"@type":"chatListArchive"}`.
+
+### Archive: owner dialog
+
+The macOS dialog (title "Unofficial Telegram MCP — approve change", buttons `Cancel` (default) and
+`Apply`, gives up after 120 seconds, which counts as declined) shows the same immutable preview that
+the proxy validated:
+
+```text
+Move chat «<title>» (chat <ID>, <kind>) from Main to Archive?
+Untrusted spans in « » are exact; ⟦U+XXXX⟧ marks <the characters listed by the legend>; look-alike words in one script are not marked.
+Account: <ID>
+Draft: <draft ID>
+Expires: <time>
+
+Current list: Main
+Target list: Archive
+Note: the chat leaves Main and loses any pin there; it is not pinned in Archive (Telegram behaviour).
+[Note: chat folders that exclude archived chats will hide it (Telegram behaviour).]
+[Note: <the preview note> (Telegram behaviour).]
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one move attempt and report the list it observes right after.
+```
+
+Moving back to Main reads "from Archive to Main" and shows only the first note (`the chat leaves
+Archive and loses any pin there; it is not pinned in Main`). The two bracketed notes appear only
+when archiving. The pin and folder notes belong to the dialog only; the preview's `note` field is
+unchanged. The chat title is untrusted: it uses the same readable rendering and legend line as the
+[forward dialog](#owner-dialog) (letters of every script literal; control, format, look-alike and
+repeated-space characters, `« » ⟦ 〚 〛` and line breaks as reversible `⟦U+XXXX⟧`), so it can neither
+close its span nor start a dialog line. The dialog is mutually exclusive with every other preview;
+a chat ID, title or hash that disagrees with the validated preview shows nothing and counts as declined.
+
+### Archive: outcomes
+
+| `status` | Meaning | Provider attempt |
+| --- | --- | --- |
+| `applied` | The target list was observed right after the call; `observed_list` is that list. A later state can differ. | yes |
+| `already_in_target` | Step 5: the chat is already in the target list | no |
+| `chat_changed` | Step 5: identity, title, kind or list changed | no |
+| `failed` | Provider rejection with a 4xx error code; the detail is `TDLib rejected the change (code N)` | yes (rejected) |
+| `outcome_unknown` | Result lost, malformed or unconfirmed, a non-4xx error code, timeout, transport loss, or the target list not observed; do not retry automatically | possibly |
+| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `expired` | Unknown, foreign, superseded or expired draft, broker restart, or account or policy change before the claim | no |
+| `local_failed` | A local guard failed after approval and before transport; the claim is consumed | no |
+| `error` | The draft is not an archive draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
+
+Only a 4xx error is proof that nothing changed. A 5xx, negative, missing or malformed code, a
+timeout or a lost result may follow an applied move and is `outcome_unknown`. `chat_id` accompanies
+answers given from the live call (`applied`, `failed`, `outcome_unknown`, `chat_changed`,
+`already_in_target`); `observed_list` is present only for `applied`.
+
+A repeated `apply_prepared_archive` replays the receipt (`applied` with its `observed_list`,
+`failed`, `outcome_unknown` or `local_failed`, with detail saying that no new change was
+attempted) and never opens a dialog or sends a request. The call that made the attempt never reads
+`expired` for it: if the account, policy or authority is lost afterwards, a claim that ended in a
+local failure is `local_failed` and any other claim is `outcome_unknown` with the detail `current
+receipt authority is unavailable; do not retry automatically`. After `outcome_unknown`, check the
+chat's list in Telegram (or with `list_chats`, when enabled) before deciding anything; never prepare a
+new archive draft to try again. A move is undone only by a new, separately approved move in the other
+direction.
+
+### Edit: inputs and normalization
+
+| Argument | Meaning |
+| --- | --- |
+| `chat` | Exact non-zero numeric chat ID of the message. `@username` and aliases are not accepted. |
+| `message_id` | Positive committed message ID (at most 2^53-1). |
+| `new_text` | The complete replacement text, plain text of 1 to 4096 characters. No styles, entities or links with hidden targets can be supplied. |
+
+Unknown fields are rejected. `new_text` is normalized like `prepare_text_send` (NFKC, CRLF and CR
+to LF; control and format characters other than line feed and tab are refused, as are empty,
+whitespace-only and over-long text) and the preview shows the normalized text; the proxy checks that
+the preview's new text equals the normalized request text. Because the edit replaces the stored text
+as given, two further local refusals precede every provider read; both are `status="refused"`,
+`refusal="invalid_input"` with a fixed detail, never silently corrected:
+
+- **Edge whitespace.** After normalization the first or last character is any Unicode whitespace
+  (space, line feed, tab, U+2028, U+2029, U+1680, and no-break and ideographic spaces, which NFKC
+  turns into a space; U+00A8 also becomes a leading space). Telegram trims it, so the stored text
+  would differ from the text the dialog calls exact. Detail: `new text must not start or end with
+  whitespace; Telegram trims it`. Interior spaces and line breaks are kept exactly.
+- **Characters Telegram rewrites.** After normalization the text contains a tab, U+2028 to U+202E,
+  U+030A, U+0333 or U+033F. The pinned TDLib turns a tab into a space and removes the others while
+  cleaning the text before sending, so the dialog's exact text would not be stored. Detail: `new text
+  contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)`. The check
+  follows NFKC: "a" plus U+030A composes to "å" and passes, while U+02DA and U+2017 become a space plus
+  U+030A or U+0333 and are refused. U+202A to U+202E are format characters already refused by the
+  normalization with the generic detail below. Edge whitespace is checked first.
+
+Text that fails the shared normalization (empty, whitespace-only, over-long, control or format
+characters) is `invalid_input` with the generic detail below.
+
+### Edit: refusals
+
+A refusal is content-free: `status="refused"`, one of the codes below and the fixed detail `message
+is not eligible for an own text edit; no draft was created` (the two `invalid_input` details above
+excepted); no draft ID and no text. Checks run in this order and the first failure is reported: local
+text checks, chat identity, outgoing, content kind, forward, reply markup, the F14 source projection
+(state, entities, link preview, names), edit permission, evidence size, unchanged text.
+
+| `refusal` | When |
+| --- | --- |
+| `invalid_input` | The new text fails normalization, has edge whitespace or contains characters Telegram rewrites. |
+| `not_outgoing` | The message is not an outgoing message of the account. |
+| `unsupported_source_content` | Content other than plain `messageText` (photo, document, sticker, poll and every other kind); the F14 projection bounds are exceeded (text over 4096 characters or over 100 entities, a projection over 64 KiB), entities that are not exact records on whole-scalar UTF-16 boundaries, malformed link-preview options; escaped text plus covered spans over 131072 characters. |
+| `source_is_forward` | The message carries forward information. |
+| `hidden_source_content` | A reply markup. Any entity outside the visible fieldless allowlist (only Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url, EmailAddress, PhoneNumber and BankCardNumber are admitted; TextUrl, MentionName, CustomEmoji, PreCode, MediaTimestamp, DateTime, unknown types and allowlisted types carrying a field refuse). A link-preview-options URL or link-card URL that is not exactly the covered text of a Url entity or a whole whitespace-delimited token of the text. An author signature that sanitizing would change. |
+| `unsupported_source_state` | Self-destructing, auto-deleting, ephemeral, scheduled or still-sending message. |
+| `not_editable` | `getMessageProperties.can_be_edited` is false (the edit window has closed or the right is missing). |
+| `unchanged_text` | The normalized `new_text` equals the current text. |
+
+`status="unavailable"` (fixed detail `text edit draft is unavailable`, no draft) covers a secret
+chat, a deleted or unreadable message, malformed or incomplete provider data (a missing safety
+field such as `is_outgoing` or `can_be_edited` is never treated as safe; mismatched IDs), exhausted
+draft capacity or request budget (preparation has a 30-second budget), and account, session or
+policy change during preparation.
+
+### Edit: preview and hashes
+
+`prepared.text_edit` is the closed `TextEditDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required` (always true), `chat` (`chat_id`, sanitized `title`, `kind`: `private`,
+`basic_group`, `supergroup` or `channel`), `message_id`, `current_text`, `current_entities`,
+`new_text`, `current_edit_date`, `source_sha256` and `preview_sha256`:
+
+- `current_text` and `new_text` are untrusted evidence in the same marked reversible JSON strings as
+  the forward preview (`[untrusted Telegram evidence] ` plus one JSON string in which only ASCII
+  letters, digits, `_` and `-` stay literal; everything else, including newlines and look-alike
+  letters, appears as `\uXXXX`). Decoding one JSON layer yields exactly the raw text that the hashes
+  cover. Non-Latin text is therefore hard to read in the MCP preview; the owner dialog renders it
+  readably.
+- `current_entities` lists every entity of the current text as `type`, `offset` and `length` in raw
+  UTF-16 code units of the current text. This edit sends no entities, so all formatting is gone from
+  the new message. Of the listed entities, Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag,
+  BotCommand and BankCardNumber are auto-detected: Telegram detects them again wherever the new text
+  still contains them. The rest (Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre,
+  BlockQuote, ExpandableBlockQuote) is formatting this plain-text edit removes. Say which is which.
+- `current_edit_date` is the Unix time of the last edit, 0 if the message was never edited.
+- `source_sha256` is the SHA-256 of the canonical version-3 source projection of the current message
+  (the F14 projection: chat, message ID, sender, signature, via-bot ID, forward flag, date, edit date,
+  text with entity types and raw offsets, link-preview options and link-card URL). Views, reactions
+  and other volatile state are excluded.
+- `preview_sha256` is a domain-separated version-1 SHA-256 over the draft ID, account, expiry, chat
+  (including `kind`), message ID, current text and entities, new text, current edit date,
+  `source_sha256` and the exact closed `editMessageText` request. The proxy recomputes it and checks
+  chat, message ID and normalized new text against the request; otherwise the result is `unavailable`.
+
+Show the complete preview: current text, new text, every current entity with its covered text, the
+chat and its kind, and the edit date. The whole text is replaced; there is no partial edit.
+
+### Edit: apply
+
+`apply_prepared_text_edit(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
+
+1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+2. Policy (`send` and `edit_own_text`) and owner (proxy client and current account) are checked; a
+   draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
+3. A stored receipt is replayed; no dialog, no provider call.
+4. The in-memory chat record must exist (lost on broker restart: `expired`) and the draft must be
+   live, owned and not superseded.
+5. The message is read again with the preparation rules. A message that is gone, no longer eligible
+   (not outgoing, not plain text, forwarded, reply markup, hidden entities, special state), in a chat
+   that is now secret, with malformed data, or whose projection hash, chat identity or title differs,
+   is `message_changed`. So is a message whose edit permission has closed (detail `message can no
+   longer be edited; no change was attempted`). Another provider read failure or a timeout is
+   `expired`.
+6. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+7. Owner, policy, provider session and account are checked again, then the single-use claim is taken
+   (loss of authority before this point is `expired`).
+8. Inside the serialized provider call the account, policy, claim, projection hash, chat identity,
+   title and edit permission are checked again, and the guard runs once more immediately before
+   transport. Any failure is `local_failed` with no transport.
+9. Exactly one `editMessageText` request is sent. There is no later readback: success rests on its
+   direct result. The returned object must be the same message (same ID and chat) with `messageText`
+   content whose text equals `new_text` exactly and a non-zero `edit_date` that is not earlier than
+   `current_edit_date`. Anything else, including a stale or zero `edit_date`, is `outcome_unknown`.
+
+Dialog and attempt share one budget of at most 330 seconds. The request has one closed shape, enforced
+before transport (see the [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate)):
+`chat_id`, `message_id`, `reply_markup: null` and an `inputMessageText` whose `formattedText` carries
+the new text and no entities, `link_preview_options: null` and `clear_draft: false`.
+
+### Edit: owner dialog
+
+The macOS dialog (same title, `Cancel` default and `Apply` button, 120-second give-up as the archive
+dialog) shows the same immutable preview that the proxy validated:
+
+```text
+Edit your message <ID> in «<chat title>» (chat <ID>, <kind>)?
+Untrusted spans in « » are exact; ⟦U+XXXX⟧ marks <the characters listed by the legend>; look-alike words in one script are not marked.
+Account: <ID>
+Draft: <draft ID>
+Expires: <time>
+
+Current text [untrusted Telegram evidence] (exact): «<current text>»
+[Current formatting, removed by this plain-text edit (raw text UTF-16 code units):
+<Type>: offset <N>, length <M>; covered «<span>»]
+[Current auto-detected entities, auto-detected again by Telegram wherever the new text contains them (raw text UTF-16 code units):
+<Type>: offset <N>, length <M>; covered «<span>»]
+New text (exact): «<new text>»
+Last edited: never | <UTC time>
+Source SHA-256: <hash>
+Preview SHA-256: <hash>
+
+The new text is plain text without formatting; Telegram may detect links in it and show a link preview. Link preview settings return to Telegram's default. Recipients see the message marked "edited".
+Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, then make one edit attempt.
+```
+
+`<kind>` is `private`, `group`, `supergroup` or `channel; visible to all subscribers`: an edit in
+a channel reaches every subscriber. Only formatting that Telegram does not detect again is listed
+under "removed"; Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and
+BankCardNumber entities are listed separately as auto-detected again, and a block is omitted when it
+would be empty. The chat title, the current text, each covered span and the new text use the same
+readable rendering and legend line as the [forward dialog](#owner-dialog). The dialog is mutually
+exclusive with every other preview; a chat ID, title, source hash or field that disagrees with the
+validated preview shows nothing and counts as declined.
+
+Explain to the owner what Telegram does with the edit: recipients see the message marked "edited",
+formatting listed as removed is gone, link-preview settings go back to Telegram's default and
+Telegram may detect links in the new text and show a link preview. The previous text is not kept by
+these tools and no tool restores it.
+
+### Edit: outcomes
+
+| `status` | Meaning | Provider attempt |
+| --- | --- | --- |
+| `applied` | The returned message carries exactly the new text; `edit_date` is its non-zero edit date | yes |
+| `message_changed` | Step 5: the message, its chat or its edit permission changed | no |
+| `failed` | Provider rejection with a 4xx error code; the detail is `TDLib rejected the change (code N)` | yes (rejected) |
+| `outcome_unknown` | Result lost, malformed or unconfirmed (wrong text, message or chat, missing or stale `edit_date`), a non-4xx error code, timeout or transport loss; do not retry automatically | possibly |
+| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `expired` | Unknown, foreign, superseded or expired draft, broker restart, or account or policy change before the claim | no |
+| `local_failed` | A local guard failed after approval and before transport; the claim is consumed | no |
+| `error` | The draft is not a text edit draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
+
+Only a 4xx error is proof that nothing changed; a 5xx, negative, missing or malformed code, a
+timeout or a lost result may follow an applied edit and is `outcome_unknown`. `chat_id` and
+`message_id` accompany answers given from the live call; `edit_date` is present only for `applied`.
+A repeated `apply_prepared_text_edit` replays the receipt (`applied` with its `edit_date`, `failed`,
+`outcome_unknown` or `local_failed`) and never opens a dialog or sends a request. As for archive moves,
+the attempting call never reads `expired` after its claim: lost authority is `local_failed` or
+`outcome_unknown` with the detail `current receipt authority is unavailable; do not retry
+automatically`. After `outcome_unknown`, read the message in Telegram (or with `read_messages`, when
+enabled) before deciding anything; never prepare a new edit draft to try again.
+
+### Archive and edit drafts, supersession and expiry
+
+Archive and text-edit drafts live in the same in-memory registry as other drafts (internal kinds
+`archive` and `text_edit`), bound to the proxy client and current Telegram account, with the same
+finite TTL (default 15 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker restart
+loses them. They are not reachable through the generic draft tools (`list_drafts` omits them;
+`get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and the reply-draft tools return
+`unavailable`), and the send tools return `error` even after the change was applied, so a change
+receipt is never replayed as a send. There is no update, refresh or cancel for these drafts.
+`apply_prepared_archive` rejects a text-edit draft and `apply_prepared_text_edit` an archive draft with
+`error`, and both reject a plain text draft.
+
+Preparing again for the same owner and chat supersedes the earlier pending archive draft (whatever
+its `target_list`); preparing again for the same owner, chat and message supersedes the earlier
+pending edit draft (whatever its new text). The superseded draft can no longer be claimed: applying it
+returns `expired` with no dialog and no attempt. Other chats, other messages, other clients and the
+other feature's drafts are unaffected. To change anything, or to withdraw a draft, prepare again or let
+it expire; nothing changes without the matching `apply_prepared_*` call with `approved=true` and the
+local confirmation.
+
+### Status of archive and edit drafts
+
+`get_send_status` needs `send` and the draft's capability (`archive_chats` or `edit_own_text`) and is
+read-only. A change has no message to correlate, so the status stays coarse: a pending draft reads
+`pending` with evidence `local_pending`, a claim without a result `pending` with `local_claimed`, a
+local failure `failed` with `local_failed`, and everything after a provider attempt (applied,
+rejected or unknown) reads the content-free `outcome_unknown` with evidence `none`. It never reads
+`sent` and never discloses the observed list or edit date. With either capability missing it reads that
+same content-free unknown. The apply response, and its replay while the receipt is retained (900
+seconds from the attempt), is the only outcome record.
+
+### Informational read side effect
+
+Preparation reads provider state to build the preview, and the preview discloses part of it without
+any read capability. With `edit_own_text` and `send`, `prepare_text_edit` reveals the exact current text,
+entities and edit date of an own outgoing text message, and the title and kind of its chat. With
+`archive_chats` and `send`, `prepare_chat_archive` reveals a chat's sanitized title, kind and Main/Archive
+membership, including through the `already_in_target` and `unsupported_chat` answers. Enabling either
+capability therefore also grants these narrow reads of exactly named chats and messages. Everything
+returned is untrusted Telegram data (texts carry the evidence marker), never instructions.
+
+### Archive and edit limits
+
+Not supported: caption edits, styled text edits (no entities can be sent), editing other people's
+messages or any non-text message, pin and unpin, deletion, chat folders (`chatListFolder`), bulk
+operations, scheduled messages, secret chats and retained selections as a source.
+
+Accepted limits, recorded rather than closed:
+
+- Reads rest on cached and offline provider state; a remote change can still race the last check
+  before transport, and Telegram receives a request to act on whatever it holds at that time. The
+  edit window can also close between preparation and apply, which is then `message_changed` (or
+  `local_failed` if it closes during the dialog) with no attempt.
+- Telegram may move an archived chat whose notifications are enabled back to Main on a new message.
+  `applied` reflects only the state observed right after the call (polled up to 10 seconds); a move
+  that becomes visible later is still `outcome_unknown`.
+- Two concurrent applies of one draft make exactly one provider attempt, but both callers may see the
+  owner dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt authority
+  is unavailable; do not retry automatically") although it made no attempt. This is the pattern of
+  forward and video sends; it errs towards unknown, never towards a second attempt or a false `applied`.
+- Plain text sends (`prepare_text_send`) share the text normalization and still admit interior tabs,
+  U+2028, U+2029 and the three combining marks that TDLib rewrites; only edits refuse them. See the
+  [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate).
+- A real owner-approved archive or unarchive and a real edit of an own test message have not been run;
+  the evidence is a synthetic provider and dialog. Synthetic checks do not establish real behaviour or
+  consumer readiness.

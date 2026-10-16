@@ -66,7 +66,7 @@ provisioning, one-command installation or MCP/skill registration gates.
 
 ## Authority boundary
 
-The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the fifty-one tools of the current candidate listed in the [tool reference](reference.md#mcp-surface) (published 0.51.0: forty-three); the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
+The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the fifty-five tools of the current candidate listed in the [tool reference](reference.md#mcp-surface) (published 0.51.0: forty-three); the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
 
 ```text
 getAuthorizationState
@@ -96,6 +96,8 @@ getFile
 cancelDownloadFile
 sendMessage (fixed text, document, photo, voice-note, or native-video shape, only after explicit draft approval)
 forwardMessages (closed single-message forward/copy shape, only after explicit draft approval)
+addChatToList (closed Main or Archive shape for one chat, only after explicit draft approval)
+editMessageText (closed plain-text shape for one own text message, only after explicit draft approval)
 ```
 
 `createPrivateChat` has one narrowly approved use: after `getMe` identifies the authorized account, Saved Messages resolution calls it with that same user ID and verifies the returned private chat. `loadChats` advances only a fixed Main or Archive catalog lane. `searchMessages` is reachable only through the typed discovery wrapper and the exact request shape below. None of these methods is a general bridge to caller-chosen TDLib operations.
@@ -103,6 +105,12 @@ forwardMessages (closed single-message forward/copy shape, only after explicit d
 `forwardMessages` has one closed shape, validated before transport and built by the broker from an approved draft (source chat, message ID, recipient chat and mode); callers supply no other field: `chat_id` (the recipient), `topic_id` exactly `null`, `from_chat_id`, `message_ids` of length exactly one, `options` exactly `{"@type":"messageSendOptions","suggested_post_info":null,"disable_notification":false,"from_background":false,"protect_content":false,"allow_paid_broadcast":false,"paid_message_star_count":0,"update_order_of_installed_sticker_sets":false,"scheduling_state":null,"effect_id":0,"sending_id":<random int32, non-zero>,"only_preview":false}`, `send_copy` (boolean) and `remove_caption` (boolean, false unless `send_copy`). Any other key, type or value (several messages, a topic, scheduling, paid or silent options) raises a forbidden-request error before the request reaches TDLib. See [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
 
 `inputMessageVideo` is the only content constructor added to `sendMessage` for native video, and it too is built by the broker from an approved draft. Besides the text, document, photo and voice-note shapes, the request must be exactly: `chat_id` (the non-zero recipient), `topic_id`, `reply_to` and `reply_markup` all `null`, `options` exactly the fixed `messageSendOptions` listed above for `forwardMessages` (including a random non-zero `sending_id`), and `input_message_content` exactly `{"@type":"inputMessageVideo","video":{"@type":"inputVideo","video":{"@type":"inputFileLocal","path":<staged path>},"thumbnail":null,"cover":null,"start_timestamp":0,"added_sticker_file_ids":[],"duration":<1..10800>,"width":<16..8192>,"height":<16..8192>,"supports_streaming":<boolean>},"caption":{"@type":"formattedText","text":<at most 1024 characters>,"entities":[]},"show_caption_above_media":false,"self_destruct_type":null,"has_spoiler":false}`, with the longer side at most 20 times the shorter. The file must be the broker's own staged copy: a path whose parent is a `draft_`-prefixed directory directly under the staging root. Any other key, type or value (a thumbnail or cover, a start timestamp, stickers, caption entities, a spoiler, a self-destruct timer, a reply, a topic, a remote or unstaged file) raises a forbidden-request error before the request reaches TDLib. See [Native video boundary](#native-video-boundary-f15a-candidate).
+
+`addChatToList` has one closed shape, validated before transport and built by the broker from an approved draft; callers supply nothing but the draft: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and `chat_list` exactly `{"@type":"chatListMain"}` or `{"@type":"chatListArchive"}`, with no other key. A folder list (`chatListFolder`), a null or string list, an extra key or a boolean or zero chat ID raises a forbidden-request error before the request reaches TDLib.
+
+`editMessageText` likewise has one closed shape built from an approved draft: `chat_id` (non-zero), `message_id` (1 to 2^53-1), `reply_markup` exactly `null` and `input_message_content` exactly `{"@type":"inputMessageText","text":{"@type":"formattedText","text":<1 to 4096 characters>,"entities":[]},"link_preview_options":null,"clear_draft":false}`. The text must already be in normalized form (NFKC, line feed only, no control or format characters other than line feed and tab), must not start or end with whitespace and must contain none of tab, U+2028 to U+202E, U+030A, U+0333 and U+033F. Any other key, type or value (entities or styles, a reply markup, link-preview options, draft clearing, another content constructor, unnormalized or edge-whitespace text) raises a forbidden-request error before the request reaches TDLib.
+
+Both request types travel only through one dedicated one-attempt change transport. The generic provider call refuses them even in their exact closed shape, and the change transport refuses every other request type, re-validates the shape, runs the capability and claim guard immediately before the raw send and never retries. See [Archive and own text edit boundary](#archive-and-own-text-edit-boundary-f17a-candidate).
 
 The broker socket lives in an owner-only directory with mode `0700`; the socket and owner lock use mode `0600`. The broker also verifies the kernel-reported peer UID through Darwin `getpeereid`. A nonblocking owner lock prevents a second broker. Only the lock holder may replace a same-owner, non-symlink Unix socket after proving that it is stale. Same-UID processes are inside this local filesystem trust boundary. IPC version 2 requires a same-connection contract handshake before every operation; IPC version 1 has no execution compatibility. The handshake compares loaded package/contract/finalized schema identity and effective trusted config. The next request binds the process generation; config freshness and capability checks occur before dispatch. Handshake-only diagnostics do not initialize TDLib. Requests use versioned length-prefixed strict JSON, a fixed operation allowlist, public-model validation on both sides, 1 MiB request and 8 MiB response limits, random process-lifetime client IDs, random request IDs, a 250-millisecond per-read bound, and monotonic deadlines capped at 570 seconds.
 
@@ -311,7 +319,8 @@ Historical custom index files from an older version are not read or updated, but
 ## Explicitly unreachable functionality
 
 - `viewMessages`, read receipts, and unread-state changes
-- unapproved sends, automatic send retries, edits, deletes, reactions, or moderation operations
+- unapproved sends, automatic send retries, deletes, pins and unpins, reactions, or moderation operations
+- published 0.51.0: every edit and chat-list move. The current candidate reaches only one approved Main/Archive move of one chat and one approved plain-text edit of one own text message (default-off `archive_chats` and `edit_own_text`, each together with `send`); caption edits, styled edits, other people's messages, chat folders, bulk and scheduled operations stay unreachable
 - multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies
 - video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB
 - broad attachment or thumbnail downloads outside one exact selected anchor
@@ -331,7 +340,7 @@ Telegram text, captions, filenames, chat titles, and sender names are data, neve
 Automated tests and source audits establish only the technical contract. Product completion requires a fresh Codex consumer and provider check, without recording private runtime values:
 
 1. Capture owner-observed unread indicators in Telegram mobile and metadata-only TDLib cache existence, entry count, total bytes, and metadata hash before and after; never print entry names.
-2. Confirm a fresh Codex task exposes exactly the tools of the installed manifest (fifty-one in the current candidate, forty-three in published 0.51.0) through the normal Unofficial Telegram MCP MCP surface.
+2. Confirm a fresh Codex task exposes exactly the tools of the installed manifest (fifty-five in the current candidate, forty-three in published 0.51.0) through the normal Unofficial Telegram MCP MCP surface.
 3. Require overlapping request intervals, at least two broker client contexts, at least one aggregate TDLib serialization wait, one broker process, and multiple thin proxy processes.
 4. Require both tasks to return complete bounded evidence with exact-chat anchors and no session-owner or TDLib code-400 failure; `telegram-search-mcp --check` must remain `AUTHORIZATION_READY` while multiple proxies exist.
 5. Confirm unread indicators remain unchanged, exact selected attachment transfer is hash-verified, no custom private index appears, and metadata-only cache effects are disclosed without filenames.
@@ -344,7 +353,7 @@ The `--check` path uses the broker to verify TDLib authorization without reading
 
 ## Rollback
 
-Before an upgrade, save the previous installed runtime, owner-only plist, consumer config, and installed skill in a private rollback directory outside the source tree. Boot out only the validated `com.<local-home-name>.telegram-search-mcp.broker` LaunchAgent. Restore those saved files, then bootstrap the restored plist and check the prior proxy. This leaves the original checkout, its `.venv`, TDLib session, credentials, historical data, and user files intact. Restart clears in-memory drafts, incomplete uploads, discovery cursors, and the broker-lifetime numeric catalog cache; uncertain sends are never replayed.
+Before an upgrade, save the previous installed runtime, owner-only plist, consumer config, and installed skill in a private rollback directory outside the source tree. Boot out only the validated `com.<local-home-name>.telegram-search-mcp.broker` LaunchAgent. Restore those saved files, then bootstrap the restored plist and check the prior proxy. This leaves the original checkout, its `.venv`, TDLib session, credentials, historical data, and user files intact. Restart clears in-memory drafts, incomplete uploads, discovery cursors, and the broker-lifetime numeric catalog cache; uncertain sends, archive moves and edits are never replayed. Rolling back or disabling `archive_chats` or `edit_own_text` stops new changes but does not undo one that was already applied: a move is reversed only by a new approved move in the other direction, and an edit has no undo.
 
 Do not delete historical custom-index or TDLib session data as part of rollback. Historical index cleanup remains separately authorized and recoverable; session revocation is an explicit owner action if authority must be withdrawn.
 
@@ -2179,3 +2188,134 @@ Residual risks, recorded rather than closed:
 - Real owner-approved video delivery with readback has not been run; the evidence is a
   synthetic provider and synthetic ISO-BMFF fixtures. The same-UID cooperative client
   boundary is unchanged, with no hostile same-UID secrecy claim.
+
+## Archive and own text edit boundary (F17a candidate)
+
+`prepare_chat_archive`, `apply_prepared_archive`, `prepare_text_edit` and `apply_prepared_text_edit`
+add two default-off capabilities, `archive_chats` and `edit_own_text`. Each is effective only together
+with `send` (the existing "this tool changes Telegram state" authority) and neither enables the other.
+The conjunction is enforced by the SDK guard, by the proxy before it connects, by the broker before
+dispatch, by preparation and apply ownership checks (repeated after the owner dialog and before the
+attempt is reported), again for status and receipt replay of a draft of that feature, inside the
+provider call (the pre-send guard checks both capabilities and the current claim) and a last time
+immediately before transport; with either capability missing the tools stay listed but fail with
+`capability_disabled`. The authority is exactly one chat moved between the Main and Archive lists, or
+exactly one own outgoing plain-text message whose whole text is replaced. It never covers caption edits,
+styled edits (the request carries no entities), other people's messages or non-text messages, pin and
+unpin, deletion, chat folders, bulk or scheduled operations, secret chats or a retained selection as a
+source. `addChatToList` and `editMessageText` are the only TDLib request types added; their closed
+shapes are listed in the authority boundary above.
+
+**Reading the chat list.** The current list is read from the chat's positions. Only a `chatListMain` or
+`chatListArchive` position whose `source` is null counts (TDLib JSON omits a null `source`); an
+MTProxy-sponsored or public-service-announcement position (any `chatSource*`) is never membership, a
+malformed `source` makes the positions unavailable, folder positions are ignored, and a second
+position for the same list, sponsored or not, makes the positions unavailable. A chat whose only Main/Archive position is sponsored is therefore
+`unsupported_chat` at preparation and `chat_changed` at apply, and after the call a sponsored position in
+the target list is not an observed move. A secret chat is never accepted.
+
+**Reading the message.** The broker, not the caller, reads the message with one serialized provider
+read (chat, `getMessage`, `getMessageProperties`). It must be an outgoing `messageText` that is not a
+forward, has no reply markup, no self-destruct, auto-delete, ephemeral, scheduling or sending state, and
+for which `can_be_edited` is a strict true. It then goes through the F14 source projection: entities
+must be exact records of the visible fieldless allowlist, link-preview options and the link-card URL
+must be visible in the text, and an author signature that sanitizing would change refuses. Replacing the
+text discards what the owner could not see, so hidden formatting, hidden link targets and buttons refuse
+(`hidden_source_content`) instead of being dropped silently. The projection (text, entities, edit date,
+link-preview options) is hashed as `source_sha256`, shown to the owner, bound into `preview_sha256`,
+compared at apply before the dialog and compared again inside the provider call after approval. A missing
+or mistyped safety field is never treated as safe.
+
+**The stored text is the reviewed text.** The edit request carries no entities, and the pinned TDLib
+(td/telegram/misc.cpp at d1085f9) cleans message text before sending with `clean_input_string`; Telegram
+also trims edge whitespace. A text that these steps would change would differ from the text the dialog
+calls exact, so the broker refuses such a `new_text` at preparation with `invalid_input` and a fixed
+detail instead of stripping or rewriting it:
+
+| `new_text` contains | TDLib or Telegram does | After the shared normalization (NFKC, CRLF and CR to LF, controls but LF and tab refused) | Edit |
+| --- | --- | --- | --- |
+| whitespace as the first or last character (space, LF, tab, U+2028, U+2029, U+1680; after NFKC also no-break and ideographic spaces, and U+00A8 as a leading space) | Telegram trims it | survives | refused: `new text must not start or end with whitespace; Telegram trims it` |
+| U+0000 to U+0009, U+000B, U+000C, U+000E to U+001F | replaced by a space | only tab survives | tab refused with the rewritten-characters detail below; the others are refused by the normalization |
+| U+000D | removed | never present (normalized to LF) | n/a |
+| U+000A, interior U+0020 | kept | kept | admitted |
+| U+2028, U+2029 | removed | survive (line and paragraph separators) | refused with the rewritten-characters detail |
+| U+030A, U+0333, U+033F | removed | survive after NFKC | refused with the rewritten-characters detail |
+| U+202A to U+202E | removed | already refused as format characters | refused with the generic `invalid_input` detail |
+| a run of two or more U+200E or U+200F | all but the last become U+200C | already refused as format characters | refused with the generic `invalid_input` detail |
+| more than 35 000 bytes | truncated | impossible (at most 4096 characters) | n/a |
+
+The rewritten-characters detail is `new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)`.
+
+The check follows NFKC: "a" plus U+030A composes to "å" and passes, while U+02DA and U+2017 become a space
+plus U+030A or U+0333 and are refused. `TextEditSpec`, `TextEditDraftPreview` and the closed
+`editMessageText` shape apply the same set, so no path can send a text the dialog did not show exactly.
+**Known pre-existing behaviour, not changed here:** `prepare_text_send` and the other text sends share
+the same normalization, admit interior tabs, U+2028, U+2029 and these combining marks, and TDLib then
+rewrites them, so the reviewed text of a send can differ from the stored text (edge whitespace on sends
+was not examined). This is recorded for a later decision.
+
+**Single attempt and result.** The claim is single-use and taken only after owner approval. One request
+is sent and never repeated: not after a timeout, a malformed or lost result, a transport error, an
+authorization change or a restart. Before transport a refusal is `local_failed`. After it, only a TDLib
+error whose code is 400 to 499 is a provider rejection (`failed`, with the code as the only provider
+detail); a 5xx, negative, zero, missing or malformed code, a timeout and a transport failure are
+`outcome_unknown`, because the change may have been applied. A move is `applied` only when a bounded
+`getChat` observation (every 0.25 seconds for at most 10 seconds) shows an own position in the target
+list after an `ok` result; any other observation is `outcome_unknown`. An edit is `applied` only when the
+returned message has the same ID and chat, `messageText` content whose text equals the new text exactly,
+and a non-zero `edit_date` not earlier than the previous one; a result for another message or chat, with
+other text or with a stale or zero date is `outcome_unknown`. No provider error string, title or text is
+copied into a response. A consumed claim never reads `expired`: lost authority after the attempt is
+`local_failed` (no attempt) or `outcome_unknown` ("current receipt authority is unavailable; do not retry
+automatically"), and observed state is disclosed only to the same current account and policy.
+
+**Drafts, status and receipts.** Drafts are bound to the proxy client and current account, live in the
+same in-memory registry (internal kinds `archive` and `text_edit`) and are not reachable through the
+generic draft tools or the send tools, which return `unavailable` or `error` even after the change was
+applied, so a change receipt is never replayed as a send. A foreign client, new proxy identity, account
+change, broker restart, supersession or expiry returns the content-free `expired`. Preparing again for the
+same owner and chat (archive) or owner, chat and message (edit) supersedes the earlier pending draft. The
+registry records an `applied` receipt only for these kinds, with the observed list or edit date; status
+reads never disclose it and never report `sent`. Receipt retention is 900 seconds from the attempt.
+
+**Hostile content in the dialog.** Chat titles and message texts are untrusted. The MCP preview carries
+the texts as marked reversible JSON strings. The local dialogs are written for a human: the chat title,
+current text, each covered entity span and the new text are enclosed in `« … »` below the same legend
+line and readable rule as the forward dialog, so untrusted content can neither close its span nor start
+a dialog line. Each dialog is rebuilt from the stored immutable draft and validated against chat ID,
+title and hash before display (a mismatch is a decline). The archive dialog states that the chat leaves
+its list and loses any pin there, that a chat folder excluding archived chats hides an archived chat,
+and Telegram's return-to-Main behaviour; the edit dialog shows the chat kind (a channel edit is visible
+to all subscribers), that link-preview settings return to Telegram's default and that recipients see the
+message marked "edited", and it lists formatting that is removed apart from entity kinds that Telegram
+detects again (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand, BankCardNumber).
+
+Residual risks, recorded rather than closed:
+
+- **Informational read side effect.** With `edit_own_text` and `send`, `prepare_text_edit` reveals the
+  exact current text, entities and edit date of an own outgoing text message, and the chat's title and
+  kind, without any read capability. With `archive_chats` and `send`, `prepare_chat_archive` reveals a
+  chat's sanitized title, kind and Main/Archive membership, including through the `already_in_target` and
+  `unsupported_chat` answers, without any read capability. Enabling either capability therefore also
+  grants these narrow reads.
+- **Concurrent applies.** Two concurrent applies of one draft make exactly one provider attempt, but both
+  callers may see the dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt
+  authority is unavailable; do not retry automatically") although it made no attempt. This is the shared
+  pattern of forward and video sends (an attempt-outcome check routes any consumed claim to "attempted");
+  it errs towards unknown, never towards a second attempt or a false `applied`.
+- **Plain text sends are rewritten by TDLib the same way** (see above); only edits refuse these characters.
+- **Reads are cached or offline provider state.** A remote edit, a deletion or a move from another
+  client can race the final check, and Telegram acts on whatever it holds at transport time. The edit
+  window can close between preparation and apply; that is `message_changed` (or `local_failed` when it
+  closes during the dialog) with no attempt.
+- **`applied` is the state right after the call.** Telegram may move an archived chat whose
+  notifications are enabled back to Main on a new message, and a move that becomes visible after the
+  10-second observation is still `outcome_unknown`. An edit is confirmed by the returned message, not by a
+  later readback.
+- **An edit is destructive and has no undo.** Formatting, entity targets and link-preview settings of the
+  old message are gone, the previous text is not kept, and a later edit cannot restore them; recipients see
+  the message marked "edited". The classification of entities as removed or detected again is the broker's
+  expectation of Telegram behaviour, not a provider fact.
+- Real owner-approved archive and unarchive of a test chat and a real edit of an own test message have not
+  been run; the evidence is a synthetic provider and dialog. The same-UID cooperative client boundary is
+  unchanged, with no hostile same-UID secrecy claim.

@@ -10,9 +10,9 @@ preserved. Technical acceptance of a bounded slice does not complete that plan.
 ## Current development snapshot — 0.52.0.dev0
 
 Development resumed after the **B2C local-upload ownership slice** under the owner's
-2026-10-16 delegation: 0.52 QR onboarding (phases A–E), F14 forward/copy and F15a
-native video are implemented below, and F17a is specified in
-[plans/0.54-archive-and-edit-spec.md](plans/0.54-archive-and-edit-spec.md). This is
+2026-10-16 delegation: 0.52 QR onboarding (phases A–E), F14 forward/copy, F15a
+native video and F17a archive/unarchive and own text edit
+([spec](plans/0.54-archive-and-edit-spec.md)) are implemented below. This is
 development source, not a new tagged release, installer distribution or PyPI
 publication. Real-account acceptance of each slice is pending the owner; the
 remaining scope below is retained.
@@ -43,7 +43,7 @@ attribution, exactly one existing message between two exact chats behind the def
 `forward_send` capability (together with `send`). They add a complete source preview, refusals
 for hidden formatting, forwarded sources in forward mode, auto-delete and protected content,
 a local owner dialog and one non-retried `forwardMessages` attempt, and bring the surface to 49
-tools (51 with F15a below). Evidence is synthetic (fake TDLib and dialog); the findings of the first independent
+tools (51 with F15a and 55 with F17a below). Evidence is synthetic (fake TDLib and dialog); the findings of the first independent
 review are fixed. **A real approved forward and copy between two of the owner's chats is
 pending the owner**, as is review of the spec's delegated decisions.
 
@@ -54,12 +54,30 @@ pending the owner**, as is review of the spec's delegated decisions.
 from the file's own boxes by a bounded stdlib probe and shown as declared by the file, not decoded;
 unusual files refuse instead of being sent with guessed metadata. They add a complete preview, a
 dedicated owner dialog, revalidation of recipient and bytes, one non-retried `sendMessage` attempt
-with a 120-second confirmation wait, and bring the surface to 51 tools. The first independent review
+with a 120-second confirmation wait, and bring the surface to 51 tools (55 with F17a below). The first independent review
 found that an artifact or video send that had already been attempted could read `expired` after its
 authority was lost; that is fixed for both. Evidence is synthetic (generated MP4/MOV boxes, fake TDLib
 and dialog). **A real approved native video send with readback is pending the owner**, as is review of
 the spec's delegated decisions, including the accepted limits (provider lock held during the upload
 wait, later calls after lost authority still read `expired`). Albums (F15b) are not started.
+
+**F17a archive/unarchive and own text edit** ([spec](plans/0.54-archive-and-edit-spec.md), development):
+`prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and
+Archive lists behind the default-off `archive_chats` capability, and `prepare_text_edit` and
+`apply_prepared_text_edit` replace the plain text of exactly one own outgoing text message behind the
+default-off `edit_own_text` capability (each together with `send`, independent of each other). Each adds
+a before/after preview, a dedicated owner dialog, revalidation of chat or message, one non-retried
+`addChatToList` or `editMessageText` attempt and a reported provider state (the observed list, or the
+validated edited message); anything else is `outcome_unknown`. They bring the surface to 55 tools.
+The independent review of the first implementation led to fixes: edge whitespace and characters that
+TDLib rewrites are refused instead of silently changed, only a 4xx error counts as a rejection,
+sponsored or announcement list positions are not membership, and the dialogs show the chat kind, the
+pin and folder effects, the link-preview reset and which formatting is removed. Evidence is synthetic
+(fake TDLib and dialog). **A real archive/unarchive of a test chat and a real edit of an own test message
+are pending the owner**, as is review of the spec's delegated decisions, including the recorded
+residuals (informational reads granted by the two capabilities, a concurrent caller reading
+`outcome_unknown`, plain text sends still rewritten by TDLib). Captions, styled edits, pin/unpin and
+deletion are not started.
 
 The local transfer CLI can now consume a short-lived upload authority issued by
 the preparing MCP client. The helper returns a result reference; the original
@@ -151,7 +169,7 @@ different license are being considered, with no committed migration date; see
 | F14 | Forward/copy | Partial (in 0.52.0.dev0): one-message forward/copy implemented with technical evidence; real delivery pending owner | Real owner-approved forward and copy between two chats with readback, and installed-consumer evidence. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
 | F15 | Native video and albums | Partial (in 0.52.0.dev0): one native video (F15a) implemented with technical evidence; albums (F15b) planned; real send pending owner | Real owner-approved native video send with readback, and installed-consumer evidence. Ordered albums, partial outcomes, videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
-| F17 | Archive/edit/delete/pin actions | Planned | Separate opt-ins, previews, permissions, final-state checks and per-action real approvals. |
+| F17 | Archive/edit/delete/pin actions | Partial (in 0.52.0.dev0): archive/unarchive of one chat and plain-text edit of one own message (F17a) implemented with technical evidence; captions, pin/unpin and deletion pending; real checks pending owner | Real owner-approved archive/unarchive of a test chat and edit of an own test message with readback, and installed-consumer evidence. Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
 | F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist; clean-user onboarding, full source-family/protocol/recovery coverage and controlled TDLib upgrades remain. |
 | F19 | Streamable HTTP and final whole-scope audit | Conditional / partial | No current confirmed cloud-consumer requirement: HTTP is not applicable now. Final full-plan audit remains after the applicable backlog. |
 
