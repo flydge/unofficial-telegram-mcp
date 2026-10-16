@@ -14,11 +14,17 @@ contract change the schema fingerprint. This new slice still requires independen
 review and installed/native/live acceptance; earlier accepted evidence does not
 cover it. See the [retained selection reference](docs/reference.md#exact-retained-selections-opt-in-candidate).
 
-The candidate surface is now 49 tools. Two of them, `prepare_forward_send` and
+The candidate surface is now 51 tools. Two of them, `prepare_forward_send` and
 `send_prepared_forward`, forward or copy exactly one existing message between two exact
 chats behind the default-off `forward_send` capability (together with `send`), with a
 complete preview, owner approval and one non-retried attempt. Real approved delivery is
 still pending; see the [forward/copy reference](docs/reference.md#exact-forwardcopy-f14).
+Two more, `prepare_video_send` and `send_prepared_video`, send one owned MP4/MOV artifact
+(at most 64 MiB) as a native Telegram video behind the default-off `video_send` capability
+(together with `send`): duration, dimensions and codec are read locally from the file's own
+boxes and shown as declared by the file, and the send follows the same preview, owner
+approval and single non-retried attempt. A real approved video send is still pending; see the
+[native video reference](docs/reference.md#native-video-send-f15a).
 
 
 **Free and open source under [AGPLv3](LICENSE).** This license was chosen because the current PDF reader uses PyMuPDF. A future PDF replacement and different license are being considered; read the [licensing rationale](docs/licensing.md). The [original development plan](docs/plans/initial-roadmap.md) and [current roadmap](docs/roadmap.md) are tracked in Git.

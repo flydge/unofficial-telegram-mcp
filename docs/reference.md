@@ -6,7 +6,7 @@ Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discov
 
 ## MCP surface
 
-The public surface of the current candidate contains forty-nine tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains fifty-one tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,13 +18,14 @@ The public surface of the current candidate contains forty-nine tools (published
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 49-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 51-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
 - `prepare_artifact_send` fixes the recipient, file hash, size, name, MIME, caption, and `kind=document|photo|voice_note` in an unsent draft. Document is the compatible default. Photos are decoded and validated; voice sources are converted locally to verified OGG/Opus mono.
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
+- `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -63,7 +64,7 @@ For free-form intent, Codex supplies two to five unique normalized hypotheses an
 
 Package version 0.51.0 retains contract version 1, private IPC version 2 and the same forty-three tools. Optional exact-topic replies and explicit outgoing text styles extend the schemas and require a fresh schema fingerprint; this version declaration does not establish release or live-provider acceptance. Refresh tool schemas and deploy matching proxy/broker versions together. Topic sending is off by default; existing sends and private reply evidence versions v1–v23 retain their behavior. Validated TextUrl messageText targets still require `reply_formatted_targets`, `reply_text_url_targets` and every other applicable target capability. TextUrl captions, CustomEmoji and MediaTimestamp remain closed. Outgoing replies remain plain unless explicit outgoing styles are supplied under their separate capability; provider strings trigger no lookup, payment or navigation. Synthetic evidence does not establish live Telegram delivery or F18 consumer readiness.
 
-Development candidate `0.52.0.dev0` adds the tools `prepare_forward_send` and `send_prepared_forward` (forty-nine in total) and the default-off capability `forward_send`. Contract 1 and private IPC 2 are unchanged; the new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. Existing tool schemas are byte-identical. `forward_send` is absent from the legacy defaults and always requires `send` as well; see [Exact forward/copy (F14)](#exact-forwardcopy-f14). This declaration does not establish release, owner-approved live delivery or consumer acceptance for the slice.
+Development candidate `0.52.0.dev0` adds the tools `prepare_forward_send` and `send_prepared_forward` with the default-off capability `forward_send`, and the tools `prepare_video_send` and `send_prepared_video` with the default-off capability `video_send` (fifty-one tools in total). Contract 1 and private IPC 2 are unchanged; the new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. Existing tool schemas are byte-identical. `forward_send` and `video_send` are absent from the legacy defaults and each always requires `send` as well; see [Exact forward/copy (F14)](#exact-forwardcopy-f14) and [Native video send (F15a)](#native-video-send-f15a). The video slice also changes a response, not a schema: a `send_prepared_artifact` call that has already made its attempt no longer reads `expired` if artifact authority is lost afterwards (see [Development-candidate artifact ownership](#development-candidate-artifact-ownership)). This declaration does not establish release, owner-approved live delivery or consumer acceptance for either slice.
 
 Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
@@ -81,7 +82,7 @@ max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
 ```
 
-`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
+`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
 
 Every operation performs a fresh handshake on its own owner-authenticated Unix connection and binds the next request to the broker's process generation. The broker rechecks policy freshness and the required capability immediately before dispatch. Generation changes never authorize replay of a send or reuse of lost state. A proven rejection before dispatch returns a safe error; lost responses after dispatch preserve the existing uncertain-outcome rule.
 
@@ -184,6 +185,11 @@ A forward/copy draft (F14) uses the same tool, statuses and evidence, but needs
 and temporary message ID instead of a content digest; see
 [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 
+A native video draft (F15a) uses the same tool, statuses and evidence, but needs
+`video_send` in addition to `send`, and likewise correlates by `sending_id`, recipient
+chat and temporary message ID plus a final `messageVideo`; see
+[Native video send (F15a)](#native-video-send-f15a).
+
 ## Inspect, revise or cancel an unsent draft
 
 Use the same running MCP proxy that prepared the draft. `list_drafts({"limit":20})`
@@ -247,6 +253,11 @@ tools: `list_drafts` omits them and `get_draft`, `update_draft`, `refresh_draft`
 `cancel_draft` return `unavailable` for them. Prepare again to supersede one; see
 [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 
+Native video drafts from `prepare_video_send` are not reachable through these tools
+either, and `send_prepared_text`, `send_prepared_artifact` and `send_prepared_forward`
+return `error` for them. Prepare again for the same artifact and recipient to supersede
+one; see [Native video send (F15a)](#native-video-send-f15a).
+
 ## Discovery and selection
 
 Catalog and global-message coverage progress independently in deterministic round-robin order. Per call, the server advances at most:
@@ -302,7 +313,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the forty-nine tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-one tools of the current candidate.
 
 ## Selected full messages
 
@@ -1763,6 +1774,23 @@ original attempt may still finish; its terminal or unknown evidence is retained
 privately against the consumed claim. Release still denies disclosure/replay and
 never authorizes a retry. Confirmation waiting does not delay release.
 
+The call that made the attempt never reports `expired` for it. If artifact authority
+is lost after the claim (client release during the confirmation wait, an account
+switch, a failed publication check), `send_prepared_artifact` (documents, photos,
+voice notes and artifact replies) and `send_prepared_video` consult the draft
+registry by draft ID, calling client and send-tool kind. A draft that was never
+claimed still reads `expired`. A claim that ended in a local failure returns that
+content-free result (`failed` with "local preparation failed; no provider send was
+attempted" for artifacts, `local_failed` for video). Any other claim returns
+`outcome_unknown` with "current receipt authority is unavailable; do not retry
+automatically". Provider evidence (status, message ID) is not disclosed under lost
+authority; it stays in the registry and only a later call that still holds the
+original client lifecycle and account epoch can replay it. Another client, or the
+other send tool, still sees `expired`, and the lookup lasts only as long as the
+900-second attempt retention. A later call without the original authority keeps the
+existing content-free `expired` replay refusal and never resends. The internal
+receipt keeps the real outcome. `send_prepared_text` is unchanged.
+
 
 ## Exact retained selections (opt-in candidate)
 
@@ -1826,7 +1854,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 49 tools. The three owner tools below use existing
+The candidate exposes 51 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: their tool descriptions and CLI help contain this complete sequence.
 
@@ -2159,3 +2187,289 @@ them, and Telegram receives a request to forward its own stored message. Deliver
 confirmation does not verify that attribution was applied as requested; the receipt
 records what was requested and status evidence what the provider returned.
 Synthetic checks do not establish real delivery or consumer readiness.
+
+## Native video send (F15a)
+
+`prepare_video_send` and `send_prepared_video` send one owned MP4 or MOV artifact of at
+most 64 MiB to one exact chat as a native Telegram video, not as a document. The broker
+reads duration, dimensions, codec, audio presence and streaming layout from the file's
+own boxes without decoding any media, returns a complete preview, repeats the artifact
+and recipient checks at send time, asks the local owner to confirm the same facts and
+then makes one `sendMessage` attempt with `inputMessageVideo`. The file is uploaded
+exactly as approved: nothing is transcoded, and no thumbnail, cover, spoiler,
+self-destruct timer, reply or topic is added. Evidence so far is technical (synthetic
+provider); a real owner-approved video send is still pending.
+
+Enable `video_send` **and** `send` in trusted runtime policy, restart matching
+components and add both tools to the consumer allowlist. `video_send` is absent from the
+legacy defaults and no other capability enables it. Without both, the tools stay listed
+but are refused with `capability_disabled` at the SDK guard, the proxy (before it
+connects) and the broker; `get_send_status` and receipt replay for a video draft need
+both as well. An owned artifact normally comes from an `artifacts` operation, but
+preparation itself checks only `send` and `video_send`.
+
+```python
+prepared = prepare_video_send(artifact_id="artifact_<issued-id>", recipient=789,
+                              caption="Optional plain text")
+# prepared.status == "prepared": show prepared.video in full, obtain approval.
+result = send_prepared_video(draft_id=prepared.video.draft_id, approved=True)
+status = get_send_status(draft_id=prepared.video.draft_id)  # after uncertainty
+```
+
+The artifact ID and chat ID are synthetic; use an ID issued to this client and an
+observed numeric chat ID.
+
+### Inputs and the artifact
+
+| Argument | Meaning |
+| --- | --- |
+| `artifact_id` | An artifact the calling client owns, exactly as for `prepare_artifact_send`: a download from `get_attachment`, or bytes created or uploaded through that client (a local upload of `kind=document` is limited to 64 MiB). Foreign, unknown, expired and unbound IDs return `unavailable`. |
+| `recipient` | Exact non-zero numeric chat ID. Secret chats are unavailable. No topic and no reply target can be given. |
+| `caption` | Optional plain text, at most 1024 characters, no styles, normalized as for artifact captions. Empty (the default) sends no caption. |
+
+Unknown fields are rejected, including a display name, a thumbnail, a spoiler flag and any
+`selection_id`. At the broker, a `selection_id` or `reply_selection_id` in the payload of
+any operation without selection support, both video tools included, is refused as
+`invalid_request` under every policy, before any selection, artifact or provider work.
+The file name shown is the artifact's own name (`video.mp4` when it has
+none), normalized with NFKC before directory parts are removed and then sanitized to at
+most 255 characters. Eligibility depends only on the file's content, never on its name or
+extension.
+
+### Size limit, probe rules and refusal codes
+
+An artifact over 64 MiB (67,108,864 bytes) is refused as `video_too_large` before it is
+read. Everything else is decided by a bounded, stdlib-only reader of the file's boxes. It
+never decodes media and never reads `mdat`, and every deviation is the one fixed code
+`unsupported_video`, with no detail and nothing from the file or its path. The probe
+requires:
+
+- a regular file (symlinks are not followed) whose size equals the artifact's recorded
+  size and that does not change in size or modification time while it is read;
+- at most 4096 boxes in total, nesting depth at most 8, `moov` at most 16 MiB (read into
+  memory) and 64-bit box sizes accepted; a truncated or overlapping box, a box that
+  overruns its parent, bytes inside a container that are not a box, a box that makes no
+  progress and a size-zero ("to end of file") box other than the last top-level one all
+  refuse;
+- `ftyp` as the first box (payload at most 4096 bytes) with a major or compatible brand among
+  `isom`, `iso2`, `iso4`, `iso5`, `iso6`, `mp41`, `mp42`, `avc1`, `M4V ` and `qt  `;
+- exactly one top-level `moov`, at least one top-level `mdat` and no `mvex` (fragmented
+  files refuse);
+- exactly one video track whose first sample description is `avc1`/`avc3` (`h264`) or
+  `hvc1`/`hev1` (`hevc`), and at most one audio track whose first sample description is
+  `mp4a` or `Opus`; any other track type, a second video or audio track, or any other
+  codec refuses;
+- a duration from `mvhd` (timescale above zero) rounded up to whole seconds, from 1 second
+  to 3 hours;
+- width and height from the video track's `tkhd` (whole pixels of the 16.16 values) with a
+  matrix that is a plain 0, 90, 180 or 270 degree rotation (no mirroring, scaling, skew or
+  perspective); a quarter turn swaps width and height. Each side must be 16 to 8192 pixels
+  and the longer side at most 20 times the shorter;
+- `supports_streaming` is true when `moov` precedes the first `mdat`, and `has_audio` is
+  true when an audio track exists.
+
+Fragmented files, files without a video track, two video tracks, VP9 or AV1, sizes out of
+range, truncated or looping boxes, an oversized `moov`, text, subtitle, timecode or hint
+tracks, and files that are not MP4 or MOV at all therefore all refuse as
+`unsupported_video`. The probe returns facts only; it does not check that the media
+decodes, that its codec parameters are valid or that Telegram will keep the encoding.
+
+A refusal is content-free: `status="refused"`, `refusal` is `unsupported_video` or
+`video_too_large`, the detail is fixed and no draft ID is returned. `status="unavailable"`
+(fixed detail `video draft is unavailable`, no draft) covers an unknown, foreign or
+unreadable artifact, a secret chat or an unresolvable recipient, exhausted draft capacity
+or request budget, a preview that fails validation, and an account, session or policy
+change during preparation. The proxy also reports `unavailable` when the returned preview
+fails its digest check or disagrees with the request's artifact ID, recipient or
+normalized caption.
+
+### Preview and hash
+
+`prepared.video` is the closed `VideoDraftPreview`: `draft_id`, `account_id`,
+`expires_at`, `approval_required` (always true), `recipient` (`chat_id`, sanitized
+`title`), `artifact_id`, `display_name`, `size_bytes`, `sha256`, `duration_seconds`,
+`width`, `height`, `codec` (`h264` or `hevc`), `has_audio`, `supports_streaming`,
+`caption` (null when empty) and `preview_sha256`.
+
+Duration, dimensions, codec, audio and streaming layout are **declared by the file**,
+not decoded; the `VideoDraftPreview` schema description and the owner dialog (under
+"Declared by the file (not decoded):") say so. A damaged or hostile
+file can declare facts its media does not have. The owner's approval covers the declared
+values, the exact bytes (by SHA-256) and the recipient, not what the video shows. Present
+them as declared by the file.
+
+`display_name` and `caption` are untrusted: each is the marker
+`[untrusted Telegram evidence] ` plus one reversible JSON string in which only ASCII
+letters, digits, `_` and `-` stay literal, so look-alike letters, bidi and zero-width
+controls, whitespace and newlines appear as `\uXXXX`. Decoding one layer yields exactly
+the normalized text. The owner dialog renders them readably instead.
+
+`preview_sha256` is a domain-separated (`telegram-search-mcp.video`) version-1 SHA-256
+over the draft ID, account, expiry, recipient, artifact ID, name, size, SHA-256, the probed
+facts, the caption and the exact closed `sendMessage` request (without the random
+`sending_id` and the staged path). The preview is built and validated from the exact
+candidate before the draft is inserted, so a refused preview leaves no orphan draft and
+supersedes nothing. The draft expires at the shorter of the draft TTL and the artifact's
+own deadline.
+
+### Video drafts, supersession and expiry
+
+A video draft lives in the same in-memory registry as other drafts, as the internal kind
+`video`, bound to the proxy client and current Telegram account, with the same finite TTL
+(default 15 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker
+restart loses it. It is not reachable through the generic draft tools: `list_drafts`
+omits it, `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and
+`get_reply_artifact_draft` return `unavailable`, and `send_prepared_text`,
+`send_prepared_artifact` and `send_prepared_forward` return `error`. There is no update,
+refresh or cancel for video drafts, and no caption edit: prepare again.
+
+Preparing again for the same owner, artifact and recipient, even with another caption,
+supersedes the earlier pending draft: it can no longer be claimed, and
+`send_prepared_video` returns `expired` with no dialog and no attempt. Other artifacts,
+other recipients and other clients are unaffected. Nothing is sent without
+`send_prepared_video(approved=true)` and the local confirmation.
+
+### Sending the video
+
+`send_prepared_video(draft_id, approved)` takes only the draft ID and a strict boolean.
+In order:
+
+1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+2. Policy (`send` and `video_send`) and owner (proxy client and current account) are
+   checked; a draft of another kind returns `error`.
+3. A stored receipt is replayed; no dialog, no provider call.
+4. The in-memory recipient record must exist (lost on broker restart: `expired`), and the
+   draft must be live, owned and not superseded. The artifact is re-hashed against the
+   draft's SHA-256 and size; changed or missing bytes are `expired`.
+5. The recipient is resolved again: chat type, native ID and sanitized title must equal the
+   prepared ones, otherwise `recipient_changed`. A recipient that has become a secret chat
+   or cannot be read is `expired`.
+6. Owner, policy and provider session are checked again, then the local owner dialog
+   (below). Decline, timeout or failure is `not_approved`.
+7. Owner, policy, provider session and account are checked again, then the single-use claim
+   is taken (loss of authority before this point is `expired`).
+8. The approved bytes are copied into a private staging directory and re-hashed. A mismatch
+   or an I/O failure is `local_failed`; the claim is consumed.
+9. Inside the serialized provider call the account, policy, claim, recipient identity and
+   title are checked again, and the guard runs once more after the observation is
+   registered and immediately before transport, including inside the raw-dispatch fence.
+   Any failure is `local_failed` with no transport.
+10. Exactly one `sendMessage` request is sent, then the call waits up to 120 seconds for
+    the result and the send updates (less if the remaining request budget is shorter).
+    Dialog, staging and transport share one budget of at most 330 seconds.
+
+The request has one closed shape, enforced before transport (see the
+[security model](security.md#native-video-boundary-f15a-candidate)): `chat_id`,
+`topic_id: null`, `reply_to: null`, `reply_markup: null`, fixed send options with a random
+non-zero `sending_id`, and an `inputMessageVideo` whose `inputVideo` carries the staged
+local file, no thumbnail and no cover, `start_timestamp: 0`, no added stickers and the
+probed `duration`, `width`, `height` and `supports_streaming`, with a plain caption
+without entities, `show_caption_above_media: false`, no self-destruct and no spoiler.
+Notifications are normal; nothing is scheduled, paid or content-protected.
+
+### Video owner dialog
+
+The macOS dialog (default button Cancel, gives up after 120 seconds, which counts as
+declined) shows the same immutable preview that the proxy validated:
+
+```text
+Send this native video to <recipient title> (chat <ID>)?
+Account: <ID>
+Draft: <draft ID>
+Expires: <time>
+
+Untrusted spans in « » below are exact; ⟦U+XXXX⟧ marks <the listed characters>; look-alike words in one script are not marked.
+File name [untrusted] (exact): «<name>»
+Bytes: <N>
+SHA-256: <hash>
+Declared by the file (not decoded):
+Duration: <N> seconds
+Dimensions: <W>x<H>
+Codec: h264|hevc
+Audio: yes|no
+Streaming: yes|no
+Caption [untrusted] (exact): «<caption>»   (or: Caption: (none))
+Recipient: <title> (chat <ID>)
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, then make one upload/send attempt as a native video.
+```
+
+The file name and caption use the same readable rendering and legend line as the
+[forward dialog](#owner-dialog): letters of every script stay literal, and the exact rule
+for what is shown as reversible `⟦U+XXXX⟧` is printed in the legend. Literal `«`, `»` and
+line breaks are always marked, so untrusted content cannot close its span or start a
+dialog line. The dialog is mutually exclusive with every other send preview; a recipient,
+hash, size, name or caption that disagrees with the validated preview shows nothing and
+counts as declined.
+
+### Outcomes and status of a video send
+
+| `status` | Meaning | Provider attempt |
+| --- | --- | --- |
+| `sent` | Exact provider confirmation; `message_id` is the positive final ID in the recipient chat | yes |
+| `failed` | Provider rejection or coherent correlated failure; the detail names at most the error code | yes |
+| `outcome_unknown` | Result lost, malformed, unconfirmed or still pending after the wait; do not retry automatically | possibly |
+| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `expired` | Unknown, foreign, superseded or expired draft, broker restart, changed or missing artifact bytes, an unreadable recipient, or account, policy or session change before the claim | no |
+| `recipient_changed` | Step 5 | no |
+| `local_failed` | A local guard failed after approval and before transport (staging, authority, a recipient changed during the dialog); the claim is consumed | no |
+| `error` | The draft is not a video draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
+
+A repeated `send_prepared_video` replays the receipt (`sent`, `failed`, `outcome_unknown`
+or `local_failed`, with detail saying that no new send was attempted) and never opens a
+dialog or sends. After `outcome_unknown` call `get_send_status`; never use another send
+as a status check and never prepare a new draft for the same file to try again.
+
+`outcome_unknown` means the upload may have been delivered. A video upload takes longer
+than text, so the confirmation wait is up to 120 seconds; if it ends first, the status
+read reconciles the outcome later without a retry. The call that made the attempt never
+reports `expired` for it: if client release, an account switch or a failed publication
+check removes artifact authority after the claim, a claim that ended in a local failure
+is returned as `local_failed` and any other claim as `outcome_unknown` with the detail
+`current receipt authority is unavailable; do not retry automatically`. The provider's
+status and message ID are not disclosed under lost authority; only a later call that still
+holds the original client lifecycle and account epoch replays them. A later call without
+that authority, or another client, still reads the content-free `expired` and never
+resends. This protects the attempting call only: a client that ignores its
+`outcome_unknown` and calls again after a release or account switch reads `expired` and
+could prepare a duplicate. The same behavior now applies to `send_prepared_artifact`; see
+[Development-candidate artifact ownership](#development-candidate-artifact-ownership).
+
+`get_send_status` uses the same statuses and evidence strengths as the table in
+[Inspect a send outcome](#inspect-a-send-outcome), requires `send` and `video_send`, and is
+read-only. A video is correlated by `sending_id`, recipient chat and the returned
+temporary message ID. The `sendMessage` result must be a pending outgoing `messageVideo`
+in the recipient chat with our `sending_id`, and the final state comes from
+`updateMessageSendSucceeded` or `updateMessageSendFailed`. As for document and photo
+sends, correlation plus a final `messageVideo` carrying a `video` object decides `sent`;
+Telegram may re-encode, so the final message's duration, dimensions, size and caption are
+not compared with the draft. Retention is the existing 900 seconds; a superseded or
+unknown draft reports `outcome_unknown` with evidence `none`.
+
+### Video limits
+
+Not supported: albums and several videos (F15b), video replies, forum-topic destinations,
+captions with styles, thumbnails and covers, spoilers and self-destruct timers, a start
+timestamp, video notes, transcoding, WebM and other containers or codecs, videos over
+64 MiB (a larger upload needs a new upload schema), retained selections as an artifact
+source, scheduling, silent or paid options, and any generic-draft access.
+
+Accepted limits, recorded rather than closed:
+
+- The probe reopens the cached artifact path after the store lookup. The draft binds
+  SHA-256 and size, and claim and staging re-hash the bytes, so only a same-user rewrite of
+  the owner-only cache between probe and hash could pair facts with other bytes. The facts
+  are declarations either way.
+- The video send holds the serialized provider lock for its confirmation wait of up to
+  120 seconds, so other provider operations queue behind a slow upload.
+- The final message's caption is not compared with the draft caption, as for plain
+  artifact sends; correlation decides.
+- If the publication check fails after a successful `prepare_video_send`, the inserted
+  draft (which superseded any pending one for the same artifact and recipient) is never
+  returned and expires unused, as for every artifact-backed prepare.
+- Telegram may re-encode the upload; a delivered video is confirmed by correlation, not by
+  matching the declared facts.
+- A real owner-approved video send with readback has not been run; the evidence is a
+  synthetic provider. Synthetic checks do not establish real delivery or consumer
+  readiness.

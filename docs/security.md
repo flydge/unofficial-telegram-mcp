@@ -65,7 +65,7 @@ provisioning, one-command installation or MCP/skill registration gates.
 
 ## Authority boundary
 
-The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the forty-nine tools of the current candidate listed in the [tool reference](reference.md#mcp-surface) (published 0.51.0: forty-three); the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
+The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the fifty-one tools of the current candidate listed in the [tool reference](reference.md#mcp-surface) (published 0.51.0: forty-three); the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
 
 ```text
 getAuthorizationState
@@ -93,13 +93,15 @@ getUser
 downloadFile
 getFile
 cancelDownloadFile
-sendMessage (fixed text, document, photo, or voice-note shape, only after explicit draft approval)
+sendMessage (fixed text, document, photo, voice-note, or native-video shape, only after explicit draft approval)
 forwardMessages (closed single-message forward/copy shape, only after explicit draft approval)
 ```
 
 `createPrivateChat` has one narrowly approved use: after `getMe` identifies the authorized account, Saved Messages resolution calls it with that same user ID and verifies the returned private chat. `loadChats` advances only a fixed Main or Archive catalog lane. `searchMessages` is reachable only through the typed discovery wrapper and the exact request shape below. None of these methods is a general bridge to caller-chosen TDLib operations.
 
 `forwardMessages` has one closed shape, validated before transport and built by the broker from an approved draft (source chat, message ID, recipient chat and mode); callers supply no other field: `chat_id` (the recipient), `topic_id` exactly `null`, `from_chat_id`, `message_ids` of length exactly one, `options` exactly `{"@type":"messageSendOptions","suggested_post_info":null,"disable_notification":false,"from_background":false,"protect_content":false,"allow_paid_broadcast":false,"paid_message_star_count":0,"update_order_of_installed_sticker_sets":false,"scheduling_state":null,"effect_id":0,"sending_id":<random int32, non-zero>,"only_preview":false}`, `send_copy` (boolean) and `remove_caption` (boolean, false unless `send_copy`). Any other key, type or value (several messages, a topic, scheduling, paid or silent options) raises a forbidden-request error before the request reaches TDLib. See [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
+
+`inputMessageVideo` is the only content constructor added to `sendMessage` for native video, and it too is built by the broker from an approved draft. Besides the text, document, photo and voice-note shapes, the request must be exactly: `chat_id` (the non-zero recipient), `topic_id`, `reply_to` and `reply_markup` all `null`, `options` exactly the fixed `messageSendOptions` listed above for `forwardMessages` (including a random non-zero `sending_id`), and `input_message_content` exactly `{"@type":"inputMessageVideo","video":{"@type":"inputVideo","video":{"@type":"inputFileLocal","path":<staged path>},"thumbnail":null,"cover":null,"start_timestamp":0,"added_sticker_file_ids":[],"duration":<1..10800>,"width":<16..8192>,"height":<16..8192>,"supports_streaming":<boolean>},"caption":{"@type":"formattedText","text":<at most 1024 characters>,"entities":[]},"show_caption_above_media":false,"self_destruct_type":null,"has_spoiler":false}`, with the longer side at most 20 times the shorter. The file must be the broker's own staged copy: a path whose parent is a `draft_`-prefixed directory directly under the staging root. Any other key, type or value (a thumbnail or cover, a start timestamp, stickers, caption entities, a spoiler, a self-destruct timer, a reply, a topic, a remote or unstaged file) raises a forbidden-request error before the request reaches TDLib. See [Native video boundary](#native-video-boundary-f15a-candidate).
 
 The broker socket lives in an owner-only directory with mode `0700`; the socket and owner lock use mode `0600`. The broker also verifies the kernel-reported peer UID through Darwin `getpeereid`. A nonblocking owner lock prevents a second broker. Only the lock holder may replace a same-owner, non-symlink Unix socket after proving that it is stale. Same-UID processes are inside this local filesystem trust boundary. IPC version 2 requires a same-connection contract handshake before every operation; IPC version 1 has no execution compatibility. The handshake compares loaded package/contract/finalized schema identity and effective trusted config. The next request binds the process generation; config freshness and capability checks occur before dispatch. Handshake-only diagnostics do not initialize TDLib. Requests use versioned length-prefixed strict JSON, a fixed operation allowlist, public-model validation on both sides, 1 MiB request and 8 MiB response limits, random process-lifetime client IDs, random request IDs, a 250-millisecond per-read bound, and monotonic deadlines capped at 570 seconds.
 
@@ -134,6 +136,23 @@ those grants. Offline local grants remain usable. The artifact's original 12-hou
 upload's 15-minute expiry remain fixed; reader context idle expiry does not shorten
 these lifetimes. Broker restart denies previously persisted unbound bytes without
 adopting or deleting those cache files.
+
+The call that made the attempt never reports `expired` for it. When artifact
+authority, scope or account checks fail after the claim (the post-send owner check,
+the publication account check, or an unavailable artifact reaching dispatch),
+`send_prepared_artifact` and `send_prepared_video` consult the draft registry by
+draft ID, calling client and send-tool kind. An unclaimed draft is `expired` as
+before; a claim that ended in a local failure returns that content-free result
+(`failed` with "no provider send was attempted" for artifacts, `local_failed` for
+video); any other claim returns `outcome_unknown` with "current receipt authority is
+unavailable; do not retry automatically". The lookup is routing only: it discloses
+no provider evidence (status, message ID), authorizes no status read or second send,
+and lasts at most the 900-second attempt retention. Another client, or the other send
+tool, still sees `expired`. A later call that no longer holds the original client
+lifecycle and account epoch keeps the existing content-free `expired` replay refusal
+and never resends. This closes a misleading `expired` that previously invited a
+duplicate artifact send; it does not extend to later calls (see the residual risks in
+[Native video boundary](#native-video-boundary-f15a-candidate)).
 
 Offline create, upload and local readers use the trusted fixed session namespace
 and do not initialize TDLib solely to obtain a numeric account ID. Provider-bound
@@ -293,6 +312,7 @@ Historical custom index files from an older version are not read or updated, but
 - `viewMessages`, read receipts, and unread-state changes
 - unapproved sends, automatic send retries, edits, deletes, reactions, or moderation operations
 - multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies
+- video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB
 - broad attachment or thumbnail downloads outside one exact selected anchor
 - null-list global search, `searchPublicChats`, or public-chat crawling
 - secret-chat access
@@ -310,7 +330,7 @@ Telegram text, captions, filenames, chat titles, and sender names are data, neve
 Automated tests and source audits establish only the technical contract. Product completion requires a fresh Codex consumer and provider check, without recording private runtime values:
 
 1. Capture owner-observed unread indicators in Telegram mobile and metadata-only TDLib cache existence, entry count, total bytes, and metadata hash before and after; never print entry names.
-2. Confirm a fresh Codex task exposes exactly the tools of the installed manifest (forty-nine in the current candidate, forty-three in published 0.51.0) through the normal Unofficial Telegram MCP MCP surface.
+2. Confirm a fresh Codex task exposes exactly the tools of the installed manifest (fifty-one in the current candidate, forty-three in published 0.51.0) through the normal Unofficial Telegram MCP MCP surface.
 3. Require overlapping request intervals, at least two broker client contexts, at least one aggregate TDLib serialization wait, one broker process, and multiple thin proxy processes.
 4. Require both tasks to return complete bounded evidence with exact-chat anchors and no session-owner or TDLib code-400 failure; `telegram-search-mcp --check` must remain `AUTHORIZATION_READY` while multiple proxies exist.
 5. Confirm unread indicators remain unchanged, exact selected attachment transfer is hash-verified, no custom private index appears, and metadata-only cache effects are disclosed without filenames.
@@ -851,6 +871,8 @@ durable journal, recipient read receipt, exactly-once promise or live-send autho
 is introduced. Synthetic checks are not evidence of live Telegram delivery.
 
 Forward/copy drafts use this tool under both `send` and `forward_send` and are correlated by `sending_id`, recipient chat and temporary message ID instead of a text digest; see [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
+
+Native video drafts use this tool under both `send` and `video_send`; without `video_send` the status read returns the content-free unknown shape (`outcome_unknown`, evidence `none`). They are correlated by `sending_id`, recipient chat and temporary message ID plus a final `messageVideo` carrying a `video` object; see [Native video boundary](#native-video-boundary-f15a-candidate).
 
 ## Plain-text reply evidence and revalidation
 
@@ -1959,3 +1981,131 @@ Residual risks, recorded rather than closed:
 - Real owner-approved forward and copy delivery with readback has not been run; the
   evidence is a synthetic provider. The same-UID cooperative client boundary is
   unchanged, with no hostile same-UID secrecy claim.
+
+## Native video boundary (F15a candidate)
+
+`prepare_video_send` and `send_prepared_video` add the default-off `video_send`
+capability, which is effective only together with `send`. The conjunction is enforced
+by the SDK guard, by the proxy before it connects, by the broker before dispatch, by
+preparation and send ownership checks, again for status and receipt replay of a video
+draft, inside the provider call, and a last time inside the raw-dispatch fence around
+the TDLib send; with either capability missing the tools stay listed but fail with
+`capability_disabled`. The authority is exactly one owned artifact, as one MP4 or MOV of
+at most 64 MiB, to one exact chat, as a native video. It never covers albums or several
+videos, replies, topic destinations, thumbnails or covers, spoilers, self-destruct
+timers, captions with styles, transcoding, videos over 64 MiB, secret chats or caption
+edits, and a retained selection cannot name the artifact. `inputMessageVideo` inside
+`sendMessage` is the only added request constructor; its closed shape is listed in the
+authority boundary above, and the random `sending_id` is drawn per attempt and excluded
+from the preview digest. At the broker, a `selection_id` or `reply_selection_id` in the
+payload of any operation without selection support, including both video tools, is
+refused as `invalid_request` under every policy before any selection, artifact or
+provider work (with `retained_selections` enabled it previously escaped as a
+`KeyError`).
+
+Eligibility is decided locally by a bounded, stdlib-only ISO-BMFF reader; there is no
+subprocess, no `ffprobe` and no decoder. It opens the cached artifact path without
+following symlinks, requires a regular file whose size equals the recorded size, reads
+box headers by seeking and the `moov` payload into memory, and refuses a file that
+changes in size or modification time while it is read. Its bounds are 64 MiB for the
+file, 4096 boxes, nesting depth 8, 16 MiB for `moov` and 4096 bytes for the `ftyp`
+payload; truncated, overlapping, oversized or non-progressing boxes refuse. It never
+reads `mdat`. Every refusal is the one fixed code `unsupported_video`, with no detail,
+no chained exception and nothing from the file or its path; an artifact over 64 MiB is
+refused as `video_too_large` before it is opened. Accepted shapes are exactly one
+non-fragmented `moov`, one H.264 or HEVC video track and at most one `mp4a` or
+Opus audio track, a duration of 1 second to 3 hours, sides of 16 to 8192 pixels with an
+aspect ratio of at most 20:1, and a plain 0, 90, 180 or 270 degree rotation matrix; see
+the [probe rules](reference.md#size-limit-probe-rules-and-refusal-codes).
+
+The resulting duration, dimensions, codec, audio and streaming layout are declarations
+of the file's own boxes, not decoded or verified facts. The `VideoDraftPreview`
+description, the dialog (under "Declared by the file (not decoded):") and the tool
+description say so, and the approval covers those declared values, the exact bytes (by
+SHA-256) and the recipient rather than the content of the media. The draft binds the
+probed facts, SHA-256 and size to one immutable record. The preview digest is a
+domain-separated version-1 SHA-256 over the draft ID, account, expiry, recipient,
+artifact ID, name, size, SHA-256, facts, caption and the exact closed `sendMessage`
+request (without `sending_id` and the staged path). The proxy recomputes the digest and
+checks artifact ID, recipient and normalized caption against the request; otherwise the
+result is `unavailable`. The preview is built and validated from the exact candidate
+before the draft is inserted, so a refused preview leaves no orphan draft and supersedes
+nothing.
+
+Drafts are bound to the proxy client and current account, live in the same in-memory
+registry as other drafts (internal kind `video`) and are not reachable through the
+generic draft tools: `list_drafts` omits them, `get_draft`, `update_draft`,
+`refresh_draft`, `cancel_draft` and `get_reply_artifact_draft` return `unavailable`, and
+`send_prepared_text`, `send_prepared_artifact` and `send_prepared_forward` return
+`error`. A foreign client, a new proxy identity, an account change, broker restart,
+supersession or expiry returns the content-free `expired`. Preparing again for the same
+owner, artifact and recipient supersedes the earlier pending draft. A foreign client
+cannot prepare another client's artifact (`unavailable`).
+
+At send time nothing is trusted from preparation. Before the dialog the broker repeats
+the owner and policy checks, re-hashes the artifact against the draft's SHA-256 and size
+(changed or missing bytes are `expired`) and resolves the recipient again, comparing
+chat type, native ID and sanitized title (`recipient_changed`; a recipient that became a
+secret chat or cannot be read is `expired`). After the dialog it checks owner, policy,
+provider session and account again and only then takes the single-use claim. Staging
+copies the approved bytes into a private `draft_`-prefixed directory under the staging
+root and re-hashes them; only that staged copy is ever given to TDLib, and the confirmed
+copy is retired. Inside the serialized provider call the account, policy, claim,
+recipient identity and title are checked again, and the guard runs once more after the
+observation is registered and immediately before transport. Any failure after the claim
+and before transport is `local_failed` and the claim is consumed.
+
+The claim is taken only after owner approval. One `sendMessage` is sent and never
+repeated: not after a timeout, a malformed or lost result, a transport error, an
+authorization change or a restart. Afterwards the outcome can only be `sent`, `failed`
+or `outcome_unknown`, and a repeated send replays the receipt without a dialog. The
+confirmation wait for a video is up to 120 seconds because uploads
+take longer than text; the whole call, including the dialog and staging, stays within 330
+seconds. If the wait ends first, the outcome is `outcome_unknown` and `get_send_status`
+reconciles it later without a retry. Observations hold only IDs, state and times (no
+text, paths or provider error strings; 900 seconds, 4096 entries); registration of a
+video is refused if it also claims a reply, topic, forward, text, caption, voice or
+entity expectation, or has reviewed facts outside the same bounds. The observation correlates by `sending_id`,
+recipient chat and the returned temporary message ID, and the final message must be a
+`messageVideo` carrying a `video` object. The reviewed duration, dimensions and size are
+bound at registration but are not compared with the final message, because Telegram may
+re-encode; a delivered video is therefore not turned into `outcome_unknown` by
+recomputed facts. Only a numeric provider error code appears in a fixed detail.
+
+The file name and caption are untrusted. The MCP preview carries each as a marked
+reversible JSON string in which only ASCII letters, digits, `_` and `-` are literal. The
+local dialog encloses each in `« … »` below the same legend line and readable rule as the
+forward dialog (letters of every script literal; control, format, default-ignorable,
+repeated-space and look-alike characters, `« » ⟦ 〚 〛` and line breaks shown as
+reversible `⟦U+XXXX⟧`), so untrusted content can neither close its span nor start a
+dialog line. The dialog is rebuilt from the stored immutable draft and validated against
+recipient, hash, size, name and caption before display; a mismatch is a decline. File
+names are normalized with NFKC before directory parts are removed, so a compatibility
+solidus (U+FF0F, U+FF3C, U+FE68) cannot become a separator after the split. This applies
+to every artifact-backed draft name: a document named `a／b.txt` is now `b.txt` instead of
+failing at staging.
+
+Residual risks, recorded rather than closed:
+
+- The probe reads the cached artifact path after the store lookup. The draft binds
+  SHA-256 and size, and claim and staging re-hash the bytes, so only a same-user rewrite
+  of the owner-only cache between probe and hash could pair probed facts with other
+  bytes. The facts remain declarations either way.
+- A video send holds the serialized provider lock for its confirmation wait of up to 120
+  seconds; other provider operations queue behind a slow upload.
+- As for plain artifact sends, the final message's caption is not compared with the draft
+  caption; correlation decides.
+- Telegram may re-encode the upload. Confirmation is by correlation and a final
+  `messageVideo`, not by matching the declared facts, and status reports no re-encoded
+  facts.
+- Only the attempting call is protected from a misleading `expired` (see the artifact
+  ownership section). A client that ignores its `outcome_unknown` and calls again after a
+  release or account switch reads `expired` and could prepare a duplicate. Extending the
+  registry consult to later calls would rewrite the reply-replay refusals that existing
+  artifact-reply suites pin (an owner decision, not made here).
+- If the publication check fails after a successful `prepare_video_send`, the inserted
+  draft (which superseded any pending one for the same artifact and recipient) is never
+  returned and expires unused, as for every artifact-backed prepare.
+- Real owner-approved video delivery with readback has not been run; the evidence is a
+  synthetic provider and synthetic ISO-BMFF fixtures. The same-UID cooperative client
+  boundary is unchanged, with no hostile same-UID secrecy claim.
