@@ -84,7 +84,8 @@ Installation returns `status: activation_required`, `next_action: run_activation
 `claude_code`, `claude_skills` and the nonsecret
 `activation_command` and `activation_arguments`: the installed Python and isolated
 launcher (`-I -S -B`, a closed app path) ending in `connect`. Installation, a started
-screen or a launch is not Ready.
+screen or a launch is not Ready. The installer prints this JSON result in Terminal; paste
+the nonsecret `activation_command` to your assistant.
 
 
 ### Connect with a QR code (primary path)
@@ -103,11 +104,14 @@ step takes a secret.
 3. Your assistant runs the same command with `wait` in place of `connect`. One call returns
    at the next phase change (the first one usually reports `waiting_for_scan` within
    seconds), or after at most 540 seconds, with the phase and a `next_action`; it repeats
-   until `ready`, `failed`, `expired` or `cancelled`. The whole run lives at most 600 seconds,
+   until `ready`, `failed`, `expired` or `cancelled`. Give the shell call a timeout of at
+   least 10 minutes (Claude Code's default Bash timeout is 2 minutes). The whole run lives at most 600 seconds,
    counted on the wall clock, so a Mac that sleeps does not extend it. `cancel` closes a
    screen that `connect` opened (the background job is stopped and tears its temporary
    Telegram client down first) and reports `cancelled` or `nothing_to_cancel`.
-4. On `ready`, reconnect the MCP client (Claude Code: `/mcp`; Codex: restart it), have the
+4. On `ready`, reconnect the MCP client (Claude Code: `/mcp`, and if `/mcp` does not list
+   `telegram_search` after an install made during this Claude Code session, restart Claude
+   Code; Codex: restart it), have the
    assistant call `_manifest` with `check_broker=true`, and make one bounded own-chat
    read or search. That, not the installer or `ready` alone, is the end-to-end check.
 
@@ -117,7 +121,8 @@ the exact receipt-bound one but its Telegram authorization is no longer valid (f
 after revoking the session from the phone), `connect` may stop that one broker, run the QR
 flow on the existing managed enrollment and hand off again; a foreign, incompatible or Ready
 owner is never stopped. An existing unmanaged session is never touched (`legacy_unmanaged`).
-A new policy enables only `read` and `artifacts`.
+A new policy enables only `read` and `artifacts`; see
+[Enabling more capabilities](#enabling-more-capabilities-candidate).
 
 If the broker answers but its first check (which starts TDLib and re-verifies the bundle) is
 still running after 25 seconds, `connect` reports `broker_starting` with
@@ -130,6 +135,8 @@ If the background job cannot start, or the assistant's sandbox refuses to create
 `connect` needs (`connect_launch_failed`), if the job ends without reporting a result
 (`helper_exited`), or no page can open (headless, SSH: run `cancel` first), run the same
 command from a native Apple Terminal window on this Mac, or use the Terminal fallback below.
+In native Terminal, `connect` runs the helper inline and prints the final result when the run
+ends (up to 600 seconds); no `wait` is needed there.
 
 **Application identity.** With no API pair of your own, `connect` uses the application
 identity shipped in the bundle (`app-identity.json`, owner-only and hash-authenticated like
@@ -155,6 +162,25 @@ example under §1.5 of its API terms), every bundled-identity installation, and 
 installation if it uses the same pair, would stop working. The Keychain override above is the
 mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-off.
 
+
+### Enabling more capabilities (candidate)
+
+`connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
+a `0700` directory) with `expected_package_version = "0.52.0.dev0"`,
+`expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
+`forward_send`, `video_send` and every extended reader are off. To enable more, edit that file
+yourself. Keep the pins as written and add only the capabilities you need from the
+[capability table below](#published-051-choose-capabilities) (for example `"send"` plus
+`"forward_send"` or `"video_send"`). The bundle has no `telegram-search-broker install`. Check
+pending send outcomes first, then restart the broker so it loads the new policy:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker
+```
+
+`<home-directory-name>` is the last component of your home directory. Running components
+report `config_stale` until restarted. Restarting the broker clears in-memory drafts, uploads
+and cursors, so reconnect the MCP client afterwards (Claude Code: `/mcp`; Codex: restart it).
 
 ### Terminal fallback: phone and code setup
 
@@ -188,9 +214,9 @@ temporary-client close/destroy without logout, revocation or deletion. Use
 complete add-only partial API provisioning or retry cancelled credential entry
 under the same genuinely-new-session checks; it cannot adopt legacy or damaged
 managed state. Resume asks TDLib for fresh authorization
-state; a local checkpoint cannot prove Ready. QR, email, registration and
-purchase authorization states are unsupported and return a safe status without
-provider details. Setup has a bounded 120-second auth/input deadline; another
+state; a local checkpoint cannot prove Ready. In this Terminal flow, QR, email, registration
+and purchase authorization states are unsupported (QR is handled by `connect`) and return a
+safe status without provider details. Setup has a bounded 120-second auth/input deadline; another
 resume may be needed if Telegram's code arrives later.
 
 Provider Closed and native destruction are reported separately. If destruction
@@ -301,6 +327,8 @@ expected_contract_version = 1
 enabled_capabilities = ["read", "artifacts"]
 ```
 
+This pin is for 0.51.0 only; a candidate policy written by `connect` pins `0.52.0.dev0`.
+
 The containing directory must be owned by you with mode `0700`; the regular policy file must have mode `0600`. Symlinks are rejected. Preserve existing policy when upgrading rather than overwriting it blindly.
 
 | To enable | Add these capabilities |
@@ -319,7 +347,7 @@ The containing directory must be owned by you with mode `0700`; the regular poli
 
 Replying to media or formatted sources can require additional source capabilities. Use the [reply reference](reference.md#prepared-same-chat-text-replies) for the exact combinations; do not enable every capability as a shortcut.
 
-After a policy change, re-run `.venv/bin/telegram-search-broker install` using the same environment and reconnect your MCP client. This restarts the managed broker and clears in-memory drafts, uploads and cursors.
+On the published 0.51 route, after a policy change, re-run `.venv/bin/telegram-search-broker install` using the same environment and reconnect your MCP client. This restarts the managed broker and clears in-memory drafts, uploads and cursors. The 0.52 candidate bundle restarts the broker as described under [Enabling more capabilities](#enabling-more-capabilities-candidate).
 
 ## Published 0.51: troubleshooting
 

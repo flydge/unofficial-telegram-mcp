@@ -986,7 +986,8 @@ Ask for explicit approval of this exact draft. Call `send_prepared_video(draft_i
 approved=true)` only after it. Inspection, silence or approval of another draft is not
 approval. A local macOS dialog then shows the same facts and needs its own click;
 declining or a timeout returns `not_approved` and sends nothing. The upload can take
-a while: the call waits up to 120 seconds for confirmation.
+a while: after approval the call waits up to 120 seconds for Telegram's confirmation of the
+upload (the dialog itself gives up after 120 seconds).
 
 Video drafts have no update, refresh or cancel, and `list_drafts`, `get_draft`,
 `update_draft`, `refresh_draft` and `cancel_draft` cannot see them. To change the caption

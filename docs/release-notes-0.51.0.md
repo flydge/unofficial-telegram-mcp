@@ -10,7 +10,7 @@ completed slices and remaining work accessible in Git.
 
 ## Available behavior
 
-The 44-tool candidate STDIO contract covers bounded discovery and exact-chat search; selected
+The 43-tool candidate STDIO contract covers bounded discovery and exact-chat search; selected
 message/history/reply/topic reading; selected document and media analysis; local
 artifact transfer; draft inspection/revision/cancellation; and explicitly approved
 text, document, photo and voice-note sending. Extended capabilities remain opt-in.

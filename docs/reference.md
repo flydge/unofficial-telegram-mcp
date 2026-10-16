@@ -2,7 +2,7 @@
 
 # Unofficial Telegram MCP: tool reference
 
-Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
+Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message and native video sending. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
 
 ## MCP surface
 
@@ -75,14 +75,14 @@ Capabilities are trusted local policy, not permissions granted by an MCP caller 
 ```toml
 config_version = 1
 enabled_capabilities = ["read", "artifacts", "send"]
-# Candidate example only; use the version from the reviewed installed manifest.
+# Published 0.51 example; a 0.52 candidate policy pins 0.52.0.dev0.
 expected_package_version = "0.51.0"
 expected_contract_version = 1
 max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
 ```
 
-`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
+`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. A policy written by the 0.52 candidate `connect` lists only `read` and `artifacts`; `send` must then be added explicitly (see [Enabling more capabilities](install.md#enabling-more-capabilities-candidate)). `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
 
 Every operation performs a fresh handshake on its own owner-authenticated Unix connection and binds the next request to the broker's process generation. The broker rechecks policy freshness and the required capability immediately before dispatch. Generation changes never authorize replay of a send or reuse of lost state. A proven rejection before dispatch returns a safe error; lost responses after dispatch preserve the existing uncertain-outcome rule.
 
@@ -282,7 +282,7 @@ Final retrieval is a separate exact-chat boundary. After direct resolution or an
 - MCP Python SDK `2.2.0`.
 - Homebrew TDLib keg `HEAD-d1085f9`, legacy `td_json_client_*` ABI.
 - macOS Keychain service `com.<local-home-name>.telegram-search-mcp`, accounts `api_id` and `api_hash`.
-- An existing dedicated TDLib session that reaches `authorizationStateReady`.
+- An existing dedicated TDLib session that reaches `authorizationStateReady` (published 0.51 route; the 0.52 candidate bundle creates it with QR-first `connect`, see [installation](install.md#connect-with-a-qr-code-primary-path)).
 
 Unofficial Telegram MCP creates no custom persistent private index. Exact file-metadata and consent-gated numeric-content search scan bounded `getChatHistory` pages in memory during the call; there is no SQLite/FTS runtime write. Numeric-content search returns only matching evidence from the exact selected chat, never a transcript export. Discovery retains only bounded mechanics in memory, separately for each proxy client, and the broker's single TDLib client keeps a broker-lifetime, memory-only numeric Main/Archive `chat_id -> order` catalog cache so asynchronous catalog updates are not lost between requests. Raw hypotheses, snippets, titles, messages, and provider payloads are not retained in either cache or logged. Releasing a proxy clears its discovery context; broker restart clears all contexts and the catalog cache.
 
@@ -296,7 +296,7 @@ No Keychain value is printed by the program. See [`security.md`](security.md) fo
 
 Supported runtime: macOS on Apple ARM64. These steps install the Python package into an already prepared local runtime. They do not create Telegram API credentials or authorize a new Telegram session.
 
-Before installing the broker, provision the exact Homebrew TDLib keg `HEAD-d1085f9` (library `1.8.67`, legacy ABI) at `/opt/homebrew/opt/tdlib/lib/libtdjson.dylib`, store the two Keychain accounts listed above, and authorize a dedicated TDLib session in `~/Library/Application Support/TelegramSearchMCP/tdlib` through a trusted local setup. Never put credentials or login codes in MCP arguments, shell history, or project files. Automated first-time login is not included. The runtime check rejects another TDLib keg; a current unpinned Homebrew install is not equivalent to the validated version.
+Before installing the broker, provision the exact Homebrew TDLib keg `HEAD-d1085f9` (library `1.8.67`, legacy ABI) at `/opt/homebrew/opt/tdlib/lib/libtdjson.dylib`, store the two Keychain accounts listed above, and authorize a dedicated TDLib session in `~/Library/Application Support/TelegramSearchMCP/tdlib` through a trusted local setup. Never put credentials or login codes in MCP arguments, shell history, or project files. Automated first-time login is not included in the published 0.51 route; the 0.52 candidate bundle provides QR-first `connect` (see [installation](install.md#connect-with-a-qr-code-primary-path)). The runtime check rejects another TDLib keg; a current unpinned Homebrew install is not equivalent to the validated version.
 
 Local media analysis additionally requires the fixed executables and verified Whisper model described in [security.md](security.md). Text search and document reads do not require a speech model. Missing media dependencies return a bounded unavailable or error result.
 
@@ -359,7 +359,7 @@ Telegram-originated strings are untrusted. Snippets and context are marked as un
 
 Install `build==1.3.0` alongside the pinned runtime dependencies, then run `python -m unittest discover -s tests -v`, `python -m build`, and `python -m pip check`. Source distributions strip local archive owner names and numeric ownership. Set `SOURCE_DATE_EPOCH` to a fixed release timestamp when reproducible timestamps are required. Review wheel/sdist contents and Git metadata before publishing. The installed wheel includes documentation, config example, and optional skill under `share/telegram-search-mcp` in the environment.
 
-The current package does not include a project license grant. Resolve project licensing and dependency distribution obligations before public distribution; package installation alone is not a licensing decision.
+The project is licensed AGPL-3.0-only (see [licensing](licensing.md)); dependency distribution obligations remain a release gate, and package installation alone is not a licensing decision.
 
 ## Bounded reply chains
 
@@ -1180,7 +1180,7 @@ by default. The same eight lifecycle tools accept settled same-chat `messageText
 sources with only Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre,
 PreCode, BlockQuote and ExpandableBlockQuote entities. Source styling never changes outgoing content. Explicit caller-supplied text
 styles require `formatted_text_send`; attachment captions keep entities=[].
-Public schemas, all 43 tools, contract 1 and IPC 2 are unchanged.
+Public schemas, all 43 tools (at that slice), contract 1 and IPC 2 are unchanged.
 
 Inspect the complete `Formatted target:` JSON record in the marked
 `reply_target.text`. It includes sanitized source text, every canonical style,
@@ -1242,7 +1242,7 @@ characters. Raw caption/spans and media facts bind the source hash before displa
 sanitation. The entire marked record is at most 4096 characters and never
 truncated. All existing document, static-photo and OGG voice restrictions remain
 in force, and preparation downloads no source attachment. Source evidence never populates outgoing entities; explicit text styles require
-`formatted_text_send`, and outgoing attachment captions keep empty entities. Public schemas, 43 tools, contract 1 and IPC 2 are unchanged. Synthetic
+`formatted_text_send`, and outgoing attachment captions keep empty entities. Public schemas, 43 tools (at that slice), contract 1 and IPC 2 are unchanged. Synthetic
 checks establish technical behavior; live Telegram delivery and owner-dialog
 approval remain unverified.
 
@@ -2043,8 +2043,8 @@ proxy client and current Telegram account, with the same finite TTL (default 15
 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker restart
 loses it. It is not reachable through the generic draft tools: `list_drafts` omits
 it, `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and `get_reply_draft`
-return `unavailable`, and `send_prepared_text` / `send_prepared_artifact` return
-`error`. There is no update, refresh or cancel for forward drafts.
+return `unavailable`, and `send_prepared_text`, `send_prepared_artifact` and
+`send_prepared_video` return `error`. There is no update, refresh or cancel for forward drafts.
 
 Preparing again for the same owner, source chat, message ID, recipient, `mode` and
 `remove_caption` supersedes the earlier pending draft: it can no longer be claimed

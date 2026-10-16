@@ -3,21 +3,24 @@
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
 
 Updated **2026-10-16**. The released baseline remains **0.51.0**; the current
-**0.52.0.dev0** development snapshot and pause boundary are recorded below.
+**0.52.0.dev0** development snapshot is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
 ## Current development snapshot — 0.52.0.dev0
 
-Development is paused after the **B2C local-upload ownership slice**. No next
-implementation batch is started. This is development source, not a new tagged
-release, installer distribution or PyPI publication. Resume requires an explicit
-request; the remaining scope below is retained.
+Development resumed after the **B2C local-upload ownership slice** under the owner's
+2026-10-16 delegation: 0.52 QR onboarding (phases A–E), F14 forward/copy and F15a
+native video are implemented below, and F17a is specified in
+[plans/0.54-archive-and-edit-spec.md](plans/0.54-archive-and-edit-spec.md). This is
+development source, not a new tagged release, installer distribution or PyPI
+publication. Real-account acceptance of each slice is pending the owner; the
+remaining scope below is retained.
 
 **Approved 0.52 requirement — next priority #1:**
 [QR-first Telegram onboarding](plans/0.52-qr-onboarding.md). The normal user path
 must be install MCP + skills → local QR screen → confirmation in the phone's
-Telegram app → optional local 2FA → ready MCP and a bounded Codex read/search.
+Telegram app → optional local 2FA → ready MCP and a bounded Claude Code and Codex read/search.
 End users must not create API applications or enter API ID/hash; the distributed
 application supplies its API identity. This is mandatory for 0.52.0. It supersedes
 conflicting manual-credential and Terminal-only onboarding plans; the Terminal
@@ -25,7 +28,7 @@ phone/code setup remains only as a fallback.
 
 **0.52 QR-first status** ([spec](plans/0.52-qr-onboarding-spec.md), phases A–F):
 phases A–E are technically done on branch `qr-onboarding-052` — transport and credential
-resolution, connect flow, loopback QR screen, `connect`/`wait`/`api-credentials` with the
+resolution, connect flow, loopback QR screen, `connect`/`wait`/`cancel`/`api-credentials` with the
 transient launchd job and narrow reconnect, and the installer/docs phase (application
 identity injection at assembly, Claude Code and Codex registration, skill copies for both
 clients, rewritten setup skill). Evidence is synthetic: fakes for Telegram, launchd, the
@@ -83,7 +86,7 @@ required one. They do not establish real Telegram delivery, native onboarding,
 all attachment formats or the whole F18 consumer matrix. Earlier failed test
 packets remain failed evidence; they are not reclassified as successful runs.
 
-Still paused and unfinished:
+Still unfinished:
 
 - **First:** accept the mandatory 0.52 QR-first onboarding scope (phase F: real
   clean-user run with a test-account phone, 2FA, reconnect and repeat use); phases A–E
@@ -108,7 +111,7 @@ by remembered context, inspect it, process it, prepare a result and explicitly s
 it to the intended Telegram conversation without manual IDs or file copying.
 
 The next focus is the mandatory QR-first setup and repeated completion of that
-path on the supported macOS platform, initially in Codex. Short answers
+path on the supported macOS platform, in Claude Code and Codex. Short answers
 with usable sources, retained conversational selections, understandable approvals
 and recovery take priority alongside capabilities that actually block a task.
 Broader client/platform support must be demonstrated separately.
@@ -145,8 +148,8 @@ different license are being considered, with no committed migration date; see
 | F11 | Draft inspection/revision/cancel/refresh | Implemented | Drafts are finite and client-scoped; reconnect/restart can invalidate state. |
 | F12 | Send-status inspection/correlation | Implemented | Unknown after state loss remains unknown; no automatic send retry or crash-boundary exactly-once promise. |
 | F13 | Replies, topic sends and outgoing styles | Partial | Plain/topic/reply paths and five text styles exist; retained rare source entities, formatted captions and applicable remaining live scenarios are not complete. |
-| F14 | Forward/copy | Partial (0.53 dev): one-message forward/copy implemented with technical evidence; real delivery pending owner | Real owner-approved forward and copy between two chats with readback, and installed-consumer evidence. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
-| F15 | Native video and albums | Partial (0.53 dev): one native video (F15a) implemented with technical evidence; albums (F15b) planned; real send pending owner | Real owner-approved native video send with readback, and installed-consumer evidence. Ordered albums, partial outcomes, videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
+| F14 | Forward/copy | Partial (in 0.52.0.dev0): one-message forward/copy implemented with technical evidence; real delivery pending owner | Real owner-approved forward and copy between two chats with readback, and installed-consumer evidence. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
+| F15 | Native video and albums | Partial (in 0.52.0.dev0): one native video (F15a) implemented with technical evidence; albums (F15b) planned; real send pending owner | Real owner-approved native video send with readback, and installed-consumer evidence. Ordered albums, partial outcomes, videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
 | F17 | Archive/edit/delete/pin actions | Planned | Separate opt-ins, previews, permissions, final-state checks and per-action real approvals. |
 | F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist; clean-user onboarding, full source-family/protocol/recovery coverage and controlled TDLib upgrades remain. |
@@ -194,7 +197,7 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
    end-user API-pair entry or Terminal-only login does not satisfy this scope.
    Resolve incompatible earlier assumptions here before any unrelated B2/F13–F17
    continuation. Public installer distribution, trust and source/notice closure
-   remain release dependencies. Development stays paused until explicit resume.
+   remain release dependencies.
 2. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening

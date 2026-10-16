@@ -15,7 +15,9 @@ step seems to need one, stop and use the Terminal fallback at the end.
 ## Flow
 
 1. **Install** only from an independently authenticated bundle index and seed whose digests
-   come from the reviewed trust input. Keep installer failures and transaction evidence. Refuse
+   come from the reviewed trust input (`/bin/sh -p packaging/bootstrap.sh …`, see
+   docs/install.md "Private bundled candidate 0.52.0.dev0"; the installer prints its JSON
+   result, and this skill is itself installed by that installer). Keep installer failures and transaction evidence. Refuse
    foreign runtime, registration, service or skill conflicts; never stop an existing owner to
    make an install pass. Success is `status: activation_required` with a nonsecret
    `activation_command`. `claude_code` is `registered` or `reused` when Claude Code has the
@@ -87,7 +89,9 @@ open from `connect` must be closed first with `cancel`.
 Installation, a started page or a launch is never Ready; only `ready` followed by a compatible
 `_manifest` is. The preserved default session lives under
 `~/Library/Application Support/TelegramSearchMCP/tdlib` and is never overwritten, purged or
-revoked from here. The default policy enables only `read` and `artifacts`. There is no account
+revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`; `send`,
+`forward_send` and `video_send` need a manual `runtime.toml` edit and a broker restart (docs/install.md,
+"Enabling more capabilities"). There is no account
 alias or profile registry, cloud auth or model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
 download missing runtime, source, media tools or models without authority.

@@ -8,11 +8,11 @@ Connect Telegram to **Claude Code, Codex, or another local MCP client**.
 
 **Version 0.51.0:** 43 tools, opt-in exact forum-topic text sends/replies, and five explicit outgoing text styles. The accepted bounded scope has installed SDK, Inspector and native Codex evidence; first-time Telegram provisioning and the broader roadmap remain unfinished. See [release notes](docs/release-notes-0.51.0.md), the [tool reference](docs/reference.md), and [development progress](docs/roadmap.md).
 
-This checkout's build candidate adds a 44th tool, default-off `retain_selection`,
-for exact chosen message/file reuse. Its typed source alternatives and refusal
-contract change the schema fingerprint. This new slice still requires independent
+This checkout's build candidate also adds default-off `retain_selection` (exact chosen
+message/file reuse) and the local-upload authority tools. Their typed source alternatives
+and refusal contract change the schema fingerprint. These slices still require independent
 review and installed/native/live acceptance; earlier accepted evidence does not
-cover it. See the [retained selection reference](docs/reference.md#exact-retained-selections-opt-in-candidate).
+cover them. See the [retained selection reference](docs/reference.md#exact-retained-selections-opt-in-candidate).
 
 The candidate surface is now 51 tools. Two of them, `prepare_forward_send` and
 `send_prepared_forward`, forward or copy exactly one existing message between two exact
@@ -89,8 +89,10 @@ on Apple Silicon macOS 26+. See [candidate installation](docs/install.md).
 Published 0.51 evidence remains separate; native onboarding, public hosting,
 publisher trust and complete source/redistribution acceptance remain open.
 
-**QR-first login (0.52):** the candidate installer registers the MCP server in **both
-Claude Code and Codex** and installs the paired skills for both. Your assistant then runs
+**QR-first login (0.52):** the candidate installer registers the MCP server in Codex and,
+when the `claude` CLI is found at a fixed location, in Claude Code (otherwise it returns the
+exact command to run yourself). Paired skills go to `~/.agents/skills` and, if Claude Code is
+present, `~/.claude/skills`. Your assistant then runs
 `connect`: a local browser page on your Mac shows a QR code, you scan it in Telegram on
 your phone (Settings → Devices → Link Desktop Device) and enter 2FA only on that page.
 No API ID or hash, phone number or login code passes through the assistant, and a bundle

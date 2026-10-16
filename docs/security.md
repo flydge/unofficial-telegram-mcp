@@ -57,8 +57,9 @@ admission and can recover partial API writes or early credential cancellation;
 existing credentials are never overwritten and foreign/damaged state refuses.
 Cancellation preserves state and attempts teardown without logout/revoke/deletion,
 retaining ownership until process exit when native destruction is uncertain.
-Unsupported QR/email/registration/purchase
-states return redacted actionable status. New policy enables only `read` and
+In this Terminal flow, QR/email/registration/purchase
+states are unsupported (QR is handled by `connect`, see the QR connect boundary below) and return
+redacted actionable status. New policy enables only `read` and
 `artifacts`; an existing policy remains byte-identical. Synthetic tests do not
 close native Keychain/Telegram/launchd or clean-user acceptance, pinned runtime
 provisioning, one-command installation or MCP/skill registration gates.
@@ -105,7 +106,7 @@ forwardMessages (closed single-message forward/copy shape, only after explicit d
 
 The broker socket lives in an owner-only directory with mode `0700`; the socket and owner lock use mode `0600`. The broker also verifies the kernel-reported peer UID through Darwin `getpeereid`. A nonblocking owner lock prevents a second broker. Only the lock holder may replace a same-owner, non-symlink Unix socket after proving that it is stale. Same-UID processes are inside this local filesystem trust boundary. IPC version 2 requires a same-connection contract handshake before every operation; IPC version 1 has no execution compatibility. The handshake compares loaded package/contract/finalized schema identity and effective trusted config. The next request binds the process generation; config freshness and capability checks occur before dispatch. Handshake-only diagnostics do not initialize TDLib. Requests use versioned length-prefixed strict JSON, a fixed operation allowlist, public-model validation on both sides, 1 MiB request and 8 MiB response limits, random process-lifetime client IDs, random request IDs, a 250-millisecond per-read bound, and monotonic deadlines capped at 570 seconds.
 
-The broker fails closed unless the dedicated session reaches `authorizationStateReady`. It never accepts API credentials, login codes, passwords, session paths, index paths, account selectors, wildcards, caller-controlled provider limits/filters/dates/functions, or arbitrary TDLib requests through MCP or IPC. `api_id` and `api_hash` are read only from the fixed macOS Keychain service by the broker and are never logged or included in an error.
+The broker fails closed unless the dedicated session reaches `authorizationStateReady`. It never accepts API credentials, login codes, passwords, session paths, index paths, account selectors, wildcards, caller-controlled provider limits/filters/dates/functions, or arbitrary TDLib requests through MCP or IPC. `api_id` and `api_hash` are read by the broker only from the fixed macOS Keychain service or, for a session enrolled with the bundled application identity, from the hash-authenticated `app-identity.json` in the installed release; they are never logged or included in an error.
 
 ## Artifact and upload ownership in the development candidate
 
@@ -982,7 +983,7 @@ Live delivery and broader target/consumer validation remain outstanding.
 
 `reply_media_targets` independently gates supported source media for both outgoing
 reply workflows, in addition to `send` and the matching reply capability. It is
-absent from legacy defaults. All 43 public argument/result schemas, annotations
+absent from legacy defaults. All 43 public argument/result schemas (at that slice), annotations
 and operation mappings stay unchanged; only eight reply-tool descriptions change.
 Broker policy derives media classification from validated private projections v2/v4/v6,
 never display strings or proxy inference. Owner/TTL/lock-bound classification
@@ -1410,7 +1411,7 @@ conversion, identity resolution or source-triggered work occurs. The final sourc
 revalidation/send interval remains non-atomic, and an uncertain transport outcome
 is never retried. Actual owner/provider delivery requires its own concrete
 approval; synthetic installed-consumer evidence proves only the reported technical
-scenario. Public schemas/annotations, 43 tools, contract1 and IPC2 stay unchanged;
+scenario. Public schemas/annotations, 43 tools (at that slice), contract1 and IPC2 stay unchanged;
 the consumer skill remains unchanged and its F18 validation is outstanding.
 
 ### Fieldless URL text and media captions require private v15/v16 source authority
@@ -1715,9 +1716,9 @@ retains the ordinary 900-second observation window and never authorizes retry.
 Pending, recovered, final and late observations require both exact topic and reply
 identity plus approved plain text. Unsupported media/quote/options remain denied.
 The public optional input/evidence changes the schema fingerprint but adds no tool
-or capability:43 tools and28 capabilities. Installed synthetic evidence remains
+or capability:43 tools and28 capabilities (at that slice). Installed synthetic evidence remains
 separate from actual owner-dialog, live delivery, native consumer and release gates.
-# Unreleased bundled first-install boundary
+## Unreleased bundled first-install boundary
 
 Candidate `0.52.0.dev0` authenticates a bounded USTAR/gzip index and every
 member using an independently pinned prebuilt native seed before extraction or
@@ -1735,7 +1736,14 @@ the exact receipt-bound isolated form alongside the existing four-argument
 legacy form. There is no PYTHONPATH or DYLD propagation.
 
 The recoverable installation transaction owns a separate runtime root, one
-lease/journal, matched skills and its Codex subtree. Original config bytes stay
+lease/journal, matched skills and its Codex subtree. It also adds, only when absent and
+at most once per installation, one Claude Code user-scope `telegram_search` entry: state is
+read from the `mcpServers` object of `~/.claude.json` (bounded, no-follow, strict JSON, no
+process started), a different existing entry refuses the install before anything is created,
+and the entry is written only by the `claude` CLI found at four fixed paths (never `PATH`),
+run as an argument list without a shell, with a minimal environment and discarded output, then
+confirmed by re-reading the file. Skills are copied to `~/.claude/skills` only when `~/.claude`
+exists or the CLI was found. Original config bytes stay
 in private transaction evidence and are never logged. Writes compare original
 bytes immediately before atomic replacement. These cooperative checks detect
 observed drift; they do not protect against a malicious process already
@@ -1750,6 +1758,68 @@ Current pointer publication occurs last; interrupted installations fail closed
 until exact checked recovery. No active broker is stopped or foreign data adopted.
 
 
+## QR connect boundary (0.52 candidate)
+
+`connect`, `wait` and `cancel` take no secrets and print fixed JSON; none prints the page address
+or its token. `connect` starts a transient per-user launchd job
+(`com.<home-directory-name>.telegram-search-mcp.connect`: a plist in the private `run` directory,
+mode `0600`, `KeepAlive` false, Aqua session, output to `/dev/null`) that runs the internal
+`connect-helper`; the helper refuses to run unless its launchd service name is that label. In
+native Terminal the helper runs inline instead. A dedicated `run/connect.lock`, separate from the
+session owner lease, keeps exactly one helper alive. The run takes the owner lease for the whole
+authorization and releases it before the broker handoff. It writes only `run/connect-status.json`
+(mode `0600`, at most 1 KiB: `phase`, `code`, `updated_at`, `expires_at`, `retry_after`, all from
+closed vocabularies); `wait` reads it strictly and reports only what it validates.
+
+The helper serves a stdlib HTTP screen on `127.0.0.1` at an ephemeral port. A fresh random 32-byte
+token lives only in the URL fragment, so it is never sent in a request or referrer; the page
+returns it as a bearer token that the server compares in constant time. The static page assets
+are served without it; `/api/state`, `/api/password` and `/api/cancel` require it. Every request
+must carry exactly the `Host` `127.0.0.1:<port>`; a POST must also carry exactly the matching
+`Origin` and a JSON body of at most 4 KiB. Other paths, methods and oversized bodies are refused
+with empty bodies, and there are no CORS headers. Responses set a strict Content-Security-Policy
+(`default-src 'none'`, scripts and styles from the page's own origin), `no-store`, `no-referrer`,
+`nosniff` and frame/cross-origin denial. The server allows 16 concurrent connections, drops a
+silent client after 10 seconds, cuts a connection off after 15 seconds and disables port sharing.
+Nothing is written to stdout, stderr or any log. The default browser is opened through
+`osascript` with the script on stdin, after the URL is checked against the server's exact shape,
+so the token is never in any process's argv. If no browser opens, the run continues and `wait`
+keeps reporting its phase until `cancel` or expiry.
+
+The QR link and the 2FA password exist only as `SecretValue`s. The link (at most 256 bytes) is
+rendered server-side to an SVG data URI and not kept. The password travels from the POST body to
+the run thread and is never stored, echoed, logged or placed in the status file, a result or an
+exception. At most 5 password submissions are accepted per run with one request in flight; only a
+definitive `invalid_password` or `invalid_input` lets the page ask again, a timeout or transport
+error stops as `password_submission_uncertain` without retry, and a password is not sent with
+less than 5 seconds of the run left.
+
+The whole run lives 600 seconds on the wall clock, so a sleeping Mac does not extend it. After a
+terminal phase the page stays up 10 seconds, the server closes and the helper removes its own
+plist. `cancel` boots out only this job; the helper's SIGTERM handler cancels the run through the
+page so the temporary auth client is closed and destroyed normally and the status becomes
+`cancelled`.
+
+`connect` never stops a foreign, incompatible or Ready owner. The one exception is an enrolled,
+receipt-bound broker that answers a compatible handshake but whose Telegram authorization is not
+ready: after read-only validation it may be stopped, the QR flow runs on the existing managed
+enrollment and key, and the broker is put back whenever no helper reaches Ready. A compatible
+broker whose first check outlives 25 seconds is reported as `broker_starting` and nothing is
+stopped.
+
+A new enrollment uses a complete API pair already in the Keychain, else the hash-authenticated
+`app-identity.json` bundled in the release (present only when the bundle producer was asked with
+`--app-identity-from-keychain`), else refuses `app_identity_missing`. The enrollment binds that
+source and a SHA-256 fingerprint of the pair; a changed identity refuses `identity_changed`. A
+partial Keychain pair is `credential_conflict`. Every user of a bundle shares the distributor's
+API ID, and distributed client parameters are extractable by design; the owner accepted this on
+2026-10-14, which is not legal sign-off. The owner's own pair (`api-credentials`, native Terminal
+only, add-only, before the first `connect`) overrides it. A new policy lists only `read` and
+`artifacts`. The loopback checks protect against other websites and DNS rebinding; they do not
+claim protection against hostile software running as the same OS user. Evidence is synthetic
+(fake Telegram, launchd, `claude` CLI and Keychain); real clean-user acceptance is pending.
+
+
 ## Retained-selection boundary (B2B candidate)
 
 The default-off `retained_selections` capability adds one closed issuer and exact
@@ -1757,7 +1827,7 @@ source alternatives on existing operations. Request, proxy, broker and finalized
 SDK schemas enforce exactly one raw source or selection, plus an independent
 exactly-one reply source where applicable. Target capture additionally requires
 `verified_targets`; original operation capabilities remain required. Contract 1 and
-framing 2 remain, while the schema fingerprint honestly changes for 44 tools.
+framing 2 remain, while the schema fingerprint honestly changes for 44 tools (at that slice).
 
 A memory-only selection binds B2A owner/client/session incarnation, observed numeric
 account and revocation epoch, schema fingerprint, ordered anchors or immutable
