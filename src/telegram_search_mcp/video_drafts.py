@@ -94,7 +94,9 @@ def preview_facts(*, draft_id: str, account_id: int, expires_at: datetime, recip
 
 
 class VideoDraftPreview(_Frozen):
-    """Probed facts plus marked, reversibly escaped untrusted file name and caption."""
+    """Facts declared by the file (not decoded): duration, dimensions, codec, audio and streaming
+    layout as its ISO-BMFF boxes state them; plus marked, reversibly escaped untrusted file
+    name and caption."""
     draft_id: DraftId
     account_id: AccountId
     expires_at: datetime

@@ -25,11 +25,11 @@ from telegram_search_mcp.approval_prompt import confirm_approved_send
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
-from telegram_search_mcp.broker_protocol import OPERATIONS
+from telegram_search_mcp.broker_protocol import OPERATIONS, BrokerProtocolError
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, LEGACY_CAPABILITIES, RuntimePolicy
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS, CompatibilityError
-from telegram_search_mcp.forward_drafts import readable
-from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
+from telegram_search_mcp.forward_drafts import READABLE_RULE, readable
+from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry, _safe_display_name
 from telegram_search_mcp.outgoing_stage import retire_staged_document, stage_approved_document
 from telegram_search_mcp.send_observations import ObservationUnavailable, SendObservations
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
@@ -52,7 +52,6 @@ MARK = '[untrusted Telegram evidence] '
 DID = 'draft_' + '1' * 32
 EXPIRY = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 MOVIE = bmff.movie()  # ftyp + moov(mvhd 5 s, one avc1 1280x720 track) + mdat: faststart
-EXACT = '(exact; invisible or look-alike characters shown as ⟦U+XXXX⟧)'
 
 
 def digest(value):
@@ -411,15 +410,22 @@ class PrepareTests(VideoFixture, unittest.TestCase):
             self.dispatch('prepare_video_send', self.request(artifact_id, caption='x' * 1025))
         with self.assertRaises(ValidationError):
             self.dispatch('prepare_video_send', self.request(artifact_id, display_name='x.mp4'))
-        # A selection token never reaches the artifact or provider path for this operation.
-        for policy, error in ((POLICY, CompatibilityError),
-                              (RuntimePolicy(enabled_capabilities=(*POLICY.enabled_capabilities, 'retained_selections')),
-                               KeyError)):
+        # A selection token on a video operation is one fixed malformed-request refusal under
+        # every policy; it never reaches the selection, artifact or provider path.
+        token = 'selection_' + 'a' * 64
+        before = len(self.raw.sent)
+        for policy in (POLICY, RuntimePolicy(enabled_capabilities=(*POLICY.enabled_capabilities, 'retained_selections'))):
             self.broker._policy = policy
-            with self.assertRaises(error):
-                self.dispatch('prepare_video_send', self.request(artifact_id, selection_id='selection_' + 'a' * 64))
+            for op, payload in (('prepare_video_send', self.request(artifact_id, selection_id=token)),
+                                ('prepare_video_send', self.request(artifact_id, reply_selection_id=token)),
+                                ('send_prepared_video', {'draft_id': DID, 'approved': True, 'selection_id': token})):
+                with self.subTest(policy=policy.enabled_capabilities, op=op, keys=sorted(payload)):
+                    with self.assertRaises(BrokerProtocolError) as caught:
+                        self.dispatch(op, payload)
+                    self.assertEqual(Broker._error_code(caught.exception), 'invalid_request')
         self.broker._policy = POLICY
         self.assertEqual(self.broker._drafts.known_ids(), set())
+        self.assertEqual(len(self.raw.sent), before)
 
     def test_untrusted_file_name_and_caption_are_normalized_then_escaped(self):
         artifact_id = self.store(name='../p\u0430ypal\u202e4pm.exe\u200b.mp4')
@@ -428,6 +434,30 @@ class PrepareTests(VideoFixture, unittest.TestCase):
         self.assertEqual(video['caption'], MARK + escape('Pay NOW\n\tok \U0001F600 fi'))
         for raw in (video['display_name'], video['caption']):
             self.assertTrue(raw[len(MARK):].isascii())
+
+    def test_preview_refusal_leaves_no_orphan_and_supersedes_nothing(self):
+        # L1: the preview is built and validated before the draft is inserted.
+        artifact_id = self.upload()
+        first = self.prepare(artifact_id)['draft_id']
+        with patch('telegram_search_mcp.broker.VideoDraftPreview.create', side_effect=ValueError('synthetic refusal')):
+            self.assert_unavailable(self.request(artifact_id, caption='changed'))
+        self.assertEqual(self.broker._drafts.known_ids(), {first})
+        self.assertEqual(self.broker._drafts._entries[first].state, 'pending')
+        self.assertEqual(self.send(first)['status'], 'sent')
+
+    def test_compatibility_solidus_is_normalized_before_the_path_split(self):
+        # L1: NFKC first, so U+FF0F / U+FF3C / U+FE68 cannot turn into a separator after the split.
+        for name in ('a\uff0fb.mp4', 'dir\uff3cb.mp4', 'x/y\uff0fb.mp4', 'a\ufe68b.mp4'):
+            with self.subTest(name=name):
+                self.assertEqual(_safe_display_name(name), 'b.mp4')
+                before = self.broker._drafts.known_ids()
+                video = self.prepare(self.store(name=name))
+                self.assertEqual(video['display_name'], MARK + escape('b.mp4'))
+                self.assertEqual(self.broker._drafts.known_ids() - before, {video['draft_id']})
+        # The shared helper also fixes document drafts, which used to keep 'a/b.txt' and fail at staging.
+        document = self.dispatch('prepare_artifact_send', {'artifact_id': self.upload(), 'recipient': RECIPIENT,
+            'display_name': 'a\uff0fb.txt', 'mime_type': 'text/plain'})
+        self.assertEqual((document['status'], document['display_name']), ('prepared', 'b.txt'))
 
     def test_generic_draft_tools_and_other_send_tools_never_touch_video_drafts(self):
         did = self.prepare()['draft_id']
@@ -545,10 +575,8 @@ class SendTests(VideoFixture, unittest.TestCase):
             self.assertEqual(self.send(self.prepare()['draft_id'])['status'], 'sent')
         self.assertEqual(staged, [MOVIE])
 
-    def test_lost_mismatched_and_rejected_outcomes_never_retry(self):
-        for mode, final, expected in (('lost', {}, 'outcome_unknown'), ('sent', {'duration': 6}, 'outcome_unknown'),
-                                      ('sent', {'width': 1281}, 'outcome_unknown'),
-                                      ('sent', {'video': file(len(MOVIE) + 1)}, 'outcome_unknown'),
+    def test_lost_invalid_and_rejected_outcomes_never_retry(self):
+        for mode, final, expected in (('lost', {}, 'outcome_unknown'), ('sent', {'@type': 'animation'}, 'outcome_unknown'),
                                       ('rejected', {}, 'failed'), ('failed', {}, 'failed')):
             with self.subTest(mode=mode, final=final):
                 self.setUp(); self.raw.mode = mode; self.raw.final = final
@@ -560,6 +588,19 @@ class SendTests(VideoFixture, unittest.TestCase):
                 self.assertNotIn('PRIVATE', json.dumps(result))
                 if mode == 'rejected':
                     self.assertIn('code 400', result['detail'])
+
+    def test_reencoded_final_facts_still_confirm_by_correlation(self):
+        # I1: like document and photo sends, correlation and a final messageVideo decide.
+        for final in ({'duration': 6}, {'width': 1281, 'height': 719}, {'video': file(len(MOVIE) + 1)},
+                      {'duration': 1, 'width': 16, 'height': 16, 'video': file(1)}):
+            with self.subTest(final=final):
+                self.setUp(); self.raw.final = final
+                did = self.prepare()['draft_id']
+                result = self.send(did)
+                self.assertEqual((result['status'], result['message_id']), ('sent', 701))
+                self.assertEqual(len(self.sends()), 1)
+                status = self.status(did)
+                self.assertEqual((status['status'], status['message_id']), ('sent', 701))
 
     def test_final_message_without_reported_size_or_with_unknown_size_still_confirms(self):
         for final in ({'video': dict(file(0))}, {'minithumbnail': None}):
@@ -673,10 +714,104 @@ class SendTests(VideoFixture, unittest.TestCase):
         self.assertEqual(result['status'], 'local_failed'); self.assertEqual(self.sends(), [])
 
 
+UNKNOWN = 'current receipt authority is unavailable; do not retry automatically'
+
+
+class AttemptedSendTests(VideoFixture, unittest.TestCase):
+    """M1: the call that consumed the claim never reads as expired after a lost authority."""
+
+    def after_raw_send(self, action):
+        real = self.raw.send
+        def send(request):
+            real(request)
+            if request['@type'] == 'sendMessage':
+                action()
+        self.raw.send = send
+
+    def assert_unknown(self, result, did):
+        self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
+                                  'message_id': None, 'detail': UNKNOWN})
+
+    def test_release_during_the_confirmation_wait_is_outcome_unknown_never_expired(self):
+        did = self.prepare()['draft_id']
+        self.after_raw_send(lambda: self.broker._artifact_authority.release(CLIENT))
+        self.assert_unknown(self.send(did), did)
+        self.assertEqual(len(self.sends()), 1)
+        receipt = self.broker._drafts._entries[did].receipt
+        self.assertEqual((receipt.status, receipt.message_id), ('sent', 701))  # Kept, never disclosed here.
+        # A later call under a fresh lifecycle keeps the content-free replay refusal and sends nothing.
+        self.assertEqual(self.send(did)['status'], 'expired')
+        self.assertEqual(len(self.sends()), 1); self.assertEqual(len(self.approvals), 1)
+        # Content-free routing only: another client or the other send tool learns nothing.
+        self.assertEqual(self.send(did, client=FOREIGN)['status'], 'expired')
+        self.assertEqual(self.broker._artifact_unavailable('send_prepared_artifact', {'draft_id': did}, CLIENT)['status'],
+                         'expired')
+        self.assertEqual(self.broker._artifact_unavailable('send_prepared_video', {'draft_id': did}, FOREIGN)['status'],
+                         'expired')
+
+    def test_account_switch_right_after_the_raw_send_is_outcome_unknown(self):
+        did = self.prepare()['draft_id']
+        self.after_raw_send(lambda: setattr(self.raw, 'account', 8))
+        self.assert_unknown(self.send(did), did)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.broker._drafts._entries[did].receipt.status, 'sent')
+        # Later calls without the original account epoch keep the replay refusal and never resend.
+        self.assertEqual(self.send(did)['status'], 'expired')
+        self.raw.account = ACCOUNT  # Switching back does not revive the old account epoch.
+        self.assertEqual(self.send(did)['status'], 'expired')
+        self.assertEqual(len(self.sends()), 1); self.assertEqual(len(self.approvals), 1)
+
+    def test_local_failure_with_lost_publication_replays_local_failed(self):
+        did = self.prepare()['draft_id']
+        def stage(claim):
+            self.broker._artifact_authority.release(CLIENT)
+            raise OSError('synthetic staging failure')
+        with patch('telegram_search_mcp.broker.stage_approved_document', side_effect=stage):
+            result = self.send(did)
+        self.assertEqual(result, {'status': 'local_failed', 'draft_id': did, 'recipient': None, 'message_id': None,
+                                  'detail': 'local revalidation failed; no provider send was attempted'})
+        self.assertEqual(self.send(did)['status'], 'expired')  # Later call: fresh lifecycle, replay refusal.
+        self.assertEqual(self.sends(), [])
+
+    def test_release_before_the_claim_stays_expired_without_attempt(self):
+        did = self.prepare()['draft_id']
+        def approve(**kw):
+            self.broker._artifact_authority.release(CLIENT); return True
+        self.broker._approval_prompt = approve
+        result = self.send(did)
+        self.assertEqual((result['status'], result['detail']), ('expired', 'draft is unavailable'))
+        self.assertEqual(self.sends(), [])
+        self.assertIsNone(self.broker._drafts.attempt_outcome(did, client_id=CLIENT, kinds=frozenset({'video'})))
+
+    def test_document_artifact_released_after_the_raw_send_is_outcome_unknown(self):
+        artifact_id = self.upload()
+        did = self.dispatch('prepare_artifact_send', {'artifact_id': artifact_id, 'recipient': RECIPIENT,
+            'display_name': 'clip.mp4', 'mime_type': 'video/mp4'})['draft_id']
+        real = self.raw.send
+        def send(request):
+            if request['@type'] != 'sendMessage':
+                return real(request)
+            self.raw.sent.append(copy.deepcopy(request))
+            content = {'@type': 'messageDocument', 'document': {},
+                       'caption': {'@type': 'formattedText', 'text': '', 'entities': []}}
+            self.raw.events.append({**outgoing(-10, content, sending_state={'@type': 'messageSendingStatePending',
+                'sending_id': request['options']['sending_id']}), '@extra': request['@extra']})
+            self.raw.events.append({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                                    'message': outgoing(801, content, sending_state=None)})
+            self.broker._artifact_authority.release(CLIENT)
+        self.raw.send = send
+        payload = {'draft_id': did, 'approved': True}
+        self.assert_unknown(self.dispatch('send_prepared_artifact', payload), did)
+        self.assertEqual(self.broker._drafts._entries[did].receipt.status, 'sent')
+        self.assertEqual(self.dispatch('send_prepared_artifact', payload)['status'], 'expired')  # Later call.
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.send(did)['status'], 'expired')  # The video tool learns nothing about a document.
+
+
 class StatusTests(VideoFixture, unittest.TestCase):
     """Criterion 7: pending, then sent or failed only with a matching messageVideo."""
 
-    def test_pending_then_late_exact_messagevideo_reconciles_without_retry(self):
+    def test_pending_then_late_correlated_messagevideo_reconciles_without_retry(self):
         self.raw.mode = 'lost'
         did = self.prepare()['draft_id']
         status = self.status(did)
@@ -687,15 +822,15 @@ class StatusTests(VideoFixture, unittest.TestCase):
         good = video_content('', 5, 1280, 720, len(MOVIE), True)
         def changed(**fields):
             value = copy.deepcopy(good); value['video'].update(fields); return value
+        # Another chat, another content type or a missing video object never reconciles; a
+        # correlated messageVideo does, whatever facts the provider re-encoded (I1).
         self.raw.events.extend([
             {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10, 'message': outgoing(703, good, chat_id=999)},
-            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10, 'message': outgoing(704, changed(duration=4))},
-            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10, 'message': outgoing(705, changed(height=721))},
-            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
-             'message': outgoing(706, changed(video=file(len(MOVIE) - 1)))},
             {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
              'message': outgoing(707, {'@type': 'messageDocument', 'document': {}})},
-            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10, 'message': outgoing(702, good)}])
+            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10, 'message': outgoing(708, dict(good, video=None))},
+            {'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+             'message': outgoing(702, changed(duration=4, height=721, video=file(len(MOVIE) - 1)))}])
         status = self.status(did)
         self.assertEqual((status['status'], status['evidence'], status['message_id']), ('sent', 'provider_confirmed', 702))
         self.assertEqual((self.send(did)['status'], self.send(did)['message_id']), ('sent', 702))
@@ -725,9 +860,10 @@ class StatusTests(VideoFixture, unittest.TestCase):
 
 GOLDEN = ('Send this native video to Recipient (chat 4242)?\nAccount: 7\nDraft: ' + DID + '\n'
           'Expires: 2030-01-02T03:04:05+00:00\n\n'
-          'File name [untrusted] ' + EXACT + ': {name}\n'
-          'Bytes: {size}\nSHA-256: {sha}\nDuration: 5 seconds\nDimensions: 1280x720\nCodec: h264\nAudio: no\n'
-          'Streaming: yes\n{caption}'
+          'Untrusted spans in « » below are exact; ' + READABLE_RULE + '.\n'
+          'File name [untrusted] (exact): «{name}»\n'
+          'Bytes: {size}\nSHA-256: {sha}\nDeclared by the file (not decoded):\nDuration: 5 seconds\n'
+          'Dimensions: 1280x720\nCodec: h264\nAudio: no\nStreaming: yes\n{caption}'
           'Recipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
           'Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, '
           'then make one upload/send attempt as a native video.')
@@ -741,14 +877,22 @@ class DialogTests(unittest.TestCase):
                              caption=caption, preview=value.preview_sha256)
 
     def test_plain_and_hostile_goldens(self):
+        # L4/L5: name and caption in « » under the forward dialog's legend; facts labelled as declared.
+        self.assertNotIn('{', READABLE_RULE)
         plain = preview()
         self.assertEqual(shown(plain), [self.golden(plain, 'clip.mp4', 'Caption: (none)\n')])
-        caption = 'Hi "there"\nRecipient: Mom (chat 1)\tp\u0430ypal ⟦x Привет 日本 \U0001F600'
-        hostile = preview(name='p\u0430ypal ⟦1⟧.mp4', caption=caption)
-        self.assertEqual(shown(hostile), [self.golden(hostile, 'p⟦U+0430⟧ypal ⟦U+27E6⟧1⟧.mp4',
-            'Caption [untrusted] ' + EXACT + ': Hi "there"⟦U+000A⟧Recipient: Mom (chat 1)⟦U+0009⟧'
-            'p⟦U+0430⟧ypal ⟦U+27E6⟧x Привет 日本 \U0001F600\n')])
+        caption = 'Hi "there"\nRecipient: Mom (chat 1)\tp\u0430ypal ⟦x Привет 日本 \U0001F600 »\nCodec: hevc «'
+        hostile = preview(name='p\u0430ypal ⟦1⟧ ».mp4', caption=caption)
+        self.assertEqual(shown(hostile), [self.golden(hostile, 'p⟦U+0430⟧ypal ⟦U+27E6⟧1⟧ ⟦U+00BB⟧.mp4',
+            'Caption [untrusted] (exact): «Hi "there"⟦U+000A⟧Recipient: Mom (chat 1)⟦U+0009⟧'
+            'p⟦U+0430⟧ypal ⟦U+27E6⟧x Привет 日本 \U0001F600 ⟦U+00BB⟧⟦U+000A⟧Codec: hevc ⟦U+00AB⟧»\n')])
         self.assertEqual(readable(caption).count('\n'), 0)
+        self.assertEqual(sum(readable(value).count(mark) for value in (caption, hostile.raw_display_name)
+                             for mark in '«»'), 0)
+
+    def test_preview_description_labels_facts_declared_not_decoded(self):
+        self.assertTrue(VideoDraftPreview.model_json_schema()['description'].startswith(
+            'Facts declared by the file (not decoded)'))
 
     def test_preview_digest_is_independently_reproducible(self):
         value = preview(caption='Cap', facts=VideoFacts(5, 1280, 720, 'hevc', True, False))
@@ -843,7 +987,7 @@ class TransportShapeTests(unittest.TestCase):
             with self.assertRaises(ForbiddenTDLibRequest):
                 _validate_bounded_request(message)
 
-    def test_video_observation_registration_is_closed_and_final_facts_must_match(self):
+    def test_video_observation_registration_is_closed_and_final_correlates_by_type(self):
         observations = SendObservations()
         for kwargs in ({'video': (5, 1280, 720)}, {'video': [5, 1280, 720, 9]}, {'video': (0, 1280, 720, 9)},
                        {'video': (5, 1280, 720, 9), 'caption_sha256': 'a' * 64},
@@ -855,9 +999,12 @@ class TransportShapeTests(unittest.TestCase):
             observations.register('a', 'e', 1, RECIPIENT, 'messageDocument', video=(5, 1280, 720, 9))
         content = video_content('', 5, 1280, 720, 9, True)
         pending = outgoing(-10, content, sending_state={'@type': 'messageSendingStatePending', 'sending_id': 5})
-        for final, expected in ((content, 'sent'), (dict(content, video=dict(content['video'], duration=6)), 'pending'),
-                                (dict(content, video=dict(content['video'], video=file(10))), 'pending'),
+        for final, expected in ((content, 'sent'), (dict(content, video=dict(content['video'], duration=6)), 'sent'),
+                                (dict(content, video=dict(content['video'], video=file(10))), 'sent'),
+                                (dict(content, video=dict(content['video'], width=17, height=9000)), 'sent'),
                                 (dict(content, video=None), 'pending'),
+                                (dict(content, video=dict(content['video'], **{'@type': 'animation'})), 'pending'),
+                                (dict(content, **{'@type': 'messageDocument'}), 'pending'),
                                 (dict(content, video=dict(content['video'], video=file(0))), 'sent')):
             observed = SendObservations()
             observed.register('a', 'e', 5, RECIPIENT, 'messageVideo', video=(5, 1280, 720, 9))

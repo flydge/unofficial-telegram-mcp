@@ -84,6 +84,8 @@ from .video_drafts import (MAX_VIDEO_BYTES, VideoDraftPreview, VideoRecipient, V
     PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest, SendPreparedVideoResponse,
     PREPARED as VIDEO_PREPARED, REFUSED as VIDEO_REFUSED, UNAVAILABLE as VIDEO_UNAVAILABLE)
 
+RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
+
 
 class BrokerStartupError(RuntimeError):
     """Raised when exclusive, private broker startup cannot be established."""
@@ -165,7 +167,7 @@ def _local_artifact_classification(file_name: str, kind: str = "document") -> tu
     return _LOCAL_MIME_TYPES.get(suffix, "application/octet-stream"), media_kind
 
 
-from .selection_broker import SelectionBrokerMixin, FileProvenance
+from .selection_broker import SelectionBrokerMixin, FileProvenance, selected_models
 from .retained_selections import SelectionRegistry
 
 
@@ -373,8 +375,28 @@ class Broker(SelectionBrokerMixin):
             raise ArtifactUnavailable('artifact is unavailable')
         return account
 
-    @staticmethod
-    def _artifact_unavailable(operation, payload):
+    def _attempted_send(self, operation, draft_id, client_id):
+        """A consumed claim never reads as expired. After lost authority (release, account
+        switch, publication) it reports its local failure or a content-free outcome_unknown;
+        provider evidence is replayed only to a later call that still holds the original client
+        lifecycle and account epoch."""
+        video = operation == 'send_prepared_video'
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id,
+                   kinds=frozenset({'video'} if video else {'document', 'photo', 'voice_note'}))
+                   if client_id is not None else None)
+        if outcome is None:
+            return None
+        if video:
+            if outcome == 'local_failed':
+                return SendPreparedVideoResponse(status='local_failed', draft_id=draft_id,
+                                                 detail='local revalidation failed; no provider send was attempted')
+            return SendPreparedVideoResponse(status='outcome_unknown', draft_id=draft_id, detail=RECEIPT_AUTHORITY_UNAVAILABLE)
+        if outcome == 'local_failed':
+            return SendPreparedArtifactResponse(status='failed', draft_id=draft_id,
+                                                detail='local preparation failed; no provider send was attempted')
+        return SendPreparedArtifactResponse(status='outcome_unknown', draft_id=draft_id, detail=RECEIPT_AUTHORITY_UNAVAILABLE)
+
+    def _artifact_unavailable(self, operation, payload, client_id=None):
         detail = 'artifact is unavailable or expired'
         if operation == 'read_attachment':
             return ReadAttachmentResponse(status='expired', detail=detail, coverage_complete=False).model_dump(mode='json')
@@ -413,6 +435,10 @@ class Broker(SelectionBrokerMixin):
             return terminal[operation](status='unavailable', detail=REPLY_UNAVAILABLE if 'reply_artifact' in operation else 'draft is unavailable').model_dump(mode='json')
         if operation == 'get_send_status':
             return send_status(payload['draft_id']).model_dump(mode='json')
+        if operation in ('send_prepared_artifact', 'send_prepared_video'):
+            attempted = self._attempted_send(operation, payload['draft_id'], client_id)
+            if attempted is not None:
+                return attempted.model_dump(mode='json')
         if operation == 'send_prepared_artifact':
             return SendPreparedArtifactResponse(status='expired', draft_id=payload['draft_id'], detail='draft is unavailable').model_dump(mode='json')
         if operation == 'prepare_video_send':
@@ -447,7 +473,13 @@ class Broker(SelectionBrokerMixin):
             self._selections.release(request['client_id'])
             self._upload_authorities.release(request['client_id'])
             return finish(self._dispatch_owned(request))
-        if operation == 'retain_selection' or request['payload'].get('selection_id') is not None or request['payload'].get('reply_selection_id') is not None:
+        if operation == 'retain_selection':
+            return self._dispatch_selection(request, publish=publish)
+        if request['payload'].get('selection_id') is not None or request['payload'].get('reply_selection_id') is not None:
+            if operation not in selected_models():
+                # A selection token on an operation without selection support is a malformed
+                # closed request under every policy; it never reaches artifact or provider work.
+                raise BrokerProtocolError('operation payload is not allowed')
             return self._dispatch_selection(request, publish=publish)
         owned_operations = {'get_attachment', 'read_attachment', 'analyze_media', 'read_attachment_page',
             'read_spreadsheet', 'read_presentation', 'create_local_artifact', 'begin_local_upload',
@@ -479,7 +511,7 @@ class Broker(SelectionBrokerMixin):
                     model.model_validate(request['payload'])
                 artifact_id = request['payload'].get('artifact_id') if model is not None else None
                 if artifact_id is not None and not self._artifact_authority.authorize(scope, artifact_id):
-                    return finish(self._artifact_unavailable(operation, request['payload']))
+                    return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
                 if operation == 'get_attachment':
                     account = self._artifact_account()
                     if account is not None:
@@ -493,9 +525,9 @@ class Broker(SelectionBrokerMixin):
                 if operation == 'get_attachment':
                     from .schemas import AttachmentResponse
                     return finish(AttachmentResponse(status='blocked', anchor=request['payload']['anchor'], coverage='none', detail='TDLib authorization is not ready').model_dump(mode='json'))
-                return finish(self._artifact_unavailable(operation, request['payload']))
+                return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
             except (ArtifactUnavailable, TDLibError):
-                return finish(self._artifact_unavailable(operation, request['payload']))
+                return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
 
     def _upload_admission(self):
         """Observe bounded policy outside locks, return a pure final fact check."""
@@ -2077,9 +2109,13 @@ class Broker(SelectionBrokerMixin):
             if (self._video_owner(client_id) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch):
                 raise DraftError(VIDEO_UNAVAILABLE)
+            previews = []
+            # The preview is built and validated before insertion: a refused preview leaves
+            # no orphan draft and supersedes nothing.
             draft = self._drafts.prepare_video(owner=owner, artifact_id=request.artifact_id, recipient=request.recipient,
-                recipient_title=recipient_title, display_name=display_name, caption=request.caption, video=spec)
-            preview = self._video_preview(draft, owner)
+                recipient_title=recipient_title, display_name=display_name, caption=request.caption, video=spec,
+                evidence=lambda candidate: previews.append(self._video_preview(candidate, owner)))
+            [preview] = previews
             self._remember_draft_title(draft)
             return PrepareVideoSendResponse(status='prepared', video=preview, detail=VIDEO_PREPARED)
         except VideoRefusal as refusal:
@@ -2190,11 +2226,11 @@ class Broker(SelectionBrokerMixin):
             if receipt.evidence == 'local_failed':
                 return result('local_failed', 'local revalidation failed; no provider send was attempted')
             try:
-                # Disclose observed evidence only to the same current account and policy.
+                # Disclose observed evidence only to the same current account, client and policy.
                 if self._video_owner(client_id) != owner:
                     raise DraftError(VIDEO_UNAVAILABLE)
-            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
-                return result('outcome_unknown', 'current receipt authority is unavailable; do not retry automatically')
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, ArtifactUnavailable):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
             return result(receipt.status,
                           'TDLib confirmed delivery' if receipt.status == 'sent' else
                           failure_detail if receipt.status == 'failed' else

@@ -532,7 +532,10 @@ class ArtifactTransportFenceTests(ArtifactSendFixture, unittest.TestCase):
                     self.assertEqual(self.release(), {'released': True})
                 with patch.object(self.client._send_observations, 'register', side_effect=release_after_register):
                     result = self.send(did)
-                self.assertEqual(result['status'], 'expired'); self.assertIsNone(result['message_id'])
+                # The consumed claim replays its content-free local failure, never expired.
+                self.assertEqual((result['status'], result['detail']),
+                                 ('failed', 'local preparation failed; no provider send was attempted'))
+                self.assertIsNone(result['message_id'])
                 self.assertEqual(self.sends(), [])
                 entry = self.broker._drafts._entries[did]
                 self.assertEqual((entry.state, entry.receipt.status, entry.receipt.evidence),
@@ -578,6 +581,8 @@ class ArtifactTransportFenceTests(ArtifactSendFixture, unittest.TestCase):
         self.assertEqual(len(self.sends()), 1)
         entry = self.broker._drafts._entries[did]
         self.assertEqual((entry.state, entry.receipt.status, entry.receipt.message_id), ('finished', 'sent', 701))
-        self.assertEqual(results[0]['status'], 'expired'); self.assertIsNone(results[0]['message_id'])
+        # An issued attempt never reads as expired and discloses no provider evidence.
+        unknown = ('outcome_unknown', 'current receipt authority is unavailable; do not retry automatically', None)
+        self.assertEqual((results[0]['status'], results[0]['detail'], results[0]['message_id']), unknown)
         self.assertEqual(self.dispatch('get_send_status', {'draft_id': did})['status'], 'outcome_unknown')
         self.assertEqual(self.send(did)['status'], 'expired'); self.assertEqual(len(self.sends()), 1)

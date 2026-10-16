@@ -558,7 +558,10 @@ class OwnershipTests(unittest.TestCase):
                     resume.set(); worker.join(3); self.assertFalse(worker.is_alive())
                 self.assertEqual(errors, [])
                 self.assertEqual(sent, [], 'revocation acknowledged before dispatch still reached provider')
-                self.assertEqual(results[0]['status'], 'expired'); self.assertIsNone(results[0]['message_id'])
+                # A consumed claim never reads as expired: its content-free local failure is replayed.
+                local = {'status': 'failed', 'draft_id': prepared['draft_id'], 'recipient': None, 'message_id': None,
+                         'detail': 'local preparation failed; no provider send was attempted'}
+                self.assertEqual(results[0], local)
                 entry = self.broker._drafts._entries[prepared['draft_id']]
                 self.assertEqual(entry.state, 'finished')
                 self.assertEqual((entry.receipt.status, entry.receipt.evidence), ('failed', 'local_failed'))
@@ -612,7 +615,10 @@ class OwnershipTests(unittest.TestCase):
                 self.assertEqual(entry.receipt.status, 'sent' if result_kind == 'sent' else 'outcome_unknown')
                 self.assertEqual(entry.receipt.message_id, 701 if result_kind == 'sent' else None)
                 self.assertEqual(entry.owner.account_id, 17)
-                self.assertEqual(results[0]['status'], 'expired'); self.assertIsNone(results[0]['message_id'])
+                # An issued attempt never reads as expired and discloses no provider evidence.
+                unknown = {'status': 'outcome_unknown', 'draft_id': prepared['draft_id'], 'recipient': None,
+                           'message_id': None, 'detail': 'current receipt authority is unavailable; do not retry automatically'}
+                self.assertEqual(results[0], unknown)
                 self.provider.account = 17
                 self.assertEqual(self.dispatch('get_send_status', {'draft_id': prepared['draft_id']})['status'], 'outcome_unknown')
                 self.assertEqual(self.dispatch('send_prepared_artifact', {'draft_id': prepared['draft_id'], 'approved': True})['status'], 'expired')

@@ -105,18 +105,21 @@ def _forward_detail(validated) -> str:
 
 
 def _video_detail(validated) -> str:
-    """The untrusted file name and caption stay on their own marked lines, readable in any
-    script, with invisible, direction-changing and look-alike characters as ⟦U+XXXX⟧."""
-    from .forward_drafts import readable
+    """As in the forward dialog, the untrusted file name and caption are enclosed in « » and
+    rendered by `readable` below the `READABLE_RULE` legend line, so no span can close early
+    or start a fake line. The probed facts are what the container boxes declare; nothing is
+    decoded, so they are labelled as declared by the file."""
+    from .forward_drafts import READABLE_RULE, readable
     recipient = validated.recipient
-    exact = '[untrusted] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧)'
-    caption = (f'Caption {exact}: {readable(validated.raw_caption)}\n' if validated.caption is not None
+    caption = (f'Caption [untrusted] (exact): «{readable(validated.raw_caption)}»\n' if validated.caption is not None
                else 'Caption: (none)\n')
     return (f"Send this native video to {recipient.title} (chat {recipient.chat_id})?\n"
             f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
             f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"File name {exact}: {readable(validated.raw_display_name)}\n"
+            f"Untrusted spans in « » below are exact; {READABLE_RULE}.\n"
+            f"File name [untrusted] (exact): «{readable(validated.raw_display_name)}»\n"
             f"Bytes: {validated.size_bytes}\nSHA-256: {validated.sha256}\n"
+            "Declared by the file (not decoded):\n"
             f"Duration: {validated.duration_seconds} seconds\nDimensions: {validated.width}x{validated.height}\n"
             f"Codec: {validated.codec}\nAudio: {'yes' if validated.has_audio else 'no'}\n"
             f"Streaming: {'yes' if validated.supports_streaming else 'no'}\n{caption}"

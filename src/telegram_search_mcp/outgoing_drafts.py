@@ -37,8 +37,11 @@ class DraftError(RuntimeError):
 
 
 def _safe_display_name(display_name: str) -> str:
+    # NFKC before splitting: a compatibility solidus (U+FF0F, U+FF3C, ...) must not
+    # become a path separator only after the split.
+    normalized = unicodedata.normalize("NFKC", display_name)
     safe_name = sanitize_telegram_text(
-        display_name.replace("\\", "/").rsplit("/", 1)[-1], max_length=255
+        normalized.replace("\\", "/").rsplit("/", 1)[-1], max_length=255
     )
     if safe_name in {"", ".", ".."}:
         safe_name = "attachment"
@@ -361,8 +364,12 @@ class OutgoingDraftRegistry:
 
     def prepare_video(self, *, owner: DraftOwner, artifact_id: str, recipient: int, recipient_title: str,
                       display_name: str, caption: str, video: object,
-                      local_admission_guard: Callable[[], None] | None = None) -> OutgoingDraft:
-        """Record one native video bound to the exact probed artifact bytes."""
+                      local_admission_guard: Callable[[], None] | None = None,
+                      evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
+        """Record one native video bound to the exact probed artifact bytes.
+
+        `evidence` builds and validates the public preview of the exact candidate outside the
+        registry lock; if it raises, nothing is inserted and no pending draft is superseded."""
         from .video_drafts import MAX_VIDEO_BYTES, VideoSpec
         self._validate_owner(owner)
         if type(recipient) is not int or recipient == 0:
@@ -385,6 +392,14 @@ class OutgoingDraftRegistry:
         expires_at = min(now + self._max_ttl_seconds, artifact.expires_at)
         if expires_at <= now:
             raise DraftError("artifact has expired")
+        draft = OutgoingDraft(
+            draft_id=f"draft_{uuid.uuid4().hex}", artifact_id=artifact_id, sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes, display_name=safe_name, mime_type=mime_type, caption=safe_caption,
+            recipient=recipient, expires_at=expires_at, recipient_title=recipient_title, kind="video", video=video,
+        )
+        if evidence is not None:
+            evidence(draft)
+        draft_id = draft.draft_id
         from .selection_broker import record_selection_draft, selected_admission_fence
         with self._lock, selected_admission_fence():
             if local_admission_guard is not None:
@@ -392,14 +407,8 @@ class OutgoingDraftRegistry:
             self._prune_locked(now)
             if len(self._entries) >= self._capacity:
                 raise DraftError("draft capacity is exhausted")
-            draft_id = f"draft_{uuid.uuid4().hex}"
             if draft_id in self._entries:
                 raise DraftError("draft ID collision")
-            draft = OutgoingDraft(
-                draft_id=draft_id, artifact_id=artifact_id, sha256=artifact.sha256, size_bytes=artifact.size_bytes,
-                display_name=safe_name, mime_type=mime_type, caption=safe_caption, recipient=recipient,
-                expires_at=expires_at, recipient_title=recipient_title, kind="video", video=video,
-            )
             # Preparing again supersedes the same owner's pending draft for the same
             # artifact and recipient; it can no longer be claimed.
             for entry in self._entries.values():
@@ -521,6 +530,22 @@ class OutgoingDraftRegistry:
             entry.claim_token = object()
             return ClaimedDraft(draft=entry.draft, path=path, claim_token=entry.claim_token,
                                 provider=provider, provider_epoch=provider_epoch)
+
+    def attempt_outcome(self, draft_id: object, *, client_id: str, kinds: frozenset[str]) -> str | None:
+        """Content-free routing after a lost authority: did this client consume the draft?
+
+        None: never claimed (or unknown, foreign, another kind, or past receipt retention).
+        'local_failed': the claim ended before any provider attempt. 'attempted': anything else.
+        Never an authority for disclosure, status or another send; the caller maps it to a
+        fixed outcome.
+        """
+        with self._lock:
+            entry = self._entries.get(draft_id) if isinstance(draft_id, str) else None
+            if (entry is None or entry.owner.client_id != client_id or entry.draft.kind not in kinds or
+                    entry.attempted_at is None or self._attempt_clock() >= entry.attempted_at + 900):
+                return None
+            receipt = entry.receipt
+            return 'local_failed' if receipt is not None and receipt.evidence == 'local_failed' else 'attempted'
 
     def peek(self, draft_id: str, *, owner: DraftOwner) -> OutgoingDraft:
         """Inspect an unexpired draft without claiming a send attempt."""
