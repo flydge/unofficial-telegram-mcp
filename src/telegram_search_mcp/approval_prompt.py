@@ -23,6 +23,8 @@ end run'''
 _CHANGE_SCRIPT = (_SCRIPT.replace('approve send', 'approve change')
                   .replace('{"Cancel", "Send"}', '{"Cancel", "Apply"}').replace('is "Send"', 'is "Apply"'))
 _LIST_NAMES = {'main': 'Main', 'archive': 'Archive'}
+_EDIT_CHAT_KINDS = {'private': 'private', 'basic_group': 'group', 'supergroup': 'supergroup',
+                    'channel': 'channel; visible to all subscribers'}
 
 
 def _outgoing_style_detail(draft):
@@ -139,14 +141,22 @@ def _archive_detail(validated) -> str:
     `READABLE_RULE` legend, so it cannot close its span early or start a fake line."""
     from .forward_drafts import READABLE_RULE, readable
     chat = validated.chat
-    note = f'Note: {validated.note} (Telegram behaviour).\n' if validated.note is not None else ''
+    current, target = _LIST_NAMES[validated.current_list], _LIST_NAMES[validated.target_list]
+    # Telegram behaviour of the move itself: the chat leaves its list (and a pin there); folders
+    # that exclude archived chats hide an archived chat.
+    notes = (f'Note: the chat leaves {current} and loses any pin there; it is not pinned in {target} '
+             '(Telegram behaviour).\n')
+    if validated.target_list == 'archive':
+        notes += 'Note: chat folders that exclude archived chats will hide it (Telegram behaviour).\n'
+    if validated.note is not None:
+        notes += f'Note: {validated.note} (Telegram behaviour).\n'
     return (f"Move chat «{readable(chat.title)}» (chat {chat.chat_id}, {chat.kind}) from "
-            f"{_LIST_NAMES[validated.current_list]} to {_LIST_NAMES[validated.target_list]}?\n"
+            f"{current} to {target}?\n"
             f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
             f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
             f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"Current list: {_LIST_NAMES[validated.current_list]}\n"
-            f"Target list: {_LIST_NAMES[validated.target_list]}\n{note}"
+            f"Current list: {current}\n"
+            f"Target list: {target}\n{notes}"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"
             "Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one "
             "move attempt and report the list it observes right after.")
@@ -154,18 +164,26 @@ def _archive_detail(validated) -> str:
 
 def _text_edit_detail(validated) -> str:
     """The chat title, current text, covered spans and new text are enclosed in « » and rendered
-    by `readable` under the `READABLE_RULE` legend line, like every other untrusted span."""
+    by `readable` under the `READABLE_RULE` legend line, like every other untrusted span. Only
+    formatting Telegram does not detect again is listed as removed."""
     from datetime import datetime, timezone
+    from .edit_drafts import AUTO_DETECTED
     from .forward_drafts import READABLE_RULE, readable
     chat = validated.chat
     marker = '[untrusted Telegram evidence]'
-    rows = validated.entity_rows()
-    formatting = (('Current formatting, removed by this plain-text edit (raw text UTF-16 code units):\n' +
-                   ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
-                           for kind, offset, length, covered in rows)) if rows else '')
+    def spans(heading, rows):
+        return (heading + ' (raw text UTF-16 code units):\n' +
+                ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
+                        for kind, offset, length, covered in rows)) if rows else ''
+    rows = list(zip(validated.current_entities, validated.entity_rows()))
+    formatting = (spans('Current formatting, removed by this plain-text edit',
+                        [row for entity, row in rows if entity.type not in AUTO_DETECTED]) +
+                  spans('Current auto-detected entities, auto-detected again by Telegram wherever the new text '
+                        'contains them', [row for entity, row in rows if entity.type in AUTO_DETECTED]))
     edited = (datetime.fromtimestamp(validated.current_edit_date, tz=timezone.utc).isoformat()
               if validated.current_edit_date else 'never')
-    return (f"Edit your message {validated.message_id} in «{readable(chat.title)}» (chat {chat.chat_id})?\n"
+    return (f"Edit your message {validated.message_id} in «{readable(chat.title)}» "
+            f"(chat {chat.chat_id}, {_EDIT_CHAT_KINDS[chat.kind]})?\n"
             f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
             f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
             f"Expires: {validated.expires_at.isoformat()}\n\n"
@@ -175,7 +193,8 @@ def _text_edit_detail(validated) -> str:
             f"Source SHA-256: {validated.source_sha256}\n"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"
             "The new text is plain text without formatting; Telegram may detect links in it and show a "
-            "link preview. Recipients see the message marked \"edited\".\n"
+            "link preview. Link preview settings return to Telegram's default. Recipients see the message "
+            "marked \"edited\".\n"
             "Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit "
             "permission, then make one edit attempt.")
 

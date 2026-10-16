@@ -207,6 +207,12 @@ def _normalized_message_text(value: str) -> bool:
         return False
 
 
+def _exact_edit_text(value: str) -> bool:
+    """No edge whitespace and no character the pinned TDLib rewrites: stored text equals the reviewed text."""
+    from .edit_drafts import edge_whitespace, rewritten_text
+    return not edge_whitespace(value) and not rewritten_text(value)
+
+
 def _validate_bounded_request(payload: dict[str, Any]) -> None:
     request_type = payload.get("@type")
     if request_type == "getForumTopicHistory" and (
@@ -424,7 +430,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             or text.get("@type") != "formattedText"
             or type(text.get("text")) is not str or not 0 < len(text["text"]) <= 4096
             or type(text.get("entities")) is not list or text["entities"] != []
-            or not _normalized_message_text(text["text"])
+            or not _normalized_message_text(text["text"]) or not _exact_edit_text(text["text"])
         ):
             raise ForbiddenTDLibRequest("TDLib edit request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
@@ -1859,7 +1865,12 @@ class TDLibClient:
                 if response.get("@extra") != extra:
                     continue
                 if response.get("@type") == "error":
-                    raise MessageSendFailed("TDLib rejected the change", provider_error=response)
+                    # Only a 4xx provider rejection proves no change; 5xx, negative or malformed
+                    # codes may follow an applied change.
+                    code = response.get("code")
+                    if type(code) is int and 400 <= code <= 499:
+                        raise MessageSendFailed("TDLib rejected the change", provider_error=response)
+                    raise MessageSendOutcomeUnknown("TDLib change error does not prove rejection")
                 return response
             raise MessageSendOutcomeUnknown("TDLib change result timed out")
 

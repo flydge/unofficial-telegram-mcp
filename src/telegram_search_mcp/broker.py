@@ -90,8 +90,8 @@ from .archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveRefusal, A
     UNAVAILABLE as ARCHIVE_UNAVAILABLE)
 from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditSpec, PrepareTextEditRequest,
     PrepareTextEditResponse, ApplyPreparedTextEditRequest, ApplyPreparedTextEditResponse, evidence_fits,
-    normalized_text, PREPARED as TEXT_EDIT_PREPARED, REFUSED as TEXT_EDIT_REFUSED,
-    UNAVAILABLE as TEXT_EDIT_UNAVAILABLE)
+    edge_whitespace, normalized_text, rewritten_text, PREPARED as TEXT_EDIT_PREPARED, REFUSED as TEXT_EDIT_REFUSED,
+    REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 
@@ -2452,7 +2452,8 @@ class Broker(SelectionBrokerMixin):
         self._require_change_policy('edit_own_text')
         return TextEditDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
             expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
-            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title), snapshot=spec.snapshot,
+            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title, kind=spec.snapshot.chat_kind),
+            snapshot=spec.snapshot,
             new_text=spec.new_text)
 
     def _prepare_text_edit(self, request: PrepareTextEditRequest, *, client_id: str) -> PrepareTextEditResponse:
@@ -2462,6 +2463,11 @@ class Broker(SelectionBrokerMixin):
                 new_text = normalized_text(request.new_text)
             except ValueError:
                 raise EditRefusal('invalid_input') from None
+            # Never stripped or rewritten silently: the dialog's exact new text is what Telegram stores.
+            if edge_whitespace(new_text):
+                return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=TEXT_EDIT_WHITESPACE)
+            if rewritten_text(new_text):
+                return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=TEXT_EDIT_REWRITTEN)
             provider = self._shared_client()
             epoch = provider.send_observation_epoch
             snapshot = provider.read_own_text_message(request.chat, request.message_id)

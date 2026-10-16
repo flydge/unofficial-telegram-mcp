@@ -50,11 +50,22 @@ def _order(value: object) -> bool:
             not (len(value) > 1 and value.startswith('0')) and 0 < int(value) < 2**63)
 
 
+def _sponsored(source: object) -> bool:
+    """TDLib JSON omits a null `source`; any ChatSource (MTProxy sponsor, PSA) is not membership."""
+    if source is None:
+        return False
+    kind = source.get('@type') if type(source) is dict else None
+    if type(kind) is not str or not kind.startswith('chatSource'):
+        raise ValueError('chat positions are unavailable')
+    return True
+
+
 def current_list(positions: object) -> str:
-    """The Main or Archive list that carries a position; folder positions are out of scope."""
+    """The Main or Archive list that carries an own (source null) position; folder positions are
+    out of scope and a sponsored or PSA position is never membership."""
     if type(positions) is not list or len(positions) > _MAX_POSITIONS:
         raise ValueError('chat positions are unavailable')
-    found = []
+    seen, found = [], []
     for position in positions:
         chat_list = position.get('list') if type(position) is dict else None
         if (type(position) is not dict or position.get('@type') != 'chatPosition' or type(chat_list) is not dict or
@@ -63,9 +74,11 @@ def current_list(positions: object) -> str:
         name = {value: key for key, value in LIST_TYPES.items()}.get(chat_list['@type'])
         if name is None:
             continue
-        if set(chat_list) != {'@type'} or not _order(position.get('order')) or name in found:
+        if set(chat_list) != {'@type'} or not _order(position.get('order')) or name in seen:
             raise ValueError('chat positions are unavailable')
-        found.append(name)
+        seen.append(name)
+        if not _sponsored(position.get('source')):
+            found.append(name)
     if len(found) > 1:
         raise ValueError('chat positions are unavailable')
     return found[0] if found else 'none'

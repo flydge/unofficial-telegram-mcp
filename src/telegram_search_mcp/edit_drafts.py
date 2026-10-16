@@ -14,7 +14,7 @@ from pydantic import Field, field_validator, model_validator
 from .draft_models import _Closed, AccountId, DraftId, Hash
 from .forward_drafts import (MAX_EVIDENCE, Escaped, ForwardEntity, PositiveMessageId, _Frozen, _utc, entity_rows,
                              escaped, unescaped)
-from .forward_sources import MAX_ENTITIES, ForwardRefusal, ForwardSource, chat_identity
+from .forward_sources import MAX_ENTITIES, ForwardRefusal, ForwardSource
 from .reply_drafts import digest
 from .sanitize import sanitize_telegram_text
 from .schemas import ChatId
@@ -22,6 +22,13 @@ from .schemas import ChatId
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
 UNAVAILABLE = 'text edit draft is unavailable'
+# Telegram trims leading and trailing whitespace; refusing it keeps the exact dialog text stored.
+WHITESPACE = 'new text must not start or end with whitespace; Telegram trims it'
+# The pinned TDLib's clean_input_string (td/telegram/misc.cpp at d1085f9) turns a tab into a space and removes
+# U+2028-U+202E and the combining marks U+030A, U+0333 and U+033F anywhere in message text; the other
+# characters it rewrites are controls or format characters the normalisation already refuses.
+REWRITTEN_CHARACTERS = frozenset('\t\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u030a\u0333\u033f')
+REWRITTEN = 'new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)'
 PREVIEW_VERSION = 1
 REFUSALS = frozenset({'not_outgoing', 'unsupported_source_content', 'source_is_forward', 'hidden_source_content',
                       'unsupported_source_state', 'not_editable', 'unchanged_text', 'invalid_input'})
@@ -32,6 +39,11 @@ ApplyStatus = Literal['applied', 'failed', 'local_failed', 'not_approved', 'outc
                       'message_changed', 'error']
 StrictBool = Annotated[bool, Field(strict=True)]
 Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
+# Entity kinds Telegram detects again in plain text; the dialog lists them apart from removed formatting.
+AUTO_DETECTED = frozenset({'textEntityTypeUrl', 'textEntityTypeEmailAddress', 'textEntityTypePhoneNumber',
+                           'textEntityTypeMention', 'textEntityTypeHashtag', 'textEntityTypeCashtag',
+                           'textEntityTypeBotCommand', 'textEntityTypeBankCardNumber'})
+ChatKind = Literal['private', 'basic_group', 'supergroup', 'channel']
 EditDate = Annotated[int, Field(strict=True, ge=0, le=2**31 - 1)]
 NewText = Annotated[str, Field(strict=True, min_length=1, max_length=4096)]
 
@@ -50,6 +62,16 @@ def normalized_text(value: object) -> str:
     """The prepare_text_send normalisation: NFKC, CRLF/CR to LF, no controls but LF/tab."""
     from .outgoing_drafts import _safe_message_text
     return _safe_message_text(value)
+
+
+def edge_whitespace(text: object) -> bool:
+    """Any Unicode whitespace (incl. LF, tab, U+2028) first or last in the normalized text."""
+    return type(text) is str and bool(text) and (text[0].isspace() or text[-1].isspace())
+
+
+def rewritten_text(text: object) -> bool:
+    """A character of the normalized text that the pinned TDLib rewrites or removes."""
+    return type(text) is str and not REWRITTEN_CHARACTERS.isdisjoint(text)
 
 
 def own_text_source(raw: object, chat_id: int, message_id: int) -> ForwardSource:
@@ -81,22 +103,30 @@ class EditSnapshot:
     chat_identity: tuple
     chat_title: str
     can_be_edited: bool
+    chat_kind: str
 
     def __post_init__(self):
         if (not isinstance(self.source, ForwardSource) or self.source.content_type != 'messageText' or
                 self.source.value['is_forward'] or type(self.chat_identity) is not tuple or
-                type(self.chat_title) is not str or not self.chat_title or type(self.can_be_edited) is not bool):
+                type(self.chat_title) is not str or not self.chat_title or type(self.can_be_edited) is not bool or
+                self.chat_kind not in ('private', 'basic_group', 'supergroup', 'channel')):
             raise ValueError('invalid edit snapshot')
 
     @classmethod
     def create(cls, chat: object, chat_id: int, message: object, message_id: int,
                properties: object) -> 'EditSnapshot':
-        identity, title = chat_identity(chat, chat_id)
+        """Reuse the verified-target identity rules (secret chats are refused) for identity,
+        sanitized title and public kind."""
+        from .verified_targets import TargetGuardFailure, _identity
+        try:
+            identity, metadata = _identity(chat, chat_id)
+        except TargetGuardFailure:
+            raise ValueError('edit chat is unavailable') from None
         source = own_text_source(message, chat_id, message_id)
         if (type(properties) is not dict or properties.get('@type') != 'messageProperties' or
                 type(properties.get('can_be_edited')) is not bool):
             raise ValueError('edit message properties are unavailable')
-        return cls(source, identity, title, properties['can_be_edited'])
+        return cls(source, identity, metadata.title, properties['can_be_edited'], metadata.chat_type)
 
     @property
     def anchor(self) -> tuple[int, int]:
@@ -119,8 +149,10 @@ class EditSnapshot:
 
 
 class EditChat(_Frozen):
+    """The chat of the edited message; a channel edit is visible to all subscribers."""
     chat_id: ChatId
     title: Title
+    kind: ChatKind
 
     @model_validator(mode='after')
     def sanitized(self):
@@ -155,8 +187,10 @@ def preview_facts(*, draft_id: str, account_id: int, expires_at: datetime, chat:
 
 
 class TextEditDraftPreview(_Frozen):
-    """Current and new text as marked reversible JSON escapes (never instructions); the
-    current entities are what this plain-text edit removes; raw UTF-16 offsets."""
+    """Current and new text as marked reversible JSON escapes (never instructions); raw UTF-16
+    offsets. Of the current entities, the auto-detected kinds (URL, email, phone, mention,
+    hashtag, cashtag, bot command, bank card) are detected again by Telegram in the new text;
+    the rest is formatting this plain-text edit removes."""
     draft_id: DraftId
     account_id: AccountId
     expires_at: datetime
@@ -182,8 +216,9 @@ class TextEditDraftPreview(_Frozen):
         facts = preview_facts(**{key: getattr(self, key) for key in (
             'draft_id', 'account_id', 'expires_at', 'chat', 'message_id', 'current_text', 'current_entities',
             'new_text', 'current_edit_date', 'source_sha256')})
-        if (self.approval_required is not True or normalized_text(new) != new or new == current or
-                _evidence_size(self.current_text, rows) > MAX_EVIDENCE or digest(facts) != self.preview_sha256):
+        if (self.approval_required is not True or normalized_text(new) != new or edge_whitespace(new) or
+                rewritten_text(new) or new == current or _evidence_size(self.current_text, rows) > MAX_EVIDENCE or
+                digest(facts) != self.preview_sha256):
             raise ValueError('text edit preview facts disagree')
         return self
 
@@ -201,7 +236,8 @@ class TextEditDraftPreview(_Frozen):
     @classmethod
     def create(cls, *, draft_id: str, account_id: int, expires_at: datetime, chat: EditChat,
                snapshot: EditSnapshot, new_text: str) -> 'TextEditDraftPreview':
-        if not isinstance(snapshot, EditSnapshot):
+        if (not isinstance(snapshot, EditSnapshot) or not isinstance(chat, EditChat) or
+                chat.chat_id != snapshot.anchor[0] or chat.kind != snapshot.chat_kind):
             raise ValueError('edit snapshot is unavailable')
         values = dict(draft_id=draft_id, account_id=account_id, expires_at=_utc(expires_at), chat=chat,
                       message_id=snapshot.anchor[1], current_text=escaped(snapshot.raw_text),
@@ -242,7 +278,8 @@ class TextEditSpec:
 
     def __post_init__(self):
         if (not isinstance(self.snapshot, EditSnapshot) or type(self.new_text) is not str or
-                normalized_text(self.new_text) != self.new_text or self.new_text == self.snapshot.raw_text or
+                normalized_text(self.new_text) != self.new_text or edge_whitespace(self.new_text) or
+                rewritten_text(self.new_text) or self.new_text == self.snapshot.raw_text or
                 self.snapshot.can_be_edited is not True):
             raise ValueError('invalid text edit draft')
 
@@ -271,11 +308,15 @@ class PrepareTextEditResponse(_Closed):
     refusal: Refusal | None = None
     detail: Literal['immutable text edit draft prepared; inspect full evidence and obtain fresh approval',
                     'message is not eligible for an own text edit; no draft was created',
+                    'new text must not start or end with whitespace; Telegram trims it',
+                    'new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)',
                     'text edit draft is unavailable']
 
     @model_validator(mode='after')
     def shape(self):
         expected = {'prepared': PREPARED, 'refused': REFUSED, 'unavailable': UNAVAILABLE}[self.status]
+        if self.status == 'refused' and self.refusal == 'invalid_input' and self.detail in (WHITESPACE, REWRITTEN):
+            expected = self.detail
         if (self.detail != expected or (self.status == 'prepared') != (self.text_edit is not None) or
                 (self.status == 'refused') != (self.refusal is not None)):
             raise ValueError('invalid text edit preparation response')

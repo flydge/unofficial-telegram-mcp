@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import tempfile
+import threading
 import time
 import unittest
 from collections import deque
@@ -20,6 +21,7 @@ from unittest.mock import patch
 
 from telegram_search_mcp.approval_prompt import confirm_approved_send
 from telegram_search_mcp.archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveSnapshot, ArchiveSpec,
+    current_list,
     ApplyPreparedArchiveRequest, ApplyPreparedArchiveResponse, PrepareChatArchiveRequest, PrepareChatArchiveResponse,
     UNAVAILABLE as ARCHIVE_UNAVAILABLE)
 from telegram_search_mcp.artifact_store import ArtifactStore
@@ -56,6 +58,12 @@ PROPERTIES = {'@type': 'messageProperties', 'can_be_edited': True, 'can_be_forwa
     'can_be_replied': True, 'can_be_saved': True, 'has_protected_content_by_current_user': False,
     'has_protected_content_by_other_user': False}
 UNKNOWN = 'current receipt authority is unavailable; do not retry automatically'
+WHITESPACE = 'new text must not start or end with whitespace; Telegram trims it'
+REWRITTEN = 'new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)'
+# Provider error codes the fake returns after the request; None omits the code. Only 4xx proves no change.
+ERRORS = {'rejected': 400, 'flood': 420, 'server_error': 500, 'negative': -1, 'codeless': None}
+MTPROXY = {'@type': 'chatSourceMtprotoProxy'}
+PSA = {'@type': 'chatSourcePublicServiceAnnouncement', 'type': 'covid', 'text': 'PRIVATE PSA TEXT'}
 # Independent literal of the shared dialog rule; a silent change fails the goldens.
 RULE = ('⟦U+XXXX⟧ marks control, format, private-use, unassigned and default-ignorable characters '
         '(except one U+FE0E/U+FE0F right after a non-selector character), line, paragraph and non-ASCII '
@@ -86,9 +94,9 @@ def escape(value):
     return out + '"'
 
 
-def positions(*lists, extra=()):
+def positions(*lists, extra=(), source=None):
     return [{'@type': 'chatPosition', 'list': {'@type': LISTS[name]}, 'order': ORDER, 'is_pinned': False,
-             'source': None} for name in lists] + list(extra)
+             'source': source} for name in lists] + list(extra)
 
 
 def folder_position():
@@ -99,6 +107,7 @@ def folder_position():
 def chat(chat_id, title, kind='supergroup', lists=('main',), native=1234):
     types = {'supergroup': {'@type': 'chatTypeSupergroup', 'supergroup_id': native, 'is_channel': False},
              'channel': {'@type': 'chatTypeSupergroup', 'supergroup_id': native, 'is_channel': True},
+             'basic_group': {'@type': 'chatTypeBasicGroup', 'basic_group_id': native},
              'private': {'@type': 'chatTypePrivate', 'user_id': native},
              'secret': {'@type': 'chatTypeSecret', 'secret_chat_id': 9, 'user_id': native}}
     return {'@type': 'chat', 'id': chat_id, 'title': title, 'type': types[kind], 'has_protected_content': False,
@@ -143,24 +152,28 @@ class Raw:
             value = copy.deepcopy(self.properties)
         elif kind == 'addChatToList':
             mode = self.archive_mode
-            if mode == 'rejected':
-                self.events.append({'@type': 'error', 'code': 400, 'message': 'PRIVATE PROVIDER TEXT',
-                                    '@extra': request['@extra']}); return
             if mode == 'lost':
                 self.fail_receive = True; return
             if mode == 'switch_account':
                 self.account = 8
             target = {value: key for key, value in LISTS.items()}[request['chat_list']['@type']]
-            if mode != 'no_move':
-                self.chats[request['chat_id']]['positions'] = positions(target)
-                self.events.append({'@type': 'updateChatPosition', 'chat_id': request['chat_id'],
-                                    'position': positions(target)[0]})
+            if mode not in ('no_move', 'rejected', 'flood'):  # A 5xx/negative/codeless error may follow the move.
+                moved = positions(target, source=MTPROXY if mode == 'sponsored' else None)
+                self.chats[request['chat_id']]['positions'] = moved
+                self.events.append({'@type': 'updateChatPosition', 'chat_id': request['chat_id'], 'position': moved[0]})
+            if mode in ERRORS:
+                error = {'@type': 'error', 'message': 'PRIVATE PROVIDER TEXT', '@extra': request['@extra']}
+                self.events.append(error if ERRORS[mode] is None else {**error, 'code': ERRORS[mode]}); return
             value = {'@type': 'chat'} if mode == 'bad_result' else {'@type': 'ok'}
         elif kind == 'editMessageText':
             mode = self.edit_mode
-            if mode == 'rejected':
-                self.events.append({'@type': 'error', 'code': 400, 'message': 'MESSAGE_EDIT_TIME_EXPIRED PRIVATE',
-                                    '@extra': request['@extra']}); return
+            if mode in ERRORS:
+                if mode not in ('rejected', 'flood'):  # A 5xx/negative/codeless error may follow the edit.
+                    self.message['content'] = {'@type': 'messageText',
+                                               'text': formatted(request['input_message_content']['text']['text'])}
+                    self.message['edit_date'] = 1700000500
+                error = {'@type': 'error', 'message': 'MESSAGE_EDIT_TIME_EXPIRED PRIVATE', '@extra': request['@extra']}
+                self.events.append(error if ERRORS[mode] is None else {**error, 'code': ERRORS[mode]}); return
             if mode == 'lost':
                 self.fail_receive = True; return
             if mode == 'switch_account':
@@ -171,6 +184,8 @@ class Raw:
             value['edit_date'] = {'zero_edit_date': 0, 'stale': self.message['edit_date'] - 1}.get(mode, 1700000500)
             if mode == 'wrong_id':
                 value['id'] = MID + 1048576
+            if mode == 'wrong_chat':
+                value['chat_id'] = CHAT - 1
             if mode in ('ok', 'switch_account'):
                 self.message = copy.deepcopy(value)
             self.events.append({'@type': 'updateMessageEdited', 'chat_id': CHAT, 'message_id': MID,
@@ -217,13 +232,15 @@ def archive_preview(current='main', target='archive', title='Team Chat', kind='s
         chat=ArchiveChat(chat_id=CHAT, title=title, kind=kind), current_list=current, target_list=target)
 
 
-def edit_snapshot(message=None, title='Team Chat', properties=None):
-    return EditSnapshot.create(chat(CHAT, title), CHAT, message or own_message(), MID, properties or dict(PROPERTIES))
+def edit_snapshot(message=None, title='Team Chat', properties=None, kind='supergroup'):
+    return EditSnapshot.create(chat(CHAT, title, kind), CHAT, message or own_message(), MID,
+                               properties or dict(PROPERTIES))
 
 
-def edit_preview(new='Hello there', message=None, title='Team Chat'):
+def edit_preview(new='Hello there', message=None, title='Team Chat', kind='supergroup'):
     return TextEditDraftPreview.create(draft_id=DID, account_id=ACCOUNT, expires_at=EXPIRY,
-        chat=EditChat(chat_id=CHAT, title=title), snapshot=edit_snapshot(message, title), new_text=new)
+        chat=EditChat(chat_id=CHAT, title=title, kind=kind), snapshot=edit_snapshot(message, title, kind=kind),
+        new_text=new)
 
 
 class Fixture:
@@ -442,6 +459,32 @@ class ArchivePrepareTests(Fixture, unittest.TestCase):
                 self.assertEqual(self.broker._drafts.known_ids(), set())
         self.assert_no_attempt()
 
+    def test_sponsored_or_psa_positions_are_not_list_membership(self):
+        # Decision 3: only a source-null position is membership; TDLib JSON omits a null source.
+        organic = positions('main'); del organic[0]['source']
+        for chat_positions, expected in ((positions('main', source=MTPROXY), 'none'),
+                                         (positions('archive', source=PSA), 'none'),
+                                         (positions('main', source=PSA) + positions('archive'), 'archive'),
+                                         (positions('archive', source=MTPROXY) + positions('main'), 'main'),
+                                         (organic, 'main'), (positions('main') + [folder_position()], 'main')):
+            with self.subTest(positions=chat_positions):
+                self.assertEqual(current_list(chat_positions), expected)
+        for source in ('chatSourceMtprotoProxy', {'@type': 'chatListMain'}, {}, {'@type': 5}, []):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                current_list(positions('main', source=source))
+        with self.assertRaises(ValueError):  # Still one position per list, sponsored or not.
+            current_list(positions('main', source=MTPROXY) + positions('main'))
+        for target in ('archive', 'main'):
+            for sponsored in (positions('main', source=MTPROXY), positions('main', source=PSA),
+                              positions('archive', source=PSA)):
+                with self.subTest(target=target, sponsored=sponsored):
+                    self.setUp(); self.raw.chats[CHAT]['positions'] = sponsored
+                    result = self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': target})
+                    self.assertEqual(result, {'status': 'refused', 'archive': None, 'refusal': 'unsupported_chat',
+                                              'detail': 'chat is not eligible; no draft was created'})
+                    self.assertEqual(self.broker._drafts.known_ids(), set()); self.assert_no_attempt()
+                    self.assertNotIn('PRIVATE', json.dumps(result))
+
     def test_malformed_missing_or_ambiguous_chats_are_unavailable(self):
         for change in (lambda raw: raw.chats[CHAT].update(positions=positions('main', 'archive')),
                        lambda raw: raw.chats[CHAT].update(positions=positions('main', 'main')),
@@ -476,6 +519,9 @@ class ArchivePrepareTests(Fixture, unittest.TestCase):
         self.broker._policy = BOTH
         self.assert_no_attempt()
         self.assertEqual(self.apply_archive(did)['status'], 'applied')
+        for op in ('send_prepared_text', 'send_prepared_artifact'):  # Never a replay of the change receipt.
+            result = self.dispatch(op, {'draft_id': did, 'approved': True})
+            self.assertEqual((result['status'], result['detail']), ('error', 'draft kind does not match send tool'), op)
 
     def test_reprepare_supersedes_only_the_same_owner_and_chat(self):
         first = self.prepare_archive()['draft_id']
@@ -538,8 +584,11 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(len(self.requests('addChatToList')), 1); self.assertEqual(len(self.approvals), 1)
 
     def test_unobserved_lost_malformed_and_rejected_outcomes_never_retry(self):
+        # Decision 2: only a 4xx error proves no change; 5xx, negative or codeless errors may follow a move.
         for mode, expected in (('no_move', 'outcome_unknown'), ('lost', 'outcome_unknown'),
-                               ('bad_result', 'outcome_unknown'), ('rejected', 'failed')):
+                               ('bad_result', 'outcome_unknown'), ('sponsored', 'outcome_unknown'),
+                               ('server_error', 'outcome_unknown'), ('negative', 'outcome_unknown'),
+                               ('codeless', 'outcome_unknown'), ('rejected', 'failed'), ('flood', 'failed')):
             with self.subTest(mode=mode):
                 self.setUp(); self.raw.archive_mode = mode
                 did = self.prepare_archive()['draft_id']
@@ -549,7 +598,7 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(len(self.requests('addChatToList')), 1)
                 self.assertNotIn('PRIVATE', json.dumps(result))
                 if expected == 'failed':
-                    self.assertEqual(result['detail'], 'TDLib rejected the change (code 400)')
+                    self.assertEqual(result['detail'], f'TDLib rejected the change (code {ERRORS[mode]})')
                 else:
                     self.assertIn('do not retry', result['detail'])
 
@@ -582,6 +631,9 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
                 ('chat_changed', lambda raw: raw.chats[CHAT]['type'].update(is_channel=True)),
                 ('chat_changed', lambda raw: raw.chats[CHAT].update(positions=[folder_position()])),
                 ('chat_changed', lambda raw: raw.chats[CHAT].update(positions=positions('main', 'archive'))),
+                ('chat_changed', lambda raw: raw.chats[CHAT].update(positions=positions('main', source=MTPROXY))),
+                ('chat_changed', lambda raw: raw.chats[CHAT].update(positions=positions('main', source=PSA))),
+                ('chat_changed', lambda raw: raw.chats[CHAT].update(positions=positions('archive', source=PSA))),
                 ('already_in_target', lambda raw: raw.chats[CHAT].update(positions=positions('archive')))):
             with self.subTest(expected=expected, change=change):
                 self.setUp(); did = self.prepare_archive()['draft_id']; change(self.raw)
@@ -622,6 +674,38 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
                                                      client_id=CLIENT)
         self.assertEqual(result.status, 'local_failed'); self.assert_no_attempt()
 
+    def test_claim_made_stale_inside_the_provider_lock_is_local_failed_without_transport(self):
+        # The claim expires between the claim and the raw send: archive_guard's claim check refuses.
+        did = self.prepare_archive()['draft_id']
+        real = self.raw.send
+        def send(request):
+            real(request)
+            if request['@type'] == 'getChat' and self.approvals:  # The revalidation read after the claim.
+                self.broker._drafts._clock = lambda: time.time() + 10**6
+        self.raw.send = send
+        self.assertEqual(self.apply_archive(did)['status'], 'local_failed'); self.assert_no_attempt()
+        self.assertEqual(self.apply_archive(did)['status'], 'local_failed'); self.assert_no_attempt()
+
+    def test_concurrent_applies_make_one_attempt(self):
+        # Recorded pattern (spec §8 amendments, shared with F14/F15): the second caller made no
+        # attempt but reads outcome_unknown, never applied or expired.
+        did = self.prepare_archive()['draft_id']
+        gate = threading.Event(); results = []
+        def prompt(**kw):
+            self.approvals.append(kw); gate.wait(5); return True
+        self.broker._approval_prompt = prompt
+        threads = [threading.Thread(target=lambda: results.append(self.apply_archive(did)['status'])) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 5
+        while len(self.approvals) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gate.set()
+        for thread in threads:
+            thread.join(10)
+        self.assertEqual(sorted(results), ['applied', 'outcome_unknown'])
+        self.assertEqual(len(self.requests('addChatToList')), 1)
+
     def test_restart_foreign_owner_and_disabled_policy_are_content_free(self):
         did = self.prepare_archive()['draft_id']
         self.assertEqual(self.apply_archive(did, client=FOREIGN)['status'], 'expired')
@@ -646,15 +730,37 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(self.apply_archive(did, client=FOREIGN)['status'], 'expired')
         self.assertEqual(len(self.requests('addChatToList')), 1); self.assertEqual(len(self.approvals), 1)
 
-    def test_status_is_bound_to_the_archive_policy_and_never_reports_sent(self):
-        did = self.prepare_archive()['draft_id']
-        status = self.dispatch('get_send_status', {'draft_id': did})
-        self.assertEqual((status['status'], status['evidence']), ('pending', 'local_pending'))
-        self.apply_archive(did)
-        status = self.dispatch('get_send_status', {'draft_id': did})
-        self.assertEqual((status['status'], status['message_id']), ('outcome_unknown', None))
-        self.broker._policy = RuntimePolicy(enabled_capabilities=('send', 'edit_own_text'))
-        self.assertEqual(self.broker._get_send_status(GetSendStatusRequest(draft_id=did), client_id=CLIENT).evidence, 'none')
+    def test_status_is_bound_to_the_change_capability_and_never_reports_sent(self):
+        # A capability refusal is the content-free default; pending and local-failure statuses differ
+        # from it, so they prove the binding. An applied change reads content-free, never sent.
+        refused = ('outcome_unknown', 'none', None)
+        for kind, other in (('archive', RuntimePolicy(enabled_capabilities=('send', 'edit_own_text'))),
+                            ('text_edit', RuntimePolicy(enabled_capabilities=('send', 'archive_chats')))):
+            def status(did, policy):
+                self.broker._policy = policy
+                try:
+                    value = self.broker._get_send_status(GetSendStatusRequest(draft_id=did), client_id=CLIENT)
+                finally:
+                    self.broker._policy = BOTH
+                return value.status, value.evidence, value.message_id
+            def prepare():
+                return self.prepare_archive()['draft_id'] if kind == 'archive' else self.prepare_edit()['draft_id']
+            def apply(did):
+                return self.apply_archive(did) if kind == 'archive' else self.apply_edit(did)
+            with self.subTest(kind=kind):
+                self.setUp(); did = prepare()
+                self.assertEqual(status(did, BOTH), ('pending', 'local_pending', None))
+                self.assertEqual(status(did, other), refused)
+                def rename(**kw):
+                    self.raw.chats[CHAT]['title'] = 'Renamed'; return True
+                self.broker._approval_prompt = rename
+                self.assertEqual(apply(did)['status'], 'local_failed')
+                self.assertEqual(status(did, BOTH), ('failed', 'local_failed', None))
+                self.assertEqual(status(did, other), refused)
+                self.setUp(); did = prepare()
+                self.assertEqual(apply(did)['status'], 'applied')
+                self.assertEqual(status(did, BOTH), refused)  # Applied: content-free, never 'sent'.
+                self.assertEqual(status(did, other), refused)
 
 
 class EditPrepareTests(Fixture, unittest.TestCase):
@@ -663,7 +769,7 @@ class EditPrepareTests(Fixture, unittest.TestCase):
     def test_prepare_binds_projection_and_reversible_escapes(self):
         self.raw.message = own_message('Hello world', [entity('textEntityTypeBold', 0, 5)])
         preview = self.prepare_edit('Привет, «мир»\r\nnext')
-        self.assertEqual(preview['chat'], {'chat_id': CHAT, 'title': 'Team Chat'})
+        self.assertEqual(preview['chat'], {'chat_id': CHAT, 'title': 'Team Chat', 'kind': 'supergroup'})
         self.assertEqual((preview['message_id'], preview['current_edit_date'], preview['account_id']), (MID, 0, ACCOUNT))
         self.assertEqual(preview['current_text'], MARK + escape('Hello world'))
         self.assertEqual(preview['new_text'], MARK + escape('Привет, «мир»\nnext'))  # Normalized like a text send.
@@ -722,6 +828,73 @@ class EditPrepareTests(Fixture, unittest.TestCase):
                     self.assertEqual(self.requests('getMessage'), [])  # Local normalisation precedes any read.
         self.assert_no_attempt()
 
+    def test_new_text_with_edge_whitespace_is_refused_never_stripped(self):
+        # Decision 1: Telegram trims edge whitespace, so the exact dialog text would not be stored.
+        # Checked after normalisation: NBSP, U+3000 and U+00A8 become a leading or trailing space.
+        for new in (' Hello', 'Hello ', 'Hello\n', '\nHello', '\tHello', 'Hello\t', 'Hello\r\n', 'Hello\r',
+                    'Hello\u2028', '\u2029Hello', '\u1680Hello', '\u3000Hello', 'Hello\u00a0', 'Hello\u2003',
+                    '\u00a8Hello', 'Hello there \n'):
+            with self.subTest(new=new):
+                self.setUp()
+                result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
+                self.assertEqual(result, {'status': 'refused', 'text_edit': None, 'refusal': 'invalid_input',
+                                          'detail': WHITESPACE})
+                self.assertEqual(self.requests('getMessage'), [])
+                self.assertEqual(self.broker._drafts.known_ids(), set())
+                proxy = BrokerClient(socket_path=Path('/nonexistent/no.sock'), policy=EDIT)
+                proxy._request = lambda *args: copy.deepcopy(result); self.addCleanup(proxy.close)
+                request = PrepareTextEditRequest(chat=CHAT, message_id=MID, new_text=new)
+                self.assertEqual(proxy.prepare_text_edit(request).model_dump(mode='json'), result)
+        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+        preview = self.prepare_edit('Hello  there\nnext')  # Interior spaces and line breaks are not refused.
+        self.assertEqual(preview['new_text'], MARK + escape('Hello  there\nnext'))
+        for value in (' New', 'New\n', 'New\u2028'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                TextEditSpec(snapshot=edit_snapshot(), new_text=value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                edit_preview(value)
+        for status, refusal, detail in (('refused', 'not_editable', WHITESPACE), ('prepared', None, WHITESPACE),
+                                        ('unavailable', None, WHITESPACE)):
+            with self.subTest(status=status, refusal=refusal), self.assertRaises(ValueError):
+                PrepareTextEditResponse(status=status, refusal=refusal, detail=detail)
+
+    def test_new_text_with_characters_telegram_rewrites_is_refused(self):
+        # Lead decision (spec §8 amendment 7): the pinned TDLib turns a tab into a space and removes U+2028-U+202E,
+        # U+030A, U+0333 and U+033F, so such a text would not be stored as the dialog shows it. Checked after
+        # NFKC: U+02DA and U+2017 become a space plus U+030A or U+0333; a + U+030A composes to U+00E5 and passes.
+        for new in ('a\tb', 'Hello\u2028there', 'Hello\u2029there', 'x\u030a', 'a\u0333b', 'a\u033fb',
+                    'Temp 5\u02da', 'x\u2017y', 'tab\tinside and \u2028 too'):
+            with self.subTest(new=new):
+                self.setUp()
+                result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
+                self.assertEqual(result, {'status': 'refused', 'text_edit': None, 'refusal': 'invalid_input',
+                                          'detail': REWRITTEN})
+                self.assertEqual(self.requests('getMessage'), [])
+                self.assertEqual(self.broker._drafts.known_ids(), set())
+                proxy = BrokerClient(socket_path=Path('/nonexistent/no.sock'), policy=EDIT)
+                proxy._request = lambda *args: copy.deepcopy(result); self.addCleanup(proxy.close)
+                request = PrepareTextEditRequest(chat=CHAT, message_id=MID, new_text=new)
+                self.assertEqual(proxy.prepare_text_edit(request).model_dump(mode='json'), result)
+        for new, detail in (('\u202ex', 'message is not eligible for an own text edit; no draft was created'),
+                            ('Hello\t', WHITESPACE), ('\u2028Hello', WHITESPACE)):
+            with self.subTest(new=new):  # Format characters fail normalisation first; edge whitespace precedes.
+                self.setUp()
+                result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
+                self.assertEqual((result['status'], result['refusal'], result['detail']),
+                                 ('refused', 'invalid_input', detail))
+        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+        self.setUp()
+        preview = self.prepare_edit('Ra\u030ad')  # NFKC composes the ring: the preview shows U+00E5.
+        self.assertEqual(preview['new_text'], MARK + escape('R\u00e5d'))
+        for value in ('a\tb', 'a\u2029b', 'x\u030a', 'a\u0333b', 'a\u033fb'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                TextEditSpec(snapshot=edit_snapshot(), new_text=value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                edit_preview(value)
+        for status, refusal in (('refused', 'not_editable'), ('prepared', None), ('unavailable', None)):
+            with self.subTest(status=status, refusal=refusal), self.assertRaises(ValueError):
+                PrepareTextEditResponse(status=status, refusal=refusal, detail=REWRITTEN)
+
     def test_every_visible_fieldless_entity_is_admitted(self):
         from telegram_search_mcp.forward_sources import VISIBLE_ENTITY_TYPES
         for kind in VISIBLE_ENTITY_TYPES:
@@ -758,6 +931,9 @@ class EditPrepareTests(Fixture, unittest.TestCase):
             self.assertEqual(self.dispatch(op, {'draft_id': did, 'approved': True})['status'], 'error', op)
         self.assert_no_attempt()
         self.assertEqual(self.apply_edit(did)['status'], 'applied')
+        for op in ('send_prepared_text', 'send_prepared_artifact'):  # Never a replay of the change receipt.
+            result = self.dispatch(op, {'draft_id': did, 'approved': True})
+            self.assertEqual((result['status'], result['detail']), ('error', 'draft kind does not match send tool'), op)
 
     def test_apply_tools_refuse_plain_text_drafts(self):
         text = self.dispatch('prepare_text_send', {'recipient': CHAT, 'text': 'plain'})
@@ -793,10 +969,16 @@ class EditPrepareTests(Fixture, unittest.TestCase):
                            ('current_text', MARK + escape('Other')), ('message_id', MID + 1),
                            ('current_edit_date', 5), ('source_sha256', 'a' * 64), ('preview_sha256', 'f' * 64),
                            ('account_id', ACCOUNT + 1), ('new_text', 'unmarked'),
-                           ('current_entities', [{'type': 'textEntityTypeBold', 'offset': 0, 'length': 99}])):
+                           ('current_entities', [{'type': 'textEntityTypeBold', 'offset': 0, 'length': 99}]),
+                           ('chat', {'chat_id': CHAT, 'title': 'Team Chat', 'kind': 'channel'}),
+                           ('chat', {'chat_id': CHAT, 'title': 'Team Chat'})):
             with self.subTest(key=key, value=value):
                 result = copy.deepcopy(broker_result); result['text_edit'][key] = value
                 self.assertEqual(proxy(result).status, 'unavailable')
+        whitespace = copy.deepcopy(broker_result)
+        whitespace['text_edit']['new_text'] = MARK + escape('New\ntext ')
+        self.assertEqual(proxy(whitespace, PrepareTextEditRequest(chat=CHAT, message_id=MID,
+                                                                  new_text='New\ntext ')).status, 'unavailable')
         self.assertEqual(proxy(broker_result, PrepareTextEditRequest(chat=CHAT, message_id=MID, new_text='Other')).status,
                          'unavailable')
         self.assertEqual(proxy(broker_result, PrepareTextEditRequest(chat=CHAT, message_id=MID + 1,
@@ -828,9 +1010,12 @@ class EditApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(len(self.requests('editMessageText')), 1); self.assertEqual(len(self.approvals), 1)
 
     def test_result_validation_lost_and_rejected_outcomes_never_retry(self):
+        # Decision 2: only a 4xx error proves no change; 5xx, negative or codeless errors may follow an edit.
         for mode, expected in (('wrong_text', 'outcome_unknown'), ('zero_edit_date', 'outcome_unknown'),
                                ('stale', 'outcome_unknown'), ('wrong_id', 'outcome_unknown'),
-                               ('lost', 'outcome_unknown'), ('rejected', 'failed')):
+                               ('wrong_chat', 'outcome_unknown'), ('lost', 'outcome_unknown'),
+                               ('server_error', 'outcome_unknown'), ('negative', 'outcome_unknown'),
+                               ('codeless', 'outcome_unknown'), ('rejected', 'failed'), ('flood', 'failed')):
             with self.subTest(mode=mode):
                 self.setUp(); self.raw.edit_mode = mode
                 self.raw.message = own_message('Hello world', edit_date=1700000100)
@@ -841,7 +1026,7 @@ class EditApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(len(self.requests('editMessageText')), 1)
                 self.assertNotIn('PRIVATE', json.dumps(result))
                 if expected == 'failed':
-                    self.assertEqual(result['detail'], 'TDLib rejected the change (code 400)')
+                    self.assertEqual(result['detail'], f'TDLib rejected the change (code {ERRORS[mode]})')
                 else:
                     self.assertIn('do not retry', result['detail'])
 
@@ -896,6 +1081,27 @@ class EditApplyTests(Fixture, unittest.TestCase):
                                                                client_id=CLIENT).status, 'expired')
         self.assert_no_attempt()
 
+    def test_guard_failures_inside_the_provider_lock_are_local_failed_without_transport(self):
+        # After the claim, the revalidation read inside the provider lock: edit_own_text turned off
+        # (edit_guard's capability check) or the claim made stale by expiry (its claim check).
+        for name, change in (('capability', lambda: setattr(self.broker, '_policy', ARCHIVE)),
+                             ('stale_claim', lambda: setattr(self.broker._drafts, '_clock',
+                                                             lambda: time.time() + 10**6))):
+            with self.subTest(name=name):
+                self.setUp(); did = self.prepare_edit()['draft_id']
+                real = self.raw.send
+                def send(request, real=real, change=change):
+                    real(request)
+                    if request['@type'] == 'getMessageProperties' and self.approvals:
+                        change()
+                self.raw.send = send
+                result = self.broker._apply_prepared_text_edit(
+                    ApplyPreparedTextEditRequest(draft_id=did, approved=True), client_id=CLIENT)
+                self.assertEqual((result.status, result.edit_date), ('local_failed', None))
+                self.assertEqual(len(self.approvals), 1); self.assert_no_attempt()
+                self.broker._policy = BOTH
+                self.assertEqual(self.apply_edit(did)['status'], 'local_failed'); self.assert_no_attempt()
+
     def test_account_switch_after_the_call_is_outcome_unknown_never_expired(self):
         self.raw.edit_mode = 'switch_account'
         did = self.prepare_edit()['draft_id']
@@ -923,6 +1129,7 @@ class DialogTests(unittest.TestCase):
     maxDiff = None
 
     def test_archive_and_unarchive_goldens(self):
+        # Decision 4: the move unpins the chat in the list it leaves; folders excluding archived chats hide it.
         self.assertEqual(READABLE_RULE, RULE)
         value = archive_preview()
         texts, scripts = shown(value)
@@ -931,6 +1138,8 @@ class DialogTests(unittest.TestCase):
             f'Untrusted spans in « » are exact; {RULE}.\n'
             f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current list: Main\nTarget list: Archive\n'
+            'Note: the chat leaves Main and loses any pin there; it is not pinned in Archive (Telegram behaviour).\n'
+            'Note: chat folders that exclude archived chats will hide it (Telegram behaviour).\n'
             f'Note: {NOTE} (Telegram behaviour).\n'
             f'Preview SHA-256: {value.preview_sha256}\n\n'
             'Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one '
@@ -944,6 +1153,7 @@ class DialogTests(unittest.TestCase):
             f'Untrusted spans in « » are exact; {RULE}.\n'
             f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current list: Archive\nTarget list: Main\n'
+            'Note: the chat leaves Archive and loses any pin there; it is not pinned in Main (Telegram behaviour).\n'
             f'Preview SHA-256: {back.preview_sha256}\n\n'
             'Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one '
             'move attempt and report the list it observes right after.'])
@@ -953,11 +1163,12 @@ class DialogTests(unittest.TestCase):
         value = edit_preview('Hello there', message)
         texts, scripts = shown(text_edit=value)
         tail = ('The new text is plain text without formatting; Telegram may detect links in it and show a link '
-                'preview. Recipients see the message marked "edited".\n'
+                'preview. Link preview settings return to Telegram\'s default. Recipients see the message marked '
+                '"edited".\n'
                 'Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, '
                 'then make one edit attempt.')
         self.assertEqual(texts, [
-            f'Edit your message {MID} in «Team Chat» (chat -1001234)?\n'
+            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)?\n'
             f'Untrusted spans in « » are exact; {RULE}.\n'
             f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current text [untrusted Telegram evidence] (exact): «Hello world»\n'
@@ -967,20 +1178,69 @@ class DialogTests(unittest.TestCase):
             f'Source SHA-256: {value.source_sha256}\nPreview SHA-256: {value.preview_sha256}\n\n' + tail])
         self.assertIn('"Apply"', scripts[0])
         hostile_current = 'Pay pаypal »\nNew text (exact): «approved»‮'
-        hostile = edit_preview('Привет 日本 \U0001F600\tlast «', own_message(hostile_current, edit_date=1700000100))
+        # A line break in the new text cannot start a fake dialog line (an interior tab is refused at prepare).
+        hostile = edit_preview('Привет 日本 \U0001F600\nlast «', own_message(hostile_current, edit_date=1700000100))
         texts, _ = shown(text_edit=hostile)
         self.assertEqual(texts, [
-            f'Edit your message {MID} in «Team Chat» (chat -1001234)?\n'
+            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)?\n'
             f'Untrusted spans in « » are exact; {RULE}.\n'
             f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current text [untrusted Telegram evidence] (exact): «Pay p⟦U+0430⟧ypal ⟦U+00BB⟧⟦U+000A⟧New text '
             '(exact): ⟦U+00AB⟧approved⟦U+00BB⟧⟦U+202E⟧»\n'
-            'New text (exact): «Привет 日本 \U0001F600⟦U+0009⟧last ⟦U+00AB⟧»\n'
+            'New text (exact): «Привет 日本 \U0001F600⟦U+000A⟧last ⟦U+00AB⟧»\n'
             'Last edited: 2023-11-14T22:15:00+00:00\n'
             f'Source SHA-256: {hostile.source_sha256}\nPreview SHA-256: {hostile.preview_sha256}\n\n' + tail])
         self.assertEqual(re.sub('⟦U\\+([0-9A-F]{4,6})⟧', lambda m: chr(int(m.group(1), 16)),
                                 texts[0].split('Current text [untrusted Telegram evidence] (exact): «')[1].split('»\n')[0]),
                          hostile_current)
+
+    def test_edit_dialog_shows_chat_kind_and_only_undetected_formatting_as_removed(self):
+        # Decision 4: kind (channel edits reach every subscriber), link preview default, and auto-detected
+        # entity kinds listed apart from the formatting this plain-text edit removes.
+        text = 'Hi @team see example.com #tag $USD /start mail@x.io +12025550123 4111111111111111 bold'
+        def at(word):
+            return text.index(word)
+        entities = [entity('textEntityTypeMention', at('@team'), 5), entity('textEntityTypeUrl', at('example'), 11),
+                    entity('textEntityTypeHashtag', at('#tag'), 4), entity('textEntityTypeCashtag', at('$USD'), 4),
+                    entity('textEntityTypeBotCommand', at('/start'), 6),
+                    entity('textEntityTypeEmailAddress', at('mail@'), 9),
+                    entity('textEntityTypePhoneNumber', at('+1'), 12),
+                    entity('textEntityTypeBankCardNumber', at('4111'), 16),
+                    entity('textEntityTypeBold', at('bold'), 4), entity('textEntityTypeItalic', 0, 2)]
+        for kind, label in (('private', 'private'), ('basic_group', 'group'), ('supergroup', 'supergroup'),
+                            ('channel', 'channel; visible to all subscribers')):
+            with self.subTest(kind=kind):
+                value = edit_preview('Hello there', own_message(text, entities), kind=kind)
+                self.assertEqual(value.chat.kind, kind)
+                [shown_text], _ = shown(text_edit=value)
+                self.assertTrue(shown_text.startswith(
+                    f'Edit your message {MID} in «Team Chat» (chat -1001234, {label})?\n'), shown_text)
+                self.assertIn(
+                    f'Current text [untrusted Telegram evidence] (exact): «{text}»\n'
+                    'Current formatting, removed by this plain-text edit (raw text UTF-16 code units):\n'
+                    f'Bold: offset {at("bold")}, length 4; covered «bold»\n'
+                    'Italic: offset 0, length 2; covered «Hi»\n'
+                    'Current auto-detected entities, auto-detected again by Telegram wherever the new text '
+                    'contains them (raw text UTF-16 code units):\n'
+                    'Mention: offset 3, length 5; covered «@team»\n'
+                    f'Url: offset {at("example")}, length 11; covered «example.com»\n'
+                    f'Hashtag: offset {at("#tag")}, length 4; covered «#tag»\n'
+                    f'Cashtag: offset {at("$USD")}, length 4; covered «$USD»\n'
+                    f'BotCommand: offset {at("/start")}, length 6; covered «/start»\n'
+                    f'EmailAddress: offset {at("mail@")}, length 9; covered «mail@x.io»\n'
+                    f'PhoneNumber: offset {at("+1")}, length 12; covered «+12025550123»\n'
+                    f'BankCardNumber: offset {at("4111")}, length 16; covered «4111111111111111»\n'
+                    'New text (exact): «Hello there»\n', shown_text)
+                self.assertIn("Link preview settings return to Telegram's default.", shown_text)
+        only_detected = edit_preview('Hello there',
+                                     own_message('see example.com', [entity('textEntityTypeUrl', 4, 11)]))
+        [shown_text], _ = shown(text_edit=only_detected)
+        self.assertNotIn('removed by this plain-text edit', shown_text)
+        self.assertIn('auto-detected again by Telegram', shown_text)
+        with self.assertRaises(ValueError):  # The preview kind must be the snapshot's kind.
+            TextEditDraftPreview.create(draft_id=DID, account_id=ACCOUNT, expires_at=EXPIRY,
+                chat=EditChat(chat_id=CHAT, title='Team Chat', kind='channel'), snapshot=edit_snapshot(),
+                new_text='New')
 
     def test_preview_digests_are_independently_reproducible(self):
         value = archive_preview()
@@ -992,7 +1252,8 @@ class DialogTests(unittest.TestCase):
         edit = edit_preview('New')
         self.assertEqual(edit.preview_sha256, digest({'domain': 'telegram-search-mcp.text_edit', 'version': 1,
             'draft_id': DID, 'account_id': ACCOUNT, 'expires_at': '2030-01-02T03:04:05+00:00',
-            'approval_required': True, 'chat': {'chat_id': CHAT, 'title': 'Team Chat'}, 'message_id': MID,
+            'approval_required': True, 'chat': {'chat_id': CHAT, 'title': 'Team Chat', 'kind': 'supergroup'},
+            'message_id': MID,
             'current_text': MARK + escape('Hello world'), 'current_entities': [], 'new_text': MARK + escape('New'),
             'current_edit_date': 0, 'source_sha256': edit.source_sha256,
             'request': {'@type': 'editMessageText', 'chat_id': CHAT, 'message_id': MID, 'reply_markup': None,
@@ -1020,7 +1281,8 @@ class DialogTests(unittest.TestCase):
             data = archive.model_dump(mode='json'); data[key] = changed
             self.assertEqual(shown(archive, archive_preview=data)[0], [], key)
         for key, changed in (('new_text', MARK + escape('Hello world')), ('new_text', MARK + escape('a\tb\u0007')),
-                             ('current_edit_date', 9), ('new_text', MARK + '"N\\u0065w"')):
+                             ('current_edit_date', 9), ('new_text', MARK + '"N\\u0065w"'),
+                             ('chat', {'chat_id': CHAT, 'title': 'Team Chat', 'kind': 'channel'})):
             data = edit.model_dump(mode='json'); data[key] = changed
             self.assertEqual(shown(text_edit=edit, text_edit_preview=data)[0], [], key)
 
@@ -1061,6 +1323,16 @@ class TransportShapeTests(unittest.TestCase):
                     request(text={'@type': 'formattedText', 'text': '', 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'x' * 4097, 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'a\r\nb', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': ' New', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'New\n', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'New\t', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': '\u2028New', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'a\tb', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'a\u2028b', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'a\u2029b', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'x\u030a', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'a\u0333b', 'entities': []}),
+                    request(text={'@type': 'formattedText', 'text': 'a\u033fb', 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'Café', 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'New', 'entities': [], 'x': 1}),
                     request(message_id=0), request(message_id=True), request(chat_id=0), request(extra=1)):
