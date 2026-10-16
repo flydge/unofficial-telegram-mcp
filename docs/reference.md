@@ -6,7 +6,7 @@ Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discov
 
 ## MCP surface
 
-The public surface contains forty-three tools:
+The public surface of the current candidate contains forty-nine tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,12 +18,13 @@ The public surface contains forty-three tools:
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 47-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 49-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
 - `prepare_artifact_send` fixes the recipient, file hash, size, name, MIME, caption, and `kind=document|photo|voice_note` in an unsent draft. Document is the compatible default. Photos are decoded and validated; voice sources are converted locally to verified OGG/Opus mono.
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
+- `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -39,6 +40,7 @@ The public surface contains forty-three tools:
 - `read_attachment_page` adds selected PDF pages and single-use text continuation (independent `attachment_pages` opt-in).
 - `read_spreadsheet` reads explicit XLSX sheet/range selections with bounded cell continuation (independent `spreadsheets` opt-in).
 - `read_presentation` reads selected PPTX shape text and explicitly requested notes, with omitted-object counts (independent `presentations` opt-in).
+- `retain_selection` retains exact chosen message or file sources as a memory-only selection (default-off `retained_selections` opt-in); see [Exact retained selections](#exact-retained-selections-opt-in-candidate).
 
 The reference workflow is:
 
@@ -61,6 +63,8 @@ For free-form intent, Codex supplies two to five unique normalized hypotheses an
 
 Package version 0.51.0 retains contract version 1, private IPC version 2 and the same forty-three tools. Optional exact-topic replies and explicit outgoing text styles extend the schemas and require a fresh schema fingerprint; this version declaration does not establish release or live-provider acceptance. Refresh tool schemas and deploy matching proxy/broker versions together. Topic sending is off by default; existing sends and private reply evidence versions v1–v23 retain their behavior. Validated TextUrl messageText targets still require `reply_formatted_targets`, `reply_text_url_targets` and every other applicable target capability. TextUrl captions, CustomEmoji and MediaTimestamp remain closed. Outgoing replies remain plain unless explicit outgoing styles are supplied under their separate capability; provider strings trigger no lookup, payment or navigation. Synthetic evidence does not establish live Telegram delivery or F18 consumer readiness.
 
+Development candidate `0.52.0.dev0` adds the tools `prepare_forward_send` and `send_prepared_forward` (forty-nine in total) and the default-off capability `forward_send`. Contract 1 and private IPC 2 are unchanged; the new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. Existing tool schemas are byte-identical. `forward_send` is absent from the legacy defaults and always requires `send` as well; see [Exact forward/copy (F14)](#exact-forwardcopy-f14). This declaration does not establish release, owner-approved live delivery or consumer acceptance for the slice.
+
 Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
 The schema fingerprint covers the finalized SDK input/output schemas, permission annotations, and the operation-to-capability mapping. A consumer may send its previously observed fingerprint as `expected_schema_fingerprint`. A mismatch reports `client_schema_mismatch` and blocks subsequent tool operations in that proxy until an explicit matching fingerprint recheck. A manifest without that token cannot detect an unreported consumer cache. Refresh the consumer's tool listing after upgrades; recreating a Codex conversation may be necessary. `package_mismatch`, `contract_mismatch`, `schema_mismatch`, and `config_mismatch` concern loaded runtime components; refreshing a cached tool list alone cannot repair them. `handshake_unavailable_or_legacy_broker` means the handshake was not established, including a legacy broker or transport failure; it is not proof of a particular cause.
@@ -77,7 +81,7 @@ max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
 ```
 
-`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
+`read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools stay listed but are refused at the SDK guard, the proxy and the broker. `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
 
 Every operation performs a fresh handshake on its own owner-authenticated Unix connection and binds the next request to the broker's process generation. The broker rechecks policy freshness and the required capability immediately before dispatch. Generation changes never authorize replay of a send or reuse of lost state. A proven rejection before dispatch returns a safe error; lost responses after dispatch preserve the existing uncertain-outcome rule.
 
@@ -175,6 +179,11 @@ same-UID cooperative client boundary still applies. These observations are not
 recipient delivery/read receipts, provider leases, persistent recovery, or an
 exactly-once guarantee. Synthetic verification does not establish live delivery.
 
+A forward/copy draft (F14) uses the same tool, statuses and evidence, but needs
+`forward_send` in addition to `send`, and correlates by `sending_id`, recipient chat
+and temporary message ID instead of a content digest; see
+[Exact forward/copy (F14)](#exact-forwardcopy-f14).
+
 ## Inspect, revise or cancel an unsent draft
 
 Use the same running MCP proxy that prepared the draft. `list_drafts({"limit":20})`
@@ -233,6 +242,11 @@ all drafts. Client separation is cooperative within the trusted local OS user:
 it does not authenticate separate applications against malicious same-UID code.
 There is no durable draft journal or recovery across broker restarts.
 
+Forward/copy drafts from `prepare_forward_send` are not reachable through these
+tools: `list_drafts` omits them and `get_draft`, `update_draft`, `refresh_draft` and
+`cancel_draft` return `unavailable` for them. Prepare again to supersede one; see
+[Exact forward/copy (F14)](#exact-forwardcopy-f14).
+
 ## Discovery and selection
 
 Catalog and global-message coverage progress independently in deterministic round-robin order. Per call, the server advances at most:
@@ -288,7 +302,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the forty-three tools.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the forty-nine tools of the current candidate.
 
 ## Selected full messages
 
@@ -1018,7 +1032,9 @@ opt-ins described above. It does not support embedded reply quotes,
 external-chat replies, scheduling, stories, checklists, polls or additional options.
 Targets with custom link preview options are unavailable; only absent/null or the
 exact disabled no-URL option shape is supported. Unsupported/malformed targets
-return a fixed unavailable response with no draft ID or preview.
+return a fixed unavailable response with no draft ID or preview. These limits
+concern reply targets only. Forwarding or copying an existing message is a
+separate route with its own capability and preview: [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 
 After the local owner confirms the full account, anchor, target evidence and
 source/review hashes, the claimed reply enters a separate provider method. Under
@@ -1810,7 +1826,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 47 tools. The three owner tools below use existing
+The candidate exposes 49 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: their tool descriptions and CLI help contain this complete sequence.
 
@@ -1862,3 +1878,267 @@ and helper operations are absent from MCP registration. Later reading/retention,
 recipient selection, draft preview, capability admission and send approval remain
 independent. No send occurs. Trusted same-UID filesystem access and explicitly
 authorized CLI exports remain outside cooperative MCP ownership isolation.
+
+## Exact forward/copy (F14)
+
+`prepare_forward_send` and `send_prepared_forward` forward, or copy without
+attribution, exactly one existing message from one exact chat to one exact chat.
+The broker projects the source message, returns a complete preview, repeats the
+source and recipient checks at send time, asks the local owner to confirm the same
+facts and then makes one `forwardMessages` attempt. The provider forwards its own
+stored message; no content is rebuilt, downloaded or uploaded. Evidence so far is
+technical (synthetic provider); real owner-approved delivery is still pending.
+
+Enable `forward_send` **and** `send` in trusted runtime policy, restart matching
+components and add both tools to the consumer allowlist. `forward_send` is absent
+from the legacy defaults and no other capability enables it. Without both, the
+tools stay listed but are refused with `capability_disabled` at the SDK guard, the
+proxy (before it connects) and the broker; `get_send_status` for a forward draft
+needs both as well. Preparation does not need the read capabilities.
+
+```python
+prepared = prepare_forward_send(source_chat=-100123, source_message_id=456,
+                                recipient=789, mode="copy")
+# prepared.status == "prepared": show prepared.forward in full, obtain approval.
+result = send_prepared_forward(draft_id=prepared.forward.draft_id, approved=True)
+status = get_send_status(draft_id=prepared.forward.draft_id)  # after uncertainty
+```
+
+The IDs are synthetic; use observed numeric chat IDs and committed message IDs.
+
+### Inputs and modes
+
+| Argument | Meaning |
+| --- | --- |
+| `source_chat` | Exact non-zero numeric chat ID of the source message. `@username` and aliases are not accepted. |
+| `source_message_id` | Positive committed message ID (at most 2^53-1). |
+| `recipient` | Exact non-zero numeric chat ID of the destination. No topic can be selected (`topic_id` is always null). |
+| `mode` | `forward` or `copy`. |
+| `remove_caption` | Strict boolean, default `false`. Valid only with `copy` of a media source. |
+
+Unknown fields are rejected. Secret chats are never accepted, as source or recipient.
+No check compares source and recipient chats. Saved Messages is an ordinary recipient.
+
+- `forward` sends `send_copy=false`: recipients see the original sender attribution.
+  The source must report `can_be_forwarded`. A source that is itself a forward
+  is refused (`source_is_forward`) because nested attribution is not shown.
+- `copy` sends `send_copy=true`: a new message from your account with no attribution.
+  The source must report `can_be_copied`. Copying a forward is allowed; the preview
+  and the dialog say that the source is itself a forward.
+- `remove_caption=true` with `copy` sends the media without its caption; the dialog
+  shows `Caption: removed — not sent`. With `mode="forward"` the request fails
+  schema validation. With a text source preparation refuses `invalid_input`.
+
+Supported source content: text, photo, document, voice note, video, audio and
+animation. Bounds: text or caption at most 4096 characters and 100 entities, a
+canonical projection of at most 64 KiB, 1–20 photo variants. Video notes,
+stickers, polls, locations, contacts and every other kind refuse
+`unsupported_source_content`.
+
+### Refusals
+
+A refusal is content-free: `status="refused"`, one of the codes below and a fixed
+detail; no draft ID, no source text. Checks run in this order and the first
+failure is reported: chat identities, source state, reply markup, content and
+formatting, provider eligibility, `remove_caption`, name bounds.
+
+| `refusal` | When |
+| --- | --- |
+| `unsupported_source_state` | Self-destructing (including secret photo/video/animation), auto-deleting (any non-zero `auto_delete_in`), ephemeral, scheduled or still-sending source. |
+| `hidden_source_content` | A reply markup (buttons carry targets the text does not show). Any text or caption entity outside the visible allowlist: only fieldless Bold, Italic, Underline, Strikethrough, Spoiler, Code, Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url, EmailAddress, PhoneNumber and BankCardNumber are admitted. TextUrl, MentionName, CustomEmoji, PreCode (language), MediaTimestamp, DateTime, unknown types and an allowlisted type carrying any field refuse. A link-preview URL that is not literally in the visible text. A non-blank name (file name, MIME type, audio title or performer, author signature) that sanitizes to nothing. |
+| `unsupported_source_content` | Content outside the supported kinds; limits above exceeded; entities that are not exact records on whole-scalar UTF-16 boundaries of the raw text; malformed link-preview options, flags, measures or file identity/size; a photo with an attached video; a displayed name over 255 characters; escaped text plus covered spans over 131072 characters. |
+| `protected_content` | The source chat, or the message for the current or another user, has protected content. Applies to both modes. |
+| `source_not_forwardable` | The mode's property is false: `can_be_forwarded` for `forward`, `can_be_copied` for `copy`. |
+| `source_is_forward` | `mode="forward"` and the source carries forward information. |
+| `invalid_input` | `remove_caption=true` with a text source. |
+
+`status="unavailable"` (fixed detail `forward draft is unavailable`, no draft) covers
+a secret chat, a deleted or unreadable source, malformed or incomplete provider
+data (a missing safety field is never treated as safe), mismatched IDs, exhausted
+draft capacity or request budget, and account, session or policy change during
+preparation.
+
+### Preview and hashes
+
+`prepared.forward` is the closed `ForwardDraftPreview`: `draft_id`, `account_id`,
+`expires_at`, `approval_required` (always true), `mode`, `remove_caption`,
+`recipient` (`chat_id`, sanitized `title`), `preview_sha256` and `source`:
+
+- `chat` (`chat_id`, sanitized `title`), `message_id`, `sender` (`kind` user or
+  chat plus numeric ID; names are not resolved), `date`, `content_kind`, `is_forward`;
+- `author_signature` and `via_bot_user_id`, present when non-empty or non-zero;
+- `text` (the text or caption) with `entities` (`type`, `offset`, `length`), and
+  `link_preview` (the admitted options, text sources only);
+- `media`: `size_bytes` and `unique_id_sha256` of the primary file (a hash of the
+  provider's remote unique ID; file IDs and local paths are never projected),
+  and where the kind has them `file_name`, `mime_type`, audio `title` and
+  `performer`, `duration_seconds`, `width`, `height`, video `start_timestamp_seconds`,
+  photo/video/animation `has_spoiler` and `caption_above_media`; photos show the
+  largest variant and a `variants` count;
+- `source_sha256`.
+
+Telegram-originated values are untrusted evidence. Short names are marked
+`[untrusted Telegram evidence] ` plus the sanitized value. The text or caption is
+that marker plus one JSON string in which only ASCII letters, digits, `_` and `-`
+stay literal: spaces, punctuation, look-alike letters, bidi and zero-width controls
+and newlines appear as `\uXXXX` (surrogate pairs for astral characters). Decoding
+one JSON layer yields exactly the raw text that the hash covers, and entity
+offsets and lengths address that raw text in UTF-16 code units. Non-Latin text is
+therefore hard to read in the MCP preview; the owner dialog renders it readably.
+Thumbnails, album and video covers, storyboards and alternative videos are neither
+projected nor shown.
+
+`source_sha256` is the SHA-256 of the canonical version-2 source projection: chat,
+message ID, sender, signature, via-bot ID, forward flag, date, edit date and the
+content facts above. Volatile state such as views, reactions and rendered link
+previews is excluded. `preview_sha256` is a domain-separated version-2 SHA-256 over
+the draft ID, account, expiry, mode, `remove_caption`, the complete source and
+recipient evidence and the exact closed `forwardMessages` request (without the
+random `sending_id`). The proxy recomputes the digest and checks that source chat,
+message ID, recipient, mode and `remove_caption` match the request; otherwise the
+result is `unavailable`. Show the complete preview, including every entity with its
+covered text, the link-preview options and the media facts, and explain whether the
+recipients will see the original sender (`forward`) or not (`copy`).
+
+### Drafts, supersession and expiry
+
+A forward draft lives in the same in-memory registry as other drafts, bound to the
+proxy client and current Telegram account, with the same finite TTL (default 15
+minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker restart
+loses it. It is not reachable through the generic draft tools: `list_drafts` omits
+it, `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and `get_reply_draft`
+return `unavailable`, and `send_prepared_text` / `send_prepared_artifact` return
+`error`. There is no update, refresh or cancel for forward drafts.
+
+Preparing again for the same owner, source chat, message ID, recipient, `mode` and
+`remove_caption` supersedes the earlier pending draft: it can no longer be claimed
+and `send_prepared_forward` returns `expired` with no dialog and no attempt.
+Other keys and other clients are unaffected. To change anything, or to withdraw a
+draft, prepare again or let it expire; nothing is sent without
+`send_prepared_forward(approved=true)` and the local confirmation.
+
+### Send
+
+`send_prepared_forward(draft_id, approved)` takes only the draft ID and a strict
+boolean. In order:
+
+1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+2. Policy (`send` and `forward_send`) and owner (proxy client and current account)
+   are checked; a draft of another kind returns `error`.
+3. A stored receipt is replayed; no dialog, no provider call.
+4. The in-memory recipient record must exist (lost on broker restart: `expired`)
+   and the draft must be live, owned and not superseded (otherwise `expired`).
+5. The recipient is resolved again: chat type, native ID and sanitized title must
+   equal the prepared ones, otherwise `recipient_changed`.
+6. The source is read again: chat identity and title, the complete projection hash
+   and the message properties. A deleted or different source is `source_changed`;
+   `forward` or `copy` no longer allowed is `source_not_forwardable`; protected
+   content is `protected_content`; any other eligibility refusal is also
+   `source_changed` because the hash binds the facts behind those refusals.
+7. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+8. Owner, policy, provider session and account are checked again, then the
+   single-use claim is taken (loss of authority is `expired`).
+9. Inside the serialized provider call the account, policy, claim, recipient
+   identity and title, source projection and properties are checked again, and the
+   guard runs once more after the observation is registered and immediately before
+   transport. Any failure is `local_failed` with no transport.
+10. Exactly one `forwardMessages` request is sent, then the call waits for the
+    result and the send updates within the remaining request budget (at most 330
+    seconds including the dialog).
+
+The request has one closed shape, enforced before transport (see the
+[security model](security.md#exact-forwardcopy-boundary-f14-candidate)):
+`chat_id`, `topic_id: null`, `from_chat_id`, one `message_ids` entry, fixed
+send options with a random non-zero `sending_id`, `send_copy` and `remove_caption`.
+Notifications are normal; nothing is scheduled, paid or content-protected.
+
+### Owner dialog
+
+The macOS dialog (default button Cancel, gives up after 120 seconds, which counts
+as declined) shows the same immutable preview that the proxy validated:
+
+```text
+Forward this message to <recipient title> (chat <ID>)?
+FORWARD — recipients see the original sender
+  (or: COPY — sent as your own message, no attribution[; caption removed])
+Account: <ID>
+Draft: <draft ID>
+Expires: <time>
+
+Source chat: <title> (chat <ID>)
+Message ID: <ID>
+Sender [untrusted Telegram evidence]: user|chat <ID>
+[Author signature [untrusted Telegram evidence]: "<value>"]
+[Via bot [untrusted Telegram evidence]: user <ID>]
+[Source is itself a forward: the copy carries no original attribution]
+Date: <time>
+Content: <kind>
+Text|Caption [untrusted Telegram evidence] (exact; invisible or look-alike characters shown as ⟦U+XXXX⟧): <text>
+  (or: Text|Caption: (none)   or: Caption: removed — not sent)
+[Text|Caption entities (raw text UTF-16 code units):
+<Type>: offset <N>, length <M>; covered <span>]
+[Link preview options [untrusted Telegram evidence]: disabled …; URL …; small media …; large media …; above text …]
+[Media [untrusted Telegram evidence]: file "…"; MIME "…"; title "…"; performer "…"; N seconds; WxH; starts at N seconds; N bytes; N variants; spoiler …; caption above media …]
+Source SHA-256: <hash>
+Recipient: <title> (chat <ID>)
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.
+```
+
+In the dialog, letters of every script stay literal, so Cyrillic or CJK text is
+readable. Control and format characters, newlines and tabs, bidi and zero-width
+characters, non-space whitespace, characters changed by NFKC (look-alike forms),
+Cyrillic or Greek letters inside a word that also has ASCII letters, and the mark
+bracket itself are shown as reversible `⟦U+XXXX⟧`. The dialog is mutually exclusive
+with every other send preview; a recipient, hash or field that disagrees with the
+validated preview shows nothing and counts as declined.
+
+### Outcomes and status
+
+| `status` | Meaning | Provider attempt |
+| --- | --- | --- |
+| `sent` | Exact provider confirmation; `message_id` is the positive final ID in the recipient chat | yes |
+| `failed` | Provider rejection or coherent correlated failure; the detail names at most the error code | yes |
+| `outcome_unknown` | Result lost, malformed or unconfirmed; do not retry automatically | possibly |
+| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `expired` | Unknown, foreign, superseded or expired draft, broker restart, a provider read failure, or account, policy or session change | no |
+| `recipient_changed` | Step 5 | no |
+| `source_changed` | Step 6 | no |
+| `source_not_forwardable` / `protected_content` | Step 6, properties now deny | no |
+| `local_failed` | A local guard failed after approval and before transport; the claim is consumed | no |
+| `error` | The draft is not a forward draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
+
+A repeated `send_prepared_forward` replays the receipt (`sent`, `failed`,
+`outcome_unknown` or `local_failed`, with detail saying that no new send was
+attempted) and never opens a dialog or sends. `pending` is a `get_send_status`
+state, not a send result. After `outcome_unknown` call `get_send_status`; never
+use another send as a status check.
+
+`get_send_status` uses the same statuses and evidence strengths as above, requires
+`send` and `forward_send`, and is read-only. A forward is correlated by
+`sending_id`, recipient chat and the returned temporary message ID; content hashes
+do not apply. The `forwardMessages` result must be one `messages` entry with
+`total_count` 1: a pending outgoing message in the recipient chat with the source's
+content type and our `sending_id`. The final state comes from
+`updateMessageSendSucceeded` or `updateMessageSendFailed`. In Saved Messages (the
+account's own chat) the provider's `is_outgoing=false` is accepted when
+`sending_id`, chat and temporary ID all match; elsewhere an incoming flag never
+matches. If the success update arrives before the result, the attempt still waits
+for and validates the result before returning `sent`. A malformed or mismatched
+result, before or after an early success, makes the observation a terminal
+conflict: `outcome_unknown` now and never reconciled to `sent` later. A lost result
+after an early success returns `outcome_unknown`, and a later status read may still
+report the provider-confirmed final message. Retention is the existing 900 seconds;
+a superseded or unknown draft reports `outcome_unknown` with evidence `none`.
+
+### Limits
+
+Not supported: several messages or albums, forum-topic destinations, retained
+selections or any `selection_id` as a source, scheduling, paid or silent options,
+secret chats, protected content, caption editing, and any generic-draft access.
+The checks rest on cached and offline provider reads; a remote edit can still race
+them, and Telegram receives a request to forward its own stored message. Delivery
+confirmation does not verify that attribution was applied as requested; the receipt
+records what was requested and status evidence what the provider returned.
+Synthetic checks do not establish real delivery or consumer readiness.

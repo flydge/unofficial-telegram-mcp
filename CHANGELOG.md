@@ -15,6 +15,20 @@
 The previously published `main` at `796f95d22ae7016ae8c7a313e96e15233aba7531` contains the Unofficial Telegram MCP rebrand. This changelog does not reconstruct intermediate private development commits or assert that they were publicly released.
 ## 0.52.0.dev0 — unreleased
 
+- Add F14 exact forward/copy of one message (development; [spec](docs/plans/0.53-forward-copy-spec.md)):
+  tools `prepare_forward_send` and `send_prepared_forward` (49 tools) and the default-off
+  `forward_send` capability, which also requires `send`. `mode="forward"` shows the original
+  sender; `mode="copy"` sends a new message without attribution (`remove_caption` only for
+  copied media). Preparation returns a complete preview with source and preview hashes, and
+  refuses secret chats, hidden formatting and link targets, reply markup, auto-deleting,
+  protected or non-forwardable sources and, in forward mode, forwarded sources. Sending
+  revalidates recipient and source, asks the local owner to confirm the same facts and makes
+  one closed-shape `forwardMessages` attempt with no retry; `get_send_status` reports the
+  outcome. Re-preparing supersedes the earlier draft; the generic draft tools do not expose
+  forward drafts. Verified with a synthetic provider only; real approved delivery is pending
+  the owner. See [reference](docs/reference.md#exact-forwardcopy-f14) and
+  [security](docs/security.md#exact-forwardcopy-boundary-f14-candidate).
+
 - Add QR-first Telegram login to the private candidate: `connect` opens a loopback
   QR screen on the Mac, `wait` reports progress, 2FA is typed only on that page, and a
   bundle assembled with the application identity needs no API ID/hash entry. The installer now

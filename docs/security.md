@@ -65,7 +65,7 @@ provisioning, one-command installation or MCP/skill registration gates.
 
 ## Authority boundary
 
-The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the forty-three tools listed in README; the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
+The dedicated TDLib session holds the Telegram account's authority. Exactly one launchd-managed broker owns that session and the sole `TDLibClient`; per-task STDIO MCP proxies never load TDLib. Unofficial Telegram MCP narrows authority at three layers: MCP exposes the forty-nine tools of the current candidate listed in the [tool reference](reference.md#mcp-surface) (published 0.51.0: forty-three); the private broker protocol accepts only the matching fixed operations plus `check`, `health`, and `release_client`; and the TDLib client rejects request types outside its fixed allowlist before transport:
 
 ```text
 getAuthorizationState
@@ -86,7 +86,7 @@ getForumTopicHistory
 searchMessages
 searchChatMessages
 getMessage
-getMessageProperties (closed exact-chat reply eligibility read)
+getMessageProperties (closed exact-chat reply and forward/copy eligibility read)
 getChatHistory
 getMessageLink
 getUser
@@ -94,9 +94,12 @@ downloadFile
 getFile
 cancelDownloadFile
 sendMessage (fixed text, document, photo, or voice-note shape, only after explicit draft approval)
+forwardMessages (closed single-message forward/copy shape, only after explicit draft approval)
 ```
 
 `createPrivateChat` has one narrowly approved use: after `getMe` identifies the authorized account, Saved Messages resolution calls it with that same user ID and verifies the returned private chat. `loadChats` advances only a fixed Main or Archive catalog lane. `searchMessages` is reachable only through the typed discovery wrapper and the exact request shape below. None of these methods is a general bridge to caller-chosen TDLib operations.
+
+`forwardMessages` has one closed shape, validated before transport and built by the broker from an approved draft (source chat, message ID, recipient chat and mode); callers supply no other field: `chat_id` (the recipient), `topic_id` exactly `null`, `from_chat_id`, `message_ids` of length exactly one, `options` exactly `{"@type":"messageSendOptions","suggested_post_info":null,"disable_notification":false,"from_background":false,"protect_content":false,"allow_paid_broadcast":false,"paid_message_star_count":0,"update_order_of_installed_sticker_sets":false,"scheduling_state":null,"effect_id":0,"sending_id":<random int32, non-zero>,"only_preview":false}`, `send_copy` (boolean) and `remove_caption` (boolean, false unless `send_copy`). Any other key, type or value (several messages, a topic, scheduling, paid or silent options) raises a forbidden-request error before the request reaches TDLib. See [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
 
 The broker socket lives in an owner-only directory with mode `0700`; the socket and owner lock use mode `0600`. The broker also verifies the kernel-reported peer UID through Darwin `getpeereid`. A nonblocking owner lock prevents a second broker. Only the lock holder may replace a same-owner, non-symlink Unix socket after proving that it is stale. Same-UID processes are inside this local filesystem trust boundary. IPC version 2 requires a same-connection contract handshake before every operation; IPC version 1 has no execution compatibility. The handshake compares loaded package/contract/finalized schema identity and effective trusted config. The next request binds the process generation; config freshness and capability checks occur before dispatch. Handshake-only diagnostics do not initialize TDLib. Requests use versioned length-prefixed strict JSON, a fixed operation allowlist, public-model validation on both sides, 1 MiB request and 8 MiB response limits, random process-lifetime client IDs, random request IDs, a 250-millisecond per-read bound, and monotonic deadlines capped at 570 seconds.
 
@@ -289,6 +292,7 @@ Historical custom index files from an older version are not read or updated, but
 
 - `viewMessages`, read receipts, and unread-state changes
 - unapproved sends, automatic send retries, edits, deletes, reactions, or moderation operations
+- multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies
 - broad attachment or thumbnail downloads outside one exact selected anchor
 - null-list global search, `searchPublicChats`, or public-chat crawling
 - secret-chat access
@@ -306,7 +310,7 @@ Telegram text, captions, filenames, chat titles, and sender names are data, neve
 Automated tests and source audits establish only the technical contract. Product completion requires a fresh Codex consumer and provider check, without recording private runtime values:
 
 1. Capture owner-observed unread indicators in Telegram mobile and metadata-only TDLib cache existence, entry count, total bytes, and metadata hash before and after; never print entry names.
-2. Confirm a fresh Codex task exposes exactly forty-three tools through the normal Unofficial Telegram MCP MCP surface.
+2. Confirm a fresh Codex task exposes exactly the tools of the installed manifest (forty-nine in the current candidate, forty-three in published 0.51.0) through the normal Unofficial Telegram MCP MCP surface.
 3. Require overlapping request intervals, at least two broker client contexts, at least one aggregate TDLib serialization wait, one broker process, and multiple thin proxy processes.
 4. Require both tasks to return complete bounded evidence with exact-chat anchors and no session-owner or TDLib code-400 failure; `telegram-search-mcp --check` must remain `AUTHORIZATION_READY` while multiple proxies exist.
 5. Confirm unread indicators remain unchanged, exact selected attachment transfer is hash-verified, no custom private index appears, and metadata-only cache effects are disclosed without filenames.
@@ -845,6 +849,8 @@ lock; auth/account reads remain inside the outer 30-second deadline. Catalog/aut
 updates and unrelated send observations are preserved. No new background worker,
 durable journal, recipient read receipt, exactly-once promise or live-send authority
 is introduced. Synthetic checks are not evidence of live Telegram delivery.
+
+Forward/copy drafts use this tool under both `send` and `forward_send` and are correlated by `sending_id`, recipient chat and temporary message ID instead of a text digest; see [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
 
 ## Plain-text reply evidence and revalidation
 
@@ -1816,3 +1822,123 @@ This is cooperative MCP isolation: trusted same-UID filesystem privilege and
 explicitly authorized CLI exports remain, without a hostile same-UID secrecy claim.
 Synthetic writer tests are technical evidence; installed/native/live and release
 acceptance remain separate gates.
+
+## Exact forward/copy boundary (F14 candidate)
+
+`prepare_forward_send` and `send_prepared_forward` add the default-off `forward_send`
+capability, which is effective only together with `send`. The conjunction is
+enforced by the SDK guard, by the proxy before it connects, by the broker before
+dispatch, and again for status and receipt replay of a forward draft; with either
+capability missing the tools stay listed but fail with `capability_disabled`. The
+authority is exactly one existing message from one exact chat to one exact chat, as
+a `forward` (recipients see the original sender) or a `copy` (a new message from
+the account, no attribution). It never covers several messages, albums, topic
+destinations, scheduling, paid or silent options, content protection, secret chats
+or caption edits, and a retained selection cannot name a source. `forwardMessages`
+is the only added TDLib request type; its closed shape is listed in the authority
+boundary above, and the random `sending_id` is drawn per attempt and excluded from
+the preview digest.
+
+The broker, not the caller, reads the source: one serialized provider read resolves
+the source chat (secret chats refused), reads the message and reads
+`getMessageProperties`. The message becomes a closed version-2 projection of at most
+64 KiB: chat, message ID, typed sender, author signature, via-bot ID, forward flag,
+date, edit date, text or caption with entity types and raw UTF-16 offsets, admitted
+link-preview options and, for media, sizes, measures, names, presentation flags and
+a hash of each file's remote unique ID. File IDs, local paths and volatile state
+(views, reactions, interaction info, rendered link previews) never enter it.
+A missing or mistyped safety field (`self_destruct_in`, `auto_delete_in`, ephemeral
+and scheduling fields, `is_secret`, the property booleans) is never treated as
+safe: the source is unavailable or unsupported. `source_sha256` is shown to the
+owner, bound into `preview_sha256`, compared at send time before the dialog and
+compared again inside the provider call after approval. Drafts are bound to the proxy client and current account; a foreign
+client, new proxy identity, account change, broker restart, supersession or expiry
+returns the content-free `expired`.
+
+Because the provider forwards its own stored message, anything the owner cannot
+review would be delivered unseen. Preparation therefore refuses with the
+content-free `hidden_source_content` for a reply markup (buttons carry targets
+the text does not show); for any text or caption entity outside the allowlist of
+fieldless visible types (Bold, Italic, Underline, Strikethrough, Spoiler, Code,
+Pre, BlockQuote, ExpandableBlockQuote, Mention, Hashtag, Cashtag, BotCommand, Url,
+EmailAddress, PhoneNumber, BankCardNumber), so TextUrl, MentionName, CustomEmoji,
+PreCode, MediaTimestamp, DateTime, unknown types and allowlisted types carrying a
+field are refused; for a link-preview URL not literally present in the visible text;
+and for a non-blank name that sanitizes to nothing. Entities must be exact
+`textEntity` records on whole-scalar boundaries of the raw text, otherwise
+`unsupported_source_content`. A same-second edit that changes an entity type or adds
+a hidden target is caught at send time: the projection binds every entity type and
+the re-read refuses fielded entities (`source_changed`). Refusal codes are fixed;
+none echoes source content or provider text.
+
+Attribution is part of the reviewed facts. `forward` exposes the original sender, so
+the preview and dialog say so, and a source that already carries forward information
+refuses `source_is_forward` in that mode because nested attribution cannot be
+shown. `copy` sends none; a copied forward is marked in the preview and dialog,
+author signature and via-bot ID are hashed and displayed when present, and
+`remove_caption` is shown as `Caption: removed — not sent` without printing the
+caption. Mode, `remove_caption` and the whole closed request are bound into
+`preview_sha256`; a coherently re-signed preview for another mode, message or
+recipient is rejected by the proxy's request-scope check.
+
+Telegram-originated strings are untrusted data. The MCP preview carries text and
+captions as a marked reversible JSON string in which only ASCII letters, digits, `_`
+and `-` are literal, so homoglyphs, bidi and zero-width controls and whitespace are
+visible as `\uXXXX`; one decoded layer is exactly the hashed raw text, and entity
+offsets address it in UTF-16 code units. The local dialog is written for a human:
+letters of every script stay literal, while control, format, bidi, zero-width and
+non-space whitespace characters, NFKC-unstable look-alike forms, Cyrillic or Greek
+letters inside a word that also has ASCII letters and the mark bracket itself are
+rendered as reversible `⟦U+XXXX⟧`. It lists every entity with its covered span, the
+link-preview options and the media facts, and prints account, draft ID and expiry.
+Short names are sanitized and marked, and a name longer than 255 displayed
+characters refuses. The dialog is rebuilt from the stored immutable draft and
+validated against recipient, hash and mode before display; a mismatch is a decline.
+
+Protected content cannot be forwarded or copied. `protected_content` applies to
+both modes when the source chat is protected or the message properties report
+protection by the current or another user; independently, `can_be_forwarded`
+(forward) or `can_be_copied` (copy) must be strictly true, else
+`source_not_forwardable`. All five facts must be present as strict booleans. They
+are checked at preparation, again at send before the dialog (reported as
+`protected_content` or `source_not_forwardable`, with any other eligibility
+refusal reported as `source_changed`), and once more inside the provider call after
+approval (reported as `local_failed`, with no transport).
+
+The claim is single-use and taken only after owner approval. One `forwardMessages` is
+sent and never repeated: not after a timeout, a malformed or lost result, a
+transport error, an authorization change or a restart. Before registration and
+transport a refusal is `local_failed` and the observation is discarded; afterwards
+the outcome can only be `sent`, `failed` or `outcome_unknown`, and a repeated send
+replays the receipt without a dialog. Observations hold only IDs, state and times
+(no text, paths or provider error strings; 900 seconds, 4096 entries). The
+`forwardMessages` result must be one pending outgoing message in the recipient chat
+with the source's content type and the attempt's `sending_id`, and the final update
+must carry the same temporary ID. A malformed, mismatched or multi-message result is
+a terminal conflict that never reconciles to `sent`, even if the success update
+arrived first; a success that overtakes the result is held until the result
+validates. Only a numeric provider error code appears in a fixed detail.
+
+Residual risks, recorded rather than closed:
+
+- Thumbnails, album and video covers, storyboards and alternative videos are copied
+  by the provider but neither projected nor shown, so the dialog cannot show them.
+- `import_info` sources are not refused, and a provider-rendered `link_preview`
+  on a text message is neither projected nor refused; only the link-preview-options
+  URL rule applies.
+- The dialog marks look-alike letters only for Cyrillic and Greek mixed with ASCII
+  and NFKC-unstable forms; other script look-alikes and script-pure look-alike words
+  appear literally. The escaped MCP preview and the hash cover them.
+- The source and recipient reads are cached or offline provider evidence, not an
+  atomic Telegram guarantee: a remote edit can race the final check, and the delivered
+  message is whatever the provider holds at transport time.
+- Confirmation does not verify that the provider applied the requested attribution;
+  Telegram may convert a forward to a copy for some chats. The receipt records what
+  was requested.
+- For the account's own Saved Messages the provider's `is_outgoing=false` on the
+  returned message is accepted when sending ID, chat and temporary ID match;
+  elsewhere an incoming flag never matches. This rests on an assumption about
+  provider behavior that has not been checked against a live account.
+- Real owner-approved forward and copy delivery with readback has not been run; the
+  evidence is a synthetic provider. The same-UID cooperative client boundary is
+  unchanged, with no hostile same-UID secrecy claim.

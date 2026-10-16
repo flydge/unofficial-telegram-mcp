@@ -14,6 +14,12 @@ contract change the schema fingerprint. This new slice still requires independen
 review and installed/native/live acceptance; earlier accepted evidence does not
 cover it. See the [retained selection reference](docs/reference.md#exact-retained-selections-opt-in-candidate).
 
+The candidate surface is now 49 tools. Two of them, `prepare_forward_send` and
+`send_prepared_forward`, forward or copy exactly one existing message between two exact
+chats behind the default-off `forward_send` capability (together with `send`), with a
+complete preview, owner approval and one non-retried attempt. Real approved delivery is
+still pending; see the [forward/copy reference](docs/reference.md#exact-forwardcopy-f14).
+
 
 **Free and open source under [AGPLv3](LICENSE).** This license was chosen because the current PDF reader uses PyMuPDF. A future PDF replacement and different license are being considered; read the [licensing rationale](docs/licensing.md). The [original development plan](docs/plans/initial-roadmap.md) and [current roadmap](docs/roadmap.md) are tracked in Git.
 

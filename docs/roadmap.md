@@ -34,6 +34,16 @@ macOS user, a test-account phone scan with 2FA, bounded own-chat search in Claud
 Codex, QR refresh/cancel/interruption, restart and revoke/reconnect, and unchanged live 0.51
 hashes. Until then 0.52 is not accepted and not released.
 
+**F14 exact forward/copy** ([spec](plans/0.53-forward-copy-spec.md), development):
+`prepare_forward_send` and `send_prepared_forward` forward, or copy without
+attribution, exactly one existing message between two exact chats behind the default-off
+`forward_send` capability (together with `send`). They add a complete source preview, refusals
+for hidden formatting, forwarded sources in forward mode, auto-delete and protected content,
+a local owner dialog and one non-retried `forwardMessages` attempt, and bring the surface to 49
+tools. Evidence is synthetic (fake TDLib and dialog); the findings of the first independent
+review are fixed. **A real approved forward and copy between two of the owner's chats is
+pending the owner**, as is review of the spec's delegated decisions.
+
 The local transfer CLI can now consume a short-lived upload authority issued by
 the preparing MCP client. The helper returns a result reference; the original
 client consumes it to obtain its own artifact grant. A copied result reference
@@ -68,7 +78,7 @@ Still paused and unfinished:
   file scenarios; broader conversational and no-skill consumer validation.
 - F13 formatted captions and remaining applicable topic/reply/live scenarios;
   retained TextUrl captions, CustomEmoji, MediaTimestamp and their combinations.
-- F14 exact forward/copy; F15 native video and ordered albums.
+- F14 real owner-approved forward/copy delivery (the one-message implementation exists); F15 native video and ordered albums.
 - F16 isolated account aliases and real two-account validation.
 - F17 archive/unarchive, own text/caption editing, pin/unpin and exact deletion.
 - Final whole-scope F18 Codex/Inspector/SDK evidence, complete distribution-source
@@ -121,7 +131,7 @@ different license are being considered, with no committed migration date; see
 | F11 | Draft inspection/revision/cancel/refresh | Implemented | Drafts are finite and client-scoped; reconnect/restart can invalidate state. |
 | F12 | Send-status inspection/correlation | Implemented | Unknown after state loss remains unknown; no automatic send retry or crash-boundary exactly-once promise. |
 | F13 | Replies, topic sends and outgoing styles | Partial | Plain/topic/reply paths and five text styles exist; retained rare source entities, formatted captions and applicable remaining live scenarios are not complete. |
-| F14 | Forward/copy | Planned | Exact forward/copy semantics, protected-content and source checks, preview and actual approved delivery. |
+| F14 | Forward/copy | Partial (0.53 dev): one-message forward/copy implemented with technical evidence; real delivery pending owner | Real owner-approved forward and copy between two chats with readback, and installed-consumer evidence. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
 | F15 | Native video and albums | Planned | Video metadata/support profile, ordered album preview, partial outcomes and real delivery. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
 | F17 | Archive/edit/delete/pin actions | Planned | Separate opt-ins, previews, permissions, final-state checks and per-action real approvals. |
@@ -177,7 +187,7 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
    exact-payload authorization. Retained message selections and B2C upload ownership
    now have bounded technical evidence in the development snapshot; full installed
    file/page and conversational outcome coverage remains open.
-3. **Blocking send capabilities:** complete F14 forwarding/copying and F15 native video
+3. **Blocking send capabilities:** complete F14 real delivery evidence and F15 native video
    when required by observed tasks; each needs its own preview and delivery evidence.
 4. **Remaining established backlog:** F16 accounts; F17 archive/unarchive and own
    text/caption editing; F15 albums; retained TextUrl captions, CustomEmoji,

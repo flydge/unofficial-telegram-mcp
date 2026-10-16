@@ -263,7 +263,7 @@ The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stder
 
 Merge the server block from [`.codex/config.toml.example`](../.codex/config.toml.example) into `.codex/config.toml` in the project where you want to use Unofficial Telegram MCP. Preserve any existing settings. Replace **both** absolute-path placeholders. The example does not expand `~` or shell variables.
 
-The current candidate example lists all 47 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
+The current candidate example lists all 49 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
 
 Install the optional skill by copying [the skill file](../skills/telegram-search/SKILL.md) to `~/.agents/skills/telegram-search/SKILL.md`. Back up an existing copy first. The skill supplies search and approval guidance; the broker enforces its own permissions.
 
@@ -314,6 +314,7 @@ The containing directory must be owned by you with mode `0700`; the regular poli
 | Exact forum-topic text sends/replies | `send`, `topic_text_send`, and `reply_text_send` for replies |
 | Explicit outgoing text styles | `send`, `formatted_text_send`, and `reply_text_send` for replies |
 | Text or attachment replies | `send` plus `reply_text_send` or `reply_artifact_send` respectively |
+| Exact forward/copy of one message (candidate) | `send` and `forward_send`; see the [forward/copy reference](reference.md#exact-forwardcopy-f14). Off by default; each send still needs the preview, approval and local confirmation |
 
 Replying to media or formatted sources can require additional source capabilities. Use the [reply reference](reference.md#prepared-same-chat-text-replies) for the exact combinations; do not enable every capability as a shortcut.
 
