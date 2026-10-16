@@ -48,11 +48,15 @@ step seems to need one, stop and use the Terminal fallback at the end.
 | `connect_in_progress` | A page is already open. Do not start another; go to step 4. |
 | `connect_launch_failed` | The background job could not start. Ask the user to run the same command in native Apple Terminal and tell you when it ends, then check with `wait`. |
 | `owner_busy` | Something else holds the Telegram session. Never stop it. Ask the user to finish or close it, then retry. |
+| `broker_start_failed` | A reconnect stopped the user's own broker and could not restart it. Ask the user to run the same command with `connect` in native Apple Terminal; logging out and in also restarts it. |
+| `connect_helper_requires_launchd` | `connect-helper` is internal; never run it. Use `connect`. |
 | `legacy_unmanaged` | An existing unmanaged session is present and is left untouched. Stop and say so. |
 | `app_identity_missing` | This build carries no application identity. The user may store their own API pair by running the same command with `api-credentials` in native Terminal (you never see it) and then `connect` again, or use the Terminal fallback. |
 | `waiting_for_scan` that persists | The page may not have opened (headless, SSH, no browser). Ask whether the user sees it; if not, use the Terminal fallback. |
 | `expired`, `cancelled`, `helper_exited` | Offer to run `connect` again. |
 | `unsupported_auth_state` | Use the Terminal fallback. |
+| `api-credentials` → `already_present` | A complete pair already exists; nothing was written. Continue with `connect`. |
+| `credential_invalid_record` | A stored Keychain record is malformed; add-only writes cannot repair it. Tell the user to inspect it in Keychain Access themselves (`repair_keychain_record_manually`); never read or delete it for them. |
 | any other `failed` code | Follow its `next_action`; do not retry in a loop. |
 
 ## Terminal fallback

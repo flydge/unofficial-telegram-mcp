@@ -465,6 +465,62 @@ class TDLibBoundaryTests(unittest.TestCase):
             ["getAuthorizationState", "getAuthorizationState"],
         )
 
+    def test_remote_revoke_reads_as_blocked_even_when_closed_tdlib_answers_every_request_with_500(self) -> None:
+        def update(state: str) -> dict[str, Any]:
+            return {"@type": "updateAuthorizationState", "authorization_state": {"@type": state}}
+        aborted = {"@type": "error", "code": 500, "message": "Request aborted"}
+        raw = StreamingRaw({"getAuthorizationState": [
+            [{"@type": "authorizationStateReady"}],
+            # Revoked from the phone: LoggingOut -> Closing -> Closed, then the request is aborted.
+            [update("authorizationStateLoggingOut"), update("authorizationStateClosing"),
+             update("authorizationStateClosed"), aborted],
+        ]})
+        client = TDLibClient(raw=raw)
+        client.ensure_ready()
+        with self.assertRaises(AuthorizationBlocked):
+            client.ensure_ready()
+        sent = len(raw.sent)
+        with self.assertRaises(AuthorizationBlocked):  # The closed instance stays blocked, never "error".
+            client.ensure_ready()
+        self.assertEqual(len(raw.sent), sent)
+
+    def test_logging_out_or_closing_seen_during_a_read_blocks_the_next_check(self) -> None:
+        aborted = {"@type": "error", "code": 500, "message": "Request aborted"}
+        for state in ("authorizationStateLoggingOut", "authorizationStateClosing", "authorizationStateClosed"):
+            with self.subTest(state=state):
+                raw = StreamingRaw({"getAuthorizationState": [[{"@type": "authorizationStateReady"}], [aborted]],
+                                    "getChat": [[{"@type": "chat", "id": 42, "type": {"@type": "chatTypePrivate"}}]]})
+                client = TDLibClient(raw=raw)
+                client.ensure_ready()
+                raw.pending.append({"@type": "updateAuthorizationState", "authorization_state": {"@type": state}})
+                with self.assertRaises(AuthorizationBlocked):
+                    client.resolve_target(42)
+                with self.assertRaises(AuthorizationBlocked):
+                    client.ensure_ready()
+
+    def test_a_closed_state_answer_also_ends_the_instance(self) -> None:
+        raw = StreamingRaw({"getAuthorizationState": [[{"@type": "authorizationStateClosed"}]]})
+        client = TDLibClient(raw=raw)
+        for _ in range(2):
+            with self.assertRaises(AuthorizationBlocked):
+                client.ensure_ready()
+        self.assertEqual(len(raw.sent), 1)  # Closed TDLib would only abort further requests.
+
+    def test_a_provider_error_without_a_closing_update_is_still_an_error_not_blocked(self) -> None:
+        raw = StreamingRaw({"getAuthorizationState": [
+            [{"@type": "authorizationStateReady"}],
+            [{"@type": "updateAuthorizationState",
+              "authorization_state": {"@type": "authorizationStateWaitPhoneNumber"}},
+             {"@type": "error", "code": 500, "message": "Request aborted"}],
+            [{"@type": "error", "code": 500, "message": "Request aborted"}],
+        ]})
+        client = TDLibClient(raw=raw)
+        client.ensure_ready()
+        for _ in range(2):
+            with self.assertRaises(TDLibError) as caught:
+                client.ensure_ready()
+            self.assertNotIsInstance(caught.exception, AuthorizationBlocked)
+
     def test_authorization_update_during_data_call_clears_ready_and_stops_read(self) -> None:
         raw = ScriptedRaw(
             {

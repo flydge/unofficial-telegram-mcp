@@ -170,6 +170,41 @@ class BrokerWalkingSkeletonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.observed_deadline, deadline)
         self.assertIsNone(backend.active_deadline)
 
+    def test_check_reports_a_remotely_revoked_session_as_blocked_not_error(self) -> None:
+        from collections import deque
+        from telegram_search_mcp.tdjson import TDLibClient
+
+        class RevokedRaw:
+            """Ready once; then the phone revokes the device and closed TDLib aborts every request."""
+            def __init__(self):
+                self.pending, self.calls = deque(), 0
+            def send(self, payload):
+                self.calls += 1
+                if self.calls == 1:
+                    self.pending.append({"@type": "authorizationStateReady", "@extra": payload["@extra"]})
+                    return
+                if self.calls == 2:
+                    for state in ("LoggingOut", "Closing", "Closed"):
+                        self.pending.append({"@type": "updateAuthorizationState",
+                                             "authorization_state": {"@type": "authorizationState" + state}})
+                self.pending.append({"@type": "error", "code": 500, "message": "Request aborted",
+                                     "@extra": payload["@extra"]})
+            def receive(self, timeout):
+                return self.pending.popleft() if self.pending else None
+            def close(self):
+                pass
+
+        client = TDLibClient(raw=RevokedRaw())
+        with tempfile.TemporaryDirectory() as parent:
+            broker = _synthetic_broker(socket_path=Path(parent) / "broker.sock", client_factory=lambda: client)
+            def check():
+                return broker._dispatch({"operation": "check", "client_id": "test", "payload": {},
+                                         "deadline": time.monotonic() + 10, "broker_generation": broker._generation})
+            self.assertEqual(check(), {"status": "ready"})
+            self.assertEqual(check(), {"status": "blocked"})
+            self.assertEqual(check(), {"status": "blocked"})  # The same closed client; nothing is recreated.
+        self.assertIs(broker._client, client)
+
     def test_subprocess_proxies_share_one_fake_tdlib_broker(self) -> None:
         child_guard = r'''
 import atexit

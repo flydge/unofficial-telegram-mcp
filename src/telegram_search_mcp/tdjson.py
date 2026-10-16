@@ -59,6 +59,9 @@ _ALLOWED_REQUEST_TYPES = frozenset(
 _AUTHORIZATION_CONTROL_TYPES = frozenset(
     {"getAuthorizationState", "setTdlibParameters", "checkDatabaseEncryptionKey"}
 )
+_ENDED_AUTHORIZATION_STATES = frozenset(
+    {"authorizationStateLoggingOut", "authorizationStateClosing", "authorizationStateClosed"}
+)
 _CHAT_MEDIA_FILTERS = {
     "video": {"@type": "searchMessagesFilterVideo"},
     "video_note": {"@type": "searchMessagesFilterVideoNote"},
@@ -767,6 +770,9 @@ class TDLibClient:
         self._serialization_wait_count = 0
         self._request_context = threading.local()
         self._ready = False
+        # LoggingOut/Closing/Closed end this instance for good (a remote revoke goes all
+        # three ways, then closed TDLib aborts every request): authorization is blocked.
+        self._authorization_ended = False
         self._send_observations = SendObservations()
         self._send_account_id: int | None = None
         self._send_observation_epoch = object()
@@ -814,6 +820,8 @@ class TDLibClient:
             self._ready = isinstance(state, dict) and state.get("@type") == "authorizationStateReady"
             if not self._ready:
                 self._invalidate_send_observations()
+            if isinstance(state, dict) and state.get("@type") in _ENDED_AUTHORIZATION_STATES:
+                self._authorization_ended = True
         self._send_observations.reduce(response)
 
     def get_send_observation(self, attempt_id: str):
@@ -966,10 +974,22 @@ class TDLibClient:
 
     def ensure_ready(self) -> None:
         for _ in range(8):
-            state = self._call({"@type": "getAuthorizationState"}).get("@type")
+            if self._authorization_ended:
+                self._ready = False
+                raise AuthorizationBlocked("the dedicated TDLib session was logged out or closed")
+            try:
+                state = self._call({"@type": "getAuthorizationState"}).get("@type")
+            except AuthorizationBlocked:
+                raise
+            except TDLibError:
+                if self._authorization_ended:  # Closed TDLib answers every request with an error.
+                    raise AuthorizationBlocked("the dedicated TDLib session was logged out or closed") from None
+                raise
             self._ready = state == "authorizationStateReady"
             if not self._ready:
                 self._invalidate_send_observations()
+            if state in _ENDED_AUTHORIZATION_STATES:
+                self._authorization_ended = True
             if state == "authorizationStateReady":
                 return
             if state == "authorizationStateWaitTdlibParameters":

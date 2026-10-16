@@ -15,6 +15,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 import urllib.request
@@ -31,7 +33,7 @@ from telegram_search_mcp.credentials import SecretValue
 from telegram_search_mcp.enrollment import EnrollmentStore, SetupPaths
 from telegram_search_mcp.keychain import ApiCredentials
 from telegram_search_mcp.launch_agent import CONNECT_JOB_LABEL
-from telegram_search_mcp.session_owner import SessionOwnerLease, open_private_directory
+from telegram_search_mcp.session_owner import SessionOwnerLease, acquire_owner_lock, open_private_directory
 
 UID = 501
 URL_CANARY = 'http://127.0.0.1:50999/#t=' + 'LEAKCANARYTOKEN-9d41' + 'x' * 23  # 43 token characters
@@ -44,23 +46,35 @@ def completed(args, code=0, out=''):
 
 
 class FakeLaunchd:
-    """Recording launchctl. Models the enrolled broker registration and the transient connect job."""
+    """Recording launchctl. Models the enrolled broker registration and the transient connect job.
+
+    `job` is the connect job's literal launchd state ('running', 'not running', 'exited',
+    'spawn scheduled', 'waiting', ...), 'absent' when unregistered, or 'no state line'.
+    """
     def __init__(self, paths, broker_plist, *, broker_loaded=False, job='absent', bootstrap_code=0,
-                 print_code=None, raises=None, exact_registration=True):
-        self.paths, self.calls = paths, []
+                 broker_bootstrap_code=0, print_code=None, raises=None, exact_registration=True,
+                 bootstrap_state='running'):
+        self.paths, self.broker_plist, self.calls = paths, broker_plist, []
         self.broker_loaded, self.job = broker_loaded, job
         self.bootstrap_code, self.print_code, self.raises = bootstrap_code, print_code, raises
+        self.broker_bootstrap_code, self.bootstrap_state = broker_bootstrap_code, bootstrap_state
         arguments = launch_agent.launch_agent_payload(python_executable=Path(sys.executable))['ProgramArguments']
         program = arguments[0] if exact_registration else '/foreign/python'
         self.broker_text = ('path = ' + str(broker_plist) + '\nprogram = ' + program
                             + '\narguments = {\n' + '\n'.join(arguments) + '\n}\n')
-        self.bootstrapped = []  # (plist bytes, status file existed) at the moment of each bootstrap
-        self.on_print = None
+        self.bootstrapped = []  # (plist bytes, status file existed) at the moment of each job bootstrap
+        self.broker_bootstraps = 0
+        self.on_print = self.on_bootout = self.on_bootstrap = None
+        self._lock = threading.RLock()
 
     def verbs(self, *names):
         return [call[1:] for call in self.calls if call[1] in names]
 
     def __call__(self, args, **kwargs):
+        with self._lock:
+            return self._call(args, **kwargs)
+
+    def _call(self, args, **kwargs):
         assert args[0] == '/bin/launchctl' and kwargs.get('check') is False
         self.calls.append(list(args))
         if self.raises is not None:
@@ -77,28 +91,42 @@ class FakeLaunchd:
                 return completed(args, self.print_code)
             if self.job == 'absent':
                 return completed(args, 113)
-            state = 'running' if self.job == 'running' else 'not running'
-            return completed(args, 0, '%s = {\n\tactive count = 1\n\tstate = %s\n\n\tprogram = /x\n}\n' % (args[2], state))
+            state = '' if self.job == 'no state line' else '\tstate = %s\n' % self.job
+            return completed(args, 0, '%s = {\n\tactive count = 1\n%s\n\tprogram = /x\n}\n' % (args[2], state))
         if verb == 'bootout':
             if args[2] == 'gui/%d/%s' % (UID, LAUNCH_AGENT_LABEL):
                 self.broker_loaded = False
             else:
                 assert args[2] == 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)
+                if self.job == 'absent':
+                    return completed(args, 113)
                 self.job = 'absent'
+                if self.on_bootout is not None:
+                    self.on_bootout()
             return completed(args)
         if verb == 'bootstrap':
             assert args[2] == 'gui/%d' % UID
+            if args[3] == str(self.broker_plist):
+                self.broker_bootstraps += 1
+                if self.broker_bootstrap_code:
+                    return completed(args, self.broker_bootstrap_code)
+                self.broker_loaded = True
+                return completed(args)
             self.bootstrapped.append((Path(args[3]).read_bytes(), connect_status_path(self.paths).exists()))
+            if self.on_bootstrap is not None:
+                self.on_bootstrap()
             if self.bootstrap_code:
                 return completed(args, self.bootstrap_code)
-            self.job = 'running'
+            self.job = self.bootstrap_state
             return completed(args)
         raise AssertionError(args)
 
 
 class FakeBroker:
+    """status may be a list: one answer per check, the last one repeating."""
     def __init__(self, status='ready', handshake_error=None):
         self.status, self.handshake_error, self.events = status, handshake_error, []
+        self.answers = list(status) if isinstance(status, list) else None
 
     def handshake(self):
         self.events.append('handshake')
@@ -108,9 +136,12 @@ class FakeBroker:
 
     def check(self):
         self.events.append('check')
-        if isinstance(self.status, Exception):
-            raise self.status
-        return self.status
+        status = self.status
+        if self.answers is not None:
+            status = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(status, Exception):
+            raise status
+        return status
 
     def close(self):
         self.events.append('close')
@@ -148,16 +179,38 @@ class Harness(unittest.TestCase):
     def launchd(self, **options):
         return FakeLaunchd(self.paths, self.broker_plist, **options)
 
-    def status_file(self, phase='ready', code=None, mode=0o600):
-        write_connect_status(self.paths, phase, code, updated_at=1.0, expires_at=2.0)
+    def status_file(self, phase='ready', code=None, mode=0o600, expires_at=None):
+        """A live run's status by default: it expires 600 s from now."""
+        now = time.time()
+        write_connect_status(self.paths, phase, code, updated_at=now,
+                             expires_at=now + 600 if expires_at is None else expires_at)
         connect_status_path(self.paths).chmod(mode)
 
-    def connect(self, launchd, *, broker=None, terminal=None, inline=None):
+    def connect(self, launchd, *, broker=None, terminal=None, inline=None, sleeper=None):
         def no_inline():
             raise AssertionError('inline helper must not run')
         return connect_cli.connect(self.paths, client_factory=lambda paths, timeout: broker,
             terminal=terminal if terminal is not None else Terminal(refused=True), inline=inline or no_inline,
-            runner=launchd, uid=UID, sleeper=self.sleeps.append, broker_plist=self.broker_plist)
+            runner=launchd, uid=UID, sleeper=sleeper or self.sleeps.append, broker_plist=self.broker_plist)
+
+    def hold_connect_lock(self):
+        """Stands in for another helper or connect: a separate open file description of connect.lock."""
+        os.close(open_private_directory(self.paths.lock.parent, create=True))
+        descriptor = acquire_owner_lock(connect_cli.connect_lock_path(self.paths))
+        holder = {'fd': descriptor}
+        def release():
+            if holder['fd'] is not None:
+                os.close(holder['fd'])
+                holder['fd'] = None
+        self.addCleanup(release)
+        return release
+
+    def connect_lock_free(self):
+        descriptor = connect_cli._take_connect_lock(self.paths)
+        if descriptor is None:
+            return False
+        os.close(descriptor)
+        return True
 
 
 class ConnectTests(Harness):
@@ -217,9 +270,10 @@ class ConnectTests(Harness):
             ['bootout', 'gui/%d/%s' % (UID, LAUNCH_AGENT_LABEL)],
             ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
         self.assertEqual(self.broker_plist.read_bytes(), plist)  # The broker definition is never unlinked.
-        # Validation (a read-only print of the broker) precedes the stop.
+        # The check is re-run right before the stop, and validation (read-only prints) precedes it.
+        self.assertEqual(broker.events, ['handshake', 'check', 'close'] * 2)
         broker_calls = [call[1] for call in launchd.calls if call[2].endswith(LAUNCH_AGENT_LABEL)]
-        self.assertEqual(broker_calls[:2], ['print', 'bootout'])
+        self.assertEqual(broker_calls[:3], ['print', 'print', 'bootout'])
         self.assertFalse(launchd.bootstrapped[0][1], 'stale status must be gone before the helper starts')
         self.assertFalse(connect_status_path(self.paths).exists())
 
@@ -277,17 +331,63 @@ class ConnectTests(Harness):
         self.assertEqual(len(launchd.verbs('bootstrap')), 1)
         self.assertEqual(launchd.verbs('bootout'), [])
 
-    def test_a_stopped_broker_that_keeps_the_lease_ends_owner_busy_without_starting_the_job(self):
+    def test_a_stopped_broker_whose_lease_stays_held_is_restarted_and_reported_truthfully(self):
+        self.enroll()
+        self.socket()
+        plist = self.install_broker_plist()
+        launchd = self.launchd(broker_loaded=True)
+        with SessionOwnerLease(self.paths.lock):  # Some other owner keeps the session after our stop.
+            value, code = self.connect(launchd, broker=FakeBroker('blocked'))
+        # The broker was stopped by this run, so the advice is not "check it without stopping it".
+        self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'owner_busy',
+                                             'next_action': 'run_connect_again'}))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [
+            ['bootout', 'gui/%d/%s' % (UID, LAUNCH_AGENT_LABEL)],
+            ['bootstrap', 'gui/%d' % UID, str(self.broker_plist)]])
+        self.assertTrue(launchd.broker_loaded, 'the enrolled broker is never left stopped')
+        self.assertEqual((launchd.bootstrapped, self.broker_plist.read_bytes()), ([], plist))
+        self.assertGreater(len(self.sleeps), 10)  # Bounded polling, not a hang.
+        self.assertTrue(self.connect_lock_free())
+
+    def test_a_stopped_broker_is_restarted_when_the_helper_job_cannot_be_bootstrapped(self):
+        self.enroll()
+        self.socket()
+        self.install_broker_plist()
+        launchd = self.launchd(broker_loaded=True, bootstrap_code=5)
+        value, code = self.connect(launchd, broker=FakeBroker('blocked'))
+        self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'connect_launch_failed',
+                                             'next_action': 'run_connect_in_native_terminal'}))
+        self.assertEqual(len(launchd.bootstrapped), 1)
+        self.assertEqual((launchd.broker_bootstraps, launchd.broker_loaded), (1, True))
+        self.assertFalse(job_plist(self.paths).exists())
+
+    def test_a_broker_that_cannot_be_restarted_after_our_stop_says_so(self):
+        self.enroll()
+        self.socket()
+        self.install_broker_plist()
+        for options in [dict(bootstrap_code=5), dict()]:
+            with self.subTest(options), SessionOwnerLease(self.paths.lock) if not options else contextlib.nullcontext():
+                launchd = self.launchd(broker_loaded=True, broker_bootstrap_code=5, **options)
+                value, code = self.connect(launchd, broker=FakeBroker('blocked'))
+                self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'broker_start_failed',
+                                                     'next_action': 'run_connect_in_native_terminal'}))
+                self.assertEqual(launchd.broker_bootstraps, 1)
+
+    def test_the_check_is_rerun_right_before_the_stop_and_only_still_blocked_is_stopped(self):
         self.enroll()
         self.socket()
         self.install_broker_plist()
         launchd = self.launchd(broker_loaded=True)
-        with SessionOwnerLease(self.paths.lock):
-            value, code = self.connect(launchd, broker=FakeBroker('blocked'))
-        self.assertEqual((code, value['code']), (2, 'owner_busy'))
-        self.assertEqual(len(launchd.verbs('bootout')), 1)
-        self.assertEqual(launchd.verbs('bootstrap'), [])
-        self.assertGreater(len(self.sleeps), 10)  # Bounded polling, not a hang.
+        value, code = self.connect(launchd, broker=FakeBroker(['blocked', 'ready']))
+        self.assertEqual((code, value), (0, {'status': 'already_connected'}))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+        for later in ['error', BrokerUnavailable('restarting')]:
+            with self.subTest(later=later), SessionOwnerLease(self.paths.lock):  # The broker still owns it.
+                launchd = self.launchd(broker_loaded=True)
+                value, code = self.connect(launchd, broker=FakeBroker(['blocked', later]))
+                self.assertEqual((code, value['code'], value['next_action']),
+                                 (2, 'owner_busy', 'check_existing_broker_without_stopping_it'))
+                self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
 
     def test_a_failed_stop_keeps_the_broker_and_refuses(self):
         self.enroll()
@@ -301,8 +401,11 @@ class ConnectTests(Harness):
                 return completed(args, 5)
             return real(args, **kwargs)
         value, code = self.connect(failing, broker=FakeBroker('blocked'))
-        self.assertEqual((code, value['code']), (2, 'owner_busy'))
+        # A stop was attempted: the restore finds the broker still loaded and touches nothing more.
+        self.assertEqual((code, value['code'], value['next_action']), (2, 'owner_busy', 'run_connect_again'))
         self.assertEqual(launchd.verbs('bootstrap'), [])
+        self.assertTrue(launchd.broker_loaded)
+        self.assertEqual([call[1] for call in launchd.calls if call[2].endswith(LAUNCH_AGENT_LABEL)][-1], 'print')
 
     def test_running_helper_means_in_progress_and_blocks_both_stop_and_status_reset(self):
         self.enroll()
@@ -318,12 +421,24 @@ class ConnectTests(Harness):
                 self.assertTrue(connect_status_path(self.paths).exists())
 
     def test_loaded_but_idle_job_is_booted_out_then_bootstrapped(self):
-        launchd = self.launchd(job='loaded')
-        value, code = self.connect(launchd)
-        self.assertEqual((code, value['status']), (0, 'screen_opened'))
-        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [
-            ['bootout', 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)],
-            ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
+        for idle in ['not running', 'exited']:
+            with self.subTest(idle):
+                launchd = self.launchd(job=idle)
+                value, code = self.connect(launchd)
+                self.assertEqual((code, value['status']), (0, 'screen_opened'))
+                self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [
+                    ['bootout', 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)],
+                    ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
+
+    def test_any_loaded_job_state_but_an_explicit_idle_one_is_a_live_helper(self):
+        self.status_file('waiting_for_scan')
+        for busy in ['running', 'spawn scheduled', 'waiting', 'spawning', 'no state line']:
+            with self.subTest(busy):
+                launchd = self.launchd(job=busy)
+                value, code = self.connect(launchd)
+                self.assertEqual((code, value), (0, {'status': 'connect_in_progress', 'next_action': 'wait'}))
+                self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+                self.assertTrue(connect_status_path(self.paths).exists())
 
     def test_launchctl_failures_are_connect_launch_failed_with_the_terminal_fallback(self):
         cases = {'bootstrap refused': dict(bootstrap_code=5), 'launchctl unusable': dict(raises=PermissionError()),
@@ -376,7 +491,7 @@ class ConnectTests(Harness):
                     plist.rmdir()
                 else:
                     plist.unlink()
-        self.assertEqual(sorted(p.name for p in run.iterdir()), ['broker.lock'])
+        self.assertEqual(sorted(p.name for p in run.iterdir()), ['broker.lock', 'connect.lock'])
 
     def test_bundle_mode_uses_the_receipt_bound_selection_for_the_helper(self):
         selection = mock.Mock()
@@ -425,6 +540,133 @@ class ConnectTests(Harness):
             value, code = self.connect(launchd)
         self.assertEqual((code, value['code']), (2, 'dependency_unavailable'))
         self.assertNotIn(URL_CANARY, json.dumps(value) + out.getvalue() + err.getvalue())
+
+    def test_a_finished_helper_in_its_linger_is_awaited_then_a_fresh_start_follows(self):
+        self.status_file('failed', 'auth_request_failed')  # The previous run ended; its page lingers.
+        release = self.hold_connect_lock()  # The lingering helper still holds connect.lock ...
+        launchd = self.launchd(job='running')  # ... and its job still runs.
+        def sleeper(seconds):
+            self.sleeps.append(seconds)
+            if len(self.sleeps) == 30:  # Linger over: the helper exits.
+                release()
+                launchd.job = 'not running'
+        value, code = self.connect(launchd, sleeper=sleeper)
+        self.assertEqual((code, value), (0, {'status': 'screen_opened', 'next_action': 'wait'}))
+        self.assertEqual(self.sleeps[:30], [0.1] * 30)
+        self.assertEqual(len(launchd.bootstrapped), 1)
+        self.assertFalse(launchd.bootstrapped[0][1], 'the old outcome is cleared before the fresh helper starts')
+
+    def test_a_finished_helper_whose_job_never_exits_is_booted_out_after_the_linger_window(self):
+        self.status_file('cancelled', 'cancelled')
+        launchd = self.launchd(job='running')
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value['status']), (0, 'screen_opened'))
+        self.assertEqual(len(self.sleeps), connect_cli.LINGER_WAIT / 0.1)
+        self.assertEqual(connect_cli.LINGER_WAIT, 15)
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [
+            ['bootout', 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)],
+            ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
+
+    def test_a_lock_still_held_past_the_linger_window_without_a_job_stays_in_progress(self):
+        self.status_file('ready')
+        self.hold_connect_lock()  # An inline run in Terminal, not our job: never booted out.
+        launchd = self.launchd()
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value), (0, {'status': 'connect_in_progress', 'next_action': 'wait'}))
+        self.assertEqual(len(self.sleeps), 150)
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+
+    def test_a_hung_helper_past_its_expiry_is_booted_out_and_replaced(self):
+        self.status_file('waiting_for_scan', expires_at=time.time() - 61)
+        release = self.hold_connect_lock()  # The hung helper holds connect.lock until it is killed.
+        launchd = self.launchd(job='running')
+        launchd.on_bootout = release
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value['status']), (0, 'screen_opened'))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [
+            ['bootout', 'gui/%d/%s' % (UID, CONNECT_JOB_LABEL)],
+            ['bootstrap', 'gui/%d' % UID, str(job_plist(self.paths))]])
+        self.assertEqual(self.sleeps, [])  # No linger wait: an expired run is not lingering.
+
+    def test_a_helper_within_its_grace_is_not_hung(self):
+        self.status_file('waiting_for_scan', expires_at=time.time() - 30)
+        self.hold_connect_lock()
+        launchd = self.launchd(job='running')
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value['status']), (0, 'connect_in_progress'))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+
+    def test_connect_holds_its_lock_only_until_the_job_is_bootstrapped(self):
+        launchd = self.launchd()
+        seen = []
+        launchd.on_bootstrap = lambda: seen.append(self.connect_lock_free())
+        value, code = self.connect(launchd)
+        self.assertEqual((code, value['status']), (0, 'screen_opened'))
+        self.assertEqual(seen, [False])
+        self.assertTrue(self.connect_lock_free())
+        self.assertEqual(stat.S_IMODE(connect_cli.connect_lock_path(self.paths).stat().st_mode), 0o600)
+
+    def test_a_held_connect_lock_means_in_progress_before_any_stop_or_reset(self):
+        self.enroll()
+        self.socket()
+        self.install_broker_plist()
+        self.status_file('waiting_for_scan')
+        self.hold_connect_lock()
+        launchd = self.launchd(broker_loaded=True)
+        value, code = self.connect(launchd, broker=FakeBroker('blocked'))
+        self.assertEqual((code, value), (0, {'status': 'connect_in_progress', 'next_action': 'wait'}))
+        self.assertEqual(launchd.verbs('bootout', 'bootstrap'), [])
+        self.assertTrue(connect_status_path(self.paths).exists())
+
+    def test_two_concurrent_connects_start_exactly_one_helper(self):
+        launchd = self.launchd()
+        second = []
+        def race():  # The second connect arrives while the first is inside its critical section.
+            if not second:
+                second.append(self.connect(launchd))
+        launchd.on_bootstrap = race
+        first = self.connect(launchd)
+        self.assertEqual(first, ({'status': 'screen_opened', 'next_action': 'wait'}, 0))
+        self.assertEqual(second, [({'status': 'connect_in_progress', 'next_action': 'wait'}, 0)])
+        self.assertEqual(len(launchd.bootstrapped), 1)
+
+    def test_two_threaded_connects_start_exactly_one_helper(self):
+        for _ in range(20):
+            connect_status_path(self.paths).unlink(missing_ok=True)
+            launchd = self.launchd(bootstrap_state='spawn scheduled')
+            barrier, results = threading.Barrier(2), []
+            def run():
+                barrier.wait()
+                results.append(self.connect(launchd, sleeper=lambda _: None))
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+            self.assertEqual(sorted(value['status'] for value, _ in results), ['connect_in_progress', 'screen_opened'])
+            self.assertEqual(len(launchd.bootstrapped), 1)
+
+    def test_inline_run_holds_the_connect_lock_for_its_whole_run(self):
+        seen = []
+        def inline():
+            seen.append(self.connect_lock_free())
+            return ConnectResult('failed', 'cancelled')
+        value, code = self.connect(self.launchd(), terminal=Terminal(), inline=inline)
+        self.assertEqual((code, value['code']), (2, 'cancelled'))
+        self.assertEqual(seen, [False])
+        self.assertTrue(self.connect_lock_free())
+
+    def test_an_inline_run_that_raises_after_our_stop_still_restores_the_broker(self):
+        self.enroll()
+        self.socket()
+        self.install_broker_plist()
+        launchd = self.launchd(broker_loaded=True)
+        def inline():
+            raise RuntimeError('helper could not be built')
+        value, code = self.connect(launchd, broker=FakeBroker('blocked'), terminal=Terminal(), inline=inline)
+        self.assertEqual((code, value['code']), (2, 'dependency_unavailable'))
+        self.assertEqual((launchd.broker_bootstraps, launchd.broker_loaded), (1, True))
+        self.assertTrue(self.connect_lock_free())
 
     def test_lease_busy_after_no_stop_refuses_before_clearing_status(self):
         self.status_file('waiting_for_scan')
@@ -500,7 +742,7 @@ class WaitTests(Harness):
     def test_a_vanished_helper_is_helper_exited_unless_it_finished_in_between(self):
         for states in [None, ('starting', None), ('waiting_for_scan', None), ('authorizing', None),
                        ('waiting_for_password', 'invalid_password')]:
-            for job in ['absent', 'loaded']:
+            for job in ['absent', 'not running', 'exited']:
                 with self.subTest(status=states, job=job):
                     if states is None:
                         connect_status_path(self.paths).unlink(missing_ok=True)
@@ -524,18 +766,73 @@ class WaitTests(Harness):
         self.status_file('starting')
         launchd = self.launchd(job='absent')
         clock = self.Clock()
-        clock.hooks = [lambda: setattr(launchd, 'job', 'running')]
+        clock.hooks = [lambda: setattr(launchd, 'job', 'spawn scheduled')]
         value, code = self.wait(launchd, clock, timeout=3)
         self.assertEqual((code, value['status']), (0, 'starting'))
 
-    def test_an_inline_helper_in_terminal_counts_as_alive_through_the_owner_lease(self):
+    def test_any_loaded_job_state_but_an_explicit_idle_one_counts_as_alive(self):
         self.status_file('waiting_for_scan')
-        with SessionOwnerLease(self.paths.lock):
-            for launchd in [self.launchd(job='absent'), self.launchd(raises=PermissionError())]:
-                value, code = self.wait(launchd, timeout=5)
+        for state in ['running', 'spawn scheduled', 'waiting', 'no state line']:
+            with self.subTest(state):
+                value, code = self.wait(self.launchd(job=state), timeout=5)
                 self.assertEqual((code, value['status']), (0, 'waiting_for_scan'))
+
+    def test_only_our_job_or_the_connect_lock_mean_alive_never_the_session_lease(self):
+        self.status_file('waiting_for_scan')
+        with SessionOwnerLease(self.paths.lock):  # A broker holding the session is not a helper.
+            value, code = self.wait(self.launchd(job='absent'), timeout=5)
+        self.assertEqual((code, value['code']), (2, 'helper_exited'))
+        release = self.hold_connect_lock()  # An inline helper in Terminal holds connect.lock.
+        for launchd in [self.launchd(job='absent'), self.launchd(raises=PermissionError())]:
+            value, code = self.wait(launchd, timeout=5)
+            self.assertEqual((code, value['status']), (0, 'waiting_for_scan'))
+        release()
         value, code = self.wait(self.launchd(raises=PermissionError()), timeout=5)
         self.assertEqual((code, value['code']), (2, 'helper_exited'))
+
+    def test_wait_never_takes_the_session_lease(self):
+        self.status_file('handing_off')
+        def forbidden(*args, **kwargs):
+            raise AssertionError('wait must not probe the owner lease')
+        with mock.patch.object(connect_cli, 'SessionOwnerLease', side_effect=forbidden), \
+             mock.patch('telegram_search_mcp.session_owner.SessionOwnerLease', side_effect=forbidden):
+            for job in ['running', 'absent']:
+                value, code = self.wait(self.launchd(job=job), timeout=3)
+                self.assertNotEqual(value.get('code'), 'dependency_unavailable')
+
+    def test_a_status_past_its_expiry_is_helper_exited_whatever_still_looks_alive(self):
+        # A helper killed mid-handoff (or long ago) while a broker now holds the session.
+        for phase in ('handing_off', 'waiting_for_scan', 'starting', 'authorizing'):
+            with self.subTest(phase):
+                self.status_file(phase, expires_at=time.time() - 61)
+                release = self.hold_connect_lock()
+                with SessionOwnerLease(self.paths.lock):
+                    value, code = self.wait(self.launchd(job='running'))
+                release()
+                self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'helper_exited',
+                                                     'next_action': 'run_connect_again'}))
+                self.assertEqual(self.clock.now, 0.0)
+        self.status_file('failed', 'owner_busy', expires_at=time.time() - 3600)  # Terminal always reports.
+        self.assertEqual(self.wait(self.launchd(job='absent'))[0]['code'], 'owner_busy')
+
+    def test_a_status_within_its_grace_is_still_waited_on(self):
+        self.status_file('handing_off', expires_at=time.time() - 30)
+        value, code = self.wait(self.launchd(job='running'), timeout=5)
+        self.assertEqual((code, value), (0, {'status': 'handing_off', 'next_action': 'wait'}))
+
+    def test_wait_creates_nothing_in_a_missing_run_directory(self):
+        value, code = self.wait(self.launchd(job='absent'))
+        self.assertEqual((code, value['code']), (2, 'helper_exited'))
+        self.assertFalse(self.paths.lock.parent.exists())
+        self.run_dir()
+        self.wait(self.launchd(job='absent'))
+        self.assertEqual(list(self.paths.lock.parent.iterdir()), [])
+
+    def test_a_corrupt_keychain_record_is_not_answered_with_connect_again(self):
+        self.status_file('failed', 'credential_invalid_record')
+        value, code = self.wait(self.launchd(job='absent'))
+        self.assertEqual((code, value), (2, {'status': 'failed', 'code': 'credential_invalid_record',
+                                             'next_action': 'repair_keychain_record_manually'}))
 
     def test_untrusted_status_files_are_ignored_and_never_reported_as_ready(self):
         run = self.run_dir()
@@ -667,7 +964,16 @@ class ApiCredentialsTests(Harness):
     def test_a_corrupt_existing_record_is_refused(self):
         store = MemoryStore({'api_id': SecretValue(b'abc')})
         (value, code), _, _ = self.run_command(Terminal(), store)
-        self.assertEqual((code, value['code']), (2, 'credential_invalid_record'))
+        self.assertEqual((code, value), (2, {'status': 'refused', 'code': 'credential_invalid_record',
+                                            'next_action': 'repair_keychain_record_manually'}))
+        self.assertEqual(store.puts, [])
+
+    def test_a_complete_existing_pair_is_already_present_and_nothing_is_written(self):
+        store = MemoryStore({'api_id': SecretValue(b'123456'), 'api_hash': SecretValue(b'c' * 32)})
+        terminal = Terminal()
+        (value, code), _, _ = self.run_command(terminal, store)
+        self.assertEqual((code, value), (0, {'status': 'already_present'}))
+        self.assertEqual((terminal.prompts, store.puts), ([], []))
 
     def test_cancel_and_timeout_are_redacted_refusals(self):
         from telegram_search_mcp.secure_terminal import TerminalError
@@ -686,12 +992,16 @@ class ApiCredentialsTests(Harness):
         self.assertEqual((built, terminal.prompts), ([], []))
 
     def test_the_bundled_identity_is_never_used_to_skip_the_prompts(self):
+        # Even with an identity reachable from every import site, the owner's typed pair is stored.
         terminal = Terminal({'api_id': b'123456', 'api_hash': b'a' * 32})
-        with mock.patch('telegram_search_mcp.app_identity.bundled_app_identity',
-                        return_value=ApiCredentials(1, 'f' * 32)) as bundled:
+        bundled = ApiCredentials(1, 'f' * 32)
+        with mock.patch('telegram_search_mcp.app_identity.bundled_app_identity', return_value=bundled), \
+             mock.patch('telegram_search_mcp.setup_wizard.bundled_app_identity', return_value=bundled), \
+             mock.patch('telegram_search_mcp.connect_flow.bundled_app_identity', return_value=bundled):
             (value, code), store, _ = self.run_command(terminal)
-        self.assertEqual(terminal.prompts, ['api_id', 'api_hash'])
-        bundled.assert_not_called()
+        self.assertEqual((code, value), (0, {'status': 'stored'}))
+        self.assertEqual((terminal.prompts, store.puts), (['api_id', 'api_hash'], ['api_id', 'api_hash']))
+        self.assertEqual((store.values['api_id'].reveal(), store.values['api_hash'].reveal()), (b'123456', b'a' * 32))
 
 
 class FakeUI:
@@ -715,8 +1025,9 @@ class FakeServer:
 
 
 class HelperTests(Harness):
-    def helper(self, *, run=None, opener=None, own_plist=None, start_error=None, result=None):
-        self.log, self.opened, self.run_args = [], [], []
+    def helper(self, *, run=None, opener=None, own_plist=None, start_error=None, result=None, sleeper=None,
+               **options):
+        self.log, self.opened, self.run_args, self.restored = [], [], [], []
         self.ui = None
         def ui_factory():
             self.ui = FakeUI(self.log)
@@ -731,13 +1042,14 @@ class HelperTests(Harness):
         def default_opener(url):
             self.log.append('open')
             self.opened.append(url)
-        def sleeper(seconds):
+        def default_sleeper(seconds):
             self.log.append('linger:%s' % seconds)
         handoff = mock.Mock(return_value='ready')
         self.handoff = handoff
+        options.setdefault('restore_broker', lambda: (self.log.append('restore'), self.restored.append(1)))
         return connect_cli.connect_helper(self.paths, store='store', provider_factory='provider', handoff=handoff,
             own_plist=own_plist, ui_factory=ui_factory, server_factory=server_factory, run=run or default_run,
-            opener=opener or default_opener, clock=lambda: 1000.0, sleeper=sleeper)
+            opener=opener or default_opener, clock=lambda: 1000.0, sleeper=sleeper or default_sleeper, **options)
 
     def test_url_goes_only_to_the_opener_and_nothing_is_printed(self):
         plist = job_plist(self.paths)
@@ -772,7 +1084,89 @@ class HelperTests(Harness):
         failed = ConnectResult('failed', 'owner_busy')
         result = self.helper(result=failed)
         self.assertEqual((result.exit_code, self.ui.notices), (2, [('failed', 'owner_busy')]))
-        self.assertEqual(self.log[-2:], ['linger:10', 'close'])
+        self.assertEqual(self.log[-3:], ['restore', 'linger:10', 'close'])
+
+    def test_an_owner_busy_run_that_wrote_no_status_is_recorded_by_the_helper(self):
+        result = self.helper(result=ConnectResult('failed', 'owner_busy'))  # run_connect wrote nothing.
+        self.assertEqual(result.code, 'owner_busy')
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('failed', 'owner_busy'))
+        value, code = connect_cli.wait(self.paths, runner=self.launchd(job='absent'), uid=UID, sleeper=lambda _: None)
+        self.assertEqual((code, value['code']), (2, 'owner_busy'))
+        self.helper(result=ConnectResult('failed', 'cancelled'))  # Other codes stay run_connect's to write.
+        self.assertEqual(connect_cli.read_connect_status(self.paths), ('failed', 'owner_busy'))
+
+    def test_the_helper_holds_the_connect_lock_for_its_whole_run_including_the_linger(self):
+        seen = {}
+        def run(paths, store, provider_factory, ui, **options):
+            seen['run'] = self.connect_lock_free()
+            return ConnectResult('failed', 'expired')
+        def sleeper(seconds):
+            seen['linger'] = self.connect_lock_free()
+        self.helper(run=run, sleeper=sleeper)
+        self.assertEqual((seen, self.connect_lock_free()), ({'run': False, 'linger': False}, True))
+
+    def test_a_second_helper_never_runs_while_the_lock_is_held_and_leaves_the_status_alone(self):
+        self.status_file('waiting_for_scan')
+        before = connect_status_path(self.paths).read_bytes()
+        self.hold_connect_lock()
+        sleeps = []
+        result = self.helper(sleeper=sleeps.append)
+        self.assertEqual((result.phase, result.code), ('failed', 'connect_in_progress'))
+        self.assertEqual(self.log, [])  # No server, opener, run, notice or restore.
+        self.assertEqual(sleeps, [0.1] * 100)
+        self.assertEqual(connect_status_path(self.paths).read_bytes(), before)
+
+    def test_a_helper_takes_the_lock_once_it_is_released_within_ten_seconds(self):
+        release = self.hold_connect_lock()
+        sleeps = []
+        def sleeper(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 20:
+                release()
+        result = self.helper(sleeper=sleeper)
+        self.assertEqual(result.phase, 'ready')
+        self.assertEqual(sleeps[:20], [0.1] * 20)
+
+    def test_inline_mode_relies_on_the_lock_its_connect_already_holds(self):
+        self.hold_connect_lock()  # Held by the calling connect.
+        result = self.helper(lock_held=True, sleeper=lambda _: None)
+        self.assertEqual(result.phase, 'ready')
+
+    def test_a_run_that_does_not_end_ready_restores_the_broker_and_a_ready_one_does_not(self):
+        for result, restored in [(ConnectResult('ready', None, True, True), []),
+                                 (ConnectResult('failed', 'auth_request_failed'), [1]),
+                                 (ConnectResult('expired', 'expired'), [1]), (ConnectResult('cancelled', 'cancelled'), [1])]:
+            with self.subTest(result.phase):
+                self.helper(result=result)
+                self.assertEqual(self.restored, restored)
+        def boom(*args, **kwargs):
+            raise RuntimeError('provider failed')
+        with self.assertRaises(RuntimeError):
+            self.helper(run=boom)
+        self.assertEqual(self.restored, [1])
+        def failing_restore():
+            raise launch_agent.LaunchAgentError('no installed broker to restore')
+        self.assertEqual(self.helper(result=ConnectResult('failed', 'timeout'), restore_broker=failing_restore).code,
+                         'timeout')
+
+    def test_the_real_restore_puts_back_only_a_broker_that_existed_and_is_not_loaded(self):
+        import functools
+        def restore(launchd):
+            return functools.partial(launch_agent.restore_enrolled_broker, plist_path=self.broker_plist,
+                                     python_executable=Path(sys.executable), runner=launchd, uid=UID)
+        failed = ConnectResult('failed', 'auth_request_failed')
+        launchd = self.launchd()  # A new user: no broker plist was ever installed.
+        self.helper(result=failed, restore_broker=restore(launchd))
+        self.assertFalse(self.broker_plist.exists(), 'never create a broker for a user who had none')
+        self.assertEqual((launchd.verbs('bootstrap', 'bootout'), launchd.broker_bootstraps), ([], 0))
+        plist = self.install_broker_plist()
+        launchd = self.launchd(broker_loaded=False)  # Stopped by connect's reconnect.
+        self.helper(result=failed, restore_broker=restore(launchd))
+        self.assertEqual((launchd.broker_bootstraps, launchd.broker_loaded), (1, True))
+        self.assertEqual(self.broker_plist.read_bytes(), plist)
+        launchd = self.launchd(broker_loaded=True)  # Still loaded: nothing to do.
+        self.helper(result=failed, restore_broker=restore(launchd))
+        self.assertEqual(launchd.verbs('bootstrap', 'bootout'), [])
 
     def test_cleanup_happens_when_the_run_raises_and_the_error_is_not_swallowed(self):
         plist = job_plist(self.paths)
@@ -791,7 +1185,7 @@ class HelperTests(Harness):
         plist.write_bytes(b'x')
         with self.assertRaises(OSError):
             self.helper(start_error=OSError('bind'), own_plist=plist)
-        self.assertEqual(self.log, ['start', 'close'])
+        self.assertEqual(self.log, ['start', 'restore', 'close'])  # Never leaves a stopped broker behind.
         self.assertFalse(plist.exists())
 
     def test_inline_mode_leaves_any_plist_alone(self):
@@ -851,7 +1245,7 @@ class HelperTests(Harness):
         system = mock.Mock(side_effect=AssertionError('no process may be started for a refused URL'))
         with mock.patch.dict(connect_cli.open_url.__kwdefaults__, {'runner': system}):
             result = connect_cli.connect_helper(self.paths, store=None, provider_factory=None, handoff=None, run=run,
-                ui_factory=lambda: FakeUI([]), sleeper=lambda _: None,
+                ui_factory=lambda: FakeUI([]), sleeper=lambda _: None, restore_broker=mock.Mock(),
                 server_factory=lambda ui, expires: FakeServer(ui, expires, [], url='http://127.0.0.1:1/#t=short'))
         self.assertEqual((result.phase, calls), ('ready', ['run']))
         system.assert_not_called()
@@ -870,7 +1264,8 @@ class HelperTests(Harness):
             return ConnectResult('ready', None, True, True)
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             result = connect_cli.connect_helper(self.paths, store=None, provider_factory=None, handoff=None,
-                                                run=run, opener=opener, sleeper=lambda _: None)
+                                                run=run, opener=opener, sleeper=lambda _: None,
+                                                restore_broker=mock.Mock())
         self.assertEqual(result.phase, 'ready')
         self.assertEqual(seen['state']['phase'], 'starting')
         self.assertTrue(0 < seen['state']['expires_in'] <= 600)
@@ -930,20 +1325,42 @@ class SetupCliDispatchTests(Harness):
             code, out, _ = self.main(['connect'])
         self.assertEqual((code, json.loads(out)['status']), (0, 'ready'))
         store.assert_called_once_with()
+        # Inline, the calling connect already holds connect.lock for the whole run.
         helper.assert_called_once_with(self.paths, store=store.return_value, provider_factory=raw,
-                                       handoff=setup_cli.handoff_broker)
+                                       handoff=setup_cli.handoff_broker, lock_held=True)
 
     def test_connect_helper_is_silent_exits_with_the_result_and_removes_only_its_plist(self):
+        launchd_env = mock.patch.dict(os.environ, {'XPC_SERVICE_NAME': CONNECT_JOB_LABEL})
         for result, expected in [(ConnectResult('ready', None, True, True), 0), (ConnectResult('failed', 'owner_busy'), 2)]:
-            with self.subTest(phase=result.phase), mock.patch.object(setup_cli, 'MacOSSecretStore'), \
+            with self.subTest(phase=result.phase), launchd_env, mock.patch.object(setup_cli, 'MacOSSecretStore'), \
                  mock.patch.object(setup_cli, 'LegacyTDJson'), \
                  mock.patch.object(connect_cli, 'connect_helper', return_value=result) as helper:
                 code, out, err = self.main(['connect-helper'])
             self.assertEqual((code, out, err), (expected, '', ''))
             self.assertEqual(helper.call_args.kwargs['own_plist'], job_plist(self.paths))
-        with mock.patch.object(setup_cli, 'MacOSSecretStore'), mock.patch.object(setup_cli, 'LegacyTDJson'), \
+            self.assertNotIn('lock_held', helper.call_args.kwargs)  # Launchd mode takes the lock itself.
+        with launchd_env, mock.patch.object(setup_cli, 'MacOSSecretStore'), mock.patch.object(setup_cli, 'LegacyTDJson'), \
              mock.patch.object(connect_cli, 'connect_helper', side_effect=RuntimeError(URL_CANARY)):
             self.assertEqual(self.main(['connect-helper']), (2, '', ''))
+
+    def test_connect_helper_refuses_unless_launched_by_launchd_as_our_job(self):
+        self.run_dir()
+        plist = job_plist(self.paths)
+        plist.write_bytes(b'belongs to whoever launched it')
+        for value in [None, '', '0', 'application.com.apple.Terminal.1234', LAUNCH_AGENT_LABEL, CONNECT_JOB_LABEL + 'x']:
+            environment = {key: item for key, item in os.environ.items() if key != 'XPC_SERVICE_NAME'}
+            if value is not None:
+                environment['XPC_SERVICE_NAME'] = value
+            with self.subTest(value=value), mock.patch.dict(os.environ, environment, clear=True), \
+                 mock.patch.object(setup_cli, 'MacOSSecretStore') as store, \
+                 mock.patch.object(connect_cli, 'connect_helper') as helper:
+                code, out, err = self.main(['connect-helper'])
+            self.assertEqual((code, json.loads(out), err), (2, {'status': 'refused',
+                'code': 'connect_helper_requires_launchd', 'next_action': 'run_connect'}, ''))
+            helper.assert_not_called()
+            store.assert_not_called()
+        self.assertEqual(plist.read_bytes(), b'belongs to whoever launched it')
+        self.assertEqual(sorted(p.name for p in self.paths.lock.parent.iterdir()), [plist.name])
 
     def test_api_credentials_gets_a_lazy_store_factory(self):
         with mock.patch.object(setup_cli, 'MacOSSecretStore') as store, \
@@ -1006,9 +1423,40 @@ class LauncherGrammarTests(unittest.TestCase):
         self.assertNotIn('secret', out.getvalue().lower())
 
     def test_launcher_dispatch_hands_every_non_mcp_action_to_setup_cli(self):
-        source = (Path(__file__).parents[1] / 'packaging/launcher.py').read_text()
-        self.assertIn("from telegram_search_mcp.setup_cli import main as dispatch", source)
-        self.assertIn("if args not in [[v] for v in ACTIONS]", source)
+        # Behavioural: a copy laid out as an installed release, admission stubbed, dispatch recorded.
+        import shutil
+        from telegram_search_mcp import launch_agent as agent
+        pin = 'a' * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary).resolve() / 'releases' / pin
+            release.mkdir(parents=True)
+            shutil.copy(Path(__file__).parents[1] / 'packaging/launcher.py', release / 'launcher.py')
+            spec = importlib.util.spec_from_file_location('connect_cli_launcher_dispatch', release / 'launcher.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            receipt = json.dumps({'release_root': str(release), 'index_sha256': pin}).encode()
+            saved_path = list(sys.path)
+            try:
+                for action in module.ACTIONS:
+                    with self.subTest(action=action), \
+                         mock.patch.object(module, '_read', return_value=receipt), \
+                         mock.patch.object(module, 'admit') as admit, \
+                         mock.patch.object(bundle_runtime, 'activate') as activate, \
+                         mock.patch.object(module, 'dispatch_mcp', return_value=11) as mcp, \
+                         mock.patch.object(agent, 'run_broker', return_value=12) as broker, \
+                         mock.patch.object(setup_cli, 'main', return_value=13) as setup:
+                        code = module.main([action])
+                        sys.path[:] = saved_path
+                    self.assertEqual(code, {'mcp': 11, 'broker': 12}.get(action, 13))
+                    admit.assert_called_once_with(release, release / 'bundle-index.json', pin, True)
+                    activate.assert_called_once_with(release, pin)
+                    self.assertEqual((mcp.called, broker.called), (action == 'mcp', action == 'broker'))
+                    if action in ('mcp', 'broker'):
+                        setup.assert_not_called()
+                    else:
+                        setup.assert_called_once_with([action])
+            finally:
+                sys.path[:] = saved_path
 
 
 if __name__ == '__main__':

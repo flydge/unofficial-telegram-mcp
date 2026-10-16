@@ -356,9 +356,15 @@ class ConnectJobLifecycleTests(unittest.TestCase):
             return self.launch_agent.connect_job_state(
                 runner=lambda a, **k: subprocess.CompletedProcess(a, code, text, ""), uid=501)
         self.assertEqual(state(113, ""), "absent")
-        self.assertEqual(state(0, "x = {\n\tstate = running\n}"), "running")
-        self.assertEqual(state(0, "x = {\n\tstate = not running\n\tendpoints = {\n\t\tstate = running\n\t}\n}"), "loaded")
-        self.assertEqual(state(0, "x = {\n\tactive count = 0\n}"), "loaded")
+        self.assertEqual(state(0, "x = {\n\tstate = running\n}"), "busy")
+        self.assertEqual(state(0, "x = {\n\tstate = not running\n\tendpoints = {\n\t\tstate = running\n\t}\n}"), "idle")
+        self.assertEqual(state(0, "x = {\n\tstate = exited\n}"), "idle")
+        # Only an explicit idle state is idle: anything else may still be or become a live helper.
+        for text in ["x = {\n\tstate = spawn scheduled\n}", "x = {\n\tstate = waiting\n}",
+                     "x = {\n\tstate = spawning\n\tendpoints = {\n\t\tstate = not running\n\t}\n}",
+                     "x = {\n\tactive count = 0\n}", "x = {\n\tstate = not running yet\n}"]:
+            with self.subTest(text=text):
+                self.assertEqual(state(0, text), "busy")
         for code, text in [(5, ""), (0, None), (0, "state = running\n" + "x" * 70000)]:
             with self.subTest(code=code), self.assertRaises(self.launch_agent.LaunchAgentError):
                 state(code, text)
@@ -446,6 +452,12 @@ class ConnectJobLifecycleTests(unittest.TestCase):
         self.assertEqual(self.launch_agent.start_connect_job(plist_path=path, runner=running, uid=501), "running")
         self.assertEqual([call[1] for call in self.calls], ["print"])
         self.assertFalse(path.exists())
+        def spawning(arguments, **kwargs):
+            self.calls.append(list(arguments))
+            return subprocess.CompletedProcess(arguments, 0, "state = spawn scheduled\n", "")
+        self.calls.clear()
+        self.assertEqual(self.launch_agent.start_connect_job(plist_path=path, runner=spawning, uid=501), "running")
+        self.assertEqual([call[1] for call in self.calls], ["print"])
         def refusing(arguments, **kwargs):
             if arguments[1] == "print":
                 return subprocess.CompletedProcess(arguments, 113, "", "")
@@ -454,6 +466,65 @@ class ConnectJobLifecycleTests(unittest.TestCase):
             self.launch_agent.start_connect_job(plist_path=path, runner=refusing, uid=501)
         self.assertFalse(path.exists())
         self.assertIn(label, self.launch_agent.connect_job_payload()["Label"])
+
+    def test_stop_connect_job_boots_out_only_the_connect_label_and_tolerates_an_already_gone_job(self) -> None:
+        label = "gui/501/" + self.launch_agent.CONNECT_JOB_LABEL
+        def runner(bootout_code, print_codes):
+            codes = list(print_codes)
+            def run(arguments, **kwargs):
+                self.calls.append(list(arguments))
+                if arguments[1] == "bootout":
+                    return subprocess.CompletedProcess(arguments, bootout_code, "", "")
+                return subprocess.CompletedProcess(arguments, codes.pop(0) if len(codes) > 1 else codes[0], "", "")
+            return run
+        sleeps: list[float] = []
+        self.launch_agent.stop_connect_job(runner=runner(0, [0, 113]), uid=501, sleeper=sleeps.append)
+        self.assertEqual(self.calls, [["/bin/launchctl", "bootout", label], ["/bin/launchctl", "print", label],
+                                      ["/bin/launchctl", "print", label]])
+        self.assertEqual(sleeps, [0.1])
+        self.launch_agent.stop_connect_job(runner=runner(113, [113]), uid=501, sleeper=sleeps.append)
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.stop_connect_job(runner=runner(5, [0]), uid=501, sleeper=lambda _: None)
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.stop_connect_job(runner=runner(0, [0]), uid=501, sleeper=lambda _: None)
+        self.assertNotIn(LAUNCH_AGENT_LABEL, " ".join(" ".join(call) for call in self.calls))
+
+    def test_restore_never_creates_a_broker_definition_and_starts_only_an_unloaded_matching_one(self) -> None:
+        agents = self.root / "LaunchAgents"
+        plist = agents / "broker.plist"
+        def runner(loaded, registration=None):
+            def run(arguments, **kwargs):
+                self.calls.append(list(arguments))
+                if arguments[1] == "print":
+                    return subprocess.CompletedProcess(arguments, 0 if loaded else 113, registration or "", "")
+                if arguments[1] == "bootstrap":
+                    return subprocess.CompletedProcess(arguments, 0, "", "")
+                raise AssertionError(arguments)
+            return run
+        for missing in [plist, self.plist]:  # No directory at all, then a directory without a plist.
+            with self.subTest(missing=str(missing)), self.assertRaises(self.launch_agent.LaunchAgentError):
+                self.launch_agent.restore_enrolled_broker(plist_path=missing, python_executable=Path(sys.executable),
+                                                          runner=runner(False), uid=501)
+        self.assertFalse(agents.exists())
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [])
+        self.assertEqual(self.calls, [])
+        before = self.installed()
+        self.launch_agent.restore_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                                                  runner=runner(False), uid=501)
+        self.assertEqual([call[1:3] for call in self.calls], [["print", "gui/501/" + LAUNCH_AGENT_LABEL],
+                                                             ["bootstrap", "gui/501"]])
+        self.calls.clear()
+        self.launch_agent.restore_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                                                  runner=runner(True, self.registration), uid=501)
+        self.assertEqual([call[1] for call in self.calls], ["print"])
+        self.assertEqual(self.plist.read_bytes(), before)
+        self.plist.write_bytes(plistlib.dumps({"Label": "foreign"}))
+        self.plist.chmod(0o600)
+        self.calls.clear()
+        with self.assertRaises(self.launch_agent.LaunchAgentError):
+            self.launch_agent.restore_enrolled_broker(plist_path=self.plist, python_executable=Path(sys.executable),
+                                                      runner=runner(False), uid=501)
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":

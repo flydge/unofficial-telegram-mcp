@@ -1,13 +1,14 @@
 """Installed local auth CLI with a closed, credential-free argument grammar."""
 from __future__ import annotations
 import json
+import os
 import sys
 import time
 from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavailable
 from .config import load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
-from .launch_agent import start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
+from .launch_agent import CONNECT_JOB_LABEL, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
 from .secure_terminal import NativeTerminal
 from .session_owner import SessionOwnerLease, OwnerLeaseError
 from .setup_wizard import run_setup, setup_status
@@ -104,14 +105,20 @@ def _connect_command(command, paths):
     def helper(**options):
         return connect_cli.connect_helper(paths, store=MacOSSecretStore(), provider_factory=LegacyTDJson,
                                           handoff=handoff_broker, **options)
-    if command == 'connect-helper':  # Internal: started by launchd, prints nothing.
+    if command == 'connect-helper':  # Internal: only our launchd job runs it, and it prints nothing.
+        if os.environ.get('XPC_SERVICE_NAME') != CONNECT_JOB_LABEL:
+            # Not launched as our transient job: touch nothing (no lock, status or plist).
+            print(json.dumps({'status': 'refused', 'code': 'connect_helper_requires_launchd',
+                              'next_action': 'run_connect'}, sort_keys=True))
+            return 2
         try:
             return helper(own_plist=connect_cli.job_plist_path(paths)).exit_code
         except (Exception, KeyboardInterrupt):
             return 2
     if command == 'connect':
+        # Inline in native Terminal: connect itself holds connect.lock for the whole run.
         value, code = connect_cli.connect(paths, client_factory=_client, terminal=NativeTerminal(),
-                                          inline=helper)
+                                          inline=lambda: helper(lock_held=True))
     elif command == 'wait':
         value, code = connect_cli.wait(paths)
     else:

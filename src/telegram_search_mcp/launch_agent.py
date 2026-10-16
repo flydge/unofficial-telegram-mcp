@@ -351,24 +351,28 @@ def validate_enrolled_broker(
 def start_enrolled_broker(
     *, plist_path: Path = LAUNCH_AGENT_PLIST,
     python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
-    uid: int | None = None,
+    uid: int | None = None, create: bool = True,
 ) -> None:
     """Start after auth teardown; no bootout, kill, restart or existing rewrite.
 
     A new installed user may have no plist. Publish the fixed credential-free
     definition without replacing any name, then bootstrap the absent service.
     An existing service must match its actual registration and installed path.
-    Ready is checked separately through the compatible IPC boundary.
+    Ready is checked separately through the compatible IPC boundary. With
+    create=False nothing is ever written: a missing definition refuses.
     """
     if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
         raise LaunchAgentError('LaunchAgent directory is unsafe')
-    plist_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if create:
+        plist_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent = _open_launch_agent_directory(plist_path)
     temporary = '.enrolled-agent-' + secrets.token_hex(16)
     created = False
     try:
         payload = launch_agent_payload(python_executable=python_executable)
         existing = _read_launch_agent(parent, plist_path.name)
+        if existing is None and not create:
+            raise LaunchAgentError('no installed broker to restore')
         if existing is None:
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=parent)
@@ -406,6 +410,20 @@ def start_enrolled_broker(
         if created:
             os.unlink(temporary, dir_fd=parent)
         os.close(parent)
+
+
+def restore_enrolled_broker(
+    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
+    uid: int | None = None,
+) -> None:
+    """Put back a broker that existed before a failed reconnect; never create one.
+
+    Only an existing, exactly matching definition is started, and only when its
+    service is not loaded (a loaded matching service is left as it is).
+    """
+    start_enrolled_broker(plist_path=plist_path, python_executable=python_executable,
+                          runner=runner, uid=uid, create=False)
 
 
 def _await_retired(service: str, *, runner: Runner, sleeper: Callable[[float], None]) -> None:
@@ -540,8 +558,13 @@ def remove_connect_job(plist_path: Path) -> bool:
         os.close(parent)
 
 
+# Only these explicit job states are idle; any other loaded state (running, spawn
+# scheduled, waiting, a missing state line) may still become or be a live helper.
+_IDLE_JOB_STATES = frozenset({'state = not running', 'state = exited'})
+
+
 def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None) -> str:
-    """'running', 'loaded' (registered, not running) or 'absent'; anything else raises."""
+    """'busy', 'idle' (registered, explicitly not running) or 'absent'; anything else raises."""
     user_id = os.getuid() if uid is None else uid
     try:
         state = _run_launchctl([LAUNCHCTL, 'print', f'gui/{user_id}/{CONNECT_JOB_LABEL}'],
@@ -555,7 +578,26 @@ def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None
         raise LaunchAgentError('unable to verify connect job')
     # The first state line belongs to the job itself; nested sections come later.
     first = next((line.strip() for line in text.splitlines() if line.strip().startswith('state = ')), None)
-    return 'running' if first == 'state = running' else 'loaded'
+    return 'idle' if first in _IDLE_JOB_STATES else 'busy'
+
+
+def stop_connect_job(
+    *, runner: Runner = subprocess.run, uid: int | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """Boot out our own transient helper job (idle, finished or hung) and await retirement."""
+    user_id = os.getuid() if uid is None else uid
+    service = f'gui/{user_id}/{CONNECT_JOB_LABEL}'
+    try:
+        stopped = _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=False, timeout=10)
+        if stopped.returncode != 0:
+            state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=1)
+            if state.returncode == 113:  # Already gone (a concurrent connect retired it).
+                return
+            raise LaunchAgentError('unable to stop connect job')
+        _await_retired(service, runner=runner, sleeper=sleeper)
+    except (OSError, subprocess.SubprocessError):
+        raise LaunchAgentError('unable to stop connect job') from None
 
 
 def start_connect_job(
@@ -563,21 +605,19 @@ def start_connect_job(
     runner: Runner = subprocess.run, uid: int | None = None,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Bootstrap the transient helper; 'running' when one already is (nothing is touched).
+    """Bootstrap the transient helper; 'running' when a busy one exists (nothing is touched).
 
     A registered but idle job is booted out first. The plist is removed again if the
     bootstrap fails, so a refused start leaves nothing behind.
     """
     user_id = os.getuid() if uid is None else uid
     domain = f'gui/{user_id}'
-    service = f'{domain}/{CONNECT_JOB_LABEL}'
     try:
         state = connect_job_state(runner=runner, uid=user_id)
-        if state == 'running':
+        if state == 'busy':
             return 'running'
-        if state == 'loaded':
-            _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=True, timeout=10)
-            _await_retired(service, runner=runner, sleeper=sleeper)
+        if state == 'idle':
+            stop_connect_job(runner=runner, uid=user_id, sleeper=sleeper)
         write_connect_job(plist_path=plist_path, python_executable=python_executable)
         try:
             _run_launchctl([LAUNCHCTL, 'bootstrap', domain, str(plist_path)],
