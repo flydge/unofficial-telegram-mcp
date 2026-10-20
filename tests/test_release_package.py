@@ -12,28 +12,44 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-def build_distribution_available() -> bool:
+# The source builds below run `python -m build --no-isolation`, so both the frontend and the backend
+# must be installed; a missing one skips the class instead of failing it.
+RELEASE_BUILD = ("build", "setuptools")
+
+
+def distributions_available(names: tuple[str, ...] = RELEASE_BUILD) -> bool:
     # A stray ./build directory imports as a namespace package; only installed metadata counts.
-    try:
-        importlib.metadata.distribution("build")
-    except importlib.metadata.PackageNotFoundError:
-        return False
+    for name in names:
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
     return True
 
 
 class BuildDependencyProbeTests(unittest.TestCase):
     def test_stray_build_directory_is_not_the_build_distribution(self) -> None:
         code = ("import importlib.util, sys; sys.path[:0] = sys.argv[1:3]; "
-                "from test_release_package import build_distribution_available as probe; "
-                "print(importlib.util.find_spec('build') is not None, probe())")
+                "from test_release_package import distributions_available as probe; "
+                "print(importlib.util.find_spec('build') is not None, probe(('build',)))")
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "build").mkdir()
             result = subprocess.run([sys.executable, "-I", "-S", "-c", code, directory, str(Path(__file__).parent)],
                                     capture_output=True, text=True, timeout=60)
         self.assertEqual((result.returncode, result.stdout.split()), (0, ["True", "False"]), result.stderr[-2000:])
 
+    def test_a_missing_backend_or_frontend_skips_the_build_tests(self) -> None:
+        real = importlib.metadata.distribution
+        for missing in RELEASE_BUILD:
+            def distribution(name: str, missing: str = missing):
+                if name == missing:
+                    raise importlib.metadata.PackageNotFoundError(name)
+                return real(name)
+            with self.subTest(missing=missing), patch("importlib.metadata.distribution", distribution):
+                self.assertFalse(distributions_available())
 
-@unittest.skipUnless(build_distribution_available(), "release build dependency required")
+
+@unittest.skipUnless(distributions_available(), "release build dependencies (build, setuptools) required")
 class SourceDistributionTests(unittest.TestCase):
     def test_failed_atomic_publish_never_leaves_raw_owner_metadata(self) -> None:
         from setuptools import Distribution

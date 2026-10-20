@@ -46,11 +46,12 @@ All must hold before the gate runs; the release commit is the commit that holds 
    to release. Untracked local notes (`CLAUDE.local.md`) are gitignored and not part of it.
 2. **Critic review closed.** An independent review of `git diff <previous-tag>..HEAD` has no open
    finding: each is fixed, or recorded under "Known limits" in the release notes.
-3. **Full suite with the build installed, isolated HOME.** The development venv must include
-   `build==1.3.0` (`.venv/bin/pip install -e . pytest tomlkit==0.13.3 build==1.3.0`), so the release
-   package tests run instead of skipping; they build with `--no-isolation`, so a Python 3.12+ venv
-   also needs the pinned backend `setuptools==80.9.0`. The suite reads the live policy file, so it
-   runs with an isolated home, and its summary must show 0 failed and 0 skipped:
+3. **Full suite with the build installed, isolated HOME.** The development venv must include the
+   pinned build frontend and backend
+   (`.venv/bin/pip install -e . pytest tomlkit==0.13.3 build==1.3.0 setuptools==80.9.0`): the
+   release package tests build with `--no-isolation` and skip when either is missing. The suite
+   reads the live policy file, so it runs with an isolated home, and its summary must show 0 failed
+   and 0 skipped:
 
    ```bash
    mkdir -p "$TMPDIR/tgmcp-home" && chmod 700 "$TMPDIR/tgmcp-home"
@@ -273,7 +274,7 @@ Release evidence is never edited: a corrected release is a new commit, a new `ru
 | --- | --- |
 | Version sites equal | `tests/test_version_consistency.py` |
 | Clean tree, release commit | `git status --porcelain`, `git rev-parse HEAD` |
-| Full suite, isolated HOME, `build==1.3.0` installed, 0 skipped | command in section 2 |
+| Full suite, isolated HOME, `build==1.3.0` and `setuptools==80.9.0` installed, 0 skipped | command in section 2 |
 | Privacy guard | `tests/test_public_tree_privacy.py` |
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |

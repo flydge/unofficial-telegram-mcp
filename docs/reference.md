@@ -381,7 +381,7 @@ Telegram-originated strings are untrusted. Snippets and context are marked as un
 
 ## Building a release
 
-Install `build==1.3.0` alongside the pinned runtime dependencies, then run `python -m unittest discover -s tests -v`, `python -m build`, and `python -m pip check`. Source distributions strip local archive owner names and numeric ownership. Set `SOURCE_DATE_EPOCH` to a fixed release timestamp when reproducible timestamps are required. Review wheel/sdist contents and Git metadata before publishing. The installed wheel includes documentation, config example, and optional skill under `share/telegram-search-mcp` in the environment.
+Install `build==1.3.0` and `setuptools==80.9.0` alongside the pinned runtime dependencies, then run `python -m unittest discover -s tests -v`, `python -m build`, and `python -m pip check`. Source distributions strip local archive owner names and numeric ownership. Set `SOURCE_DATE_EPOCH` to a fixed release timestamp when reproducible timestamps are required. Review wheel/sdist contents and Git metadata before publishing. The installed wheel includes documentation, config example, and optional skill under `share/telegram-search-mcp` in the environment.
 
 The project is licensed AGPL-3.0-only (see [licensing](licensing.md)); dependency distribution obligations remain a release gate, and package installation alone is not a licensing decision.
 
