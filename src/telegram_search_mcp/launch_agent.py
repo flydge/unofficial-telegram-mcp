@@ -630,17 +630,21 @@ def start_connect_job(
     return 'started'
 
 
-def restart_launch_agent(
+def start_launch_agent_if_stopped(
     *,
     runner: Runner = subprocess.run,
     uid: int | None = None,
 ) -> None:
+    """Start the broker service if it is not running; never kill a running one.
+
+    A broker that is still starting (Keychain key, encrypted database) has no
+    socket yet; killing it with `kickstart -k` would only restart that wait.
+    """
     user_id = os.getuid() if uid is None else uid
     _run_launchctl(
         [
             LAUNCHCTL,
             "kickstart",
-            "-k",
             f"gui/{user_id}/{LAUNCH_AGENT_LABEL}",
         ],
         runner=runner,

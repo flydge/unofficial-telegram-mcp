@@ -332,5 +332,5 @@ class TransferCliTests(unittest.TestCase):
             client = self.module._make_client()
         self.assertEqual(client._socket_path, self.module.BROKER_SOCKET_PATH)
         self.assertIs(client._policy, policy)
-        with patch("telegram_search_mcp.launch_agent.restart_launch_agent", side_effect=AssertionError):
+        with patch("telegram_search_mcp.launch_agent.start_launch_agent_if_stopped", side_effect=AssertionError):
             client._restart_callback()

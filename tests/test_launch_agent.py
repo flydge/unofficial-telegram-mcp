@@ -529,3 +529,17 @@ class ConnectJobLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartIfStoppedTests(unittest.TestCase):
+    def test_starting_the_broker_never_kills_a_running_one(self):
+        launch_agent = importlib.import_module("telegram_search_mcp.launch_agent")
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+        launch_agent.start_launch_agent_if_stopped(runner=runner, uid=501)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:2], [launch_agent.LAUNCHCTL, "kickstart"])
+        self.assertNotIn("-k", calls[0])
+        self.assertEqual(calls[0][-1], "gui/501/" + launch_agent.LAUNCH_AGENT_LABEL)

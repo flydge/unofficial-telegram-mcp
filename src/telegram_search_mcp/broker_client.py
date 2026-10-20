@@ -8,6 +8,7 @@ from .local_upload_models import (UPLOAD_MODELS, LocalUploadUnavailable, upload_
 
 import secrets
 import json
+import math
 import socket
 import threading
 import time
@@ -232,9 +233,14 @@ def _connect(socket_path: Path) -> socket.socket:
 
 
 def _request_launchd_restart() -> None:
-    from .launch_agent import restart_launch_agent
+    from .launch_agent import start_launch_agent_if_stopped
 
-    restart_launch_agent()
+    start_launch_agent_if_stopped()
+
+
+# A starting broker reads its Keychain key and opens an encrypted database before
+# it creates its socket (about 4 s observed on a real Mac); wait for it, bounded.
+BROKER_STARTUP_WAIT_SECONDS = 10.0
 
 
 from .selection_client import SelectionClientMixin, selected_method, selection_wire, strict_selection_response
@@ -366,11 +372,17 @@ class BrokerClient(SelectionClientMixin):
                 self._restart_callback()
             except Exception:
                 pass
-            self._sleeper(self._retry_backoff_seconds)
-            try:
-                connection = self._connector(self._socket_path)
-            except OSError as error:
-                raise BrokerUnavailable("Unofficial Telegram MCP broker is unavailable") from error
+            attempts = (max(1, math.ceil(BROKER_STARTUP_WAIT_SECONDS / self._retry_backoff_seconds))
+                        if self._retry_backoff_seconds > 0 else 1)
+            connection = None
+            for attempt in range(attempts):
+                self._sleeper(self._retry_backoff_seconds)
+                try:
+                    connection = self._connector(self._socket_path)
+                    break
+                except OSError:
+                    if attempt == attempts - 1 or time.monotonic() >= deadline:
+                        raise BrokerUnavailable("Unofficial Telegram MCP broker is unavailable") from None
         handshaken = False
         try:
             with connection:

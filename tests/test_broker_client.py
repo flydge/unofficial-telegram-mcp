@@ -340,6 +340,55 @@ class BrokerClientTests(unittest.TestCase):
         self.assertEqual(restarts, ["restart"])
         self.assertEqual(sleeps, [0.25])
 
+    def test_a_starting_broker_is_waited_for_not_restarted_repeatedly(self) -> None:
+        # Found on a real Mac: a 0.52 broker needs ~4 s before its socket exists; the client
+        # used to kill it with `kickstart -k` and give up after one retry.
+        module = importlib.import_module("telegram_search_mcp.broker_client")
+        proxy_socket, broker_socket = socket.socketpair()
+        connection_attempts: list[int] = []
+        restarts: list[str] = []
+        sleeps: list[float] = []
+
+        def connector(_path: Path) -> socket.socket:
+            connection_attempts.append(len(connection_attempts) + 1)
+            if len(connection_attempts) <= 6:
+                raise FileNotFoundError("synthetic socket not created yet")
+            return proxy_socket
+
+        def broker() -> None:
+            request = receive_request(broker_socket)
+            send_frame(broker_socket, {"version": PROTOCOL_VERSION, "request_id": request["request_id"],
+                                       "ok": True, "result": resolved_response()}, max_bytes=MAX_RESPONSE_BYTES)
+            broker_socket.close()
+
+        thread = threading.Thread(target=broker)
+        thread.start()
+        client = module.BrokerClient(socket_path=Path("/unused/test.sock"), policy=RuntimePolicy(),
+                                     connector=connector, restart_callback=lambda: restarts.append("start"),
+                                     retry_backoff_seconds=0.25, sleeper=sleeps.append)
+        response = client.resolve(ResolveTargetRequest(target="@known_chat"))
+        thread.join(timeout=2)
+        self.assertEqual(response.status, "resolved")
+        self.assertEqual(restarts, ["start"])
+        self.assertEqual(len(connection_attempts), 7)
+        self.assertEqual(sleeps, [0.25] * 6)
+
+    def test_a_broker_that_never_appears_fails_after_the_bounded_startup_wait(self) -> None:
+        module = importlib.import_module("telegram_search_mcp.broker_client")
+        restarts: list[str] = []
+        sleeps: list[float] = []
+
+        def connector(_path: Path) -> socket.socket:
+            raise FileNotFoundError("synthetic socket missing")
+
+        client = module.BrokerClient(socket_path=Path("/unused/test.sock"), policy=RuntimePolicy(),
+                                     connector=connector, restart_callback=lambda: restarts.append("start"),
+                                     retry_backoff_seconds=0.25, sleeper=sleeps.append)
+        response = client.resolve(ResolveTargetRequest(target="@known_chat"))
+        self.assertEqual(response.status, "error")
+        self.assertEqual(restarts, ["start"])
+        self.assertEqual(len(sleeps), int(module.BROKER_STARTUP_WAIT_SECONDS / 0.25))
+
     def test_lost_discovery_response_does_not_advance_the_registry_twice(self) -> None:
         module = importlib.import_module("telegram_search_mcp.broker_client")
         proxy_socket, broker_socket = socket.socketpair()

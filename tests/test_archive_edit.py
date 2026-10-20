@@ -13,6 +13,8 @@ import tempfile
 import threading
 import time
 import unittest
+
+from telegram_search_mcp import broker_client as broker_client_module
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -398,7 +400,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(prepare().status, 'unavailable')
                     applied = apply()
                     if enabled:
-                        self.assertEqual(len(connects), 4); self.assertEqual(applied.status, 'outcome_unknown')
+                        self.assertEqual(len(connects), 2 * (1 + int(broker_client_module.BROKER_STARTUP_WAIT_SECONDS / 0.25))); self.assertEqual(applied.status, 'outcome_unknown')
                     else:
                         self.assertEqual(connects, []); self.assertEqual(applied.status, 'error')
                         self.assertIn('capability_disabled', applied.detail)
