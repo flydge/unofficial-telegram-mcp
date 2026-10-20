@@ -16,10 +16,11 @@ from pathlib import Path
 import stat
 import subprocess
 
+from . import product_identity as identity
 from .bundle_paths import (MissingRuntimePath, RuntimePathError, open_owned_file, file_metadata_identity,
                            _safe_metadata, _validate_descriptor_acl, _path_binding_identity)
 
-SERVER_NAME = 'telegram_search'
+SERVER_NAME = identity.MCP_SERVER_NAME
 WRITE_TIMEOUT = 30
 MAX_CONFIG_BYTES = 64 * 1024 * 1024
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'

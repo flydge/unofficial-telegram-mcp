@@ -21,8 +21,10 @@ import uuid
 import tomlkit
 from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import InlineTable, Table
+from . import product_identity as identity
 from .bundle_paths import _validate_descriptor_acl, file_metadata_identity, RuntimePathError
 
+SERVER_NAME = identity.MCP_SERVER_NAME
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
 MAX_SUBTREE_BYTES = 32 * 1024
@@ -128,7 +130,7 @@ def _owned(document):
         return None
     if not isinstance(servers, (Table, InlineTable, OutOfOrderTableProxy)):
         raise ConfigConflict('invalid_config')
-    entry = servers.get('telegram_search')
+    entry = servers.get(SERVER_NAME)
     if entry is not None and not isinstance(entry, (Table, InlineTable, OutOfOrderTableProxy)):
         raise ConfigConflict('invalid_config')
     return entry
@@ -140,13 +142,13 @@ def _subtree(entry) -> bytes | None:
     if isinstance(entry, InlineTable):
         # Render before copying: tomlkit deepcopy drops InlineTable's _new
         # formatting flag, which otherwise changes generated comma spacing.
-        encoded = ('[mcp_servers]\ntelegram_search = ' + entry.as_string() + '\n').encode('utf-8')
+        encoded = ('[mcp_servers]\n' + SERVER_NAME + ' = ' + entry.as_string() + '\n').encode('utf-8')
         if len(encoded) > MAX_SUBTREE_BYTES:
             raise ConfigConflict('invalid_registration')
         return encoded
     document = tomlkit.document()
     servers = tomlkit.table(is_super_table=True)
-    servers.add('telegram_search', deepcopy(entry))
+    servers.add(SERVER_NAME, deepcopy(entry))
     document.add('mcp_servers', servers)
     encoded = tomlkit.dumps(document).encode('utf-8')
     # tomlkit attaches blank separators preceding the next table to this table.
@@ -179,7 +181,7 @@ def _validate_preimage(encoded: bytes | None):
     try:
         document = _parse(encoded)
         entry = _owned(document)
-        if entry is None or set(document) != {'mcp_servers'} or set(document['mcp_servers']) != {'telegram_search'}:
+        if entry is None or set(document) != {'mcp_servers'} or set(document['mcp_servers']) != {SERVER_NAME}:
             raise ConfigConflict('invalid_receipt')
         values = entry.unwrap()
         expected = {'command', 'args', 'enabled_tools', 'startup_timeout_sec', 'tool_timeout_sec', 'enabled', 'required'}
@@ -320,7 +322,7 @@ def merge_registration(source: bytes, desired: Registration, ownership: Receipt 
         separator = b'\n' if not source or source.endswith(b'\n') else b'\n\n'
         candidate = source + separator + wanted
     else:
-        document['mcp_servers']['telegram_search'] = replacement
+        document['mcp_servers'][SERVER_NAME] = replacement
         candidate = tomlkit.dumps(document).encode('utf-8')
     after = _subtree(_owned(_parse(candidate)))
     return ConfigChange(source, candidate, current, after, ownership)
@@ -334,14 +336,14 @@ def rollback_registration(source: bytes, receipt: Receipt) -> ConfigChange:
     _check_ownership(current, receipt)
     if receipt.pre_subtree is None:
         if current is not None:
-            del document['mcp_servers']['telegram_search']
+            del document['mcp_servers'][SERVER_NAME]
             if (not document['mcp_servers'] and isinstance(document['mcp_servers'], Table)
                     and document['mcp_servers'].is_super_table()):
                 del document['mcp_servers']
     else:
         if 'mcp_servers' not in document:
             document.add('mcp_servers', tomlkit.table(is_super_table=True))
-        document['mcp_servers']['telegram_search'] = deepcopy(_owned(_parse(receipt.pre_subtree)))
+        document['mcp_servers'][SERVER_NAME] = deepcopy(_owned(_parse(receipt.pre_subtree)))
     candidate = tomlkit.dumps(document).encode('utf-8')
     after = _subtree(_owned(_parse(candidate)))
     return ConfigChange(source, candidate, current, after, receipt)
@@ -466,7 +468,7 @@ def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | 
 def _neighbors(source: bytes) -> bytes:
     document = _parse(source)
     if _owned(document) is not None:
-        del document['mcp_servers']['telegram_search']
+        del document['mcp_servers'][SERVER_NAME]
     if ('mcp_servers' in document and not document['mcp_servers']
             and isinstance(document['mcp_servers'], Table) and document['mcp_servers'].is_super_table()):
         del document['mcp_servers']

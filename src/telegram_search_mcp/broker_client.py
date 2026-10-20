@@ -1,4 +1,4 @@
-"""Thin per-process client for the owner-only Unofficial Telegram MCP broker."""
+"""Thin per-process client for the owner-only broker."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from . import product_identity as identity
 from .broker_protocol import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -150,7 +151,7 @@ class BrokerUnavailable(RuntimeError):
 class BrokerCompatibilityError(BrokerUnavailable):
     def __init__(self, code: str):
         self.code = code
-        super().__init__("Unofficial Telegram MCP compatibility check failed: " + code + "; inspect _manifest diagnostics")
+        super().__init__(identity.DISPLAY_NAME + " compatibility check failed: " + code + "; inspect _manifest diagnostics")
 
 
 @dataclass(frozen=True)
@@ -329,7 +330,7 @@ class BrokerClient(SelectionClientMixin):
                   *, deadline: float, generation: str | None) -> dict[str, Any]:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise BrokerUnavailable("Unofficial Telegram MCP request deadline expired")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} request deadline expired")
         connection.settimeout(remaining)
         request_id = f"request_{secrets.token_urlsafe(24)}"
         send_frame(connection, {"version": PROTOCOL_VERSION, "client_id": self._client_id,
@@ -339,18 +340,18 @@ class BrokerClient(SelectionClientMixin):
         if (not isinstance(response, dict) or type(response.get("version")) is not int
                 or response.get("version") != PROTOCOL_VERSION or response.get("request_id") != request_id
                 or type(response.get("ok")) is not bool):
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         if response["ok"] is not True:
             code = response.get("error")
             if set(response) != {"version", "request_id", "ok", "error"} or type(code) is not str:
-                raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+                raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
             if code in COMPATIBILITY_CODES:
                 raise BrokerCompatibilityError(code)
             if code not in {"expired", "invalid_request", "overloaded", "unavailable"}:
-                raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
-            raise BrokerUnavailable("Unofficial Telegram MCP broker could not complete the request")
+                raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker could not complete the request")
         if set(response) != {"version", "request_id", "ok", "result"} or not isinstance(response["result"], dict):
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         return response["result"]
 
     def _request(self, operation: str | None, payload: dict[str, Any]) -> dict[str, Any]:
@@ -381,7 +382,7 @@ class BrokerClient(SelectionClientMixin):
                     break
                 except OSError:
                     if attempt == attempts - 1 or time.monotonic() >= deadline:
-                        raise BrokerUnavailable("Unofficial Telegram MCP broker is unavailable") from None
+                        raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker is unavailable") from None
         handshaken = False
         try:
             with connection:
@@ -432,7 +433,7 @@ class BrokerClient(SelectionClientMixin):
         except (OSError, BrokerProtocolError) as error:
             if not handshaken:
                 raise BrokerCompatibilityError("handshake_unavailable_or_legacy_broker") from error
-            raise BrokerUnavailable("Unofficial Telegram MCP broker is unavailable") from error
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker is unavailable") from error
 
     def handshake(self) -> dict[str, Any]:
         return self._request(None, {})
@@ -1844,7 +1845,7 @@ class BrokerClient(SelectionClientMixin):
             "blocked",
             "error",
         }:
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         return result["status"]
 
     def health(self) -> dict[str, Any]:
@@ -1859,16 +1860,16 @@ class BrokerClient(SelectionClientMixin):
             "serialization_wait_count",
         }
         if set(result) != expected:
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         if type(result["uptime_seconds"]) not in (int, float) or result[
             "uptime_seconds"
         ] < 0:
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         if any(
             type(result[name]) is not int or result[name] < 0
             for name in expected - {"uptime_seconds"}
         ):
-            raise BrokerUnavailable("Unofficial Telegram MCP broker returned an invalid response")
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         return result
 
     def close(self) -> None:
