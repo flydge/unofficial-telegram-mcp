@@ -10,10 +10,10 @@
 [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this
 candidate: install → `connect` → local QR screen → phone confirmation → optional 2FA →
 ready MCP, with no API ID/hash, phone number or login code going through your
-assistant. It is implemented and covered by synthetic and inert-fake tests only. Real
-acceptance (a clean macOS user, a test-account phone scan with 2FA, a bounded search in
-Claude Code and in Codex, restart and revoke/reconnect) is still pending, so nothing
-here is released or accepted end to end. The phone/code Terminal flow remains as the
+assistant. It was accepted for real on the owner's Mac on 20.10.2026 (phone scan, 2FA,
+QR refresh/cancel/expiry, revoke and reconnect, a bounded search in Claude Code and in
+Codex). Installing the identity bundle on a clean macOS user is still pending, so this
+candidate is not released yet. The phone/code Terminal flow remains as the
 [fallback](#terminal-fallback-phone-and-code-setup).
 
 The continuing development candidate supports an offline authenticated first
@@ -21,8 +21,8 @@ install for Apple Silicon macOS 26+. Its bundle supplies standalone Python,
 the exact runtime dependencies, pinned TDLib/OpenSSL and paired search/setup
 skills. It requires no consumer Python, Homebrew, Git or compiler. This is an
 unreleased private installation route; published 0.51 instructions below remain
-historical published support. Public hosting, publisher trust, source completeness
-and clean-user/native onboarding acceptance remain open.
+historical published support. Public hosting, publisher trust (Developer ID signing and
+notarization), source completeness and the clean-user install remain open.
 
 From native Terminal, run the reviewed local `packaging/bootstrap.sh` with
 `/bin/sh -p`, absolute `--seed`, independently supplied `--seed-sha256` and

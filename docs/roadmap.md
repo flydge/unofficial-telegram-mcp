@@ -2,82 +2,82 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
 
-Updated **2026-10-16**. The released baseline remains **0.51.0**; the current
-**0.52.0.dev0** development snapshot is recorded below.
+Updated **2026-10-20**. The released baseline remains **0.51.0**; the
+**0.52.0.dev0** release candidate is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## Current development snapshot — 0.52.0.dev0
+## Current release candidate — 0.52.0.dev0
 
-Development resumed after the **B2C local-upload ownership slice** under the owner's
-2026-10-16 delegation: 0.52 QR onboarding (phases A–E), F14 forward/copy, F15a
-native video and F17a archive/unarchive and own text edit
-([spec](plans/0.54-archive-and-edit-spec.md)) are implemented below. This is
-development source, not a new tagged release, installer distribution or PyPI
-publication. Real-account acceptance of each slice is pending the owner; the
-remaining scope below is retained.
+The **0.52.0.dev0** release candidate (branch `qr-onboarding-052`) contains QR-first onboarding and
+three opt-in action slices: F14 forward/copy, F15a native video, and F17a archive/unarchive with own
+text edit. All four have real owner-approved evidence from 20.10.2026. It is not tagged, not an
+installer distribution and not a PyPI publication.
 
-**Approved 0.52 requirement — next priority #1:**
-[QR-first Telegram onboarding](plans/0.52-qr-onboarding.md). The normal user path
-must be install MCP + skills → local QR screen → confirmation in the phone's
-Telegram app → optional local 2FA → ready MCP and a bounded Claude Code and Codex read/search.
-End users must not create API applications or enter API ID/hash; the distributed
-application supplies its API identity. This is mandatory for 0.52.0. It supersedes
-conflicting manual-credential and Terminal-only onboarding plans; the Terminal
-phone/code setup remains only as a fallback.
+**Approved 0.52 requirement:** [QR-first Telegram onboarding](plans/0.52-qr-onboarding.md).
+- **The normal user path:** install MCP + skills, then a local QR screen, confirmation in the
+  phone's Telegram app, optional local 2FA, and a ready MCP with a bounded read/search in Claude
+  Code and Codex.
+- **No end-user API application:** end users do not create an API application or enter an API
+  ID/hash; the distributed application supplies its API identity.
+- **Fallback:** the Terminal phone/code setup remains only as a fallback.
 
-**0.52 QR-first status** ([spec](plans/0.52-qr-onboarding-spec.md), phases A–F):
-phases A–E are technically done on branch `qr-onboarding-052` — transport and credential
-resolution, connect flow, loopback QR screen, `connect`/`wait`/`cancel`/`api-credentials` with the
-transient launchd job and narrow reconnect, and the installer/docs phase (application
-identity injection at assembly, Claude Code and Codex registration, skill copies for both
-clients, rewritten setup skill). Evidence is synthetic: fakes for Telegram, launchd, the
-`claude` CLI and Keychain. **Phase F (real acceptance) is pending the owner:** a separate
-macOS user, a test-account phone scan with 2FA, bounded own-chat search in Claude Code and
-Codex, QR refresh/cancel/interruption, restart and revoke/reconnect, and unchanged live 0.51
-hashes. Until then 0.52 is not accepted and not released.
+**0.52 QR-first status** ([spec](plans/0.52-qr-onboarding-spec.md),
+[phase F record](plans/0.52-qr-onboarding-spec.tasks.md)): phases A–E are implemented.
 
-**F14 exact forward/copy** ([spec](plans/0.53-forward-copy-spec.md), development):
-`prepare_forward_send` and `send_prepared_forward` forward, or copy without
-attribution, exactly one existing message between two exact chats behind the default-off
-`forward_send` capability (together with `send`). They add a complete source preview, refusals
-for hidden formatting, forwarded sources in forward mode, auto-delete and protected content,
-a local owner dialog and one non-retried `forwardMessages` attempt, and bring the surface to 49
-tools (51 with F15a and 55 with F17a below). Evidence is synthetic (fake TDLib and dialog); the findings of the first independent
-review are fixed. **A real approved forward and copy between two of the owner's chats is
-pending the owner**, as is review of the spec's delegated decisions.
+Phase F was accepted for real on the owner's Mac on 20.10.2026, on the owner's macOS user with a
+source install, the Keychain identity and two Telegram accounts:
+- **Login:** QR login and handoff, an observed QR refresh, page Cancel, screen expiry, and a 2FA
+  login with the password typed only on the page.
+- **Recovery:** a phone revoke stops the broker with `AUTHORIZATION_BLOCKED`, and `connect` then
+  reconnects on the same enrollment. A repeat `connect` reads `already_connected`, and a broker
+  restart needs no new login.
+- **Policy and clients:** the default policy is exactly `read` and `artifacts`. A bounded own-chat
+  search worked through the official MCP SDK client, real Codex (`codex exec`) and a new Claude
+  Code session.
+- **Defects found and fixed:**
+  - Keychain reads failed on every real Mac (`-50`);
+  - a starting broker was killed by `launchctl kickstart -k`;
+  - archive drafts were accepted for chats TDLib cannot move or has not loaded;
+  - a disabled capability reached the client as a bare error and now names the missing capability.
+- **Bundle:** a bundle carrying the owner's application identity is assembled and verified offline
+  with `bootstrap.sh --prepare-only`. It has not been installed yet.
 
-**F15a native video** ([spec](plans/0.53-native-video-spec.md), development):
-`prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact of at most
-64 MiB as a native Telegram video behind the default-off `video_send` capability (together with
-`send`). Duration, dimensions, codec (H.264 or HEVC), audio and streaming layout are read locally
-from the file's own boxes by a bounded stdlib probe and shown as declared by the file, not decoded;
-unusual files refuse instead of being sent with guessed metadata. They add a complete preview, a
-dedicated owner dialog, revalidation of recipient and bytes, one non-retried `sendMessage` attempt
-with a 120-second confirmation wait, and bring the surface to 51 tools (55 with F17a below). The first independent review
-found that an artifact or video send that had already been attempted could read `expired` after its
-authority was lost; that is fixed for both. Evidence is synthetic (generated MP4/MOV boxes, fake TDLib
-and dialog). **A real approved native video send with readback is pending the owner**, as is review of
-the spec's delegated decisions, including the accepted limits (provider lock held during the upload
-wait, later calls after lost authority still read `expired`). Albums (F15b) are not started.
+**Remaining 0.52.0 gate:**
+- install that bundle on a clean macOS user and connect there (optionally also an interrupted helper
+  and a logout/login on that user);
+- owner review of the delegated decisions in the F14, F15a and F17a specs;
+- then the version and the tag.
 
-**F17a archive/unarchive and own text edit** ([spec](plans/0.54-archive-and-edit-spec.md), development):
-`prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and
-Archive lists behind the default-off `archive_chats` capability, and `prepare_text_edit` and
-`apply_prepared_text_edit` replace the plain text of exactly one own outgoing text message behind the
-default-off `edit_own_text` capability (each together with `send`, independent of each other). Each adds
-a before/after preview, a dedicated owner dialog, revalidation of chat or message, one non-retried
-`addChatToList` or `editMessageText` attempt and a reported provider state (the observed list, or the
-validated edited message); anything else is `outcome_unknown`. They bring the surface to 55 tools.
-The independent review of the first implementation led to fixes: edge whitespace and characters that
-TDLib rewrites are refused instead of silently changed, only a 4xx error counts as a rejection,
-sponsored or announcement list positions are not membership, and the dialogs show the chat kind, the
-pin and folder effects, the link-preview reset and which formatting is removed. Evidence is synthetic
-(fake TDLib and dialog). **A real archive/unarchive of a test chat and a real edit of an own test message
-are pending the owner**, as is review of the spec's delegated decisions, including the recorded
-residuals (informational reads granted by the two capabilities, a concurrent caller reading
-`outcome_unknown`, plain text sends still rewritten by TDLib). Captions, styled edits, pin/unpin and
-deletion are not started.
+**F14 exact forward/copy** ([spec](plans/0.53-forward-copy-spec.md)):
+- **What it does:** `prepare_forward_send` and `send_prepared_forward` forward, or copy without
+  attribution, exactly one message between two exact chats, behind the default-off `forward_send`
+  capability (together with `send`).
+- **Real evidence:** an approved copy and forward to Saved Messages were sent and read back through
+  the official MCP SDK client.
+- **Pending:** a visual check of the forward header in a Telegram app.
+
+**F15a native video** ([spec](plans/0.53-native-video-spec.md)):
+- **What it does:** `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV of at most
+  64 MiB as a native video, behind the default-off `video_send` capability (together with `send`).
+  Metadata is read locally from the file's own boxes.
+- **Real evidence:** a 3-second H.264 MP4 was sent with its caption and read back.
+- **Accepted limits:** the provider lock is held during the upload wait, and later calls after lost
+  authority still read `expired`.
+- **Not started:** albums (F15b).
+
+**F17a archive/unarchive and own text edit** ([spec](plans/0.54-archive-and-edit-spec.md)):
+- **What it does:** four tools behind the independent default-off `archive_chats` and
+  `edit_own_text` capabilities (each together with `send`).
+- **Real evidence:**
+  - an own-text edit was applied and read back;
+  - a supergroup was archived and unarchived, with the target list observed each time;
+  - Telegram's refusal to archive the service chat surfaced as `failed`, with no retry.
+- **Recorded residuals:**
+  - informational reads are granted by the two capabilities;
+  - a concurrent caller can read `outcome_unknown`;
+  - plain text sends are still rewritten by TDLib.
+- **Not started:** captions, styled edits, pin/unpin and deletion.
 
 The local transfer CLI can now consume a short-lived upload authority issued by
 the preparing MCP client. The helper returns a result reference; the original
@@ -106,18 +106,23 @@ packets remain failed evidence; they are not reclassified as successful runs.
 
 Still unfinished:
 
-- **First:** accept the mandatory 0.52 QR-first onboarding scope (phase F: real
-  clean-user run with a test-account phone, 2FA, reconnect and repeat use); phases A–E
-  are technically implemented.
-- Installed file/page/parser coverage beyond the bounded B2 message and B2C text
-  file scenarios; broader conversational and no-skill consumer validation.
-- F13 formatted captions and remaining applicable topic/reply/live scenarios;
-  retained TextUrl captions, CustomEmoji, MediaTimestamp and their combinations.
-- F14 real owner-approved forward/copy delivery and F15a real native-video delivery (the one-message and one-video implementations exist); F15b ordered albums.
+- **First (0.52.0 gate):** the clean macOS user install of the identity bundle, and owner review
+  of the F14, F15a and F17a delegated decisions.
+- **Next version — client coverage and distribution** (chosen by the owner on 20.10.2026):
+  - registration in Claude Desktop;
+  - a Claude Code plugin package;
+  - Developer ID signing and notarization of the bundle;
+  - a distinct product name before any public listing, because another vendor's directory listing
+    already uses "Unofficial Telegram MCP".
+- Conversational usability, and installed file/page/parser coverage beyond the bounded B2 message
+  and B2C text file scenarios; broader conversational and no-skill consumer validation.
+- F13 formatted captions and the remaining applicable topic/reply/live scenarios; retained TextUrl
+  captions, CustomEmoji, MediaTimestamp and their combinations.
+- F15b ordered albums.
 - F16 isolated account aliases and real two-account validation.
-- F17 archive/unarchive, own text/caption editing, pin/unpin and exact deletion.
-- Final whole-scope F18 Codex/Inspector/SDK evidence, complete distribution-source
-  and notice closure, and the final requirement/privacy/history/package review.
+- F17 caption and styled edits, pin/unpin and exact deletion.
+- Final whole-scope F18 Codex/Inspector/SDK evidence, complete distribution-source and notice
+  closure, and the final requirement/privacy/history/package review.
 
 F19 HTTP remains not applicable without a demonstrated cloud-consumer need.
 Prepared notes for future slices are planning artifacts, not implemented features.
@@ -128,8 +133,8 @@ The goal is convenient conversational interaction: find information or an attach
 by remembered context, inspect it, process it, prepare a result and explicitly send
 it to the intended Telegram conversation without manual IDs or file copying.
 
-The next focus is the mandatory QR-first setup and repeated completion of that
-path on the supported macOS platform, in Claude Code and Codex. Short answers
+After the 0.52.0 gate, the next focus is client coverage and distribution: the same QR-first
+setup in Claude Desktop and as a Claude Code plugin, from a signed and notarized bundle. Short answers
 with usable sources, retained conversational selections, understandable approvals
 and recovery take priority alongside capabilities that actually block a task.
 Broader client/platform support must be demonstrated separately.
@@ -152,7 +157,7 @@ different license are being considered, with no committed migration date; see
 | ID | Scope | 0.51.0 status | What remains |
 | --- | --- | --- | --- |
 | P0/P1/P3 | Public export, privacy/history review and release packaging | Implemented for the selected public source line | Repeat audit for future source/history/artifact changes. Private development history is not part of the public ancestry. |
-| P2 | Installed public product | Partial | Package build/install and existing-owner scenarios passed; first-time Telegram provisioning for a new user remains unfinished. |
+| P2 | Installed public product | Partial (0.52 candidate: QR-first first-time provisioning accepted for real on the owner's Mac, 20.10.2026) | Install the identity bundle on a clean macOS user (0.52.0 gate); then public hosting, Developer ID signing and notarization, and a distinct product name before a public listing. |
 | F1 | Version/capabilities/compatibility | Implemented | Broader protocol/upgrade compatibility remains part of F18. |
 | F2 | Selected message and batch reads | Implemented | Retain unsupported-type and per-message coverage limits. |
 | F3 | Bounded latest/history | Implemented | The pinned provider path cannot certify complete history coverage; this is an explicit limitation. |
@@ -166,11 +171,11 @@ different license are being considered, with no committed migration date; see
 | F11 | Draft inspection/revision/cancel/refresh | Implemented | Drafts are finite and client-scoped; reconnect/restart can invalidate state. |
 | F12 | Send-status inspection/correlation | Implemented | Unknown after state loss remains unknown; no automatic send retry or crash-boundary exactly-once promise. |
 | F13 | Replies, topic sends and outgoing styles | Partial | Plain/topic/reply paths and five text styles exist; retained rare source entities, formatted captions and applicable remaining live scenarios are not complete. |
-| F14 | Forward/copy | Partial (in 0.52.0.dev0): one-message forward/copy implemented with technical evidence; real delivery pending owner | Real owner-approved forward and copy between two chats with readback, and installed-consumer evidence. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
-| F15 | Native video and albums | Partial (in 0.52.0.dev0): one native video (F15a) implemented with technical evidence; albums (F15b) planned; real send pending owner | Real owner-approved native video send with readback, and installed-consumer evidence. Ordered albums, partial outcomes, videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
+| F14 | Forward/copy | Partial (0.52 candidate): one-message forward/copy with real owner-approved copy and forward, read back through the official MCP SDK client (20.10.2026) | Visual check of the forward header in a Telegram app, and owner review of the spec's delegated decisions. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
+| F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); albums (F15b) planned | Ordered albums (F15b) with partial outcomes, and owner review of the spec's delegated decisions. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
-| F17 | Archive/edit/delete/pin actions | Partial (in 0.52.0.dev0): archive/unarchive of one chat and plain-text edit of one own message (F17a) implemented with technical evidence; captions, pin/unpin and deletion pending; real checks pending owner | Real owner-approved archive/unarchive of a test chat and edit of an own test message with readback, and installed-consumer evidence. Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
-| F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist; clean-user onboarding, full source-family/protocol/recovery coverage and controlled TDLib upgrades remain. |
+| F17 | Archive/edit/delete/pin actions | Partial (0.52 candidate): archive/unarchive of one chat and plain-text edit of one own message (F17a), with real owner-approved runs read back (20.10.2026) | Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
+| F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist. The 0.52 candidate adds real Codex (`codex exec`) and Claude Code searches on the owner's Mac. Still open: clean-user onboarding, Claude Desktop and plugin installs (next version), full source-family/protocol/recovery coverage and controlled TDLib upgrades. |
 | F19 | Streamable HTTP and final whole-scope audit | Conditional / partial | No current confirmed cloud-consumer requirement: HTTP is not applicable now. Final full-plan audit remains after the applicable backlog. |
 
 ## Completed release slices
@@ -206,27 +211,27 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
 
 ## Remaining work and approved priority
 
-1. **Priority #1 — QR-first onboarding for 0.52:** follow the
+1. **Priority #1 — release 0.52.0:** follow the
    [approved requirements and acceptance gate](plans/0.52-qr-onboarding.md).
-   The installer, application identity, local QR/optional-2FA screen and
-   `connect`/`wait` commands are implemented (phases A–E); what remains is to prove a
-   clean install → real phone confirmation → Claude Code and Codex search →
-   repeat-use path (phase F, owner-run). Mandatory
-   end-user API-pair entry or Terminal-only login does not satisfy this scope.
-   Resolve incompatible earlier assumptions here before any unrelated B2/F13–F17
-   continuation. Public installer distribution, trust and source/notice closure
-   remain release dependencies.
-2. **Conversational usability:** keep context for selected conversations/messages/files;
+   - **Done:** QR-first onboarding is implemented (phases A–E) and accepted for real on the owner's
+     Mac, including 2FA, revoke/reconnect and Claude Code and Codex searches (phase F, most of it).
+   - **Remaining:** the clean macOS user install of the identity bundle, owner review of the
+     delegated F14/F15a/F17a decisions, then the version and tag.
+   - **Out of scope:** mandatory end-user API-pair entry or Terminal-only login does not satisfy
+     this scope.
+2. **Priority #2 — client coverage and distribution (next version):** the same QR-first setup
+   registered in Claude Desktop and installable as a Claude Code plugin. This includes Developer ID
+   signing and notarization of the bundle so that a downloaded copy passes Gatekeeper, a distinct
+   product name before any public listing, and public hosting with source/notice closure.
+3. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening
    exact-payload authorization. Retained message selections and B2C upload ownership
-   now have bounded technical evidence in the development snapshot; full installed
-   file/page and conversational outcome coverage remains open.
-3. **Blocking send capabilities:** complete F14 and F15a real delivery evidence, and F15b
-   albums, when required by observed tasks; each needs its own preview and delivery evidence.
-4. **Remaining established backlog:** F16 accounts; F17 archive/unarchive and own
-   text/caption editing; F15 albums; retained TextUrl captions, CustomEmoji,
-   MediaTimestamp and combinations; F17 pin/unpin and exact selected deletion.
+   have bounded technical evidence; full installed file/page and conversational outcome
+   coverage remains open. Guard refusals already name the missing capability.
+4. **Remaining established backlog:** F16 accounts; F15b albums; F17 caption and styled edits,
+   pin/unpin and exact selected deletion; F13 retained TextUrl captions, CustomEmoji,
+   MediaTimestamp and combinations. Each needs its own preview and real evidence.
 5. **Final acceptance:** close the applicable whole-scope F18 matrix, package/history/
    privacy/license checks and requirement-by-requirement review before claiming the
    complete original plan is finished. Reassess F19 only if a cloud need appears.

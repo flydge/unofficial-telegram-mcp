@@ -2,6 +2,26 @@
 
 ## 0.52.0.dev0 — unreleased
 
+Release candidate. The real QR-first acceptance on the owner's Mac is recorded below, along with real
+approved forward/copy, native video, archive/unarchive and own-text edit runs. The remaining 0.52.0
+gate is a clean macOS user installing the bundle that carries the application identity
+([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). No version change or tag yet.
+
+- Real acceptance on the owner's Mac, 20.10.2026 (owner's macOS user, source install, Keychain
+  identity): QR login, refresh, page Cancel and screen expiry; a 2FA login with the password typed
+  only on the page; phone revoke ⇒ `AUTHORIZATION_BLOCKED`, then `connect` reconnects on the same
+  enrollment; repeat `connect` ⇒ `already_connected`. The default policy is exactly `read` and
+  `artifacts`. Bounded own-chat search worked through the official MCP SDK client, real Codex
+  (`codex exec`) and a new Claude Code session.
+- Fix Keychain reads that failed on every real Mac (`-50`): count matching items first, then read
+  exactly one item's data. An item removed between the two queries reads `unavailable`.
+- Wait for a starting broker instead of restarting it: a client request no longer runs
+  `launchctl kickstart -k`, which killed a broker in the middle of TDLib startup. It starts a
+  stopped agent and waits up to 10 seconds for it.
+- Ask TDLib which lists a chat may join before an archive draft (`getChatListsToAddChat`): an
+  unsupported move is refused as `unsupported_chat` with no draft or dialog. A chat a fresh session
+  has not loaded yet is loaded once from Main and Archive.
+
 - Add F14 exact forward/copy of one message (development; [spec](docs/plans/0.53-forward-copy-spec.md)):
   tools `prepare_forward_send` and `send_prepared_forward` (49 tools with this slice) and the default-off
   `forward_send` capability, which also requires `send`. `mode="forward"` shows the original
@@ -12,8 +32,8 @@
   revalidates recipient and source, asks the local owner to confirm the same facts and makes
   one closed-shape `forwardMessages` attempt with no retry; `get_send_status` reports the
   outcome. Re-preparing supersedes the earlier draft; the generic draft tools do not expose
-  forward drafts. Verified with a synthetic provider only; real approved delivery is pending
-  the owner. See [reference](docs/reference.md#exact-forwardcopy-f14) and
+  forward drafts. A real approved copy and forward to Saved Messages were sent and read back on
+  20.10.2026, through the official MCP SDK client on the owner's account. See [reference](docs/reference.md#exact-forwardcopy-f14) and
   [security](docs/security.md#exact-forwardcopy-boundary-f14-candidate).
 
 - Harden F14 after the independent re-review: the forward dialog marks more invisible and
@@ -32,8 +52,8 @@
   `sendMessage(inputMessageVideo)` attempt with a 120-second confirmation wait and no retry;
   `get_send_status` reports the outcome by correlation. Re-preparing for the same artifact and
   recipient supersedes the earlier draft; the generic draft tools do not expose video drafts.
-  Verified with generated MP4/MOV boxes and a synthetic provider only; a real approved send is
-  pending the owner. See [reference](docs/reference.md#native-video-send-f15a) and
+  A real approved video send was confirmed and read back on 20.10.2026: a 3-second H.264 MP4
+  with its caption. See [reference](docs/reference.md#native-video-send-f15a) and
   [security](docs/security.md#native-video-boundary-f15a-candidate).
 
 - Fix a misleading `expired` for sends that were already attempted: when artifact authority is
@@ -64,8 +84,8 @@
   `forbidden` list now names exactly these two mutations instead of all edits. `get_send_status` reads
   coarsely and never `sent` for these drafts, the generic draft tools do not expose them, and enabling
   either capability also lets its prepare tool reveal that chat's or message's content. The earlier 51
-  tool schemas are unchanged. Verified with a synthetic provider only; a real archive/unarchive and a
-  real edit are pending the owner. See [reference](docs/reference.md#archiveunarchive-and-own-text-edit-f17a)
+  tool schemas are unchanged. A real own-text edit and a real archive and unarchive of a supergroup
+  were applied and read back on 20.10.2026. See [reference](docs/reference.md#archiveunarchive-and-own-text-edit-f17a)
   and [security](docs/security.md#archive-and-own-text-edit-boundary-f17a-candidate).
 
 - Add QR-first Telegram login to the private candidate: `connect` opens a loopback
@@ -78,7 +98,7 @@
   present), and returns an activation command ending in `connect`. The bundle assembler injects `app-identity.json`
   only with the explicit `--app-identity-from-keychain` flag. The Terminal `setup` flow
   remains as the fallback; the setup skill is rewritten for the connect/wait flow.
-  Verified with synthetic fakes only; real clean-user acceptance (phase F) is pending.
+  Real acceptance on the owner's Mac is the first entry above. The clean macOS user run is pending.
 
 - Report SDK guard refusals with a fixed reason instead of the bare `Error executing tool <name>`:
   `capability_disabled` names only the missing capabilities (for example `read_history`, or
@@ -95,8 +115,8 @@
 - Add authenticated offline macOS ARM64 first-install bundle admission,
   recoverable owned runtime/registration/paired-skills installation and an
   isolated receipt-bound launcher integrated with the preserved default session.
-- Private installation ends at `activation_required`. Real-account acceptance of native
-  onboarding, fresh Codex search, public distribution and source completeness remain open.
+- Private installation ends at `activation_required`. Still open: installing the bundle on a clean
+  macOS user, public distribution (Developer ID signing and notarization) and source completeness.
 
 - Preserve client-owned artifact grants across the supported local lifecycle and
   add retained selections for bounded conversational message reuse.
@@ -107,7 +127,7 @@
   independent review and installed official SDK auto/legacy scenarios using
   synthetic data. No real Telegram send or full F18 acceptance is claimed.
 - Development was paused after B2C at the owner's request and later resumed (QR onboarding,
-  F14, F15a above); the unfinished scope and evidence limits are in
+  F14, F15a and F17a above); the unfinished scope and evidence limits are in
   [the roadmap](docs/roadmap.md). No new release is tagged.
 
 ## 0.51.0 — 2026-10-13

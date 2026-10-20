@@ -6,32 +6,28 @@
 
 Connect Telegram to **Claude Code, Codex, or another local MCP client**.
 
-**Version 0.51.0:** 43 tools, opt-in exact forum-topic text sends/replies, and five explicit outgoing text styles. The accepted bounded scope has installed SDK, Inspector and native Codex evidence; first-time Telegram provisioning and the broader roadmap remain unfinished. See [release notes](docs/release-notes-0.51.0.md), the [tool reference](docs/reference.md), and [development progress](docs/roadmap.md).
+**Published version 0.51.0:** 43 tools, opt-in exact forum-topic text sends/replies, and five explicit outgoing text styles. The accepted bounded scope has installed SDK, Inspector and native Codex evidence; first-time Telegram provisioning and the broader roadmap remain unfinished. See [release notes](docs/release-notes-0.51.0.md), the [tool reference](docs/reference.md), and [development progress](docs/roadmap.md).
 
-This checkout's build candidate also adds default-off `retain_selection` (exact chosen
-message/file reuse) and the local-upload authority tools. Their typed source alternatives
-and refusal contract change the schema fingerprint. These slices still require independent
-review and installed/native/live acceptance; earlier accepted evidence does not
-cover them. See the [retained selection reference](docs/reference.md#exact-retained-selections-opt-in-candidate).
+**0.52 release candidate** (this checkout, `0.52.0.dev0`, not yet tagged):
 
-The candidate surface is now 55 tools. Two of them, `prepare_forward_send` and
-`send_prepared_forward`, forward or copy exactly one existing message between two exact
-chats behind the default-off `forward_send` capability (together with `send`), with a
-complete preview, owner approval and one non-retried attempt. Real approved delivery is
-still pending; see the [forward/copy reference](docs/reference.md#exact-forwardcopy-f14).
-Two more, `prepare_video_send` and `send_prepared_video`, send one owned MP4/MOV artifact
-(at most 64 MiB) as a native Telegram video behind the default-off `video_send` capability
-(together with `send`): duration, dimensions and codec are read locally from the file's own
-boxes and shown as declared by the file, and the send follows the same preview, owner
-approval and single non-retried attempt. A real approved video send is still pending; see the
-[native video reference](docs/reference.md#native-video-send-f15a).
-Four more, `prepare_chat_archive`/`apply_prepared_archive` and `prepare_text_edit`/`apply_prepared_text_edit`,
-move one chat between Main and Archive and replace the plain text of one of your own text messages,
-behind the independent default-off `archive_chats` and `edit_own_text` capabilities (each together with
-`send`): a before/after preview, owner approval, one non-retried attempt and a reported provider state.
-Real approved runs are still pending; see the
-[archive and edit reference](docs/reference.md#archiveunarchive-and-own-text-edit-f17a).
-
+- **QR-first login.** Install, then `connect`: a local page on your Mac shows a QR code, you scan
+  it in Telegram on your phone, and you type a 2FA password, if you use one, only on that page. No API
+  ID or hash, phone number or login code passes through your assistant. This was verified for real on
+  the owner's Mac (login, QR refresh, cancel, expiry, 2FA, revoke and reconnect, and a search from
+  Claude Code and from Codex). The remaining release gate is installing the bundle on a clean macOS
+  user. See [candidate installation](#unreleased-local-candidate).
+- **55 tools.** Four new opt-in actions are each behind their own default-off capability, together
+  with `send`. Each has a complete preview, a local owner approval and one non-retried attempt, and
+  each was verified with real approved runs on 20.10.2026:
+  - forward or copy one message ([`forward_send`](docs/reference.md#exact-forwardcopy-f14));
+  - send one MP4/MOV as a native video ([`video_send`](docs/reference.md#native-video-send-f15a));
+  - move one chat between Main and Archive, and replace the text of one of your own messages
+    ([`archive_chats`, `edit_own_text`](docs/reference.md#archiveunarchive-and-own-text-edit-f17a)).
+- **Clearer refusals.** A tool whose capability is off now says so, for example
+  `capability_disabled: read_history`, instead of a bare error.
+- **Also in the candidate:** default-off [retained selections](docs/reference.md#exact-retained-selections-opt-in-candidate)
+  for reusing an exact chosen message or file, and local-upload authority tools. These have
+  installed-SDK evidence with synthetic data, but no live acceptance.
 
 **Free and open source under [AGPLv3](LICENSE).** This license was chosen because the current PDF reader uses PyMuPDF. A future PDF replacement and different license are being considered; read the [licensing rationale](docs/licensing.md). The [original development plan](docs/plans/initial-roadmap.md) and [current roadmap](docs/roadmap.md) are tracked in Git.
 
@@ -89,20 +85,23 @@ Ask your assistant:
 
 # Unreleased local candidate
 
-This checkout is development candidate `0.52.0.dev0`. Its private authenticated
-bundle supplies Python/native dependencies and recoverable first installation
-on Apple Silicon macOS 26+. See [candidate installation](docs/install.md).
-Published 0.51 evidence remains separate; native onboarding, public hosting,
-publisher trust and complete source/redistribution acceptance remain open.
+This checkout is release candidate `0.52.0.dev0`. Its private authenticated bundle supplies
+standalone Python, the pinned dependencies and TDLib, and a recoverable first installation on
+Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed. See
+[candidate installation](docs/install.md).
 
-**QR-first login (0.52):** the candidate installer registers the MCP server in Codex and,
-when the `claude` CLI is found at a fixed location, in Claude Code (otherwise it returns the
-exact command to run yourself). Paired skills go to `~/.agents/skills` and, if Claude Code is
-present, `~/.claude/skills`. Your assistant then runs
-`connect`: a local browser page on your Mac shows a QR code, you scan it in Telegram on
-your phone (Settings → Devices → Link Desktop Device) and enter 2FA only on that page.
-No API ID or hash, phone number or login code passes through the assistant, and a bundle
-assembled with the application identity needs no API ID/hash entry at all. This is technically implemented and tested with
-fakes; real acceptance on a clean macOS user is pending, so it is not yet a released or
-accepted feature. The Terminal phone/code setup remains as a fallback. Details and the
-shared-API-identity risk: [candidate installation](docs/install.md#private-bundled-candidate-0520dev0).
+**QR-first login (0.52):**
+- **What the installer does.** It registers the MCP server in Codex and, when the `claude` CLI is
+  found at a fixed location, in Claude Code. Otherwise it returns the exact command to run yourself.
+  It copies the paired skills to `~/.agents/skills` and, if Claude Code is present, `~/.claude/skills`.
+- **How you connect.** Your assistant runs `connect`: a local browser page shows a QR code, you scan
+  it in Telegram on your phone (Settings → Devices → Link Desktop Device) and enter 2FA only on that
+  page. A bundle assembled with the application identity needs no API ID or hash at all. The
+  Terminal phone/code setup remains as a fallback.
+- **Status.** It was accepted for real on the owner's Mac on 20.10.2026. Installing the bundle on a
+  clean macOS user is the remaining 0.52.0 gate.
+- **Open beyond 0.52.0:** public hosting, Developer ID signing and notarization, and complete
+  source/redistribution review.
+
+Details and the shared-API-identity risk:
+[candidate installation](docs/install.md#private-bundled-candidate-0520dev0).
