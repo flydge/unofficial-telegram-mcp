@@ -12,7 +12,9 @@ and writes <workdir>/evidence.json beside the artifacts. Its only network use is
 downloading the pinned, hash-checked wheels (TOOLS below and
 packaging/constraints-<release>.txt at the commit) into the workdir. The privacy
 scan runs the commit's own tests/test_public_tree_privacy.py (scan_text with its
-ALLOW table) over the shipped text, the added diff lines and the commit messages.
+ALLOW table) over the shipped text, the added diff lines and the commit messages
+(a hit refuses), and over the lines each commit of the range added (a classified
+report in history_findings, not a refusal: history remediation is the owner's).
 
 verify binds to the recorded commit, never to HEAD, and trusts no recorded
 result: it rebuilds from a fresh `git archive <commit>` offline from the recorded
@@ -90,7 +92,15 @@ MAX_COMMITS = 100000
 GIT_TIMEOUT, PIP_TIMEOUT, BUILD_TIMEOUT, SMOKE_TIMEOUT, SUITE_TIMEOUT = 120, 900, 900, 180, 3600
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
 TAG = re.compile(r"v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?")
-HUNK = re.compile(r"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
+HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
+RAW = re.compile(rb":[0-7]{6} [0-7]{6} [0-9a-f]{4,64} [0-9a-f]{4,64} ([A-Z])[0-9]{0,3}\t(.+)")
+MARK = re.compile(rb"commit ([0-9a-f]{40})")
+C_ESCAPES = dict(zip(b'abtnvfr"\\', b'\a\b\t\n\v\f\r"\\'))
+# Explicit flags, so the repository's own diff configuration (prefixes, context, textconv, renames)
+# cannot change the paths or line numbers the privacy scan parses.
+PATCH = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-prefix", "-U0",
+         "--inter-hunk-context=0")
+MAX_HISTORY = 2000
 RULE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_HITS = 100
 VERSION = re.compile(r'^__version__ = "([0-9]+(?:\.[0-9]+){1,3}(?:(?:a|b|rc)[0-9]+)?'
@@ -99,7 +109,7 @@ PIN = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)==([0-9A-Za-z.+!]+)((?: --hash=sha2
 TARGET = re.compile(r"# target: cpython-(3\.[0-9]{1,2}) macosx-arm64")
 EVIDENCE_KEYS = frozenset({"schema", "gate", "commit", "tree", "commit_time", "previous_tag", "previous_commit",
     "version", "toolchain", "archive", "sdist", "wheel", "constraints", "install", "smoke", "privacy",
-    "identities", "tests"})
+    "history_findings", "identities", "tests"})
 CODES = frozenset({
     "usage", "repo_unavailable", "git_failed", "invalid_commit", "unknown_commit", "invalid_tag", "unknown_tag",
     "tag_not_ancestor", "invalid_workdir", "workdir_under_tmp", "workdir_inside_repo", "workdir_not_empty",
@@ -664,9 +674,123 @@ def _text(data: bytes) -> str:
     return "" if b"\0" in data[:8192] else data.decode("utf-8", "replace")
 
 
+def _git_path(raw: bytes) -> str:
+    """A path as git prints it with core.quotePath=false: C-quoted when it holds a quote, a backslash
+    or a control character, otherwise verbatim; UTF-8 either way."""
+    if raw.startswith(b'"'):
+        need(len(raw) >= 2 and raw.endswith(b'"'), "privacy_scan_bounds")
+        body, out, index = raw[1:-1], bytearray(), 0
+        while index < len(body):
+            if body[index] != 0x5C:
+                need(body[index] != 0x22, "privacy_scan_bounds")
+                out.append(body[index])
+                index += 1
+            elif body[index + 1:index + 2] and body[index + 1] in C_ESCAPES:
+                out.append(C_ESCAPES[body[index + 1]])
+                index += 2
+            else:
+                need(re.fullmatch(rb"[0-3][0-7]{2}", body[index + 1:index + 4]), "privacy_scan_bounds")
+                out.append(int(body[index + 1:index + 4], 8))
+                index += 4
+        raw = bytes(out)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeError:
+        raise GateRefusal("privacy_scan_bounds") from None
+
+
+def parse_patch(lines: list[bytes]) -> tuple[dict[str, tuple[list[str], list[int]]], list[str], int]:
+    """Added lines per path of one patch printed with PATCH, the names its --raw lines list (deletions
+    excluded) and the number of added lines. Only git's own header lines carry paths: a hunk line
+    always starts with a prefix character, so its text is never read as structure."""
+    added: dict[str, tuple[list[str], list[int]]] = {}
+    names: list[str] = []
+    path, target, header, started, number, count = None, False, False, False, 0, 0
+    for line in lines:
+        if line.startswith(b"diff --git "):
+            path, target, header, started = None, False, True, True
+        elif not started and line.startswith(b":"):
+            raw = RAW.fullmatch(line)
+            need(raw, "privacy_scan_bounds")
+            if raw.group(1) != b"D":
+                names.append(_git_path(raw.group(2)))
+        elif header and line.startswith(b"+++ "):
+            # git appends a TAB to a name that holds a space; a name never ends in an unquoted TAB.
+            name = line[4:].removesuffix(b"\t")
+            path, target = (None if name == b"/dev/null" else _git_path(name)), True
+        elif line.startswith(b"@@ "):
+            match = HUNK.match(line)
+            need(match and target, "privacy_scan_bounds")
+            header, number = False, int(match.group(1))
+        elif not header and target and line.startswith(b"+"):
+            if path is not None:
+                # Text added by git as one line stays one tracked line, whatever str.splitlines makes of it.
+                pieces, numbers = added.setdefault(path, ([], []))
+                for piece in line[1:].decode("utf-8", "replace").splitlines() or [""]:
+                    pieces.append(piece)
+                    numbers.append(number)
+            number += 1
+            count += 1
+        elif not header and target and line.startswith(b" "):
+            number += 1
+    return added, names, count
+
+
+def _findings(guard, literals: tuple[str, ...], path: str, text: str,
+              numbers: list[int] | None = None) -> tuple[str, list[tuple[int, str]]]:
+    """The guard's scan_text as (shown path, [(line, rule)]). A path that is itself a finding (line 0)
+    is shown only by its digest, so no matched text is ever recorded."""
+    try:
+        found = guard.scan_text(path, text, literals)
+    except (Exception, SystemExit):
+        raise GateRefusal("privacy_guard_missing") from None
+    need(type(found) is list, "privacy_guard_missing")
+    results = []
+    for item in found:
+        need(type(item) is tuple and len(item) == 3 and type(item[1]) is int and item[1] >= 0
+             and type(item[2]) is str and RULE.fullmatch(item[2]), "privacy_guard_missing")
+        results.append((numbers[min(item[1], len(numbers)) - 1] if numbers and item[1] else item[1], item[2]))
+    if any(line == 0 for line, _ in results):
+        path = "name-sha256-" + _sha(path.encode("utf-8", "surrogatepass"))[:16]
+    return path, results
+
+
+def history_scan(git: Git, previous: str, commit: str, guard, literals: tuple[str, ...]) -> dict:
+    """A classified report, not a refusal: the guard over the names and lines each commit of
+    previous..commit added, merges included (what their resolution added, --diff-merges=remerge).
+
+    Text added and removed again inside the range never reaches the tip diff, but stays in history,
+    whose remediation is the owner's decision. A finding is `<12-hex commit>:<path>:<line>:<rule>`."""
+    output = git("log", "-p", "--raw", "--format=commit %H", *PATCH, "--diff-merges=remerge", "--root",
+                 "--no-show-signature", f"{previous}..{commit}", "--", code="privacy_scan_bounds").stdout
+    commits: list[tuple[str, list[bytes]]] = []
+    for line in output.split(b"\n"):
+        mark = MARK.fullmatch(line)
+        if mark:
+            commits.append((mark.group(1).decode("ascii"), []))
+            need(len(commits) <= MAX_COMMITS, "privacy_scan_bounds")
+        elif commits:
+            commits[-1][1].append(line)
+        else:
+            need(not line, "privacy_scan_bounds")
+    findings: set[str] = set()
+    files = lines = 0
+    for sha, patch in commits:
+        added, names, count = parse_patch(patch)
+        lines += count
+        for name in sorted(set(names) | set(added)):
+            pieces, numbers = added.get(name, ([], []))
+            files += 1
+            shown, found = _findings(guard, literals, name, "\n".join(pieces), numbers)
+            findings.update(f"{sha[:12]}:{shown}:{line}:{rule}" for line, rule in found)
+    return {"commits": len(commits), "files": files, "lines": lines, "total": len(findings),
+            "findings": sorted(findings)[:MAX_HISTORY]}
+
+
 def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict[str, tuple[str, bool]],
-                 sdist: Path, wheel: Path, version: str, data_files: dict) -> dict:
-    """The guard's scan_text over shipped text, added diff lines and commit messages of previous..commit.
+                 sdist: Path, wheel: Path, version: str, data_files: dict) -> tuple[dict, dict]:
+    """The guard's scan_text over shipped text, added diff lines and commit messages of previous..commit
+    (any hit refuses, see check_privacy), and the per-commit history report of history_scan.
 
     Paths are given to scan_text as tracked paths, so its path-scoped ALLOW entries apply. A hit is
     `<where>/<path>:<line>:<rule>`; the matched text is never recorded."""
@@ -679,42 +803,13 @@ def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict
     scanned = {"sdist_members": 0, "wheel_members": 0, "diff_files": 0, "diff_lines": 0, "commits": 0}
 
     def scan(where: str, path: str, text: str, numbers: list[int] | None = None) -> None:
-        try:
-            found = guard.scan_text(path, text, literals)
-        except (Exception, SystemExit):
-            raise GateRefusal("privacy_guard_missing") from None
-        need(type(found) is list, "privacy_guard_missing")
-        for item in found:
-            need(type(item) is tuple and len(item) == 3 and type(item[1]) is int and item[1] >= 0
-                 and type(item[2]) is str and RULE.fullmatch(item[2]), "privacy_guard_missing")
-            line = numbers[min(item[1], len(numbers)) - 1] if numbers and item[1] else item[1]
-            hits.add(f"{where}{path}:{line}:{item[2]}")
+        shown, found = _findings(guard, literals, path, text, numbers)
+        hits.update(f"{where}{shown}:{line}:{rule}" for line, rule in found)
 
     names = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "--name-only", "-z",
                 previous, commit, "--", code="privacy_scan_bounds").stdout
-    patch = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "-U0",
-                previous, commit, "--", code="privacy_scan_bounds").stdout
-    added: dict[str, tuple[list[str], list[int]]] = {}
-    path, header, number = None, False, 0
-    for raw in patch.split(b"\n"):
-        line = raw.decode("utf-8", "replace")
-        if line.startswith("diff --git "):
-            path, header = None, True
-        elif header and line.startswith("+++ "):
-            need(line.startswith("+++ b/"), "privacy_scan_bounds")
-            path = line[6:]
-        elif line.startswith("@@ "):
-            match = HUNK.match(line)
-            need(match and path is not None, "privacy_scan_bounds")
-            header, number = False, int(match.group(1))
-        elif not header and path is not None and line.startswith("+"):
-            # Text added by git as one line stays one tracked line, whatever str.splitlines makes of it.
-            pieces, numbers = added.setdefault(path, ([], []))
-            for piece in line[1:].splitlines() or [""]:
-                pieces.append(piece)
-                numbers.append(number)
-            number += 1
-            scanned["diff_lines"] += 1
+    patch = git("diff", *PATCH, "--diff-filter=d", previous, commit, "--", code="privacy_scan_bounds").stdout
+    added, _, scanned["diff_lines"] = parse_patch(patch.split(b"\n"))
     try:
         changed = [name.decode("utf-8") for name in names.split(b"\0") if name]
     except UnicodeError:
@@ -724,7 +819,8 @@ def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict
         pieces, numbers = added.get(name, ([], []))
         scanned["diff_files"] += 1
         scan("diff/", name, "\n".join(pieces), numbers)
-    log = git("log", "--format=%H%x00%B%x1e", f"{previous}..{commit}", code="privacy_scan_bounds").stdout
+    log = git("log", "--no-show-signature", "--format=%H%x00%B%x1e", f"{previous}..{commit}", "--",
+              code="privacy_scan_bounds").stdout
     for record in log.split(b"\x1e"):
         record = record.strip(b"\n")
         if not record:
@@ -764,8 +860,9 @@ def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict
                 scan("wheel/", name, _text(archive.read(entry)))
     except (OSError, tarfile.TarError, zipfile.BadZipFile, EOFError):
         raise GateRefusal("privacy_scan_bounds") from None
-    return {"guard": PRIVACY_SOURCE, "guard_sha256": sources[PRIVACY_SOURCE][0], "rules": sorted(rules),
-            "allow": len(guard.ALLOW), "scanned": scanned, "hits": sorted(hits)}
+    report = {"guard": PRIVACY_SOURCE, "guard_sha256": sources[PRIVACY_SOURCE][0], "rules": sorted(rules),
+              "allow": len(guard.ALLOW), "scanned": scanned, "hits": sorted(hits)}
+    return report, history_scan(git, previous, commit, guard, literals)
 
 
 def check_privacy(report: dict) -> None:
@@ -779,7 +876,7 @@ def _identity_class(address: str) -> str:
 
 def identities(git: Git, previous: str, commit: str) -> dict:
     """A classified report of who appears in previous..commit; not a pass/fail check."""
-    output = git("log", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00"
+    output = git("log", "--no-show-signature", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce%x00"
                  "%(trailers:key=Co-authored-by,valueonly,separator=%x1f)%x1e", f"{previous}..{commit}").stdout
     counts: dict[tuple[str, str, str], int] = {}
     commits = 0
@@ -987,8 +1084,8 @@ def derive(git: Git, commit: str, tag: str, base: Path, scratch: Path, *, online
     sdist, wheel = build_twice(chain, build_venv, trees, version, epoch)
     sdist_members = check_sdist(sdist, version, epoch, sources)
     wheel_members = check_wheel(wheel, version, sources, project)
-    privacy = privacy_scan(git, previous, commit, trees[0], sources, sdist, wheel, version,
-                           project["tool"]["setuptools"]["data-files"])
+    privacy, history = privacy_scan(git, previous, commit, trees[0], sources, sdist, wheel, version,
+                                    project["tool"]["setuptools"]["data-files"])
     check_privacy(privacy)
     if online:
         _private_dir(wheelhouse)
@@ -1017,6 +1114,7 @@ def derive(git: Git, commit: str, tag: str, base: Path, scratch: Path, *, online
         "install": install,
         "smoke": check_smoke(source, observed, version),
         "privacy": privacy,
+        "history_findings": history,
         "identities": identities(git, previous, commit),
         "_artifacts": (sdist, wheel, archives[0], chain),
     }

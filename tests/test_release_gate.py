@@ -391,37 +391,50 @@ class PrivacyAndIdentityTests(GateCase):
     DATA_FILES = {"share/telegram-search-mcp/tests": ["tests/test_schemas.py"]}
 
     def scan(self, tracked: dict[str, str], wheel_members: dict[str, str] | None = None, *,
-             guard: str | None = GUARD, message: str | None = None) -> tuple[dict, str]:
-        """The gate's privacy scan of a synthetic release whose sdist ships `tracked`."""
+             guard: str | None = GUARD, message: str | None = None,
+             steps: tuple = ()) -> tuple[dict, dict, str]:
+        """The gate's privacy scan of a synthetic release whose sdist ships `tracked`; `steps` are later
+        commits of (files, message), a None file being deleted, made before the release commit."""
         base = self.root / secrets.token_hex(4)
         base.mkdir()
         files = {**tracked, **({} if guard is None else {gate.PRIVACY_SOURCE: guard})}
         repo, previous, head = synthetic_repo(base, {"README.md": "public\n"}, files)
-        if message is not None:
-            git(repo, "commit", "-q", "--allow-empty", "-m", message)
-            head = git(repo, "rev-parse", "HEAD")
+        for changes, text in steps + (() if message is None else (({}, message),)):
+            for name, content in changes.items():
+                if content is None:
+                    (repo / name).unlink()
+                else:
+                    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / name).write_text(content)
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "--allow-empty", "-m", text)
+        head = git(repo, "rev-parse", "HEAD")
+        self.repo = repo
         sdist, wheel = base / "s.tar.gz", base / "w.whl"
         make_sdist(sdist, {name: text.encode() for name, text in tracked.items()})
         with zipfile.ZipFile(wheel, "w") as archive:
             for name, text in (wheel_members or {f"{gate.DIST}/__init__.py": "VALUE = 1\n"}).items():
                 archive.writestr(name, text)
         sources = {name: (sha(text.encode()), False) for name, text in files.items()}
-        return gate.privacy_scan(gate.Git(repo), previous, head, repo, sources, sdist, wheel, VERSION,
-                                 self.DATA_FILES), head
+        report, history = gate.privacy_scan(gate.Git(repo), previous, head, repo, sources, sdist, wheel, VERSION,
+                                            self.DATA_FILES)
+        return report, history, head
 
     def test_allowlisted_value_passes_only_in_its_shipped_file(self) -> None:
         line = f"ID = {ALLOWED_ID}\n"
         data = f"{gate.DIST}-{VERSION}.data/data/share/telegram-search-mcp/tests/test_schemas.py"
-        report, _ = self.scan({"tests/test_schemas.py": line, "docs/clean.md": "public\n"}, {data: line})
+        report, history, head = self.scan({"tests/test_schemas.py": line, "docs/clean.md": "public\n"}, {data: line})
         gate.check_privacy(report)
+        self.assertEqual(history, {"commits": 1, "files": 3, "lines": len(GUARD.splitlines()) + 2, "total": 0,
+                                   "findings": []})
         self.assertEqual((report["guard"], report["guard_sha256"], report["hits"]),
                          (gate.PRIVACY_SOURCE, sha(GUARD.encode()), []))
         self.assertIn("chat_id", report["rules"])
         self.assertGreater(report["allow"], 0)
         self.assertEqual(report["scanned"], {"sdist_members": 5, "wheel_members": 1, "diff_files": 3,
                                              "diff_lines": len(GUARD.splitlines()) + 2, "commits": 1})
-        report, _ = self.scan({"tests/test_schemas.py": line, "docs/other.md": "fine\n" + line},
-                              {data: line, f"{gate.DIST}/leak.py": line})
+        report, _, _ = self.scan({"tests/test_schemas.py": line, "docs/other.md": "fine\n" + line},
+                                 {data: line, f"{gate.DIST}/leak.py": line})
         self.assertEqual(report["hits"], ["diff/docs/other.md:2:chat_id", "sdist/docs/other.md:2:chat_id",
                                           f"wheel/src/{gate.DIST}/leak.py:1:chat_id"])
         with self.refused("privacy_hit") as caught:
@@ -430,10 +443,65 @@ class PrivacyAndIdentityTests(GateCase):
         self.assertNotIn(ALLOWED_ID.removeprefix("-"), json.dumps(caught.exception.detail) + json.dumps(report))
 
     def test_commit_message_hit_refuses(self) -> None:
-        report, head = self.scan({"docs/clean.md": "public\n"}, message="Fix the reply\n\nseen in msg 6312" "42752\n")
+        report, _, head = self.scan({"docs/clean.md": "public\n"}, message="Fix the reply\n\nseen in msg 6312" "42752\n")
         self.assertEqual((report["scanned"]["commits"], report["hits"]), (2, [f"commit/{head}:3:message_id"]))
         with self.refused("privacy_hit"):
             gate.check_privacy(report)
+
+    def test_paths_with_spaces_and_quotes_are_parsed(self) -> None:
+        names = ("docs/a b.md", 'docs/q"uote.md', 'docs/q" b.md', "docs/tab\tname.md", "docs/\u00fc.md")
+        report, history, _ = self.scan({name: "public\n" for name in names})
+        gate.check_privacy(report)
+        self.assertEqual((report["scanned"]["diff_files"], report["scanned"]["diff_lines"], history["total"]),
+                         (len(names) + 1, len(names) + len(GUARD.splitlines()), 0))
+        report, history, head = self.scan({name: f"fine\nID = {ALLOWED_ID}\n" for name in names})
+        self.assertEqual(report["hits"], sorted(f"{where}/{name}:2:chat_id" for where in ("diff", "sdist")
+                                                for name in names))
+        self.assertEqual(history["findings"], sorted(f"{head[:12]}:{name}:2:chat_id" for name in names))
+
+    def test_git_quoted_paths_decode_or_refuse(self) -> None:
+        self.assertEqual(gate._git_path(b'"docs/q\\"b \\303\\274\\t\\\\.md"'), 'docs/q"b \u00fc\t\\.md')
+        self.assertEqual(gate._git_path(b"docs/a b.md"), "docs/a b.md")
+        for raw in (b'"docs/open', b'"bad \\x"', b'"short \\30"', b'"in"ner"', b"\xff.md"):
+            with self.subTest(raw=raw), self.refused("privacy_scan_bounds"):
+                gate._git_path(raw)
+
+    def test_history_findings_are_a_report_not_a_refusal(self) -> None:
+        named = "docs/tg-" "dev-7.md"  # its name is a local_dir finding
+        hit = f"fine\nID = {ALLOWED_ID}\n"
+        report, history, head = self.scan({"docs/clean.md": "public\n"}, steps=(
+            ({"docs/old notes.md": hit, named: "x\n"}, "add notes"),
+            ({"docs/old notes.md": None, named: None}, "drop notes")))
+        gate.check_privacy(report)
+        added = git(self.repo, "rev-parse", "HEAD~1")[:12]
+        shown = "name-sha256-" + sha(named.encode())[:16]
+        self.assertEqual(history, {"commits": 3, "files": 4, "lines": len(GUARD.splitlines()) + 4, "total": 2,
+                                   "findings": sorted([f"{added}:docs/old notes.md:2:chat_id",
+                                                       f"{added}:{shown}:0:local_dir"])})
+        self.assertNotIn(ALLOWED_ID.removeprefix("-"), json.dumps(history))
+        self.assertNotIn("dev-7", json.dumps(history))
+        # at the tip, a path that is itself a finding refuses and is shown only by its digest
+        report, _, _ = self.scan({named: "x\n"})
+        self.assertEqual(report["hits"], [f"diff/{shown}:0:local_dir", f"sdist/{shown}:0:local_dir"])
+        self.assertNotIn("dev-7", json.dumps(report))
+
+    def test_history_scans_what_a_merge_resolution_added(self) -> None:
+        tree = self.root / "guard"
+        (tree / "tests").mkdir(parents=True)
+        (tree / gate.PRIVACY_SOURCE).write_text(GUARD)
+        guard = gate.load_guard(tree, {gate.PRIVACY_SOURCE: (sha(GUARD.encode()), False)})
+        repo, previous, _ = synthetic_repo(self.root, {"README.md": "one\n"}, {"README.md": "one\nmain\n"})
+        git(repo, "checkout", "-q", "-b", "side", previous)
+        (repo / "README.md").write_text("one\nside\n")
+        git(repo, "commit", "-qam", "side")
+        git(repo, "checkout", "-q", "main")
+        with contextlib.suppress(subprocess.CalledProcessError):
+            git(repo, "merge", "-q", "side", "-m", "merge")
+        (repo / "README.md").write_text(f"one\nID = {ALLOWED_ID}\n")
+        git(repo, "commit", "-qam", "merge")
+        merge = git(repo, "rev-parse", "HEAD")
+        history = gate.history_scan(gate.Git(repo), previous, merge, guard, ())
+        self.assertEqual((history["commits"], history["findings"]), (3, [f"{merge[:12]}:README.md:2:chat_id"]))
 
     def test_missing_or_broken_privacy_guard_refuses(self) -> None:
         guards = (None, "ALLOW = ()\n", "def scan_text(path, text, literals=()):\n    return []\n",
@@ -530,6 +598,8 @@ class VerifyTests(GateCase):
             "privacy": {"guard": gate.PRIVACY_SOURCE, "guard_sha256": "2" * 64, "rules": ["chat_id", "email"],
                         "allow": 1, "hits": [], "scanned": {"sdist_members": 9, "wheel_members": 8, "diff_files": 1,
                                                             "diff_lines": 1, "commits": 1}},
+            "history_findings": {"commits": 1, "files": 1, "lines": 1, "total": 1,
+                                 "findings": ["aaaaaaaaaaaa:docs/x.md:1:email"]},
             "identities": {"commits": 1, "identities": []}}
         self.evidence = {**copy.deepcopy(self.derived),
                          "tests": gate.suite_report(self.base / "junit.xml", self.base / "suite.log")}
@@ -578,6 +648,7 @@ class VerifyTests(GateCase):
                  (edit(("privacy", "guard_sha256"), "3" * 64), "evidence_mismatch"),
                  (edit(("install", "freeze"), ["mcp==2.2.1", f"{gate.PROJECT}=={VERSION}"]), "evidence_mismatch"),
                  (edit(("identities", "commits"), 2), "evidence_mismatch"),
+                 (edit(("history_findings", "findings"), []), "evidence_mismatch"),
                  (edit(("tree",), "9" * 40), "evidence_mismatch"),
                  (edit(("toolchain", "python"), "3.14.1"), "toolchain_mismatch"),
                  (edit(("gate", "sha256"), "2" * 64), "gate_mismatch"),

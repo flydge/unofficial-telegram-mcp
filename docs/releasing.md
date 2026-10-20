@@ -67,8 +67,9 @@ All must hold before the gate runs; the release commit is the commit that holds 
    previous tag, `docs/third-party-notices.md`, `docs/licensing.md` and `docs/licenses/` match, and
    `packaging/constraints-<version>.txt` pins the tested closure with hashes.
 
-Author and committer identity is not a pre-cut condition: the gate reports it (section 4) and
-publication waits for the owner's history decision when it is not the public identity.
+Author and committer identity and per-commit history findings are not pre-cut conditions: the
+gate reports them (section 4) and publication waits for the owner's history decision when the
+identity is not the public one or `history_findings` is not 0.
 
 ## 3. Release gate
 
@@ -89,13 +90,14 @@ details in `<dir>/refusal.json`. Both must exit 0.
   existing ancestor, so `/PRIVATE/TMP/x` and firmlink aliases such as
   `/System/Volumes/Data/private/tmp/x` or `/System/Volumes/Data<repository>/x` are refused too.
 - `run` builds everything from `git archive <sha>`, never from the working tree. Its only network
-  use is pip downloading the hash-pinned build and test tools and the closure of
-  `packaging/constraints-<version>.txt` into `<dir>/toolhouse` and `<dir>/wheelhouse`. It builds
-  the sdist and the wheel twice and requires identical bytes, checks their members against the
-  tracked files, installs the closure offline with `pip check` and every `RECORD` hash, smoke-tests
-  the installed server over stdio, runs the privacy scan of section 4, then runs the full suite
-  from a fresh archive extraction in a fresh offline venv with a hermetic HOME. It writes
-  `<dir>/evidence.json`, `<dir>/dist/`, `<dir>/junit.xml` and `<dir>/suite.log`.
+  use is pip downloading the hash-pinned build and test tools into `<dir>/toolhouse` and the
+  closure of `packaging/constraints-<version>.txt` into `<dir>/wheelhouse`. In order, it downloads
+  the tools, builds the sdist and the wheel twice and requires identical bytes, checks their
+  members against the tracked files, runs the privacy scan of section 4 (a hit refuses before the
+  closure is downloaded or anything is installed), downloads the closure, installs it offline with
+  `pip check` and every `RECORD` hash, smoke-tests the installed server over stdio, then runs the
+  full suite from a fresh archive extraction in a fresh offline venv with a hermetic HOME. It
+  writes `<dir>/evidence.json`, `<dir>/dist/`, `<dir>/junit.xml` and `<dir>/suite.log`.
 - `verify` binds to the **recorded** commit, not to `HEAD`, so old evidence stays verifiable. It
   accepts only the exact bytes `run` wrote, checks the artifacts and the junit and log files on
   disk, rebuilds from a fresh `git archive` offline from `<dir>/toolhouse` and `<dir>/wheelhouse`,
@@ -108,7 +110,8 @@ details in `<dir>/refusal.json`. Both must exit 0.
   0.52.x; see [release-preflight.md](release-preflight.md).
 
 The evidence is a local artifact: keep it with the release record outside the public tree (its
-`identities` hold names and addresses), and quote digests and results, never paths, in the notes.
+`identities` hold names and addresses, its `history_findings` paths), and quote digests and
+results, never paths, in the notes.
 Its keys:
 
 | Key | What it records |
@@ -125,6 +128,7 @@ Its keys:
 | `install` | `freeze` of the installed closure, `pip_check` and the number of verified `record_entries` |
 | `smoke` | `server_version`, `tool_count`, `tools_sha256`, `schema_fingerprint` and `capabilities` seen over stdio |
 | `privacy` | the `guard` file and its `guard_sha256`, its `rules`, the `allow` entry count, `scanned` counts and `hits` (empty) |
+| `history_findings` | the per-commit history report of section 4: `commits`, `files` and `lines` scanned, the `total` and the first 2000 `findings` as `<12-hex commit>:<path>:<line>:<rule>`; a report, not a refusal |
 | `identities` | `commits` in the range and each author, committer and co-author with role, `class` (`noreply` or `direct`) and commit count |
 | `tests` | `tests`, `passed`, `failed`, `errors`, `skipped`, the `skips` with reasons, the last log line (`summary`), and `junit`, `log` with their SHA-256 |
 
@@ -149,7 +153,15 @@ its `ALLOW` table, over every text member of the sdist and the wheel (under thei
 path-scoped entries apply), the lines added by `git diff <tag>..<sha>` and every commit message of
 `git log <tag>..<sha>`. A missing guard, or one without `scan_text`, refuses with
 `privacy_guard_missing`; any finding refuses with `privacy_hit`, and `refusal.json` lists only
-`path:line:rule`, never the matched text.
+`path:line:rule`, never the matched text (a path that is itself a finding appears as
+`name-sha256-<first 16 hex digits of its SHA-256>`).
+
+**History scan.** The tip diff misses text that a commit of the range added and a later one
+removed, yet that text stays in the published history. `run` therefore also runs the same guard
+over the names and lines each commit of `git log -p <tag>..<sha>` added (a merge contributes what
+its conflict resolution added, git's remerge diff). Its findings are a classified report in
+`history_findings` (`<12-hex commit>:<path>:<line>:<rule>`, never the value), not a refusal:
+history remediation is the owner's decision, taken before publication (Gpub, section 7).
 
 **Identity.** New commits and tags use the repository-local public identity of the v0.51.0 tag
 (name `Unofficial Telegram MCP Contributors`, address `noreply@users.noreply.github.com`),
@@ -197,7 +209,10 @@ Gpub is an explicit owner authorization naming the refs and artifacts to publish
 given, nothing is pushed to `main` and no tag leaves the machine; working branches may be pushed
 as backups. It also needs the owner's decision on the history and identity question of section 4,
 because moving `main` forward makes the cheaper remediation (rewriting only the unmerged branch
-range) impossible without rewriting `main`. Pushed objects stay retrievable on the remote even
+range) impossible without rewriting `main`. Gpub checks `history_findings` in the verified
+evidence: its `total` must be 0, or the owner's acceptance of the listed findings (or the
+remediation chosen, which makes a new release commit and a new `run`) is recorded with the release
+record before anything is pushed. Pushed objects stay retrievable on the remote even
 after a ref is deleted, so publication is irreversible in practice.
 
 Remote pre-checks (read-only):
@@ -209,6 +224,8 @@ git ls-remote origin refs/heads/main 'refs/tags/*'    # record this output
 git merge-base --is-ancestor origin/main <sha> && echo fast-forward
 git ls-remote --tags origin v<version>                # must print nothing
 .venv/bin/python packaging/release_gate.py verify --evidence <dir>/evidence.json
+.venv/bin/python -c 'import json, sys; print(json.load(open(sys.argv[1]))["history_findings"]["total"])' \
+    <dir>/evidence.json                               # 0, or the owner's acceptance is recorded
 ```
 
 Publish only the named refs, one push each, never `--force` and never `--tags`:
@@ -282,6 +299,7 @@ Release evidence is never edited: a corrected release is a new commit, a new `ru
 | Package data | `pyproject.toml`, `MANIFEST.in` |
 | Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
+| History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |
 | Tag | `git tag -a v<version> -m ...` |
 | Gpub with remote pre and post checks | section 7 |
 | Pin note for users | section 8, in the release notes |
