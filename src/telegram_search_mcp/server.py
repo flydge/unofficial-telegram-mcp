@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 from pathlib import Path
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import ConfigDict, Field
 
@@ -176,6 +177,14 @@ _OVERWRITE = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=True,
 )
+# SDK 2.2.0 masks every exception except ToolError as "Error executing tool <name>".
+# Guard refusals are anticipated, so they carry this fixed text: the code and, for
+# capability_disabled, only the missing names from the closed capability set.
+_GUARD_REFUSALS = {
+    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)",
+    "client_schema_mismatch": "client_schema_mismatch (refresh tools/list, then recheck _manifest)",
+    "config_stale": "config_stale (restart matching components)",
+}
 
 
 def _validate_raw_search_arguments(arguments: dict[str, object]) -> None:
@@ -1446,19 +1455,22 @@ def build_server(
             capability = OPERATION_CAPABILITIES[operation]
             original = registered.fn
             def guarded(*args, _fn=original, _capability=capability, _upload_owner=tool_name in PUBLIC_MODELS, **kwargs):
+                missing = []
                 try:
                     if consumer_schema_mismatch:
                         raise CompatibilityError("client_schema_mismatch")
                     require_current(runtime_policy)
-                    if (_capability not in runtime_policy.enabled_capabilities or
-                            (_capability in SEND_DEPENDENT_CAPABILITIES and "send" not in runtime_policy.enabled_capabilities)):
+                    contract_descriptor(runtime_policy)
+                    required = (_capability, "send") if _capability in SEND_DEPENDENT_CAPABILITIES else (_capability,)
+                    if kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None:
+                        required += ('retained_selections',)
+                    missing = [name for name in required if name not in runtime_policy.enabled_capabilities]
+                    if missing:
                         raise CompatibilityError("capability_disabled")
-                    if (kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None) and 'retained_selections' not in runtime_policy.enabled_capabilities:
-                        raise CompatibilityError('capability_disabled')
-                except CompatibilityError:
+                except CompatibilityError as error:
                     if _upload_owner:
                         return LocalUploadUnavailable()
-                    raise
+                    raise ToolError(_GUARD_REFUSALS[error.code].format(", ".join(missing))) from None
                 return _fn(*args, **kwargs)
             registered.fn = guarded
 
