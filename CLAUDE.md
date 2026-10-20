@@ -15,21 +15,16 @@ mkdir -p "$TMPDIR/tgmcp-home" && chmod 700 "$TMPDIR/tgmcp-home"
 HOME="$TMPDIR/tgmcp-home" .venv/bin/python -m pytest -q -p no:cacheprovider -W ignore::DeprecationWarning
 ```
 
-Baseline at ce44a35: 2053 passed, 3 skipped. Dev venv: `python3 -m venv .venv &&
-.venv/bin/pip install -e . pytest tomlkit==0.13.3`.
+Baseline: full suite green (see the latest release gate evidence). Dev venv:
+`python3 -m venv .venv && .venv/bin/pip install -e . pytest tomlkit==0.13.3`.
 
-## Live installation on the owner's Mac (since 20.10.2026)
+## Local installation
 
-The released 0.51 install is **set aside, not deleted**: its whole
-`~/Library/Application Support/TelegramSearchMCP` tree and LaunchAgent plist are in
-`~/telegram-mcp-051-backup-20261020/` (with `state-before.txt` hashes). Restoring it requires
-stopping the 0.52 broker and moving the 0.52 tree aside first; 0.51 refuses state written by 0.52.
-
-The live broker is now **0.52 from source** in `~/telegram-mcp-052-runtime/venv` (non-editable;
-reinstall from `git archive HEAD`, never `pip install .` in the checkout, which leaves `build/`
-and un-skips release tests). Claude Code's user-scope `telegram_search` points at that venv;
-Codex and Claude Desktop still point at the 0.51 binary. Never point a client at the checkout's
-`.venv`, never edit the live `runtime.toml` or TDLib session without the owner's request.
+A local, untracked `CLAUDE.local.md` (gitignored; Claude Code loads it automatically) holds
+machine-specific installation notes. Never commit paths, account details or operational state;
+`tests/test_public_tree_privacy.py` fails on them. Never run `pip install .` in a checkout (it
+leaves `build/` and un-skips release tests); the release steps are in
+[docs/releasing.md](docs/releasing.md).
 
 ## Acceptance
 
