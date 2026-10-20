@@ -395,7 +395,7 @@ class PrivacyAndIdentityTests(GateCase):
         self.assertNotIn(ALLOWED_ID.removeprefix("-"), json.dumps(caught.exception.detail) + json.dumps(report))
 
     def test_commit_message_hit_refuses(self) -> None:
-        report, head = self.scan({"docs/clean.md": "public\n"}, message="Fix the reply\n\nseen in msg " "631242752\n")
+        report, head = self.scan({"docs/clean.md": "public\n"}, message="Fix the reply\n\nseen in msg 6312" "42752\n")
         self.assertEqual((report["scanned"]["commits"], report["hits"]), (2, [f"commit/{head}:3:message_id"]))
         with self.refused("privacy_hit"):
             gate.check_privacy(report)

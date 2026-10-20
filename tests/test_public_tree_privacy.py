@@ -23,10 +23,13 @@ RULES = {
     "other_home": re.compile(r"(?<![\w~])~[A-Za-z_][A-Za-z0-9_.-]*/"),
     "claude_project": re.compile(r"-Users-[A-Za-z0-9_.]+-"),
     "local_dir": re.compile(r"~/telegram-mcp-[0]|telegram-mcp-[0]\d\d-|\.codex/rese[a]rch|tg-de[v]-"),
-    "message_id": re.compile(r"(?<![A-Za-z])(?:msg|message)(?:[ _-]?ids?)?\W{1,3}\d{6,}", re.I),
+    # Up to 6 non-word characters between key and value admit `"message_id": "1..."` and `message_id = '1...'`.
+    "message_id": re.compile(r"(?<![A-Za-z])(?:msg|message)(?:[ _-]?ids?)?\W{1,6}\d{6,}", re.I),
     "chat_id": re.compile(r"(?<![0-9A-Za-z])-100\d{8,}"),
-    "phone": re.compile(r"(?<![\w+])\+\d{10,15}(?!\d)"),
-    "api_hash": re.compile(r"api_hash\W{0,3}[0-9A-Fa-f]{32}", re.I),
+    # 10-15 digits after "+", optionally grouped by single spaces or hyphens; a longer run is not a phone.
+    "phone": re.compile(r"(?<![\w+])\+\d(?:[ -]?\d){9,14}(?![ -]?\d)"),
+    # TOML `api_hash = "..."` and JSON `"api_hash": "..."` put 4 non-word characters before the value.
+    "api_hash": re.compile(r"api_hash\W{0,6}[0-9A-Fa-f]{32}", re.I),
     "email": re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"),
 }
 # The only noreply addresses accepted; any other address on a real domain is a finding.
@@ -34,8 +37,8 @@ NOREPLY = frozenset({"noreply@users.noreply.github.com", "noreply@anthropic.com"
 
 # (rule, tracked path or None for any, exact matched text or None for any, reason). Keep it minimal.
 # Every entry must admit at least one finding of the scanned tree, and a scoped entry must name a
-# scanned file; otherwise `test_allowlist_has_no_stale_entries` fails. The values are split so that
-# this file does not match its own path-scoped entries.
+# scanned file; otherwise `test_allowlist_has_no_stale_entries` fails. The values are split inside the
+# digits so that this file does not match its own path-scoped entries.
 ALLOW = (
     ("user_path", None, "/Users/" "example", "documentation placeholder account name"),
     ("user_path", "tests/test_connect_cli.py", "/Users/" "SYNTHETIC_SECRET_SENTINEL",
@@ -43,17 +46,21 @@ ALLOW = (
     ("chat_id", "tests/test_schemas.py", "-100" "1234567890", "sequential-digit synthetic supergroup id"),
     ("chat_id", "tests/test_reply_relative_datetime_targets.py", "-100" "3456789012",
      "sequential-digit synthetic supergroup id"),
-    ("message_id", "tests/test_reply_relative_datetime_targets.py", "MESSAGE_ID = " "1048576",
+    ("message_id", "tests/test_reply_relative_datetime_targets.py", "MESSAGE_ID = 104" "8576",
      "synthetic message id constant (2**20)"),
-    ("message_id", "tests/test_forum_tdjson.py", "message_id': " "1048576", "synthetic TDLib message id (2**20)"),
-    ("message_id", "tests/test_topic_history_tdjson.py", "message_id=" "12582912",
+    ("message_id", "tests/test_forum_tdjson.py", "message_id': 104" "8576", "synthetic TDLib message id (2**20)"),
+    ("message_id", "tests/test_topic_history_tdjson.py", "message_id=125" "82912",
      "synthetic TDLib message id (12 * 2**20)"),
-    ("message_id", "tests/test_topic_history_tdjson.py", "message_id':" "12582912",
+    ("message_id", "tests/test_topic_history_tdjson.py", "message_id':125" "82912",
      "the same synthetic id in the expected request"),
     ("phone", "tests/test_archive_edit.py", "+1202555" "0123", "reserved fictional 555-01xx number in a fixture"),
     ("phone", "tests/test_onboarding.py", "+1234" "567890", "sequential-digit synthetic phone number"),
     ("api_hash", "tests/test_bundle_assembled_install.py", "api_hash" '":"' + "0" * 32,
      "all-zero synthetic api_hash in a bundle fixture"),
+    ("api_hash", "tests/test_bundle_archive.py", "API_HASH = '" "0123456789abcdef" "0123456789abcdef",
+     "sequential-hex synthetic api_hash in a bundle fixture"),
+    ("api_hash", "tests/test_bundle_install.py", "api_hash = '" "fedcba9876543210" "fedcba9876543210",
+     "reversed sequential-hex synthetic api_hash in a bundle fixture"),
     ("email", "docs/licenses/Pillow.txt", None,
      "verbatim third-party license text quotes upstream maintainer addresses"),
     ("email", "tests/test_archive_edit.py", "mail@" "x.io", "synthetic address inside a styled-text fixture"),
@@ -186,18 +193,26 @@ class PublicTreePrivacyTests(unittest.TestCase):
             ("local_dir", "see ~/telegram-mcp-" "052-runtime/venv"),
             ("local_dir", "copy from ~/.codex/" "research/run"),
             ("local_dir", "clone tg-" "dev-7"),
-            ("message_id", "sent msg " "631242752"),
-            ("message_id", "sent message " "631242752"),
-            ("message_id", "sent msg  " "631242752"),
-            ("message_id", "reply message_id=" "631242752"),
-            ("message_id", "reply Message_ID: " "631242752"),
-            ("message_id", 'json {"msg_id": ' "631242752}"),
+            ("message_id", "sent msg 6312" "42752"),
+            ("message_id", "sent message 6312" "42752"),
+            ("message_id", "sent msg  6312" "42752"),
+            ("message_id", "reply message_id=6312" "42752"),
+            ("message_id", "reply Message_ID: 6312" "42752"),
+            ("message_id", 'json {"msg_id": 6312' "42752}"),
+            ("message_id", 'json {"message_id": "6312' '42752"}'),
+            ("message_id", "toml message_id = '6312" "42752'"),
             ("chat_id", "chat -100" "9876543210"),
             ("phone", "call +4915" "112345678"),
             ("phone", "call (+7999" "1234567)"),
             ("phone", "max +12345" "6789012345"),
+            ("phone", "call +7 999 1" "23-45-67"),
+            ("phone", "call +49 151 1" "2345678"),
+            ("phone", "call +1234 5" "67 890"),
+            ("phone", "call +1-202-5" "55-0199"),
             ("api_hash", "api_hash=" "0123456789abcdef" "0123456789ABCDEF"),
             ("api_hash", 'API_HASH: "' "0123456789abcdef" '0123456789abcdef"'),
+            ("api_hash", 'toml api_hash = "' "0123456789abcdef" '0123456789abcdef"'),
+            ("api_hash", 'json {"api_hash": "' "0123456789abcdef" '0123456789abcdef"}'),
             ("email", "mail bob@" "corp.com"),
             ("email", "mail noreply@" "corp.com"),
             ("email", "mail 12345+bob@" "users.noreply.github.com"),
@@ -220,8 +235,11 @@ class PublicTreePrivacyTests(unittest.TestCase):
             ("docs/a.md", "By: noreply@" "users.noreply.github.com, noreply@" "anthropic.com, noreply@" "github.com"),
             ("docs/a.md", "tomlkit==0.13.3 abc@1.2.3 @pytest.mark.skip"),
             ("docs/a.md", "cd ~/project; ~~struck~~/x; a~b/c; message 12345; messages: 6312427; 1+1234567890"),
-            ("docs/a.md", "call +1234 567 890; ref -Users/x; api_hash=" "0123456789abcdef"),
-            ("tests/test_reply_relative_datetime_targets.py", "MESSAGE_ID = " "1048576"),
+            ("docs/a.md", "call +12 345 678; +1 234 567 890 123 456; ref -Users/x; api_hash=" "0123456789abcdef"),
+            ("docs/a.md", "1+1234 567 890; v1.2.3+4567-8901; message_id = '12345'; api_hash = 12"),
+            ("tests/test_reply_relative_datetime_targets.py", "MESSAGE_ID = 104" "8576"),
+            ("tests/test_bundle_archive.py", "    API_HASH = '" "0123456789abcdef" "0123456789abcdef'"),
+            ("tests/test_bundle_install.py", "api_hash = '" "fedcba9876543210" "fedcba9876543210'"),
             ("tests/test_archive_edit.py", "phone +1202555" "0123"),
             ("tests/test_onboarding.py", "phone +1234" "567890"),
             ("tests/test_bundle_assembled_install.py", '{"api_hash' '":"' + "0" * 32 + '"}'),
@@ -242,8 +260,8 @@ class PublicTreePrivacyTests(unittest.TestCase):
             root = Path(directory)
             (root / "docs").mkdir()
             (root / "docs" / "clean.md").write_text("nothing private here\n")
-            (root / "docs" / "dirty.md").write_text("fine\nsent msg " "633339904 today\n")
-            (root / "blob.bin").write_bytes(b"\0msg " b"633339904")
+            (root / "docs" / "dirty.md").write_text("fine\nsent msg 6333" "39904 today\n")
+            (root / "blob.bin").write_bytes(b"\0msg 6333" b"39904")
             (root / ".venv").mkdir()
             (root / ".venv" / "skipped.txt").write_text("cd /Users/" "alice/x\n")
             findings, scanned = scan_tree(root)
