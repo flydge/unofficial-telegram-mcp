@@ -440,9 +440,16 @@ class Backend:
     def data_bytes(self, value, maximum): return value
     def array_values(self, value, maximum): return tuple(value)
     def copy_matching(self, query):
+        """Mirrors file-based macOS keychains, which refuse data for many items (-50)."""
         if self.status: return self.status, None
+        if query.get('kSecReturnData') and query.get('kSecMatchLimit') != 'kSecMatchLimitOne':
+            return -50, None
         value = self.values.get(query['kSecAttrAccount'])
-        return (0, (value,)) if value is not None else (-25300, None)
+        if value is None:
+            return -25300, None
+        if query.get('kSecReturnData'):
+            return 0, value
+        return 0, ({'acct': query['kSecAttrAccount']},)
     def add(self, query):
         self.calls.append(query)
         name = query['kSecAttrAccount']
@@ -454,18 +461,50 @@ class Backend:
 class CredentialBoundaryTests(unittest.TestCase):
     def test_reads_legacy_search_list_and_refuses_ambiguous_duplicate_account(self):
         backend = Backend()
+        backend.values['api_id'] = b'123'
         queries = []
+        real = backend.copy_matching
         def copy(query):
             queries.append(query)
-            return 0, (b'123',)
+            return real(query)
         backend.copy_matching = copy
         store = MacOSSecretStore(backend_factory=lambda: backend)
         self.assertEqual(store.get('api_id').reveal(), b'123')
         self.assertEqual(queries[0]['kSecMatchSearchList'], ('keychain', 'other-keychain'))
-        backend.copy_matching = lambda query: (0, (b'123', b'456'))
+        backend.copy_matching = lambda query: (0, ({'acct': 1}, {'acct': 2}))
         with self.assertRaises(CredentialStoreError) as caught:
             store.get('api_id')
         self.assertEqual(caught.exception.code, 'conflict')
+    def test_never_asks_for_data_of_many_items_which_real_keychains_refuse(self):
+        # Found on a real Mac: kSecReturnData with kSecMatchLimitAll returns errSecParam (-50),
+        # which made every stored pair read as invalid_record and blocked setup and connect.
+        backend = Backend()
+        backend.values.update(api_id=b'12345678', api_hash=b'a' * 32)
+        queries = []
+        real = backend.copy_matching
+        def copy(query):
+            queries.append(dict(query))
+            return real(query)
+        backend.copy_matching = copy
+        store = MacOSSecretStore(backend_factory=lambda: backend)
+        self.assertEqual(store.get('api_id').reveal(), b'12345678')
+        self.assertEqual(store.get('api_hash').reveal(), b'a' * 32)
+        for query in queries:
+            self.assertFalse(query.get('kSecReturnData') and query.get('kSecMatchLimit') == 'kSecMatchLimitAll')
+        self.assertTrue(any(q.get('kSecReturnAttributes') and q.get('kSecMatchLimit') == 'kSecMatchLimitAll'
+                            for q in queries))
+    def test_item_removed_between_count_and_read_is_unavailable_not_absent(self):
+        backend = Backend()
+        backend.values['api_id'] = b'123'
+        real = backend.copy_matching
+        def copy(query):
+            if query.get('kSecReturnData'):
+                return -25300, None
+            return real(query)
+        backend.copy_matching = copy
+        with self.assertRaises(CredentialStoreError) as caught:
+            MacOSSecretStore(backend_factory=lambda: backend).get('api_id')
+        self.assertEqual(caught.exception.code, 'unavailable')
     def test_construction_is_inert_and_get_distinguishes_absent_from_denied(self):
         backend = Backend()
         factory = mock.Mock(return_value=backend)

@@ -157,13 +157,18 @@ class MacOSSecretStore:
         return pairs, retain, keychain
 
     def _get(self, account):
+        """Count matches by attributes, then read the single item's data.
+
+        File-based macOS keychains refuse kSecReturnData with kSecMatchLimitAll
+        (errSecParam, -50), so duplicates are detected without returning data.
+        """
         native = self._native()
         with ExitStack() as owned:
             pairs, retain, _ = self._query(native, owned, account)
-            pairs.extend([(native.constant('kSecMatchLimit'), native.constant('kSecMatchLimitAll')),
-                          (native.constant('kSecReturnData'), native.constant('kCFBooleanTrue'))])
-            query = retain(native.dictionary(pairs))
-            status, result = native.copy_matching(query)
+            count = retain(native.dictionary(pairs + [
+                (native.constant('kSecMatchLimit'), native.constant('kSecMatchLimitAll')),
+                (native.constant('kSecReturnAttributes'), native.constant('kCFBooleanTrue'))]))
+            status, result = native.copy_matching(count)
             if result:
                 retain(result)
             if status == -25300:
@@ -171,10 +176,20 @@ class MacOSSecretStore:
             _check_status(status)
             if not result:
                 _raise_safe('invalid_record')
-            matches = native.array_values(result, 16)
-            if len(matches) != 1:
+            if len(native.array_values(result, 16)) != 1:
                 _raise_safe('conflict')
-            value = native.data_bytes(matches[0], _MAX_BYTES)
+            read = retain(native.dictionary(pairs + [
+                (native.constant('kSecMatchLimit'), native.constant('kSecMatchLimitOne')),
+                (native.constant('kSecReturnData'), native.constant('kCFBooleanTrue'))]))
+            status, result = native.copy_matching(read)
+            if result:
+                retain(result)
+            if status == -25300:
+                _raise_safe('unavailable')  # Removed between the two queries; never read as absent.
+            _check_status(status)
+            if not result:
+                _raise_safe('invalid_record')
+            value = native.data_bytes(result, _MAX_BYTES)
             _validate_record(account, value)
             return SecretValue(value)
 
