@@ -1,6 +1,6 @@
 # Development progress and roadmap
 
-[Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
+[Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md) · [Releasing](releasing.md)
 
 Updated **2026-10-20**. The released baseline remains **0.51.0**; the
 **0.52.0** release is recorded below.
@@ -260,3 +260,4 @@ Update the relevant row when a slice is implemented, record the release containi
 it and distinguish automated/installed-consumer evidence from actual provider and
 user outcomes. Keep [the original plan](plans/initial-roadmap.md) as the baseline;
 use Git history to follow later scope, status and priority changes.
+The release procedure, gate and publication checks are in [releasing.md](releasing.md).
