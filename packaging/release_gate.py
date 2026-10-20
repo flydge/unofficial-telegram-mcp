@@ -72,6 +72,8 @@ GENERATED = ("PKG-INFO", "setup.cfg") + tuple(f"src/{DIST}.egg-info/{name}" for 
 DIST_INFO = ("METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt")
 TMP_ROOTS = (Path("/tmp"), Path("/private/tmp"))
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# Downloads are hash-checked, so a proxy or CA bundle cannot change what is installed.
+NETWORK_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
 MAX_MEMBERS = 5000
 MAX_MEMBER_BYTES = 64 << 20
 MAX_FILE_BYTES = 1 << 30
@@ -433,8 +435,9 @@ class Toolchain:
 
     def env(self, venv: Path | None = None, **extra: str) -> dict[str, str]:
         path = (str(venv / "bin") + ":" if venv else "") + SYSTEM_PATH
+        network = {name: os.environ[name] for name in NETWORK_ENV if name in os.environ}
         return {"HOME": str(self.home), "TMPDIR": str(self.tmp), "PATH": path, "LC_ALL": "C", "TZ": "UTC",
-                "PYTHONUTF8": "1", "PYTHONHASHSEED": "0", "PYTHONNOUSERSITE": "1", **extra}
+                "PYTHONUTF8": "1", "PYTHONHASHSEED": "0", "PYTHONNOUSERSITE": "1", **network, **extra}
 
     def venv(self, name: str) -> Path:
         root = self.scratch / name
@@ -898,10 +901,9 @@ def derive(git: Git, commit: str, tag: str, base: Path, scratch: Path, *, online
 
 def run_tests(evidence: dict, base: Path, scratch: Path) -> dict:
     """The full suite from a fresh archive extraction, on the pinned closure, with a hermetic HOME."""
-    sdist, wheel, archive, chain = evidence["_artifacts"]
+    archive, chain = evidence["_artifacts"][2:]
     tree = scratch / "suite-tree"
     extract(archive, tree, evidence["commit_time"])
-    _, pins = parse_constraints((tree / evidence["constraints"]["file"]).read_text(encoding="utf-8"))
     venv = chain.venv("venv-test")
     tools = {name: (pinned, frozenset({digest})) for name, pinned, digest in TOOLS}
     chain.pip(venv, "install", "--no-index", "--find-links", base / "toolhouse", "--find-links", base / "wheelhouse",
@@ -918,9 +920,13 @@ def run_tests(evidence: dict, base: Path, scratch: Path) -> dict:
     return report
 
 
+def canonical(evidence: dict) -> bytes:
+    return (json.dumps(evidence, indent=1, sort_keys=True) + "\n").encode()
+
+
 def write_evidence(path: Path, evidence: dict) -> None:
     temporary = path.with_name(path.name + ".partial")
-    _write_new(temporary, (json.dumps(evidence, indent=1, sort_keys=True) + "\n").encode())
+    _write_new(temporary, canonical(evidence))
     os.replace(temporary, path)
 
 
@@ -969,10 +975,13 @@ def load_evidence(path: Path) -> dict:
     try:
         metadata = path.lstat()
         need(stat.S_ISREG(metadata.st_mode) and metadata.st_size <= MAX_EVIDENCE_BYTES, "evidence_invalid")
-        evidence = json.loads(path.read_bytes(), object_pairs_hook=_unique)
+        raw = path.read_bytes()
+        evidence = json.loads(raw, object_pairs_hook=_unique)
     except (OSError, ValueError):
         raise GateRefusal("evidence_invalid") from None
-    need(type(evidence) is dict and set(evidence) == EVIDENCE_KEYS and evidence["schema"] == SCHEMA
+    # Only the exact bytes the gate writes are accepted, so even a formatting edit fails.
+    need(type(evidence) is dict and canonical(evidence) == raw, "evidence_invalid")
+    need(set(evidence) == EVIDENCE_KEYS and evidence["schema"] == SCHEMA
          and type(evidence["commit"]) is str and type(evidence["previous_tag"]) is str
          and type(evidence["gate"]) is dict and type(evidence["tests"]) is dict
          and type(evidence["sdist"]) is dict and type(evidence["wheel"]) is dict, "evidence_invalid")

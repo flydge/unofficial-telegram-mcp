@@ -464,6 +464,13 @@ class VerifyTests(GateCase):
             with self.subTest(code=code), self.refused(code):
                 self.verify(evidence)
 
+    def test_formatting_only_edit_is_refused(self) -> None:
+        gate.write_evidence(self.path, self.evidence)
+        self.path.write_text(json.dumps(self.evidence, indent=2, sort_keys=True) + "\n")
+        args = argparse.Namespace(evidence=self.path, repo=self.repo, delegated=False)
+        with self.refused("evidence_invalid"):
+            gate.verify(args, derive_evidence=self.fake_derive)
+
     def test_changed_artifact_or_junit_on_disk_is_refused(self) -> None:
         self.wheel.write_bytes(b"other wheel")
         with self.refused("evidence_mismatch"):
