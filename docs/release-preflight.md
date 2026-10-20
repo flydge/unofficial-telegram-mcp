@@ -1,4 +1,13 @@
-# Release preparation tools
+# Release preparation tools (frozen 0.51.0 harness)
+
+> **Scope.** Request schema v1 below is the frozen historical harness of the 0.51.0 release. It
+> accepts only `tgcmp-sdk-error-probe-request/v1` with `expected_tools` equal to 43 and the
+> 12-route probe: `release_preflight` refuses a request with any other count
+> (`sdk_probe_environment`) and `release_sdk_probe` refuses a server that lists another number of
+> tools (`schema_census`). The 0.52.0 server lists 55 tools, so these tools **cannot certify
+> 0.52.x**, and they are deliberately unchanged. From 0.52.0 on, release evidence comes from
+> `packaging/release_gate.py` (`run` and `verify`), described in [releasing.md](releasing.md).
+> Nothing in this document is a 0.52.x gate; the reports it describes stay historical data.
 
 These versioned tools are preparation diagnostics. Every output has
 `acceptance: false`. They neither run nor replace fullsuite, build/install,
@@ -45,9 +54,9 @@ applicable authorization; do not regenerate pins automatically.
 Run the tracked `release_sdk_probe.py` file using the exact installed interpreter
 with `-I -S -B`. Its pinned `tgcmp-sdk-error-probe-request/v1` names two sibling
 tooling libraries, installed implementation pins, the shared environment,
-source version and 43 expected tools. The installed package parent is loaded
+source version and 43 expected tools (0.51.0 only). The installed package parent is loaded
 from verified bytes; product imports remain in installed SITE. Only the two
-named tooling modules are overridden. Optimized/nonisolated startup refuses78.
+named tooling modules are overridden. Optimized or nonisolated startup refuses (exit 78).
 
 ```
 INSTALLED_PYTHON -I -S -B /absolute/source/release_sdk_probe.py \
@@ -98,8 +107,10 @@ are explicit and fresh; old failed/accepted receipts are preserved.
 
 The 12 October maintenance demonstration intentionally binds frozen 0.51.0
 source and two accepted historical F12/P06 reports alongside the new preparation
-harness. This validates reuse, not a new release of that harness. Before the next
-existing acceptance chain, name that chain's exact source/interpreter, run this
-preflight early and retain every unchanged full quality gate and independent
-closure review. New report layouts need an explicit adapter and refusal tests;
-never reinterpret historical DATA as new acceptance.
+harness. This validates reuse, not a new release of that harness. A chain on the
+0.51.0 line names its exact source/interpreter, runs this preflight early and
+retains every unchanged full quality gate and independent closure review. New
+report layouts need an explicit adapter and refusal tests; never reinterpret
+historical DATA as new acceptance. A 0.52.0 or later chain does not use v1: it
+uses the release gate in [releasing.md](releasing.md), and any new diagnostic
+needs its own versioned request schema rather than a changed v1.
