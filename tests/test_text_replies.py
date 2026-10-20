@@ -547,10 +547,11 @@ class ReplyAdmissionTests(ReplyFixture, unittest.TestCase):
             connector=lambda path:left,restart_callback=lambda:None,request_timeout=570);self.addCleanup(proxy.close)
         deadlines=[]
         def exchange(connection,operation,payload,*,deadline,generation):
-            deadlines.append(deadline)
+            # The deadline is fixed before any exchange, so it never exceeds 30 s past this observation.
+            deadlines.append((deadline,time.monotonic()))
             if operation=='handshake':return {**contract_descriptor(POLICY),'broker_generation':'broker_'+'a'*32}
             return {'status':'unavailable','reply':None,'detail':'reply draft is unavailable'}
-        before=time.monotonic()
         with patch.object(proxy,'_exchange',side_effect=exchange):
             proxy.prepare_reply_text_send(PrepareReplyTextSendRequest(recipient=123,text='x',reply_to=ANCHOR))
-        self.assertLessEqual(max(deadlines),before+30.1)
+        self.assertTrue(deadlines)
+        for deadline,observed in deadlines:self.assertLessEqual(deadline,observed+30)

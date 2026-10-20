@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import importlib.util
+import importlib.metadata
 import os
 import runpy
 import subprocess
@@ -12,7 +12,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-@unittest.skipUnless(importlib.util.find_spec("build"), "release build dependency required")
+def build_distribution_available() -> bool:
+    # A stray ./build directory imports as a namespace package; only installed metadata counts.
+    try:
+        importlib.metadata.distribution("build")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+class BuildDependencyProbeTests(unittest.TestCase):
+    def test_stray_build_directory_is_not_the_build_distribution(self) -> None:
+        code = ("import importlib.util, sys; sys.path[:0] = sys.argv[1:3]; "
+                "from test_release_package import build_distribution_available as probe; "
+                "print(importlib.util.find_spec('build') is not None, probe())")
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "build").mkdir()
+            result = subprocess.run([sys.executable, "-I", "-S", "-c", code, directory, str(Path(__file__).parent)],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["True", "False"]), result.stderr[-2000:])
+
+
+@unittest.skipUnless(build_distribution_available(), "release build dependency required")
 class SourceDistributionTests(unittest.TestCase):
     def test_failed_atomic_publish_never_leaves_raw_owner_metadata(self) -> None:
         from setuptools import Distribution
