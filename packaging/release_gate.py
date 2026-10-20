@@ -1061,8 +1061,9 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv)
         return run(args) if args.command == "run" else verify(args)
     except GateRefusal as refusal:
-        print(f"release gate refused: {refusal.code}" + (f" ({refusal.detail})" if
-              refusal.code == "evidence_mismatch" and refusal.detail in EVIDENCE_KEYS else ""), file=sys.stderr)
+        section = refusal.detail if refusal.code == "evidence_mismatch" and isinstance(refusal.detail, str) else None
+        print(f"release gate refused: {refusal.code}" + (f" ({section})" if section in EVIDENCE_KEYS else ""),
+              file=sys.stderr)
         return 1
 
 
