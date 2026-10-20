@@ -39,7 +39,7 @@ from telegram_search_mcp.edit_drafts import (EditChat, EditSnapshot, TextEditDra
 from telegram_search_mcp.forward_drafts import READABLE_RULE
 from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
-from telegram_search_mcp.tdjson import (ForbiddenTDLibRequest, MessageSendNotAttempted, TDLibClient,
+from telegram_search_mcp.tdjson import (ForbiddenTDLibRequest, MessageSendNotAttempted, TDLibClient, TDLibError,
     _ALLOWED_REQUEST_TYPES, _validate_bounded_request)
 
 CLIENT = 'client_' + 'a' * 24
@@ -137,6 +137,10 @@ class Raw:
     def __init__(self):
         self.sent = []; self.events = deque(); self.account = ACCOUNT; self.fail_receive = False
         self.archive_mode = 'ok'; self.edit_mode = 'ok'
+        # A fresh session: `unloaded` chats answer 400 until loadChats ('ok', or 404 'end', loads them).
+        self.unloaded = {}; self.load_mode = 'ok'; self.chat_errors = {}
+        # getChatListsToAddChat: per-chat offered lists, or one verbatim response for every chat.
+        self.offered = {}; self.lists_response = None; self.on_lists = None
         self.chats = {CHAT: chat(CHAT, 'Team Chat'), SECRET: chat(SECRET, 'Secret', 'secret', native=55)}
         self.message = own_message(); self.properties = dict(PROPERTIES)
 
@@ -147,7 +151,22 @@ class Raw:
         elif kind == 'getMe':
             value = {'@type': 'user', 'id': self.account}
         elif kind == 'getChat':
-            value = copy.deepcopy(self.chats.get(request['chat_id'], {'@type': 'error', 'code': 400, 'message': 'x'}))
+            missing = {'@type': 'error', 'code': self.chat_errors.get(request['chat_id'], 400), 'message': 'x'}
+            value = copy.deepcopy(missing if request['chat_id'] in self.chat_errors
+                                  else self.chats.get(request['chat_id'], missing))
+        elif kind == 'loadChats':
+            if self.load_mode == 'fail':
+                self.events.append({'@type': 'error', 'code': 500, 'message': 'x', '@extra': request['@extra']}); return
+            self.chats.update(self.unloaded); self.unloaded = {}
+            if self.load_mode == 'end':  # TDLib's 404: every chat of the list is already loaded.
+                self.events.append({'@type': 'error', 'code': 404, 'message': 'x', '@extra': request['@extra']}); return
+            value = {'@type': 'ok'}
+        elif kind == 'getChatListsToAddChat':
+            if self.on_lists is not None:
+                self.on_lists()
+            both = [{'@type': 'chatListMain'}, {'@type': 'chatListArchive'}, {'@type': 'chatListFolder', 'chat_folder_id': 3}]
+            value = copy.deepcopy(self.lists_response if self.lists_response is not None else
+                                  {'@type': 'chatLists', 'chat_lists': self.offered.get(request['chat_id'], both)})
         elif kind == 'getMessage':
             value = copy.deepcopy(self.message)
         elif kind == 'getMessageProperties':
@@ -502,6 +521,155 @@ class ArchivePrepareTests(Fixture, unittest.TestCase):
                 self.assertEqual(result, {'status': 'unavailable', 'archive': None, 'refusal': None,
                                           'detail': 'archive draft is unavailable'})
                 self.assertEqual(self.broker._drafts.known_ids(), set())
+
+    def lists_requests(self):
+        return [{key: value for key, value in request.items() if key != '@extra'}
+                for request in self.requests('getChatListsToAddChat')]
+
+    def test_target_list_not_offered_by_telegram_refuses_without_draft_dialog_or_attempt(self):
+        # Amendment 20.10.2026: the service chat 777000 can be moved to neither list on request; Telegram's
+        # own getChatListsToAddChat decides at prepare, so the owner is never asked to approve it.
+        service = 777000
+        self.raw.chats[service] = chat(service, 'Telegram', 'private', native=service)
+        main, archive, folder = ({'@type': 'chatListMain'}, {'@type': 'chatListArchive'},
+                                 {'@type': 'chatListFolder', 'chat_folder_id': 3})
+        refused = {'status': 'refused', 'archive': None, 'refusal': 'unsupported_chat',
+                   'detail': 'chat is not eligible; no draft was created'}
+        for chat_id, current, target, offered in ((service, 'main', 'archive', [main]),
+                                                  (service, 'main', 'archive', []),
+                                                  (CHAT, 'main', 'archive', [main, folder]),
+                                                  (CHAT, 'main', 'archive', [folder]),
+                                                  (CHAT, 'archive', 'main', [archive, folder])):
+            with self.subTest(chat_id=chat_id, target=target, offered=offered):
+                self.raw.chats[chat_id]['positions'] = positions(current)
+                self.raw.offered[chat_id] = offered
+                self.assertEqual(self.dispatch('prepare_chat_archive', {'chat': chat_id, 'target_list': target}), refused)
+                self.assertEqual(self.broker._drafts.known_ids(), set())
+        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+        self.assertEqual(self.lists_requests()[0], {'@type': 'getChatListsToAddChat', 'chat_id': service})
+        # An offered target (folders ignored) prepares; the answer is read once per prepare.
+        self.raw.sent.clear(); self.raw.chats[service]['positions'] = positions('archive')
+        self.raw.offered[service] = [main, folder]
+        preview = self.prepare_archive('main', chat_id=service)
+        self.assertEqual((preview['current_list'], preview['target_list']), ('archive', 'main'))
+        self.assertEqual(self.lists_requests(), [{'@type': 'getChatListsToAddChat', 'chat_id': service}])
+        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+
+    def test_lists_to_add_is_asked_only_after_the_existing_prepare_checks(self):
+        # Existing order is kept up to already_in_target: refusals and "already there" never ask Telegram.
+        self.raw.offered[CHAT] = []
+        for chat_id, chat_positions, target in ((SECRET, None, 'archive'), (CHAT, [], 'archive'),
+                                                (CHAT, positions('main'), 'main'), (CHAT, positions('archive'), 'archive')):
+            if chat_positions is not None:
+                self.raw.chats[CHAT]['positions'] = chat_positions
+            self.dispatch('prepare_chat_archive', {'chat': chat_id, 'target_list': target})
+        self.assertEqual(self.requests('getChatListsToAddChat'), [])
+        self.raw.chats[CHAT]['positions'] = positions('main')
+        self.assertEqual(self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'})['status'],
+                         'refused')
+        self.assertEqual(len(self.requests('getChatListsToAddChat')), 1)
+
+    def test_account_switch_while_asking_telegram_for_the_lists_is_unavailable(self):
+        self.raw.on_lists = lambda: setattr(self.raw, 'account', 8)
+        result = self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'})
+        self.assertEqual(result, {'status': 'unavailable', 'archive': None, 'refusal': None,
+                                  'detail': 'archive draft is unavailable'})
+        self.assertEqual(len(self.requests('getChatListsToAddChat')), 1)
+        self.assertEqual(self.broker._drafts.known_ids(), set()); self.assert_no_attempt()
+
+    def test_malformed_chat_lists_answers_are_unavailable(self):
+        main, archive = {'@type': 'chatListMain'}, {'@type': 'chatListArchive'}
+        for response in ({'@type': 'ok'}, {'@type': 'chatLists'}, {'@type': 'chatLists', 'chat_lists': None},
+                         {'@type': 'chatLists', 'chat_lists': 'chatListArchive'},
+                         {'@type': 'chatLists', 'chat_lists': {'@type': 'chatListArchive'}},
+                         {'@type': 'chatLists', 'chat_lists': ['chatListArchive']},
+                         {'@type': 'chatLists', 'chat_lists': [archive, None]},
+                         {'@type': 'chatLists', 'chat_lists': [archive, {}]},
+                         {'@type': 'chatLists', 'chat_lists': [archive, {'@type': 5}]},
+                         {'@type': 'chatLists', 'chat_lists': [archive, {'@type': 'chatListOther'}]},
+                         {'@type': 'chatLists', 'chat_lists': [{'@type': 'chatListArchive', 'x': 1}]},
+                         {'@type': 'chatLists', 'chat_lists': [archive], 'x': 1},
+                         {'@type': 'chatLists', 'chat_lists': [archive] + [main] * 64}):
+            with self.subTest(response=str(response)[:60]):
+                self.setUp(); self.raw.lists_response = response
+                result = self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'})
+                self.assertEqual(result, {'status': 'unavailable', 'archive': None, 'refusal': None,
+                                          'detail': 'archive draft is unavailable'})
+                self.assertEqual(self.broker._drafts.known_ids(), set())
+                self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+        for code in (400, 500):  # A failing getChatListsToAddChat is unavailable, never refused, never retried.
+            with self.subTest(code=code):
+                self.setUp(); self.raw.lists_response = {'@type': 'error', 'code': code, 'message': 'PRIVATE'}
+                result = self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'})
+                self.assertEqual((result['status'], len(self.requests('getChatListsToAddChat'))), ('unavailable', 1))
+                self.assertEqual(self.broker._drafts.known_ids(), set()); self.assertEqual(self.approvals, [])
+
+    def test_chat_lists_to_add_returns_only_main_and_archive(self):
+        client = TDLibClient(raw=self.raw); client._ready = True
+        main, archive, folder = ({'@type': 'chatListMain'}, {'@type': 'chatListArchive'},
+                                 {'@type': 'chatListFolder', 'chat_folder_id': 3})
+        for offered, expected in (([], set()), ([folder], set()), ([main], {'main'}), ([archive, folder], {'archive'}),
+                                  ([folder, main, archive, folder], {'main', 'archive'}), ([main, main], {'main'})):
+            with self.subTest(offered=offered):
+                self.raw.offered[CHAT] = offered
+                answer = client.chat_lists_to_add(CHAT)
+                self.assertEqual((type(answer), answer), (frozenset, frozenset(expected)))
+        for bad in (0, True, 2**53, '5', None, 1.0):
+            with self.subTest(chat_id=bad), self.assertRaises(ValueError):
+                client.chat_lists_to_add(bad)
+
+    def test_unknown_chat_is_loaded_for_both_lists_then_retried_once(self):
+        # Amendment 20.10.2026: a fresh session answers getChat 400 until chats are loaded.
+        for load_mode in ('ok', 'end'):  # 'end' = TDLib's 404 "no more chats", which is fine.
+            with self.subTest(load_mode=load_mode):
+                self.setUp(); self.raw.load_mode = load_mode
+                self.raw.unloaded = {CHAT: self.raw.chats.pop(CHAT)}
+                self.assertEqual(self.prepare_archive()['chat']['title'], 'Team Chat')
+                sent = [{key: value for key, value in request.items() if key != '@extra'}
+                        for request in self.raw.sent if request['@type'] not in ('getAuthorizationState', 'getMe')]
+                self.assertEqual(sent, [
+                    {'@type': 'getChat', 'chat_id': CHAT},
+                    {'@type': 'loadChats', 'chat_list': {'@type': 'chatListMain'}, 'limit': 100},
+                    {'@type': 'loadChats', 'chat_list': {'@type': 'chatListArchive'}, 'limit': 100},
+                    {'@type': 'getChat', 'chat_id': CHAT},
+                    {'@type': 'getChatListsToAddChat', 'chat_id': CHAT}])
+                self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+        # A chat TDLib already knows is never loaded.
+        self.setUp(); self.prepare_archive()
+        self.assertEqual((len(self.requests('getChat')), self.requests('loadChats')), (1, []))
+
+    def test_still_unknown_after_loading_or_any_other_failure_is_unavailable(self):
+        unavailable = {'status': 'unavailable', 'archive': None, 'refusal': None, 'detail': 'archive draft is unavailable'}
+        self.raw.chats.pop(CHAT)  # Second 400 after loading: exactly one retry, then unavailable.
+        self.assertEqual(self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'}), unavailable)
+        self.assertEqual(len(self.requests('getChat')), 2)
+        self.assertEqual([r['chat_list']['@type'] for r in self.requests('loadChats')],
+                         ['chatListMain', 'chatListArchive'])
+        self.assertEqual(self.requests('getChatListsToAddChat'), [])
+        self.assertEqual(self.broker._drafts.known_ids(), set()); self.assert_no_attempt()
+        for code in (404, 420, 500):  # Only a 400 loads; any other getChat failure is final.
+            with self.subTest(getchat_code=code):
+                self.setUp(); self.raw.chat_errors = {CHAT: code}
+                self.assertEqual(self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'}),
+                                 unavailable)
+                self.assertEqual((len(self.requests('getChat')), self.requests('loadChats')), (1, []))
+        self.setUp(); self.raw.load_mode = 'fail'  # A failing load is not retried or ignored.
+        self.raw.unloaded = {CHAT: self.raw.chats.pop(CHAT)}
+        self.assertEqual(self.dispatch('prepare_chat_archive', {'chat': CHAT, 'target_list': 'archive'}), unavailable)
+        self.assertEqual((len(self.requests('getChat')), len(self.requests('loadChats'))), (1, 1))
+        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+
+    def test_only_read_chat_list_state_loads_chats(self):
+        # resolve_target (every other read path) keeps failing on 400 without loading anything.
+        client = TDLibClient(raw=self.raw); client._ready = True
+        self.raw.chats.pop(CHAT)
+        with self.assertRaises(TDLibError) as caught:
+            client.resolve_target(CHAT)
+        self.assertEqual(caught.exception.provider_code, 400)
+        self.assertEqual(self.requests('loadChats'), [])
+        with self.assertRaises(TDLibError):
+            client.read_chat_list_state(CHAT)
+        self.assertEqual(len(self.requests('loadChats')), 2)
 
     def test_generic_draft_tools_and_other_send_tools_never_touch_archive_drafts(self):
         did = self.prepare_archive()['draft_id']
@@ -1304,6 +1472,29 @@ class TransportShapeTests(unittest.TestCase):
         with self.assertRaises(ForbiddenTDLibRequest):
             _validate_bounded_request({'@type': 'addChatToList', 'chat_id': CHAT})
 
+    def test_get_chat_lists_to_add_chat_has_one_closed_shape(self):
+        self.assertIn('getChatListsToAddChat', _ALLOWED_REQUEST_TYPES)
+        for chat_id in (CHAT, -1, 777000, 2**53 - 1, -(2**53 - 1)):
+            _validate_bounded_request({'@type': 'getChatListsToAddChat', 'chat_id': chat_id})
+        good = {'@type': 'getChatListsToAddChat', 'chat_id': CHAT}
+        for bad in ({'extra': 1}, {'chat_list': {'@type': 'chatListArchive'}}, {'chat_id': 0}, {'chat_id': True},
+                    {'chat_id': 2**53}, {'chat_id': -(2**53)}, {'chat_id': '5'}, {'chat_id': 1.0}, {'chat_id': None}):
+            with self.subTest(bad=bad), self.assertRaises(ForbiddenTDLibRequest):
+                _validate_bounded_request({**good, **bad})
+        with self.assertRaises(ForbiddenTDLibRequest):
+            _validate_bounded_request({'@type': 'getChatListsToAddChat'})
+
+    def test_load_chats_admits_only_the_catalog_and_the_one_shot_limit(self):
+        for limit in (50, 100):
+            for chat_list in ('chatListMain', 'chatListArchive'):
+                _validate_bounded_request({'@type': 'loadChats', 'chat_list': {'@type': chat_list}, 'limit': limit})
+        good = {'@type': 'loadChats', 'chat_list': {'@type': 'chatListMain'}, 'limit': 100}
+        for bad in ({'limit': 0}, {'limit': 1}, {'limit': 99}, {'limit': 101}, {'limit': 200}, {'limit': True},
+                    {'limit': 100.0}, {'limit': '100'}, {'limit': None}, {'extra': 1},
+                    {'chat_list': {'@type': 'chatListFolder', 'chat_folder_id': 1}}, {'chat_list': None}):
+            with self.subTest(bad=bad), self.assertRaises(ForbiddenTDLibRequest):
+                _validate_bounded_request({**good, **bad})
+
     def test_edit_message_text_has_one_closed_shape(self):
         def request(**changes):
             content = {'@type': 'inputMessageText', 'text': {'@type': 'formattedText', 'text': 'New', 'entities': []},
@@ -1346,7 +1537,7 @@ class TransportShapeTests(unittest.TestCase):
 
     def test_change_transport_refuses_other_requests_before_any_raw_send(self):
         raw = Raw(); client = TDLibClient(raw=raw); client._ready = True
-        for payload in ({'@type': 'getChat', 'chat_id': CHAT},
+        for payload in ({'@type': 'getChat', 'chat_id': CHAT}, {'@type': 'getChatListsToAddChat', 'chat_id': CHAT},
                         {'@type': 'addChatToList', 'chat_id': CHAT, 'chat_list': {'@type': 'chatListFolder'}}):
             with self.subTest(payload=payload), self.assertRaises(MessageSendNotAttempted):
                 client._change_transport(payload, pre_transport_guard=lambda: True)

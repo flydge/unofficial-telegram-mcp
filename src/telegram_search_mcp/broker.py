@@ -2329,12 +2329,17 @@ class Broker(SelectionBrokerMixin):
                 raise ArchiveRefusal('unsupported_chat') from None
             if snapshot.current_list == 'none':
                 raise ArchiveRefusal('unsupported_chat')  # Neither Main nor Archive carries the chat.
-            self._reply_budget_check(provider)
-            if (self._change_owner(client_id, 'archive_chats') != owner or self._shared_client() is not provider or
-                    provider.send_observation_epoch is not epoch):
-                raise DraftError(ARCHIVE_UNAVAILABLE)
+            def unchanged():
+                self._reply_budget_check(provider)
+                if (self._change_owner(client_id, 'archive_chats') != owner or self._shared_client() is not provider or
+                        provider.send_observation_epoch is not epoch):
+                    raise DraftError(ARCHIVE_UNAVAILABLE)
+            unchanged()
             if snapshot.current_list == request.target_list:
                 return PrepareChatArchiveResponse(status='already_in_target', detail=ARCHIVE_ALREADY)
+            if request.target_list not in provider.chat_lists_to_add(request.chat):
+                raise ArchiveRefusal('unsupported_chat')  # Telegram does not offer this list, e.g. the service chat.
+            unchanged()
             spec = ArchiveSpec(snapshot=snapshot, target_list=request.target_list)
             previews = []
             draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.title,

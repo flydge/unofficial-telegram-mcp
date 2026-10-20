@@ -80,6 +80,7 @@ searchChatsOnServer
 getChats
 loadChats
 getChat
+getChatListsToAddChat (closed exact-chat read of the Main/Archive lists Telegram offers for one chat)
 getSupergroup
 getForumTopics
 getForumTopic
@@ -100,7 +101,7 @@ addChatToList (closed Main or Archive shape for one chat, only after explicit dr
 editMessageText (closed plain-text shape for one own text message, only after explicit draft approval)
 ```
 
-`createPrivateChat` has one narrowly approved use: after `getMe` identifies the authorized account, Saved Messages resolution calls it with that same user ID and verifies the returned private chat. `loadChats` advances only a fixed Main or Archive catalog lane. `searchMessages` is reachable only through the typed discovery wrapper and the exact request shape below. None of these methods is a general bridge to caller-chosen TDLib operations.
+`createPrivateChat` has one narrowly approved use: after `getMe` identifies the authorized account, Saved Messages resolution calls it with that same user ID and verifies the returned private chat. `loadChats` advances only a fixed Main or Archive catalog lane (limit 50); its one other use is a single limit-100 load of each of the two lists when an archive read meets a chat that a fresh session has not loaded yet (see the F17a boundary). `searchMessages` is reachable only through the typed discovery wrapper and the exact request shape below. None of these methods is a general bridge to caller-chosen TDLib operations.
 
 `forwardMessages` has one closed shape, validated before transport and built by the broker from an approved draft (source chat, message ID, recipient chat and mode); callers supply no other field: `chat_id` (the recipient), `topic_id` exactly `null`, `from_chat_id`, `message_ids` of length exactly one, `options` exactly `{"@type":"messageSendOptions","suggested_post_info":null,"disable_notification":false,"from_background":false,"protect_content":false,"allow_paid_broadcast":false,"paid_message_star_count":0,"update_order_of_installed_sticker_sets":false,"scheduling_state":null,"effect_id":0,"sending_id":<random int32, non-zero>,"only_preview":false}`, `send_copy` (boolean) and `remove_caption` (boolean, false unless `send_copy`). Any other key, type or value (several messages, a topic, scheduling, paid or silent options) raises a forbidden-request error before the request reaches TDLib. See [Exact forward/copy boundary](#exact-forwardcopy-boundary-f14-candidate).
 
@@ -109,6 +110,8 @@ editMessageText (closed plain-text shape for one own text message, only after ex
 `addChatToList` has one closed shape, validated before transport and built by the broker from an approved draft; callers supply nothing but the draft: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and `chat_list` exactly `{"@type":"chatListMain"}` or `{"@type":"chatListArchive"}`, with no other key. A folder list (`chatListFolder`), a null or string list, an extra key or a boolean or zero chat ID raises a forbidden-request error before the request reaches TDLib.
 
 `editMessageText` likewise has one closed shape built from an approved draft: `chat_id` (non-zero), `message_id` (1 to 2^53-1), `reply_markup` exactly `null` and `input_message_content` exactly `{"@type":"inputMessageText","text":{"@type":"formattedText","text":<1 to 4096 characters>,"entities":[]},"link_preview_options":null,"clear_draft":false}`. The text must already be in normalized form (NFKC, line feed only, no control or format characters other than line feed and tab), must not start or end with whitespace and must contain none of tab, U+2028 to U+202E, U+030A, U+0333 and U+033F. Any other key, type or value (entities or styles, a reply markup, link-preview options, draft clearing, another content constructor, unnormalized or edge-whitespace text) raises a forbidden-request error before the request reaches TDLib.
+
+`getChatListsToAddChat` is a read with one closed shape: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and no other key; any extra key or a boolean, zero, string or out-of-range chat ID raises a forbidden-request error before the request reaches TDLib. `loadChats` admits exactly the limits 50 (catalog lane) and 100 (the one-shot load above) for `chatListMain` or `chatListArchive`.
 
 Both request types travel only through one dedicated one-attempt change transport. The generic provider call refuses them even in their exact closed shape, and the change transport refuses every other request type, re-validates the shape, runs the capability and claim guard immediately before the raw send and never retries. See [Archive and own text edit boundary](#archive-and-own-text-edit-boundary-f17a-candidate).
 
@@ -2207,8 +2210,9 @@ immediately before transport; with either capability missing the tools stay list
 exactly one own outgoing plain-text message whose whole text is replaced. It never covers caption edits,
 styled edits (the request carries no entities), other people's messages or non-text messages, pin and
 unpin, deletion, chat folders, bulk or scheduled operations, secret chats or a retained selection as a
-source. `addChatToList` and `editMessageText` are the only TDLib request types added; their closed
-shapes are listed in the authority boundary above.
+source. `addChatToList` and `editMessageText` are the only state-changing TDLib request types added, and
+the read `getChatListsToAddChat` the only other one; their closed shapes are listed in the authority
+boundary above.
 
 **Reading the chat list.** The current list is read from the chat's positions. Only a `chatListMain` or
 `chatListArchive` position whose `source` is null counts (TDLib JSON omits a null `source`); an
@@ -2217,6 +2221,16 @@ malformed `source` makes the positions unavailable, folder positions are ignored
 position for the same list, sponsored or not, makes the positions unavailable. A chat whose only Main/Archive position is sponsored is therefore
 `unsupported_chat` at preparation and `chat_changed` at apply, and after the call a sponsored position in
 the target list is not an observed move. A secret chat is never accepted.
+
+**Fresh session and offered lists.** A fresh session has not loaded its chats, and `getChat` then answers
+400. Only that answer makes the chat read call `loadChats` once for Main and once for Archive (limit
+100; a 404 end answer is fine) and repeat `getChat` exactly once; any other failure, a failing load or
+a second 400 is `unavailable`. After the "already in the target list" answer, preparation asks
+`getChatListsToAddChat` for the chat: if the target list is not among the Main/Archive lists it offers
+(folder lists are ignored), the chat is `unsupported_chat` and no draft or dialog exists, so the owner
+is never asked to approve a move Telegram refuses (for example the Telegram service chat). A
+malformed answer or a failing request is `unavailable`. Apply-time behaviour is unchanged: a 4xx from
+Telegram after the attempt is still `failed`.
 
 **Reading the message.** The broker, not the caller, reads the message with one serialized provider
 read (chat, `getMessage`, `getMessageProperties`). It must be an outgoing `messageText` that is not a

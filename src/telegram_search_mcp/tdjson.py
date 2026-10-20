@@ -38,6 +38,7 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "getChats",
         "loadChats",
         "getChat",
+        "getChatListsToAddChat",
         "getSupergroup",
         "getForumTopics",
         "getForumTopic",
@@ -455,13 +456,19 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
         ):
             raise ForbiddenTDLibRequest("TDLib file request shape is not allowed")
     if request_type == "loadChats":
+        # 50 advances a catalog lane; 100 is the one-shot load before an archive read of an unknown chat.
         if (
             set(payload) != {"@type", "chat_list", "limit"}
             or payload.get("chat_list")
             not in ({"@type": "chatListMain"}, {"@type": "chatListArchive"})
-            or payload.get("limit") != 50
+            or not _is_strict_integer(payload.get("limit"))
+            or payload["limit"] not in (50, 100)
         ):
             raise ForbiddenTDLibRequest("TDLib request shape is not allowed")
+    if request_type == "getChatListsToAddChat" and (
+        set(payload) != {"@type", "chat_id"} or not _is_forum_chat_id(payload.get("chat_id"))
+    ):
+        raise ForbiddenTDLibRequest("TDLib chat lists request shape is not allowed")
     if request_type == "searchMessages":
         expected_keys = {
             "@type",
@@ -704,6 +711,9 @@ def _catalog_change_from_update(
 
 class TDLibError(RuntimeError):
     """A redacted TDLib failure."""
+
+    # The provider's numeric error code when TDLib answered with an error object; never its text.
+    provider_code: int | None = None
 
 
 class ForumUnsupported(TDLibError):
@@ -1057,7 +1067,9 @@ class TDLibClient:
                         raise TDLibError("TDLib returned an invalid error response")
                     if code == 404:
                         raise MessageNotFound("Telegram message is no longer available")
-                    raise TDLibError(f"TDLib request failed with code {code}")
+                    failure = TDLibError(f"TDLib request failed with code {code}")
+                    failure.provider_code = code if 0 < code < 10000 else None
+                    raise failure
                 return response
 
     @staticmethod
@@ -1731,12 +1743,45 @@ class TDLibClient:
     CHANGE_POLL_SECONDS = 0.25
 
     def read_chat_list_state(self, chat_id: int):
-        """One serialized read of chat identity, title, kind and current Main/Archive list."""
+        """One serialized read of chat identity, title, kind and current Main/Archive list.
+
+        A fresh session has not loaded its chats, and getChat then answers 400. Only that answer
+        triggers one loadChats per list and exactly one more getChat; any other failure, and a
+        second 400, propagate unchanged."""
         from .archive_drafts import ArchiveSnapshot
         if not _is_forum_chat_id(chat_id):
             raise ValueError("archive chat is unavailable")
         with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
-            return ArchiveSnapshot.create(self.resolve_target(chat_id), chat_id)
+            try:
+                chat = self.resolve_target(chat_id)
+            except TDLibError as error:
+                if error.provider_code != 400:
+                    raise
+                for chat_list in ("main", "archive"):
+                    try:
+                        self._call({"@type": "loadChats", "chat_list": _chat_list_payload(chat_list), "limit": 100})
+                    except MessageNotFound:
+                        pass  # 404: TDLib has no more chats in this list.
+                chat = self.resolve_target(chat_id)
+            return ArchiveSnapshot.create(chat, chat_id)
+
+    def chat_lists_to_add(self, chat_id: int) -> frozenset[str]:
+        """The Main/Archive lists TDLib offers for adding this chat; folder lists are ignored."""
+        if not _is_forum_chat_id(chat_id):
+            raise ValueError("archive chat is unavailable")
+        response = self._call({"@type": "getChatListsToAddChat", "chat_id": chat_id})
+        lists = response.get("chat_lists")
+        if (response.get("@type") != "chatLists" or set(response) - {"@type", "@extra", "chat_lists"} or
+                type(lists) is not list or len(lists) > 64):
+            raise TDLibError("TDLib returned an invalid chat lists result")
+        offered = set()
+        for item in lists:
+            kind = item.get("@type") if type(item) is dict else None
+            if kind in ("chatListMain", "chatListArchive") and set(item) == {"@type"}:
+                offered.add("main" if kind == "chatListMain" else "archive")
+            elif kind != "chatListFolder":
+                raise TDLibError("TDLib returned an invalid chat lists result")
+        return frozenset(offered)
 
     def move_chat_to_list(self, chat_id: int, *, target_list: str, expected, expected_account_id: int,
                           pre_send_guard: Callable[[], bool]) -> str:

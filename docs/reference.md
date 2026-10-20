@@ -2531,8 +2531,9 @@ preview settings) that no tool can restore.
 | `chat` | Exact non-zero numeric chat ID. `@username` and aliases are not accepted. |
 | `target_list` | `archive` or `main`, exactly in lower case. Chat folders are never a target. |
 
-Unknown fields are rejected. The broker reads the chat itself (one serialized provider read,
-cached or offline state) and decides its current list from the chat's positions: only a
+Unknown fields are rejected. The broker reads the chat itself (one serialized provider read;
+in a fresh session whose chats TDLib has not loaded yet, one `loadChats` per list and a single
+retry of that read) and decides its current list from the chat's positions: only a
 `chatListMain` or `chatListArchive` position whose `source` is null counts. A position carrying
 any `chatSource*` (an MTProxy sponsor or a public-service announcement) is never membership, a
 malformed `source` makes the positions unavailable, and folder positions are ignored.
@@ -2540,10 +2541,12 @@ malformed `source` makes the positions unavailable, and folder positions are ign
 A refusal is content-free: `status="refused"`, `refusal="unsupported_chat"` and the fixed detail
 `chat is not eligible; no draft was created`, with no draft ID, title or list. It is returned for
 a secret chat and for a chat that has no own Main or Archive position (it is in neither list, only
-in a folder, or only sponsored/PSA-listed). A chat that already is in `target_list` returns
-`status="already_in_target"` (fixed detail `chat is already in the target list; no draft was
-created`) without a draft. `status="unavailable"` (fixed detail `archive draft is unavailable`,
-no draft) covers an unreadable or deleted chat, malformed or ambiguous provider data (a missing,
+in a folder, or only sponsored/PSA-listed), and for a chat whose `target_list` Telegram does not
+offer (`getChatListsToAddChat`, asked only after the already-in-target check; for example the
+Telegram service chat), so the owner is never asked to approve a move Telegram refuses. A chat
+that already is in `target_list` returns `status="already_in_target"` (fixed detail `chat is
+already in the target list; no draft was created`) without a draft. `status="unavailable"` (fixed
+detail `archive draft is unavailable`, no draft) covers an unreadable or deleted chat, malformed or ambiguous provider data (a missing,
 duplicated or malformed position, an own Main and an own Archive position at once, an empty or
 unsanitized title), exhausted draft capacity or request budget (preparation has a 30-second
 budget), and account, session or policy change during preparation.

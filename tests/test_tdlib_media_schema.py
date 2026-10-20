@@ -92,6 +92,55 @@ class PinnedMediaSchemaTests(unittest.TestCase):
         self.assertEqual(fields("message")["edit_date"], "int32")
         self.assertEqual(fields("messageProperties")["can_be_edited"], "bool")
 
+    def test_chat_list_reads_match_native_constructor_fields(self) -> None:
+        header_path = TDLIB_LIBRARY.resolve().parent.parent / "include/td/telegram/td_api.h"
+        if not header_path.is_file():
+            self.skipTest("pinned TDLib development header is not installed")
+        header = header_path.read_text()
+
+        def fields(class_name: str) -> dict[str, str]:
+            declaration = header.split(f"class {class_name} final", 1)[1].split("\n};", 1)[0]
+            return {name: kind for kind, name in re.findall(r"^\s+([^\n]+?)\s+(\w+)_;$", declaration, re.MULTILINE)}
+
+        from telegram_search_mcp.tdjson import MessageNotFound, TDLibError, _validate_bounded_request
+        client = TDLibClient(raw=Mock())
+        chat = {"@type": "chat", "id": -100, "title": "T", "positions": [],
+                "type": {"@type": "chatTypeSupergroup", "supergroup_id": 1, "is_channel": False}}
+        sent: list[dict] = []
+        unknown = TDLibError("TDLib request failed with code 400")
+        unknown.provider_code = 400
+        answers = {"getChat": [unknown, chat],
+                   "loadChats": [{"@type": "ok"}, MessageNotFound("end")],
+                   "getChatListsToAddChat": [{"@type": "chatLists", "chat_lists": [
+                       {"@type": "chatListMain"}, {"@type": "chatListArchive"},
+                       {"@type": "chatListFolder", "chat_folder_id": 3}]}]}
+
+        def call(payload):
+            _validate_bounded_request(payload)
+            sent.append(payload)
+            answer = answers[payload["@type"]].pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        with patch.object(client, "_call", side_effect=call):
+            client.read_chat_list_state(-100)
+            self.assertEqual(client.chat_lists_to_add(-100), frozenset({"main", "archive"}))
+        self.assertEqual([request["@type"] for request in sent],
+                         ["getChat", "loadChats", "loadChats", "getChat", "getChatListsToAddChat"])
+        for request in sent:
+            self.assertEqual(set(request) - {"@type"}, set(fields(request["@type"])))
+        self.assertEqual(fields("loadChats"), {"chat_list": "object_ptr<ChatList>", "limit": "int32"})
+        self.assertEqual({request["chat_list"]["@type"] for request in sent[1:3]}, {"chatListMain", "chatListArchive"})
+        for request in sent[1:3]:
+            self.assertIn(f"class {request['chat_list']['@type']} final : public ChatList", header)
+        self.assertEqual(fields("getChatListsToAddChat"), {"chat_id": "int53"})
+        self.assertIn("class getChatListsToAddChat final : public Function", header)
+        self.assertIn("using ReturnType = object_ptr<chatLists>;", header.split("class getChatListsToAddChat final", 1)[1])
+        self.assertEqual(fields("chatLists"), {"chat_lists": "array<object_ptr<ChatList>>"})
+        for kind in ("chatListMain", "chatListArchive", "chatListFolder"):
+            self.assertIn(f"class {kind} final : public ChatList", header)
+        self.assertEqual(fields("chatListMain"), {})
+
     def test_media_rejects_files_outside_approved_staging(self) -> None:
         raw = Mock()
         client = TDLibClient(raw=raw)
