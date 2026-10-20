@@ -188,7 +188,7 @@ Pass an actual list of at most 32 closed records, for example
 The five fieldless types are `textEntityTypeBold`, `textEntityTypeItalic`,
 `textEntityTypeUnderline`, `textEntityTypeStrikethrough` and `textEntityTypeSpoiler`.
 Offsets and lengths are strict integers in UTF-16 code units of the **complete
-final normalized text** (NFKC, CRLF/CR converted to LF), on whole Unicode scalar
+final normalized text** (NFKC, CRLF/CR converted to LF, then Telegram's rewrite: a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; leading and trailing spaces and line feeds are trimmed), on whole Unicode scalar
 boundaries. Normalize and recalculate spans before preparation; no parser or
 automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
 and overlapping or adjacent spans of the same style are rejected. Distinct styles
@@ -323,7 +323,7 @@ Historical custom index files from an older version are not read or updated, but
 
 - `viewMessages`, read receipts, and unread-state changes
 - unapproved sends, automatic send retries, deletes, pins and unpins, reactions, or moderation operations
-- published 0.51.0: every edit and chat-list move. The current candidate reaches only one approved Main/Archive move of one chat and one approved plain-text edit of one own text message (default-off `archive_chats` and `edit_own_text`, each together with `send`); caption edits, styled edits, other people's messages, chat folders, bulk and scheduled operations stay unreachable
+- published 0.51.0: every edit and chat-list move. The current candidate reaches only one approved Main/Archive move of one chat and one approved plain-text edit of one own text message (default-off `archive_chats` and `edit_own_text`, each together with `send` and `read`); caption edits, styled edits, other people's messages, chat folders, bulk and scheduled operations stay unreachable
 - multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies
 - video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB
 - broad attachment or thumbnail downloads outside one exact selected anchor
@@ -2246,13 +2246,14 @@ compared at apply before the dialog and compared again inside the provider call 
 or mistyped safety field is never treated as safe.
 
 **The stored text is the reviewed text.** The pinned TDLib (td/telegram/misc.cpp at d1085f9) cleans
-message text and captions before sending with `clean_input_string`, and Telegram trims edge whitespace.
+message text and captions before sending with `clean_input_string`, and `fix_formatted_text` then trims
+spaces and line feeds (only those) at both ends.
 Since the owner's 20.10.2026 decision the shared normalization of every text send, caption and edit
 applies the same rewrite before the preview, so the dialog shows exactly the text Telegram stores:
 
 | Input contains | TDLib or Telegram does | Shared normalization (NFKC, CRLF and CR to LF, then the rewrite) |
 | --- | --- | --- |
-| whitespace as the first or last character (space, LF, tab, U+2028, U+2029, U+1680; after NFKC also no-break and ideographic spaces, and U+00A8 as a leading space) | Telegram trims it | trimmed (Python whitespace, a superset of what Telegram trims) |
+| a space or line feed as the first or last character (after the rewrite, a tab is a space; NFKC turns no-break and ideographic spaces into spaces and U+00A8 into a space plus a mark) | Telegram trims it | trimmed; other edge whitespace such as U+1680 is kept, as in Telegram |
 | U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F | replaced by a space | refused as control characters |
 | U+0009 (tab) | replaced by a space | replaced by a space |
 | U+000D | removed | never present (normalized to LF) |

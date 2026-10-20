@@ -115,7 +115,7 @@ The five fieldless types are `textEntityTypeBold`, `textEntityTypeItalic`,
 `textEntityTypeUnderline`, `textEntityTypeStrikethrough` and `textEntityTypeSpoiler`.
 Offsets and lengths are strict integers in UTF-16 code units of the **complete
 final normalized text** (NFKC, CRLF/CR converted to LF, then Telegram's own rewrite: a tab becomes a
-space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; edge whitespace is trimmed), on whole Unicode scalar
+space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; leading and trailing spaces and line feeds are trimmed), on whole Unicode scalar
 boundaries. Normalize and recalculate spans before preparation; no parser or
 automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
 and overlapping or adjacent spans of the same style are rejected. Distinct styles
@@ -2682,7 +2682,8 @@ Unknown fields are rejected. `new_text` is normalized like `prepare_text_send`:
 - NFKC, and CRLF and CR to LF;
 - control and format characters other than line feed and tab are refused;
 - Telegram's own rewrite is applied: a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F
-  are removed; the result is NFKC-stable; edge whitespace is trimmed;
+  are removed; the result is NFKC-stable; leading and trailing spaces and line feeds are trimmed (other whitespace such as U+1680 is kept,
+  as in Telegram);
 - empty and over-long results are refused.
 
 The preview shows that text, which is exactly what Telegram stores. The proxy checks that the preview's

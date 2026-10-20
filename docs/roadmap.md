@@ -73,7 +73,7 @@ connecting there. A kit is ready. Until that run happens, the bundle path is ver
 
 **F17a archive/unarchive and own text edit** ([spec](plans/0.54-archive-and-edit-spec.md)):
 - **What it does:** four tools behind the independent default-off `archive_chats` and
-  `edit_own_text` capabilities (each together with `send`).
+  `edit_own_text` capabilities (each together with `send` and `read`).
 - **Real evidence:**
   - an own-text edit was applied and read back;
   - a supergroup was archived and unarchived, with the target list observed each time;

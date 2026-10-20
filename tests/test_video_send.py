@@ -974,6 +974,10 @@ class TransportShapeTests(unittest.TestCase):
                    {'show_caption_above_media': True}, {'self_destruct_type': {'@type': 'messageSelfDestructTypeTimer'}},
                    {'has_spoiler': True}, {'caption': {'@type': 'formattedText', 'text': 'x', 'entities': [{}]}},
                    {'caption': {'@type': 'formattedText', 'text': 'x' * 1025, 'entities': []}},
+                   # Defense in depth (20.10.2026): a caption not already in the shared normalized form.
+                   {'caption': {'@type': 'formattedText', 'text': 'a\tb', 'entities': []}},
+                   {'caption': {'@type': 'formattedText', 'text': ' Cap', 'entities': []}},
+                   {'caption': {'@type': 'formattedText', 'text': 'Ca\u2028p', 'entities': []}},
                    {'video': {'@type': 'inputFileLocal', 'path': '/tmp/unapproved.mp4'}},
                    {'video': {'@type': 'inputFileRemote', 'id': 'X'}}, {'extra': 1}]
             for changes in bad:

@@ -51,7 +51,8 @@ def _safe_display_name(display_name: str) -> str:
 
 
 # The pinned TDLib's clean_input_string (td/telegram/misc.cpp at d1085f9) turns a tab into a space and removes
-# U+2028, U+2029 and the combining marks U+030A, U+0333 and U+033F, and fix_formatted_text trims edge whitespace.
+# U+2028, U+2029 and the combining marks U+030A, U+0333 and U+033F, and fix_formatted_text trims only spaces and
+# line feeds at both ends (td/telegram/MessageEntity.cpp at d1085f9).
 # Applying the same rewrite before the preview makes the reviewed text the stored text (owner decision 20.10.2026).
 _TELEGRAM_REWRITE = {ord("\t"): " ", **dict.fromkeys(map(ord, "\u2028\u2029\u030a\u0333\u033f"))}
 
@@ -61,7 +62,7 @@ def _telegram_stored(text: str) -> str:
     for _ in range(4):  # NFKC can reintroduce a removed mark (U+02DA is a space plus U+030A); rounds settle it.
         rewritten = unicodedata.normalize("NFKC", text.translate(_TELEGRAM_REWRITE))
         if rewritten == text:
-            return text.strip()
+            return text.strip(" \n")
         text = rewritten
     raise ValueError("text does not settle under Telegram's rewrite")
 

@@ -60,6 +60,11 @@ class RevisionBoundaryTests(unittest.TestCase):
         sent = self.dispatch('send_prepared_text', {'draft_id': revised['draft_id'], 'approved': True})
         self.assertEqual(sent['status'], 'sent')
         self.assertEqual(self.sender.sent, [(123, 'x y')])
+        from telegram_search_mcp.tdjson import _bounded_text_entities  # Defense in depth at the transport shape.
+        self.assertTrue(_bounded_text_entities({'@type': 'formattedText', 'text': 'x y', 'entities': []}))
+        for raw in ('x\ty', ' x', 'x\n', 'x\u2029y', 'x\u0333'):
+            with self.subTest(raw=raw):
+                self.assertFalse(_bounded_text_entities({'@type': 'formattedText', 'text': raw, 'entities': []}))
         for blank in ('\t \u2028', '\u2029\n'):
             with self.subTest(blank=blank):
                 self.assertNotEqual(self.dispatch('prepare_text_send', {'recipient': 123, 'text': blank})['status'],

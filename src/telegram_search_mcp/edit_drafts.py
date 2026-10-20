@@ -22,7 +22,7 @@ from .schemas import ChatId
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
 UNAVAILABLE = 'text edit draft is unavailable'
-# Telegram trims edge whitespace and its clean_input_string rewrites the characters below. Since 20.10.2026
+# Telegram trims spaces and line feeds at both ends and its clean_input_string rewrites the characters below. Since 20.10.2026
 # the shared normalisation applies those rewrites before the preview, so these checks only guard input that
 # skipped it; the two fixed details stay in the output schema.
 WHITESPACE = 'new text must not start or end with whitespace; Telegram trims it'
@@ -65,8 +65,8 @@ def normalized_text(value: object) -> str:
 
 
 def edge_whitespace(text: object) -> bool:
-    """Any Unicode whitespace (incl. LF, tab, U+2028) first or last in the normalized text."""
-    return type(text) is str and bool(text) and (text[0].isspace() or text[-1].isspace())
+    """A space or line feed first or last: the only characters the pinned TDLib trims at the edges."""
+    return type(text) is str and bool(text) and (text[0] in ' \n' or text[-1] in ' \n')
 
 
 def rewritten_text(text: object) -> bool:

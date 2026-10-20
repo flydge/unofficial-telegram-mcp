@@ -1525,8 +1525,9 @@ class BrokerClient(SelectionClientMixin):
             if response.previous_draft_id is not None and response.previous_draft_id != request.draft_id:
                 raise BrokerUnavailable("revision response does not match request")
             if isinstance(request, UpdateDraftRequest) and response.draft is not None:
-                from .outgoing_drafts import _safe_message_text
+                from .outgoing_drafts import _safe_caption, _safe_message_text
                 if ((request.text is not None and response.draft.text != _safe_message_text(request.text)) or
+                        (request.caption is not None and response.draft.caption != _safe_caption(request.caption)) or
                         not _matching_outgoing_entities(request.text, request.outgoing_entities,
                             response.draft.outgoing_entities)):
                     raise BrokerUnavailable('revision formatting differs from request')
@@ -1583,9 +1584,14 @@ class BrokerClient(SelectionClientMixin):
 
     @selected_method("prepare_artifact_send", PrepareArtifactSendResponse)
     def prepare_artifact_send(self, request: PrepareArtifactSendRequest) -> PrepareArtifactSendResponse:
+        from .outgoing_drafts import _safe_caption
         try:
-            return PrepareArtifactSendResponse.model_validate(self._request("prepare_artifact_send", request.model_dump(mode="json")))
-        except (BrokerUnavailable, ValidationError):
+            response = PrepareArtifactSendResponse.model_validate(self._request("prepare_artifact_send", request.model_dump(mode="json")))
+            if response.status == "prepared" and (response.recipient != request.recipient or response.kind != request.kind
+                                                  or response.caption != _safe_caption(request.caption)):
+                raise BrokerUnavailable("artifact draft differs from request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
             return PrepareArtifactSendResponse(status="error", detail="draft broker is unavailable")
 
     @selected_method("prepare_reply_artifact_send", PrepareReplyArtifactSendResponse)

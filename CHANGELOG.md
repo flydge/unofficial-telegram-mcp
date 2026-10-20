@@ -11,7 +11,7 @@ F14/F15a/F17a decisions on 20.10.2026. No version change or tag yet.
 - Apply Telegram's own text rewrite before every preview (owner decision): text sends, replies, topic
   sends, captions and own-text edits share one normalization.
   - A tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed (with NFKC repeated
-    until stable); edge whitespace is trimmed.
+    until stable); leading and trailing spaces and line feeds are trimmed, exactly the characters Telegram trims.
   - The reviewed text is now the stored text. Edits no longer refuse such texts, and sends no longer
     send a text that Telegram silently changes.
   - Style span offsets refer to this final text.

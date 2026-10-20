@@ -34,7 +34,7 @@ Pass an actual list of at most 32 closed records, for example
 The five fieldless types are `textEntityTypeBold`, `textEntityTypeItalic`,
 `textEntityTypeUnderline`, `textEntityTypeStrikethrough` and `textEntityTypeSpoiler`.
 Offsets and lengths are strict integers in UTF-16 code units of the **complete
-final normalized text** (NFKC, CRLF/CR converted to LF), on whole Unicode scalar
+final normalized text** (NFKC, CRLF/CR converted to LF, then Telegram's rewrite: a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; leading and trailing spaces and line feeds are trimmed), on whole Unicode scalar
 boundaries. Normalize and recalculate spans before preparation; no parser or
 automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
 and overlapping or adjacent spans of the same style are rejected. Distinct styles
@@ -1073,7 +1073,7 @@ replacement text, several messages and deletion are unsupported.
 Settle the new text with the owner before preparing. `new_text` replaces the WHOLE text and is plain: all
 formatting of the old message is lost. It is normalized like a text send: NFKC, line feed line breaks,
 and Telegram's own rewrite (a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed;
-edge whitespace is trimmed). Show the owner the preview's new text, which is exactly what Telegram will
+leading and trailing spaces and line feeds are trimmed). Show the owner the preview's new text, which is exactly what Telegram will
 store.
 
 Call `prepare_text_edit(chat, message_id, new_text)`. A `refused` or `unavailable` response is final for

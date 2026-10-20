@@ -1007,7 +1007,7 @@ class EditPrepareTests(Fixture, unittest.TestCase):
         # preview and the dialog shows the stored text. NBSP, U+3000 and U+00A8 become a space first (NFKC).
         for new, stored in ((' Hello', 'Hello'), ('Hello ', 'Hello'), ('Hello\n', 'Hello'), ('\nHello', 'Hello'),
                             ('\tHello', 'Hello'), ('Hello\t', 'Hello'), ('Hello\r\n', 'Hello'), ('Hello\r', 'Hello'),
-                            ('Hello\u2028', 'Hello'), ('\u2029Hello', 'Hello'), ('\u1680Hello', 'Hello'),
+                            ('Hello\u2028', 'Hello'), ('\u2029Hello', 'Hello'), ('\u1680Hello', '\u1680Hello'),
                             ('\u3000Hello', 'Hello'), ('Hello\u00a0', 'Hello'), ('Hello\u2003', 'Hello'),
                             ('\u00a8Hello', '\u0308Hello'), ('Hello there \n', 'Hello there')):
             with self.subTest(new=new):

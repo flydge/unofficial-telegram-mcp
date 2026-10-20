@@ -2487,7 +2487,8 @@ class Broker(SelectionBrokerMixin):
                 new_text = normalized_text(request.new_text)
             except ValueError:
                 raise EditRefusal('invalid_input') from None
-            # Never stripped or rewritten silently: the dialog's exact new text is what Telegram stores.
+            # normalized_text already applied Telegram's own rewrite, so the dialog's new text is what Telegram
+            # stores; these two checks only guard input that skipped it.
             if edge_whitespace(new_text):
                 return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=TEXT_EDIT_WHITESPACE)
             if rewritten_text(new_text):

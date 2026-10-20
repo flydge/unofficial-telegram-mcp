@@ -189,10 +189,19 @@ def _native_outgoing_entity_expectation(text, entities):
     return freeze_outgoing_entities(text, caller)
 
 
+def _normalized_caption(value) -> bool:
+    """A caption already in the shared normalized form, Telegram's own rewrite included."""
+    try:
+        from .outgoing_drafts import _safe_caption
+        return type(value) is str and _safe_caption(value) == value
+    except (ValueError, TypeError, UnicodeError):
+        return False
+
+
 def _bounded_text_entities(formatted):
     entities = formatted.get('entities')
     if entities == []:
-        return True
+        return _normalized_message_text(formatted.get('text'))
     try:
         from .outgoing_drafts import _safe_message_text
         return (_safe_message_text(formatted['text']) == formatted['text'] and
@@ -307,6 +316,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and isinstance(caption, dict) and caption.get("@type") == "formattedText"
             and set(caption) == {"@type", "text", "entities"}
             and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+            and _normalized_caption(caption["text"])
             and caption.get("entities") == []
         )
         photo = content.get("photo") if isinstance(content, dict) else None
@@ -326,6 +336,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
             and caption.get("@type") == "formattedText"
             and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+            and _normalized_caption(caption["text"])
             and caption.get("entities") == []
         )
         voice = content.get("voice_note") if isinstance(content, dict) else None
@@ -342,6 +353,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
             and caption.get("@type") == "formattedText"
             and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+            and _normalized_caption(caption["text"])
             and caption.get("entities") == []
         )
         if reply_to is not None and valid_photo and (type(photo.get('width')) is not int or type(photo.get('height')) is not int):
@@ -369,6 +381,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
             and caption.get("@type") == "formattedText"
             and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+            and _normalized_caption(caption["text"])
             and caption.get("entities") == []
         )
         if (
