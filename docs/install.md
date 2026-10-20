@@ -12,8 +12,8 @@ candidate: install → `connect` → local QR screen → phone confirmation → 
 ready MCP, with no API ID/hash, phone number or login code going through your
 assistant. It was accepted for real on the owner's Mac on 20.10.2026 (phone scan, 2FA,
 QR refresh/cancel/expiry, revoke and reconnect, a bounded search in Claude Code and in
-Codex). Installing the identity bundle on a clean macOS user is still pending, so this
-candidate is not released yet. The phone/code Terminal flow remains as the
+Codex). Installing the identity bundle on a clean macOS user is deferred to the backlog,
+and the candidate is not released yet. The phone/code Terminal flow remains as the
 [fallback](#terminal-fallback-phone-and-code-setup).
 
 The continuing development candidate supports an offline authenticated first
@@ -190,7 +190,8 @@ Apple Terminal; `resume` recovers a managed interrupted enrollment, `status` rea
 enrollment/handshake metadata. After confirmed native teardown and owner handoff, require the
 matching broker's fresh Ready, reconnect the client, check the installed manifest and perform
 one authorized bounded own-chat search. Synthetic installation and an inert manifest do not
-close that gate. Native Keychain, Telegram, launchd and clean-user acceptance remain open.
+close that gate. Native Keychain, Telegram and launchd behaviour was accepted on the owner's Mac on
+20.10.2026; the clean-user install of the bundle is in the backlog.
 
 Setup refuses agent/captured shells, SSH, tmux, script wrappers and redirected or
 piped input before credentials or session changes. It uses hidden prompts for

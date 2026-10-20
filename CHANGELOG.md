@@ -3,8 +3,8 @@
 ## 0.52.0.dev0 — unreleased
 
 Release candidate. The real QR-first acceptance on the owner's Mac is recorded below, along with real
-approved forward/copy, native video, archive/unarchive and own-text edit runs. The remaining 0.52.0
-gate is a clean macOS user installing the bundle that carries the application identity
+approved forward/copy, native video, archive/unarchive and own-text edit runs. A clean macOS user
+installing the bundle that carries the application identity is deferred to the backlog
 ([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). No version change or tag yet.
 
 - Real acceptance on the owner's Mac, 20.10.2026 (owner's macOS user, source install, Keychain
@@ -98,7 +98,7 @@ gate is a clean macOS user installing the bundle that carries the application id
   present), and returns an activation command ending in `connect`. The bundle assembler injects `app-identity.json`
   only with the explicit `--app-identity-from-keychain` flag. The Terminal `setup` flow
   remains as the fallback; the setup skill is rewritten for the connect/wait flow.
-  Real acceptance on the owner's Mac is the first entry above. The clean macOS user run is pending.
+  Real acceptance on the owner's Mac is the first entry above. The clean macOS user run is in the backlog.
 
 - Report SDK guard refusals with a fixed reason instead of the bare `Error executing tool <name>`:
   `capability_disabled` names only the missing capabilities (for example `read_history`, or

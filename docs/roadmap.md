@@ -43,11 +43,11 @@ source install, the Keychain identity and two Telegram accounts:
 - **Bundle:** a bundle carrying the owner's application identity is assembled and verified offline
   with `bootstrap.sh --prepare-only`. It has not been installed yet.
 
-**Remaining 0.52.0 gate:**
-- install that bundle on a clean macOS user and connect there (optionally also an interrupted helper
-  and a logout/login on that user);
-- owner review of the delegated decisions in the F14, F15a and F17a specs;
-- then the version and the tag.
+**Remaining 0.52.0 steps:** owner review of the delegated decisions in the F14, F15a and F17a
+specs, then the version and the tag.
+
+**Moved to the backlog** by the owner on 20.10.2026: installing that bundle on a clean macOS user and
+connecting there. A kit is ready. Until that run happens, the bundle path is verified offline only.
 
 **F14 exact forward/copy** ([spec](plans/0.53-forward-copy-spec.md)):
 - **What it does:** `prepare_forward_send` and `send_prepared_forward` forward, or copy without
@@ -106,8 +106,9 @@ packets remain failed evidence; they are not reclassified as successful runs.
 
 Still unfinished:
 
-- **First (0.52.0 gate):** the clean macOS user install of the identity bundle, and owner review
-  of the F14, F15a and F17a delegated decisions.
+- **First (0.52.0):** owner review of the F14, F15a and F17a delegated decisions.
+- **Backlog (deferred by the owner on 20.10.2026):** the clean macOS user install of the identity
+  bundle, including an interrupted helper and a logout/login on that user.
 - **Next version — client coverage and distribution** (chosen by the owner on 20.10.2026):
   - registration in Claude Desktop;
   - a Claude Code plugin package;
@@ -157,7 +158,7 @@ different license are being considered, with no committed migration date; see
 | ID | Scope | 0.51.0 status | What remains |
 | --- | --- | --- | --- |
 | P0/P1/P3 | Public export, privacy/history review and release packaging | Implemented for the selected public source line | Repeat audit for future source/history/artifact changes. Private development history is not part of the public ancestry. |
-| P2 | Installed public product | Partial (0.52 candidate: QR-first first-time provisioning accepted for real on the owner's Mac, 20.10.2026) | Install the identity bundle on a clean macOS user (0.52.0 gate); then public hosting, Developer ID signing and notarization, and a distinct product name before a public listing. |
+| P2 | Installed public product | Partial (0.52 candidate: QR-first first-time provisioning accepted for real on the owner's Mac, 20.10.2026) | Install the identity bundle on a clean macOS user (backlog, deferred by the owner on 20.10.2026); public hosting, Developer ID signing and notarization, and a distinct product name before a public listing. |
 | F1 | Version/capabilities/compatibility | Implemented | Broader protocol/upgrade compatibility remains part of F18. |
 | F2 | Selected message and batch reads | Implemented | Retain unsupported-type and per-message coverage limits. |
 | F3 | Bounded latest/history | Implemented | The pinned provider path cannot certify complete history coverage; this is an explicit limitation. |
@@ -215,8 +216,8 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
    [approved requirements and acceptance gate](plans/0.52-qr-onboarding.md).
    - **Done:** QR-first onboarding is implemented (phases A–E) and accepted for real on the owner's
      Mac, including 2FA, revoke/reconnect and Claude Code and Codex searches (phase F, most of it).
-   - **Remaining:** the clean macOS user install of the identity bundle, owner review of the
-     delegated F14/F15a/F17a decisions, then the version and tag.
+   - **Remaining:** owner review of the delegated F14/F15a/F17a decisions, then the version and
+     tag. The clean macOS user install is in the backlog (deferred by the owner on 20.10.2026).
    - **Out of scope:** mandatory end-user API-pair entry or Terminal-only login does not satisfy
      this scope.
 2. **Priority #2 — client coverage and distribution (next version):** the same QR-first setup

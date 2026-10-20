@@ -14,8 +14,8 @@ Connect Telegram to **Claude Code, Codex, or another local MCP client**.
   it in Telegram on your phone, and you type a 2FA password, if you use one, only on that page. No API
   ID or hash, phone number or login code passes through your assistant. This was verified for real on
   the owner's Mac (login, QR refresh, cancel, expiry, 2FA, revoke and reconnect, and a search from
-  Claude Code and from Codex). The remaining release gate is installing the bundle on a clean macOS
-  user. See [candidate installation](#unreleased-local-candidate).
+  Claude Code and from Codex). Installing the bundle on a clean macOS user is deferred to the
+  backlog. See [candidate installation](#unreleased-local-candidate).
 - **55 tools.** Four new opt-in actions are each behind their own default-off capability, together
   with `send`. Each has a complete preview, a local owner approval and one non-retried attempt, and
   each was verified with real approved runs on 20.10.2026:
@@ -99,7 +99,7 @@ Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed. See
   page. A bundle assembled with the application identity needs no API ID or hash at all. The
   Terminal phone/code setup remains as a fallback.
 - **Status.** It was accepted for real on the owner's Mac on 20.10.2026. Installing the bundle on a
-  clean macOS user is the remaining 0.52.0 gate.
+  clean macOS user is deferred to the backlog.
 - **Open beyond 0.52.0:** public hosting, Developer ID signing and notarization, and complete
   source/redistribution review.
 
