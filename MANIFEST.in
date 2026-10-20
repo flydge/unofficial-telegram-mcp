@@ -8,6 +8,7 @@ include docs/release-preflight.md
 include skills/telegram-search/SKILL.md
 include skills/telegram-setup/SKILL.md
 recursive-include packaging *.py *.sh *.c *.json
+include packaging/constraints-0.52.0.txt
 recursive-include src/telegram_search_mcp *.py
 recursive-include tests *.py
 include tests/fixtures/legacy_0_13_tool_hashes.json
@@ -33,5 +34,6 @@ include CHANGELOG.md
 include docs/third-party-notices.md
 include docs/licensing.md
 include docs/roadmap.md
+include docs/releasing.md
 include docs/plans/initial-roadmap.md
 recursive-include docs/licenses *.txt

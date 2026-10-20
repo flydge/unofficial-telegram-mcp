@@ -5,31 +5,35 @@
   python packaging/release_gate.py verify --evidence <dir>/evidence.json
 
 run builds only from `git archive <commit>`, never from a working tree, into a
-fresh workdir outside /tmp and outside the repository, and writes
-<workdir>/evidence.json beside the artifacts. Its only network use is pip
+fresh absolute workdir outside the repository and outside the OS-cleared temp
+roots (/tmp, /var/folders and their /private forms, compared casefolded), and
+writes <workdir>/evidence.json beside the artifacts. Its only network use is pip
 downloading the pinned, hash-checked wheels (TOOLS below and
-packaging/constraints-<release>.txt at the commit) into the workdir.
+packaging/constraints-<release>.txt at the commit) into the workdir. The privacy
+scan runs the commit's own tests/test_public_tree_privacy.py (scan_text with its
+ALLOW table) over the shipped text, the added diff lines and the commit messages.
 
-verify binds to the recorded commit, never to HEAD: it rebuilds from a fresh
-`git archive <commit>` offline from the recorded wheelhouses, re-derives every
-recorded field (tests from the junit and log files on disk) and fails on any
-difference. Evidence made by another gate version is verified by the gate
-stored at the recorded commit when its hash matches.
+verify binds to the recorded commit, never to HEAD, and trusts no recorded
+result: it rebuilds from a fresh `git archive <commit>` offline from the recorded
+wheelhouses, re-derives every recorded field, re-runs the full suite in a fresh
+offline venv with a hermetic HOME and fails on any difference. Evidence made by
+another gate version is verified by the gate stored at the recorded commit when
+its hash matches.
 
 Both commands take --repo (default: the repository of the current directory).
 Refusals print one fixed code and never echo inputs; run keeps the details in
-<workdir>/refusal.json.
+<workdir>/refusal.json (privacy hits as path:line:rule, never the matched text).
 """
 from __future__ import annotations
 
 import argparse
-import ast
 import base64
 import configparser
 import csv
 import email.parser
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -70,7 +74,8 @@ SHIPPED_INTERNAL = frozenset({"docs/plans/initial-roadmap.md"})
 GENERATED = ("PKG-INFO", "setup.cfg") + tuple(f"src/{DIST}.egg-info/{name}" for name in (
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt", "requires.txt", "top_level.txt"))
 DIST_INFO = ("METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt")
-TMP_ROOTS = (Path("/tmp"), Path("/private/tmp"))
+# The OS clears these (macOS TMPDIR lives under /var/folders); compared casefolded, as APFS does.
+TMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Downloads are hash-checked, so a proxy or CA bundle cannot change what is installed.
 NETWORK_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE")
@@ -82,7 +87,10 @@ MAX_EVIDENCE_BYTES = 4 << 20
 MAX_COMMITS = 100000
 GIT_TIMEOUT, PIP_TIMEOUT, BUILD_TIMEOUT, SMOKE_TIMEOUT, SUITE_TIMEOUT = 120, 900, 900, 180, 3600
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
-TAG = re.compile(r"v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}")
+TAG = re.compile(r"v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?")
+HUNK = re.compile(r"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
+RULE = re.compile(r"[a-z][a-z0-9_]{0,39}")
+MAX_HITS = 100
 VERSION = re.compile(r'^__version__ = "([0-9]+(?:\.[0-9]+){1,3}(?:(?:a|b|rc)[0-9]+)?'
                      r'(?:\.post[0-9]+)?(?:\.dev[0-9]+)?)"$', re.M)
 PIN = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)==([0-9A-Za-z.+!]+)((?: --hash=sha256:[0-9a-f]{64})+)")
@@ -100,7 +108,7 @@ CODES = frozenset({
     "wheel_data_mismatch", "wheel_metadata", "wheel_entry_points", "wheel_record", "install_failed",
     "pip_check_failed", "freeze_mismatch", "record_mismatch", "census_failed", "smoke_failed",
     "smoke_version_mismatch", "tool_census_mismatch", "smoke_manifest_mismatch", "smoke_policy_mismatch",
-    "suite_failed", "suite_unreadable", "tests_failed", "privacy_patterns_invalid", "privacy_scan_bounds",
+    "suite_failed", "suite_unreadable", "tests_failed", "privacy_guard_missing", "privacy_scan_bounds",
     "privacy_hit", "evidence_invalid", "evidence_mismatch", "toolchain_mismatch", "gate_mismatch"})
 
 CENSUS = r'''
@@ -273,16 +281,26 @@ def resolve_tag(git: Git, tag: str, commit: str) -> str:
     return previous
 
 
+def _folded(path: str) -> str:
+    return "/" + os.path.normpath(path).lstrip("/").casefold()
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
 def outside_tmp(path: Path, repo: Path | None, code: str = "invalid_workdir") -> Path:
+    """An absolute real path outside the temp roots and the repository, compared casefolded."""
+    need(path.is_absolute(), code)
     try:
-        absolute = Path(os.path.abspath(path))
-        resolved = absolute.resolve()
+        resolved = os.path.realpath(path)
     except (OSError, RuntimeError, ValueError):
         raise GateRefusal(code) from None
-    for candidate in (absolute, resolved):
-        need(not any(candidate.is_relative_to(root) for root in TMP_ROOTS), "workdir_under_tmp")
-    need(repo is None or not resolved.is_relative_to(repo), "workdir_inside_repo")
-    return resolved
+    need(os.path.isabs(resolved), code)
+    for candidate in (_folded(os.fspath(path)), _folded(resolved)):
+        need(not any(_under(candidate, _folded(root)) for root in TMP_ROOTS), "workdir_under_tmp")
+    need(repo is None or not _under(_folded(resolved), _folded(os.fspath(repo))), "workdir_inside_repo")
+    return Path(resolved)
 
 
 def prepare_workdir(path: Path, repo: Path) -> Path:
@@ -581,72 +599,148 @@ def check_wheel(path: Path, version: str, sources: dict[str, tuple[str, bool]], 
     return len(members)
 
 
-def privacy_patterns(tree: Path, sources: dict[str, tuple[str, bool]]) -> tuple[str, list[str]]:
-    """Static PRIVACY_PATTERNS from the commit's own privacy test; never executes it."""
-    if PRIVACY_SOURCE not in sources:
-        return "not_available", []
+def load_guard(tree: Path, sources: dict[str, tuple[str, bool]]):
+    """The commit's own privacy guard, imported from the archived tree (our code); absent means refused."""
+    path = tree / PRIVACY_SOURCE
+    need(PRIVACY_SOURCE in sources and path.is_file() and not path.is_symlink(), "privacy_guard_missing")
+    bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
-        module = ast.parse((tree / PRIVACY_SOURCE).read_text(encoding="utf-8"))
-        values = [node.value for node in module.body
-                  if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                      and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "PRIVACY_PATTERNS")
-                  or (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-                      and node.target.id == "PRIVACY_PATTERNS" and node.value is not None)]
-        need(len(values) == 1, "privacy_patterns_invalid")
-        patterns = ast.literal_eval(values[0])
-        need(isinstance(patterns, (tuple, list)) and 1 <= len(patterns) <= 256
-             and all(type(p) is str and 0 < len(p) <= 1024 for p in patterns), "privacy_patterns_invalid")
-        for pattern in patterns:
-            re.compile(pattern)
-    except (OSError, UnicodeError, SyntaxError, ValueError, re.error):
-        raise GateRefusal("privacy_patterns_invalid") from None
-    return PRIVACY_SOURCE, list(patterns)
+        spec = importlib.util.spec_from_file_location(f"tgmcp_privacy_guard_{secrets.token_hex(8)}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except (Exception, SystemExit):
+        raise GateRefusal("privacy_guard_missing") from None
+    finally:
+        sys.dont_write_bytecode = bytecode
+    need(callable(getattr(module, "scan_text", None)) and type(getattr(module, "ALLOW", None)) is tuple,
+         "privacy_guard_missing")
+    return module
 
 
-def privacy_scan(git: Git, previous: str, commit: str, source: str, patterns: list[str],
-                 sdist: Path, wheel: Path) -> dict:
-    """Hits name the source, member path and pattern index only; matched text is never recorded."""
-    compiled = [re.compile(pattern) for pattern in patterns]
-    hits: set[tuple[str, str, int]] = set()
-    scanned = {"diff_lines": 0, "sdist_members": 0, "wheel_members": 0}
+def _guard_literals(guard, repo: Path) -> tuple[str, ...]:
+    provider = getattr(guard, "local_literals", None)
+    if not callable(provider):
+        return ()
+    try:
+        literals = provider(repo)
+    except (Exception, SystemExit):
+        raise GateRefusal("privacy_guard_missing") from None
+    need(type(literals) is tuple and all(type(value) is str for value in literals), "privacy_guard_missing")
+    return literals
 
-    def scan(kind: str, path: str, text: str) -> None:
-        for index, pattern in enumerate(compiled):
-            if pattern.search(text):
-                hits.add((kind, path, index))
 
-    diff = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--text", "-U0", previous, commit, "--",
-               code="privacy_scan_bounds").stdout
-    path = ""
-    for raw in diff.split(b"\n"):
+def _text(data: bytes) -> str:
+    """Binary members (a NUL in the first 8 KiB, as the guard decides) contribute only their name."""
+    return "" if b"\0" in data[:8192] else data.decode("utf-8", "replace")
+
+
+def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict[str, tuple[str, bool]],
+                 sdist: Path, wheel: Path, version: str, data_files: dict) -> dict:
+    """The guard's scan_text over shipped text, added diff lines and commit messages of previous..commit.
+
+    Paths are given to scan_text as tracked paths, so its path-scoped ALLOW entries apply. A hit is
+    `<where>/<path>:<line>:<rule>`; the matched text is never recorded."""
+    guard = load_guard(tree, sources)
+    literals = _guard_literals(guard, git.repo)
+    rules = getattr(guard, "RULES", {})
+    need(isinstance(rules, dict) and all(type(name) is str and RULE.fullmatch(name) for name in rules),
+         "privacy_guard_missing")
+    hits: set[str] = set()
+    scanned = {"sdist_members": 0, "wheel_members": 0, "diff_files": 0, "diff_lines": 0, "commits": 0}
+
+    def scan(where: str, path: str, text: str, numbers: list[int] | None = None) -> None:
+        try:
+            found = guard.scan_text(path, text, literals)
+        except (Exception, SystemExit):
+            raise GateRefusal("privacy_guard_missing") from None
+        need(type(found) is list, "privacy_guard_missing")
+        for item in found:
+            need(type(item) is tuple and len(item) == 3 and type(item[1]) is int and item[1] >= 0
+                 and type(item[2]) is str and RULE.fullmatch(item[2]), "privacy_guard_missing")
+            line = numbers[min(item[1], len(numbers)) - 1] if numbers and item[1] else item[1]
+            hits.add(f"{where}{path}:{line}:{item[2]}")
+
+    names = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "--name-only", "-z",
+                previous, commit, "--", code="privacy_scan_bounds").stdout
+    patch = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "-U0",
+                previous, commit, "--", code="privacy_scan_bounds").stdout
+    added: dict[str, tuple[list[str], list[int]]] = {}
+    path, header, number = None, False, 0
+    for raw in patch.split(b"\n"):
         line = raw.decode("utf-8", "replace")
-        if line.startswith("+++ "):
-            path = line[4:].removeprefix("b/")
-            scan("diff", path, path)
-        elif line.startswith("+"):
+        if line.startswith("diff --git "):
+            path, header = None, True
+        elif header and line.startswith("+++ "):
+            need(line.startswith("+++ b/"), "privacy_scan_bounds")
+            path = line[6:]
+        elif line.startswith("@@ "):
+            match = HUNK.match(line)
+            need(match and path is not None, "privacy_scan_bounds")
+            header, number = False, int(match.group(1))
+        elif not header and path is not None and line.startswith("+"):
+            # Text added by git as one line stays one tracked line, whatever str.splitlines makes of it.
+            pieces, numbers = added.setdefault(path, ([], []))
+            for piece in line[1:].splitlines() or [""]:
+                pieces.append(piece)
+                numbers.append(number)
+            number += 1
             scanned["diff_lines"] += 1
-            scan("diff", path, line[1:])
+    try:
+        changed = [name.decode("utf-8") for name in names.split(b"\0") if name]
+    except UnicodeError:
+        raise GateRefusal("privacy_scan_bounds") from None
+    need(set(added) <= set(changed) and len(changed) <= MAX_MEMBERS, "privacy_scan_bounds")
+    for name in changed:
+        pieces, numbers = added.get(name, ([], []))
+        scanned["diff_files"] += 1
+        scan("diff/", name, "\n".join(pieces), numbers)
+    log = git("log", "--format=%H%x00%B%x1e", f"{previous}..{commit}", code="privacy_scan_bounds").stdout
+    for record in log.split(b"\x1e"):
+        record = record.strip(b"\n")
+        if not record:
+            continue
+        sha, separator, body = record.partition(b"\0")
+        scanned["commits"] += 1
+        need(separator and re.fullmatch(rb"[0-9a-f]{40}", sha) and scanned["commits"] <= MAX_COMMITS,
+             "privacy_scan_bounds")
+        scan("", "commit/" + sha.decode("ascii"), body.decode("utf-8", "replace"))
+    prefix, data_dir = f"{DIST}-{version}/", f"{DIST}-{version}.data/data/"
+    licenses = f"{DIST}-{version}.dist-info/licenses/"
+    shipped_data = {f"{target}/{PurePosixPath(name).name}": name for target, names in data_files.items()
+                    for name in names}
     try:
         with tarfile.open(sdist, "r:gz") as tar:
-            for member in tar:
-                scanned["sdist_members"] += 1
-                scan("sdist", member.name, member.name)
+            for count, member in enumerate(tar, 1):
+                need(count <= MAX_MEMBERS and member.size <= MAX_MEMBER_BYTES, "privacy_scan_bounds")
+                data = b""
                 if member.isfile():
                     with tar.extractfile(member) as content:
-                        scan("sdist", member.name, content.read(MAX_MEMBER_BYTES).decode("utf-8", "replace"))
+                        data = content.read(MAX_MEMBER_BYTES)
+                scanned["sdist_members"] += 1
+                scan("sdist/", member.name.removeprefix(prefix), _text(data))
         with zipfile.ZipFile(wheel) as archive:
-            for entry in archive.infolist():
+            entries = archive.infolist()
+            need(len(entries) <= MAX_MEMBERS, "privacy_scan_bounds")
+            for entry in entries:
+                need(entry.file_size <= MAX_MEMBER_BYTES, "privacy_scan_bounds")
+                name = entry.filename
+                if name.startswith(DIST + "/"):
+                    name = "src/" + name
+                elif name.startswith(data_dir):
+                    name = shipped_data.get(name.removeprefix(data_dir), name)
+                elif name.startswith(licenses):
+                    name = name.removeprefix(licenses)
                 scanned["wheel_members"] += 1
-                scan("wheel", entry.filename, entry.filename)
-                scan("wheel", entry.filename, archive.read(entry).decode("utf-8", "replace"))
+                scan("wheel/", name, _text(archive.read(entry)))
     except (OSError, tarfile.TarError, zipfile.BadZipFile, EOFError):
         raise GateRefusal("privacy_scan_bounds") from None
-    return {"pattern_source": source, "patterns": len(patterns), "scanned": scanned,
-            "hits": [{"source": kind, "path": member, "pattern": index} for kind, member, index in sorted(hits)]}
+    return {"guard": PRIVACY_SOURCE, "guard_sha256": sources[PRIVACY_SOURCE][0], "rules": sorted(rules),
+            "allow": len(guard.ALLOW), "scanned": scanned, "hits": sorted(hits)}
 
 
 def check_privacy(report: dict) -> None:
-    need(not report["hits"], "privacy_hit", {"hits": report["hits"][:100]})
+    need(not report["hits"], "privacy_hit", {"hits": report["hits"][:MAX_HITS], "total": len(report["hits"])})
 
 
 def _identity_class(address: str) -> str:
@@ -864,8 +958,8 @@ def derive(git: Git, commit: str, tag: str, base: Path, scratch: Path, *, online
     sdist, wheel = build_twice(chain, build_venv, trees, version, epoch)
     sdist_members = check_sdist(sdist, version, epoch, sources)
     wheel_members = check_wheel(wheel, version, sources, project)
-    pattern_source, patterns = privacy_patterns(trees[0], sources)
-    privacy = privacy_scan(git, previous, commit, pattern_source, patterns, sdist, wheel)
+    privacy = privacy_scan(git, previous, commit, trees[0], sources, sdist, wheel, version,
+                           project["tool"]["setuptools"]["data-files"])
     check_privacy(privacy)
     if online:
         _private_dir(wheelhouse)
@@ -899,25 +993,34 @@ def derive(git: Git, commit: str, tag: str, base: Path, scratch: Path, *, online
     }
 
 
-def run_tests(evidence: dict, base: Path, scratch: Path) -> dict:
-    """The full suite from a fresh archive extraction, on the pinned closure, with a hermetic HOME."""
-    archive, chain = evidence["_artifacts"][2:]
+def run_tests(artifacts: tuple, commit_time: int, constraints: str, base: Path, scratch: Path,
+              out: Path) -> tuple[dict, int]:
+    """The full suite from a fresh archive extraction, offline on the saved closure, with a hermetic HOME."""
+    archive, chain = artifacts[2:]
     tree = scratch / "suite-tree"
-    extract(archive, tree, evidence["commit_time"])
+    extract(archive, tree, commit_time)
     venv = chain.venv("venv-test")
     tools = {name: (pinned, frozenset({digest})) for name, pinned, digest in TOOLS}
     chain.pip(venv, "install", "--no-index", "--find-links", base / "toolhouse", "--find-links", base / "wheelhouse",
               "--only-binary=:all:", "--require-hashes", "-r", _requirements(scratch / "test-tools.txt", tools),
-              "-r", tree / evidence["constraints"]["file"], code="toolchain_failed")
+              "-r", tree / constraints, code="toolchain_failed")
     chain.pip(venv, "check", code="pip_check_failed")
     home = _private_dir(scratch / "suite-home")
     env = {**chain.env(venv), "HOME": str(home), "PYTHONPATH": str(tree / "src"), "PYTHONDONTWRITEBYTECODE": "1",
            "TMPDIR": tempfile.gettempdir(),
            "PATH": str(venv / "bin") + ":" + os.environ.get("PATH", SYSTEM_PATH)}
-    returncode = run_suite(venv / "bin" / "python", tree, base / "junit.xml", base / "suite.log", env)
-    report = suite_report(base / "junit.xml", base / "suite.log")
-    check_tests(report, returncode)
-    return report
+    returncode = run_suite(venv / "bin" / "python", tree, out / "junit.xml", out / "suite.log", env)
+    return suite_report(out / "junit.xml", out / "suite.log"), returncode
+
+
+SUITE_COUNTS = ("tests", "passed", "failed", "errors", "skipped")
+
+
+def rerun_suite(artifacts: tuple, evidence: dict, base: Path, scratch: Path) -> dict:
+    """verify trusts no recorded result: the suite runs again from the fresh archive verify extracted."""
+    report, returncode = run_tests(artifacts, evidence["commit_time"], evidence["constraints"]["file"], base,
+                                   scratch, _private_dir(scratch / "rerun"))
+    return {**{key: report[key] for key in SUITE_COUNTS}, "returncode": returncode}
 
 
 def canonical(evidence: dict) -> bytes:
@@ -945,7 +1048,10 @@ def run(args: argparse.Namespace) -> int:
             shutil.copyfile(artifact, dist / artifact.name)
             os.chmod(dist / artifact.name, 0o600)
             need(sha256_file(dist / artifact.name) == sha256_file(artifact), "build_failed")
-        evidence["tests"] = run_tests(evidence, workdir, scratch)
+        report, returncode = run_tests(evidence["_artifacts"], evidence["commit_time"],
+                                       evidence["constraints"]["file"], workdir, scratch, workdir)
+        check_tests(report, returncode)
+        evidence["tests"] = report
         del evidence["_artifacts"]
         for kind in ("sdist", "wheel"):
             evidence[kind]["sha256"] = sha256_file(workdir / evidence[kind]["file"])
@@ -1005,7 +1111,7 @@ def delegate(git: Git, evidence: dict, path: Path, scratch: Path) -> int | None:
         raise GateRefusal("gate_mismatch") from None
 
 
-def verify(args: argparse.Namespace, derive_evidence=derive) -> int:
+def verify(args: argparse.Namespace, derive_evidence=derive, rerun=rerun_suite) -> int:
     path = outside_tmp(args.evidence, None, "evidence_invalid")
     evidence = load_evidence(path)
     base = path.parent
@@ -1027,13 +1133,15 @@ def verify(args: argparse.Namespace, derive_evidence=derive) -> int:
         need(tests == evidence["tests"], "evidence_mismatch", "tests")
         check_tests(tests, 0)
         derived = derive_evidence(git, evidence["commit"], evidence["previous_tag"], base, scratch, online=False)
-        sdist, wheel = derived.pop("_artifacts")[:2]
+        artifacts = derived.pop("_artifacts")
         need(derived["toolchain"] == evidence["toolchain"], "toolchain_mismatch")
-        for kind, artifact in (("sdist", sdist), ("wheel", wheel)):
+        for kind, artifact in (("sdist", artifacts[0]), ("wheel", artifacts[1])):
             need(sha256_file(artifact) == sha256_file(base / evidence[kind]["file"]), "evidence_mismatch", kind)
-        derived["tests"] = tests
-        for key in sorted(EVIDENCE_KEYS):
+        for key in sorted(EVIDENCE_KEYS - {"tests"}):
             need(derived[key] == evidence[key], "evidence_mismatch", key)
+        again = rerun(artifacts, evidence, base, scratch)
+        need(again.get("returncode") == 0 and all(again.get(key) == tests[key] for key in SUITE_COUNTS),
+             "evidence_mismatch", "tests")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     print("release gate verified")

@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import tomllib
 import unittest
+from unittest import mock
 import zipfile
 
 import telegram_search_mcp
@@ -30,7 +31,16 @@ gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gate)
 VERSION = "1.2.3"
 EPOCH = 1700000000
-OUTSIDE_TMP = not any(Path(tempfile.gettempdir()).resolve().is_relative_to(root) for root in gate.TMP_ROOTS)
+GUARD = (TESTS / "test_public_tree_privacy.py").read_text(encoding="utf-8")
+ALLOWED_ID = "-100" "1234567890"  # allowlisted by the guard for tests/test_schemas.py only
+COUNTS = {"tests": 2, "passed": 1, "failed": 0, "errors": 0, "skipped": 1}
+
+
+def admitting(root: Path):
+    """These tests live in the OS temp dir: drop only the refused temp roots that hold `root`."""
+    held = gate._folded(os.path.realpath(root))
+    return mock.patch.object(gate, "TMP_ROOTS", tuple(
+        r for r in gate.TMP_ROOTS if not gate._under(held, gate._folded(os.path.realpath(r)))))
 
 PROBE = '''
 import os
@@ -147,8 +157,12 @@ class GateCase(unittest.TestCase):
     def refused(self, code: str):
         return self.assertRaisesRegex(gate.GateRefusal, f"^{code}$")
 
+    def admit(self) -> None:
+        patcher = admitting(self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-@unittest.skipUnless(OUTSIDE_TMP, "release gate tests need a temporary directory outside /tmp")
+
 class RunRefusalTests(GateCase):
     def setUp(self) -> None:
         super().setUp()
@@ -169,22 +183,57 @@ class RunRefusalTests(GateCase):
                                        str(workdir), "--repo", str(self.repo))[2], f"release gate refused: {code}\n")
         self.assertFalse(workdir.exists())
 
-    def test_workdir_under_tmp_inside_repo_or_not_empty_is_refused(self) -> None:
+    def run_in(self, workdir: str) -> tuple[int, str, str]:
+        return self.main("run", "--commit", self.head, "--previous-tag", "v0.0.1", "--workdir", workdir,
+                         "--repo", str(self.repo))
+
+    def test_workdir_under_any_temp_root_or_relative_is_refused(self) -> None:
+        token = secrets.token_hex(8)
+        refused = (f"/tmp/tgmcp-gate-{token}", f"/private/tmp/tgmcp-gate-{token}", f"/PRIVATE/TMP/tgmcp-gate-{token}",
+                   f"/TMP/tgmcp-gate-{token}", f"//tmp/tgmcp-gate-{token}", f"/tmp/../tmp/tgmcp-gate-{token}",
+                   f"/var/folders/zz/tgmcp-gate-{token}/T", f"/private/var/folders/zz/tgmcp-gate-{token}",
+                   f"/Private/Var/Folders/tgmcp-gate-{token}")
+        for workdir in refused:
+            with self.subTest(workdir=workdir):
+                self.assertEqual(self.run_in(workdir), (1, "", "release gate refused: workdir_under_tmp\n"))
+                with self.refused("workdir_under_tmp"):
+                    gate.outside_tmp(Path(workdir), None)
+        for workdir in (f"tgmcp-gate-{token}", f"./tgmcp-gate-{token}/x"):
+            with self.subTest(workdir=workdir):
+                self.assertEqual(self.run_in(workdir), (1, "", "release gate refused: invalid_workdir\n"))
+        for workdir in refused + (f"tgmcp-gate-{token}",):
+            self.assertFalse(Path(workdir).exists())
+
+    def test_workdir_inside_repo_or_not_empty_is_refused(self) -> None:
+        self.admit()
         busy = self.root / "busy"
         busy.mkdir()
         (busy / "stale.json").write_text("{}")
-        token = secrets.token_hex(8)
-        cases = ((f"/tmp/tgmcp-gate-{token}", "workdir_under_tmp"),
-                 (f"/private/tmp/tgmcp-gate-{token}", "workdir_under_tmp"),
-                 (str(self.repo / "evidence"), "workdir_inside_repo"), (str(busy), "workdir_not_empty"))
+        cases = ((str(self.repo / "evidence"), "workdir_inside_repo"),
+                 (str(self.repo / "evidence").upper(), "workdir_inside_repo"), (str(busy), "workdir_not_empty"))
         for workdir, code in cases:
             with self.subTest(code=code):
-                result = self.main("run", "--commit", self.head, "--previous-tag", "v0.0.1", "--workdir", workdir,
-                                   "--repo", str(self.repo))
-                self.assertEqual(result, (1, "", f"release gate refused: {code}\n"))
-        self.assertFalse(Path(f"/tmp/tgmcp-gate-{token}").exists())
+                self.assertEqual(self.run_in(workdir), (1, "", f"release gate refused: {code}\n"))
         self.assertFalse((self.repo / "evidence").exists())
         self.assertEqual(sorted(p.name for p in busy.iterdir()), ["stale.json"])
+
+    def test_evidence_under_a_temp_root_or_relative_is_refused(self) -> None:
+        token = secrets.token_hex(8)
+        for path in (f"/tmp/tgmcp-{token}/evidence.json", f"/PRIVATE/TMP/tgmcp-{token}/evidence.json",
+                     f"/var/folders/zz/tgmcp-{token}/evidence.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.main("verify", "--evidence", path),
+                                 (1, "", "release gate refused: workdir_under_tmp\n"))
+        self.assertEqual(self.main("verify", "--evidence", f"tgmcp-{token}/evidence.json"),
+                         (1, "", "release gate refused: evidence_invalid\n"))
+
+    def test_release_candidate_previous_tag_is_accepted(self) -> None:
+        git(self.repo, "tag", "v0.0.2rc1", self.previous)
+        self.assertEqual(gate.resolve_tag(gate.Git(self.repo), "v0.0.2rc1", self.head), self.previous)
+        self.assertTrue(gate.TAG.fullmatch("v0.52.0rc12"))
+        for tag in ("v0.0.2-rc1", "v0.0.2rc", "v0.0.2RC1", "v0.0.2rc1x", "v0.0.2a1"):
+            with self.subTest(tag=tag), self.refused("invalid_tag"):
+                gate.resolve_tag(gate.Git(self.repo), tag, self.head)
 
     def test_usage_errors_never_echo_arguments(self) -> None:
         secret = "SYNTHETIC_SECRET_SENTINEL"
@@ -303,29 +352,60 @@ class ConstraintsTests(unittest.TestCase):
                 gate.parse_constraints(text)
 
 
-@unittest.skipUnless(OUTSIDE_TMP, "release gate tests need a temporary directory outside /tmp")
 class PrivacyAndIdentityTests(GateCase):
-    def test_privacy_hit_names_the_member_but_never_the_matched_text(self) -> None:
-        repo, previous, head = synthetic_repo(
-            self.root, {"README.md": "public\n"},
-            {gate.PRIVACY_SOURCE: 'PRIVACY_PATTERNS = ("SYNTH[E]TIC-LEAK",)\n', "docs/leak.md": "a SYNTHETIC-LEAK\n"})
-        sdist, wheel = self.root / "s.tar.gz", self.root / "w.whl"
-        make_sdist(sdist, {"clean.txt": b"public\n"})
+    DATA_FILES = {"share/telegram-search-mcp/tests": ["tests/test_schemas.py"]}
+
+    def scan(self, tracked: dict[str, str], wheel_members: dict[str, str] | None = None, *,
+             guard: str | None = GUARD, message: str | None = None) -> tuple[dict, str]:
+        """The gate's privacy scan of a synthetic release whose sdist ships `tracked`."""
+        base = self.root / secrets.token_hex(4)
+        base.mkdir()
+        files = {**tracked, **({} if guard is None else {gate.PRIVACY_SOURCE: guard})}
+        repo, previous, head = synthetic_repo(base, {"README.md": "public\n"}, files)
+        if message is not None:
+            git(repo, "commit", "-q", "--allow-empty", "-m", message)
+            head = git(repo, "rev-parse", "HEAD")
+        sdist, wheel = base / "s.tar.gz", base / "w.whl"
+        make_sdist(sdist, {name: text.encode() for name, text in tracked.items()})
         with zipfile.ZipFile(wheel, "w") as archive:
-            archive.writestr("pkg/leak.txt", "SYNTHETIC-LEAK")
-        sources = {gate.PRIVACY_SOURCE: ("", False), "docs/leak.md": ("", False)}
-        source, patterns = gate.privacy_patterns(repo, sources)
-        self.assertEqual((source, patterns), (gate.PRIVACY_SOURCE, ["SYNTH[E]TIC-LEAK"]))
-        report = gate.privacy_scan(gate.Git(repo), previous, head, source, patterns, sdist, wheel)
-        self.assertEqual(report["hits"], [{"source": "diff", "path": "docs/leak.md", "pattern": 0},
-                                          {"source": "wheel", "path": "pkg/leak.txt", "pattern": 0}])
+            for name, text in (wheel_members or {f"{gate.DIST}/__init__.py": "VALUE = 1\n"}).items():
+                archive.writestr(name, text)
+        sources = {name: (sha(text.encode()), False) for name, text in files.items()}
+        return gate.privacy_scan(gate.Git(repo), previous, head, repo, sources, sdist, wheel, VERSION,
+                                 self.DATA_FILES), head
+
+    def test_allowlisted_value_passes_only_in_its_shipped_file(self) -> None:
+        line = f"ID = {ALLOWED_ID}\n"
+        data = f"{gate.DIST}-{VERSION}.data/data/share/telegram-search-mcp/tests/test_schemas.py"
+        report, _ = self.scan({"tests/test_schemas.py": line, "docs/clean.md": "public\n"}, {data: line})
+        gate.check_privacy(report)
+        self.assertEqual((report["guard"], report["guard_sha256"], report["hits"]),
+                         (gate.PRIVACY_SOURCE, sha(GUARD.encode()), []))
+        self.assertIn("chat_id", report["rules"])
+        self.assertGreater(report["allow"], 0)
+        self.assertEqual(report["scanned"], {"sdist_members": 5, "wheel_members": 1, "diff_files": 3,
+                                             "diff_lines": len(GUARD.splitlines()) + 2, "commits": 1})
+        report, _ = self.scan({"tests/test_schemas.py": line, "docs/other.md": "fine\n" + line},
+                              {data: line, f"{gate.DIST}/leak.py": line})
+        self.assertEqual(report["hits"], ["diff/docs/other.md:2:chat_id", "sdist/docs/other.md:2:chat_id",
+                                          f"wheel/src/{gate.DIST}/leak.py:1:chat_id"])
         with self.refused("privacy_hit") as caught:
             gate.check_privacy(report)
-        self.assertNotIn("SYNTHETIC-LEAK", json.dumps(caught.exception.detail) + json.dumps(report))
-        self.assertEqual(gate.privacy_patterns(repo, {"docs/leak.md": ("", False)}), ("not_available", []))
-        (repo / gate.PRIVACY_SOURCE).write_text("PRIVACY_PATTERNS = load()\n")
-        with self.refused("privacy_patterns_invalid"):
-            gate.privacy_patterns(repo, sources)
+        self.assertEqual(caught.exception.detail, {"hits": report["hits"], "total": 3})
+        self.assertNotIn(ALLOWED_ID.removeprefix("-"), json.dumps(caught.exception.detail) + json.dumps(report))
+
+    def test_commit_message_hit_refuses(self) -> None:
+        report, head = self.scan({"docs/clean.md": "public\n"}, message="Fix the reply\n\nseen in msg " "631242752\n")
+        self.assertEqual((report["scanned"]["commits"], report["hits"]), (2, [f"commit/{head}:3:message_id"]))
+        with self.refused("privacy_hit"):
+            gate.check_privacy(report)
+
+    def test_missing_or_broken_privacy_guard_refuses(self) -> None:
+        guards = (None, "ALLOW = ()\n", "def scan_text(path, text, literals=()):\n    return []\n",
+                  "raise SystemExit(3)\n", "ALLOW = ()\ndef scan_text(path, text, literals=()):\n    return None\n")
+        for guard in guards:
+            with self.subTest(guard=guard), self.refused("privacy_guard_missing"):
+                self.scan({"docs/clean.md": "public\n"}, guard=guard)
 
     def test_identities_are_a_classified_report(self) -> None:
         repo, previous, head = synthetic_repo(self.root, {"a.txt": "1\n"}, {"a.txt": "2\n"})
@@ -380,10 +460,11 @@ class SmokeAndSuiteTests(GateCase):
             gate.check_tests(report, returncode)
 
 
-@unittest.skipUnless(OUTSIDE_TMP, "release gate tests need a temporary directory outside /tmp")
 class VerifyTests(GateCase):
     def setUp(self) -> None:
         super().setUp()
+        self.admit()
+        self.rerun = {**COUNTS, "returncode": 0}
         self.repo = synthetic_repo(self.root, {"README.md": "one\n"}, {"README.md": "two\n"})[0]
         self.base = self.root / "evidence"
         (self.base / "dist").mkdir(parents=True)
@@ -411,8 +492,9 @@ class VerifyTests(GateCase):
                         "record_entries": 10},
             "smoke": {"server_version": VERSION, "tool_count": 55, "tools_sha256": "0" * 64,
                       "schema_fingerprint": "1" * 64, "capabilities": 33},
-            "privacy": {"pattern_source": "not_available", "patterns": 0, "hits": [],
-                        "scanned": {"diff_lines": 1, "sdist_members": 9, "wheel_members": 8}},
+            "privacy": {"guard": gate.PRIVACY_SOURCE, "guard_sha256": "2" * 64, "rules": ["chat_id", "email"],
+                        "allow": 1, "hits": [], "scanned": {"sdist_members": 9, "wheel_members": 8, "diff_files": 1,
+                                                            "diff_lines": 1, "commits": 1}},
             "identities": {"commits": 1, "identities": []}}
         self.evidence = {**copy.deepcopy(self.derived),
                          "tests": gate.suite_report(self.base / "junit.xml", self.base / "suite.log")}
@@ -422,12 +504,17 @@ class VerifyTests(GateCase):
         self.assertEqual((commit, tag, base, online), (self.derived["commit"], "v0.0.1", self.base, False))
         return {**copy.deepcopy(self.derived), "_artifacts": (self.sdist, self.wheel, None, None)}
 
+    def fake_rerun(self, artifacts, evidence, base, scratch):
+        self.assertEqual((artifacts[:2], evidence["commit"], base), ((self.sdist, self.wheel), "a" * 40, self.base))
+        self.assertTrue(scratch.is_relative_to(self.base))
+        return dict(self.rerun)
+
     def verify(self, evidence: dict) -> int:
         self.path.unlink(missing_ok=True)
         gate.write_evidence(self.path, evidence)
         args = argparse.Namespace(evidence=self.path, repo=self.repo, delegated=False)
         try:
-            return gate.verify(args, derive_evidence=self.fake_derive)
+            return gate.verify(args, derive_evidence=self.fake_derive, rerun=self.fake_rerun)
         finally:
             self.assertEqual(sorted(p.name for p in self.base.iterdir()),
                              ["dist", "evidence.json", "junit.xml", "suite.log"])
@@ -452,7 +539,8 @@ class VerifyTests(GateCase):
                  (edit(("tests", "passed"), 2), "evidence_mismatch"),
                  (edit(("tests", "skips"), []), "evidence_mismatch"),
                  (edit(("smoke", "tool_count"), 54), "evidence_mismatch"),
-                 (edit(("privacy", "hits"), [{"source": "diff", "path": "x", "pattern": 0}]), "evidence_mismatch"),
+                 (edit(("privacy", "hits"), ["diff/x:1:email"]), "evidence_mismatch"),
+                 (edit(("privacy", "guard_sha256"), "3" * 64), "evidence_mismatch"),
                  (edit(("install", "freeze"), ["mcp==2.2.1", f"{gate.PROJECT}=={VERSION}"]), "evidence_mismatch"),
                  (edit(("identities", "commits"), 2), "evidence_mismatch"),
                  (edit(("tree",), "9" * 40), "evidence_mismatch"),
@@ -469,7 +557,18 @@ class VerifyTests(GateCase):
         self.path.write_text(json.dumps(self.evidence, indent=2, sort_keys=True) + "\n")
         args = argparse.Namespace(evidence=self.path, repo=self.repo, delegated=False)
         with self.refused("evidence_invalid"):
-            gate.verify(args, derive_evidence=self.fake_derive)
+            gate.verify(args, derive_evidence=self.fake_derive, rerun=self.fake_rerun)
+
+    def test_rerun_suite_counts_must_match_the_evidence(self) -> None:
+        for change in ({"passed": 0, "failed": 1}, {"passed": 2, "skipped": 0}, {"tests": 3, "passed": 2},
+                       {"errors": 1}, {"returncode": 1}):
+            self.rerun = {**COUNTS, "returncode": 0, **change}
+            with self.subTest(change=change), self.refused("evidence_mismatch") as caught:
+                self.verify(self.evidence)
+            self.assertEqual(caught.exception.detail, "tests")
+        self.rerun = {**COUNTS, "returncode": 0}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.verify(self.evidence), 0)
 
     def test_changed_artifact_or_junit_on_disk_is_refused(self) -> None:
         self.wheel.write_bytes(b"other wheel")
@@ -480,7 +579,3 @@ class VerifyTests(GateCase):
                                                                                          'message="edited"'))
         with self.refused("evidence_mismatch"):
             self.verify(self.evidence)
-
-    def test_evidence_under_tmp_is_refused(self) -> None:
-        self.assertEqual(self.main("verify", "--evidence", f"/tmp/tgmcp-{secrets.token_hex(8)}/evidence.json"),
-                         (1, "", "release gate refused: workdir_under_tmp\n"))

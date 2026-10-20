@@ -16,7 +16,9 @@ HOME="$TMPDIR/tgmcp-home" .venv/bin/python -m pytest -q -p no:cacheprovider -W i
 ```
 
 Baseline: full suite green (see the latest release gate evidence). Dev venv:
-`python3 -m venv .venv && .venv/bin/pip install -e . pytest tomlkit==0.13.3`.
+`python3 -m venv .venv && .venv/bin/pip install -e . pytest tomlkit==0.13.3 build==1.3.0`
+(with `build`, the release-package tests run instead of skipping; they build with
+`--no-isolation`, so a Python 3.12+ venv also needs the pinned backend `setuptools==80.9.0`).
 
 ## Local installation
 
