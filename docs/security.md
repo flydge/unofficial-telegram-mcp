@@ -109,7 +109,7 @@ editMessageText (closed plain-text shape for one own text message, only after ex
 
 `addChatToList` has one closed shape, validated before transport and built by the broker from an approved draft; callers supply nothing but the draft: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and `chat_list` exactly `{"@type":"chatListMain"}` or `{"@type":"chatListArchive"}`, with no other key. A folder list (`chatListFolder`), a null or string list, an extra key or a boolean or zero chat ID raises a forbidden-request error before the request reaches TDLib.
 
-`editMessageText` likewise has one closed shape built from an approved draft: `chat_id` (non-zero), `message_id` (1 to 2^53-1), `reply_markup` exactly `null` and `input_message_content` exactly `{"@type":"inputMessageText","text":{"@type":"formattedText","text":<1 to 4096 characters>,"entities":[]},"link_preview_options":null,"clear_draft":false}`. The text must already be in normalized form (NFKC, line feed only, no control or format characters other than line feed and tab), must not start or end with whitespace and must contain none of tab, U+2028 to U+202E, U+030A, U+0333 and U+033F. Any other key, type or value (entities or styles, a reply markup, link-preview options, draft clearing, another content constructor, unnormalized or edge-whitespace text) raises a forbidden-request error before the request reaches TDLib.
+`editMessageText` likewise has one closed shape built from an approved draft: `chat_id` (non-zero), `message_id` (1 to 2^53-1), `reply_markup` exactly `null` and `input_message_content` exactly `{"@type":"inputMessageText","text":{"@type":"formattedText","text":<1 to 4096 characters>,"entities":[]},"link_preview_options":null,"clear_draft":false}`. The text must already be in the shared normalized form (NFKC, line feed only, no control or format characters other than line feed, and Telegram's rewrite already applied): no edge whitespace and none of tab, U+2028 to U+202E, U+030A, U+0333 and U+033F. Any other key, type or value (entities or styles, a reply markup, link-preview options, draft clearing, another content constructor, unnormalized or edge-whitespace text) raises a forbidden-request error before the request reaches TDLib.
 
 `getChatListsToAddChat` is a read with one closed shape: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and no other key; any extra key or a boolean, zero, string or out-of-range chat ID raises a forbidden-request error before the request reaches TDLib. `loadChats` admits exactly the limits 50 (catalog lane) and 100 (the one-shot load above) for `chatListMain` or `chatListArchive`.
 
@@ -2245,33 +2245,29 @@ link-preview options) is hashed as `source_sha256`, shown to the owner, bound in
 compared at apply before the dialog and compared again inside the provider call after approval. A missing
 or mistyped safety field is never treated as safe.
 
-**The stored text is the reviewed text.** The edit request carries no entities, and the pinned TDLib
-(td/telegram/misc.cpp at d1085f9) cleans message text before sending with `clean_input_string`; Telegram
-also trims edge whitespace. A text that these steps would change would differ from the text the dialog
-calls exact, so the broker refuses such a `new_text` at preparation with `invalid_input` and a fixed
-detail instead of stripping or rewriting it:
+**The stored text is the reviewed text.** The pinned TDLib (td/telegram/misc.cpp at d1085f9) cleans
+message text and captions before sending with `clean_input_string`, and Telegram trims edge whitespace.
+Since the owner's 20.10.2026 decision the shared normalization of every text send, caption and edit
+applies the same rewrite before the preview, so the dialog shows exactly the text Telegram stores:
 
-| `new_text` contains | TDLib or Telegram does | After the shared normalization (NFKC, CRLF and CR to LF, controls but LF and tab refused) | Edit |
-| --- | --- | --- | --- |
-| whitespace as the first or last character (space, LF, tab, U+2028, U+2029, U+1680; after NFKC also no-break and ideographic spaces, and U+00A8 as a leading space) | Telegram trims it | survives | refused: `new text must not start or end with whitespace; Telegram trims it` |
-| U+0000 to U+0009, U+000B, U+000C, U+000E to U+001F | replaced by a space | only tab survives | tab refused with the rewritten-characters detail below; the others are refused by the normalization |
-| U+000D | removed | never present (normalized to LF) | n/a |
-| U+000A, interior U+0020 | kept | kept | admitted |
-| U+2028, U+2029 | removed | survive (line and paragraph separators) | refused with the rewritten-characters detail |
-| U+030A, U+0333, U+033F | removed | survive after NFKC | refused with the rewritten-characters detail |
-| U+202A to U+202E | removed | already refused as format characters | refused with the generic `invalid_input` detail |
-| a run of two or more U+200E or U+200F | all but the last become U+200C | already refused as format characters | refused with the generic `invalid_input` detail |
-| more than 35 000 bytes | truncated | impossible (at most 4096 characters) | n/a |
+| Input contains | TDLib or Telegram does | Shared normalization (NFKC, CRLF and CR to LF, then the rewrite) |
+| --- | --- | --- |
+| whitespace as the first or last character (space, LF, tab, U+2028, U+2029, U+1680; after NFKC also no-break and ideographic spaces, and U+00A8 as a leading space) | Telegram trims it | trimmed (Python whitespace, a superset of what Telegram trims) |
+| U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F | replaced by a space | refused as control characters |
+| U+0009 (tab) | replaced by a space | replaced by a space |
+| U+000D | removed | never present (normalized to LF) |
+| U+000A, interior U+0020 | kept | kept |
+| U+2028, U+2029 | removed | removed |
+| U+030A, U+0333, U+033F | removed | removed, repeating NFKC until stable (U+02DA and U+2017 contain them) |
+| U+202A to U+202E | removed | refused as format characters |
+| a run of two or more U+200E or U+200F | all but the last become U+200C | refused as format characters |
+| more than 35 000 bytes | truncated | impossible (at most 4096 characters) |
 
-The rewritten-characters detail is `new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)`.
-
-The check follows NFKC: "a" plus U+030A composes to "å" and passes, while U+02DA and U+2017 become a space
-plus U+030A or U+0333 and are refused. `TextEditSpec`, `TextEditDraftPreview` and the closed
-`editMessageText` shape apply the same set, so no path can send a text the dialog did not show exactly.
-**Known pre-existing behaviour, not changed here:** `prepare_text_send` and the other text sends share
-the same normalization, admit interior tabs, U+2028, U+2029 and these combining marks, and TDLib then
-rewrites them, so the reviewed text of a send can differ from the stored text (edge whitespace on sends
-was not examined). This is recorded for a later decision.
+A text that is empty after the rewrite is refused. `TextEditSpec`, `TextEditDraftPreview`, the closed
+`editMessageText` shape and the send-shape validators still reject any text that is not already in this
+form, so no path can send a text the dialog did not show exactly. Before this decision, edits refused
+such texts and sends admitted them unchanged; the two edit details for that remain in the schema as
+guards.
 
 **Single attempt and result.** The claim is single-use and taken only after owner approval. One request
 is sent and never repeated: not after a timeout, a malformed or lost result, a transport error, an

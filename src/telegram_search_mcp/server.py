@@ -1335,7 +1335,7 @@ def build_server(
 
     @server.tool(name="prepare_chat_archive", description=(
         "Prepare moving exactly one chat between the Main and Archive chat lists (target_list archive or main). "
-        "Requires default-off archive_chats and send. Secret chats and chats in neither list are refused as "
+        "Requires default-off archive_chats, send and read. Secret chats and chats in neither list are refused as "
         "unsupported_chat; a chat already in target_list returns already_in_target without a draft. Returns an "
         "immutable preview: account, chat ID, sanitized title and kind, current and target list, a note that "
         "Telegram may move an archived chat with notifications enabled back to Main on new messages, and "
@@ -1359,12 +1359,12 @@ def build_server(
 
     @server.tool(name="prepare_text_edit", description=(
         "Prepare replacing the whole text of exactly one of your own outgoing text messages with new_text "
-        "(plain text, normalized like prepare_text_send; no styles). Requires default-off edit_own_text and "
-        "send. Incoming, non-text, forwarded, reply-markup, self-destructing, auto-deleting, scheduled or "
+        "(plain text, normalized like prepare_text_send; no styles). Requires default-off edit_own_text, send "
+        "and read. Incoming, non-text, forwarded, reply-markup, self-destructing, auto-deleting, scheduled or "
         "still-sending messages, messages Telegram no longer lets you edit, hidden or parameterized formatting "
-        "and an unchanged text are refused with a content-free code; new_text that starts or ends with "
-        "whitespace or contains characters Telegram rewrites (tab, U+2028-U+202E, U+030A, U+0333, U+033F) is "
-        "refused as invalid_input with a fixed detail. Returns an immutable preview: the chat with its kind, "
+        "and an unchanged text are refused with a content-free code. The normalization already applies "
+        "Telegram's own rewrites (tab to space; U+2028, U+2029, U+030A, U+0333 and U+033F removed; edge "
+        "whitespace trimmed), so the new text shown is the text Telegram stores. Returns an immutable preview: the chat with its kind, "
         "current and new text as marked untrusted evidence in reversible JSON escapes, all current formatting "
         "entities (raw UTF-16 offsets; the plain-text edit drops them, and Telegram re-detects automatic ones "
         "such as links and mentions), the current edit_date, source_sha256 and preview_sha256. Link-preview "

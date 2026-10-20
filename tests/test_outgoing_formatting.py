@@ -95,6 +95,10 @@ class OutgoingFormattingTests(unittest.TestCase):
             {"@type": "textEntity", "offset": 4, "length": 4, "type": {"@type": "textEntityTypeItalic"}},
             {"@type": "textEntity", "offset": 8, "length": 2, "type": {"@type": "textEntityTypeSpoiler"}},
         ])
+        # Telegram's own rewrite is part of the final text too (owner decision 20.10.2026).
+        rewritten = _safe_message_text(" \tHi\u2028there\tyou \n")
+        self.assertEqual(rewritten, "Hithere you")
+        self.assertEqual(self.facts(rewritten, self.freeze(rewritten, [span(8, 3, I)])), ((8, 3, I, "you"),))
         # A former raw span can remain valid: do not guess intent or rebase it.
         shifted = self.freeze(final, [span(3, 4)])
         self.assertEqual(self.facts(final, shifted), ((3, 4, B, "\nCaf"),))

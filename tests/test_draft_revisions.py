@@ -48,6 +48,23 @@ class RevisionBoundaryTests(unittest.TestCase):
         self.assertEqual(sent['status'], 'sent')
         self.assertEqual(self.sender.sent, [(123, 'Final\ntext')])
 
+    def test_prepare_shows_and_sends_the_text_telegram_stores(self):
+        # Owner decision 20.10.2026: Telegram's own rewrites (tab to space; U+2028, U+2029, U+030A, U+0333 and
+        # U+033F removed; edge whitespace trimmed) apply before the preview, so the approved text is the stored one.
+        stored = 'lineone and  two'
+        result = self.dispatch('prepare_text_send', {'recipient': 123, 'text': ' \tline\u2028one\tand \u0333 two \n'})
+        self.assertEqual((result['status'], result['text']), ('prepared', stored))
+        self.assertEqual(result['sha256'], hashlib.sha256(stored.encode()).hexdigest())
+        revised = self.revise(result['draft_id'], text='x\u2017y\t')
+        self.assertEqual(revised['text'], 'x y')
+        sent = self.dispatch('send_prepared_text', {'draft_id': revised['draft_id'], 'approved': True})
+        self.assertEqual(sent['status'], 'sent')
+        self.assertEqual(self.sender.sent, [(123, 'x y')])
+        for blank in ('\t \u2028', '\u2029\n'):
+            with self.subTest(blank=blank):
+                self.assertNotEqual(self.dispatch('prepare_text_send', {'recipient': 123, 'text': blank})['status'],
+                                    'prepared')
+
     def test_update_or_refresh_while_approval_open_prevents_old_send(self):
         for operation in ('update_draft', 'refresh_draft'):
             with self.subTest(operation=operation):

@@ -435,7 +435,7 @@ class PrepareTests(VideoFixture, unittest.TestCase):
         artifact_id = self.store(name='../p\u0430ypal\u202e4pm.exe\u200b.mp4')
         video = self.prepare(artifact_id, caption='Pay \u202eNOW\u200b\r\n\tok \U0001F600 \ufb01')
         self.assertEqual(video['display_name'], MARK + escape('p\u0430ypal4pm.exe.mp4'))
-        self.assertEqual(video['caption'], MARK + escape('Pay NOW\n\tok \U0001F600 fi'))
+        self.assertEqual(video['caption'], MARK + escape('Pay NOW\n ok \U0001F600 fi'))  # Tab as Telegram stores it.
         for raw in (video['display_name'], video['caption']):
             self.assertTrue(raw[len(MARK):].isascii())
 
@@ -885,10 +885,10 @@ class DialogTests(unittest.TestCase):
         self.assertNotIn('{', READABLE_RULE)
         plain = preview()
         self.assertEqual(shown(plain), [self.golden(plain, 'clip.mp4', 'Caption: (none)\n')])
-        caption = 'Hi "there"\nRecipient: Mom (chat 1)\tp\u0430ypal ⟦x Привет 日本 \U0001F600 »\nCodec: hevc «'
+        caption = 'Hi "there"\nRecipient: Mom (chat 1) p\u0430ypal ⟦x Привет 日本 \U0001F600 »\nCodec: hevc «'
         hostile = preview(name='p\u0430ypal ⟦1⟧ ».mp4', caption=caption)
         self.assertEqual(shown(hostile), [self.golden(hostile, 'p⟦U+0430⟧ypal ⟦U+27E6⟧1⟧ ⟦U+00BB⟧.mp4',
-            'Caption [untrusted] (exact): «Hi "there"⟦U+000A⟧Recipient: Mom (chat 1)⟦U+0009⟧'
+            'Caption [untrusted] (exact): «Hi "there"⟦U+000A⟧Recipient: Mom (chat 1) '
             'p⟦U+0430⟧ypal ⟦U+27E6⟧x Привет 日本 \U0001F600 ⟦U+00BB⟧⟦U+000A⟧Codec: hevc ⟦U+00AB⟧»\n')])
         self.assertEqual(readable(caption).count('\n'), 0)
         self.assertEqual(sum(readable(value).count(mark) for value in (caption, hostile.raw_display_name)

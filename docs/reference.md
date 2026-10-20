@@ -114,7 +114,8 @@ Pass an actual list of at most 32 closed records, for example
 The five fieldless types are `textEntityTypeBold`, `textEntityTypeItalic`,
 `textEntityTypeUnderline`, `textEntityTypeStrikethrough` and `textEntityTypeSpoiler`.
 Offsets and lengths are strict integers in UTF-16 code units of the **complete
-final normalized text** (NFKC, CRLF/CR converted to LF), on whole Unicode scalar
+final normalized text** (NFKC, CRLF/CR converted to LF, then Telegram's own rewrite: a tab becomes a
+space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; edge whitespace is trimmed), on whole Unicode scalar
 boundaries. Normalize and recalculate spans before preparation; no parser or
 automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
 and overlapping or adjacent spans of the same style are rejected. Distinct styles
@@ -2677,28 +2678,22 @@ direction.
 | `message_id` | Positive committed message ID (at most 2^53-1). |
 | `new_text` | The complete replacement text, plain text of 1 to 4096 characters. No styles, entities or links with hidden targets can be supplied. |
 
-Unknown fields are rejected. `new_text` is normalized like `prepare_text_send` (NFKC, CRLF and CR
-to LF; control and format characters other than line feed and tab are refused, as are empty,
-whitespace-only and over-long text) and the preview shows the normalized text; the proxy checks that
-the preview's new text equals the normalized request text. Because the edit replaces the stored text
-as given, two further local refusals precede every provider read; both are `status="refused"`,
-`refusal="invalid_input"` with a fixed detail, never silently corrected:
+Unknown fields are rejected. `new_text` is normalized like `prepare_text_send`:
+- NFKC, and CRLF and CR to LF;
+- control and format characters other than line feed and tab are refused;
+- Telegram's own rewrite is applied: a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F
+  are removed; the result is NFKC-stable; edge whitespace is trimmed;
+- empty and over-long results are refused.
 
-- **Edge whitespace.** After normalization the first or last character is any Unicode whitespace
-  (space, line feed, tab, U+2028, U+2029, U+1680, and no-break and ideographic spaces, which NFKC
-  turns into a space; U+00A8 also becomes a leading space). Telegram trims it, so the stored text
-  would differ from the text the dialog calls exact. Detail: `new text must not start or end with
-  whitespace; Telegram trims it`. Interior spaces and line breaks are kept exactly.
-- **Characters Telegram rewrites.** After normalization the text contains a tab, U+2028 to U+202E,
-  U+030A, U+0333 or U+033F. The pinned TDLib turns a tab into a space and removes the others while
-  cleaning the text before sending, so the dialog's exact text would not be stored. Detail: `new text
-  contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)`. The check
-  follows NFKC: "a" plus U+030A composes to "å" and passes, while U+02DA and U+2017 become a space plus
-  U+030A or U+0333 and are refused. U+202A to U+202E are format characters already refused by the
-  normalization with the generic detail below. Edge whitespace is checked first.
+The preview shows that text, which is exactly what Telegram stores. The proxy checks that the preview's
+new text equals the normalized request text.
 
-Text that fails the shared normalization (empty, whitespace-only, over-long, control or format
-characters) is `invalid_input` with the generic detail below.
+The rewrite follows NFKC: "a" plus U+030A composes to "å" and is kept, while U+02DA and U+2017 become a
+space plus a removed mark. Before the owner's 20.10.2026 decision such texts were refused. The two fixed
+details for that, `new text must not start or end with whitespace; Telegram trims it` and `new text
+contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)`, remain in the output
+schema only as guards for input that skipped the normalization. Text that fails the shared
+normalization is `invalid_input` with the generic detail below.
 
 ### Edit: refusals
 
@@ -2710,7 +2705,7 @@ text checks, chat identity, outgoing, content kind, forward, reply markup, the F
 
 | `refusal` | When |
 | --- | --- |
-| `invalid_input` | The new text fails normalization, has edge whitespace or contains characters Telegram rewrites. |
+| `invalid_input` | The new text fails normalization (empty after Telegram's rewrite, over-long, or with refused control or format characters). |
 | `not_outgoing` | The message is not an outgoing message of the account. |
 | `unsupported_source_content` | Content other than plain `messageText` (photo, document, sticker, poll and every other kind); the F14 projection bounds are exceeded (text over 4096 characters or over 100 entities, a projection over 64 KiB), entities that are not exact records on whole-scalar UTF-16 boundaries, malformed link-preview options; escaped text plus covered spans over 131072 characters. |
 | `source_is_forward` | The message carries forward information. |
@@ -2912,9 +2907,8 @@ Accepted limits, recorded rather than closed:
   owner dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt authority
   is unavailable; do not retry automatically") although it made no attempt. This is the pattern of
   forward and video sends; it errs towards unknown, never towards a second attempt or a false `applied`.
-- Plain text sends (`prepare_text_send`) share the text normalization and still admit interior tabs,
-  U+2028, U+2029 and the three combining marks that TDLib rewrites; only edits refuse them. See the
+- Text sends, captions and edits share one normalization that already applies Telegram's own rewrite
+  (owner decision 20.10.2026), so a reviewed text is the stored text. See the
   [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate).
-- A real owner-approved archive or unarchive and a real edit of an own test message have not been run;
-  the evidence is a synthetic provider and dialog. Synthetic checks do not establish real behaviour or
-  consumer readiness.
+- A real owner-approved archive and unarchive of a supergroup and a real edit of an own message were run
+  and read back on 20.10.2026.

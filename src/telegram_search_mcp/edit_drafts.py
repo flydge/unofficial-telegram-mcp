@@ -22,11 +22,11 @@ from .schemas import ChatId
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
 UNAVAILABLE = 'text edit draft is unavailable'
-# Telegram trims leading and trailing whitespace; refusing it keeps the exact dialog text stored.
+# Telegram trims edge whitespace and its clean_input_string rewrites the characters below. Since 20.10.2026
+# the shared normalisation applies those rewrites before the preview, so these checks only guard input that
+# skipped it; the two fixed details stay in the output schema.
 WHITESPACE = 'new text must not start or end with whitespace; Telegram trims it'
-# The pinned TDLib's clean_input_string (td/telegram/misc.cpp at d1085f9) turns a tab into a space and removes
-# U+2028-U+202E and the combining marks U+030A, U+0333 and U+033F anywhere in message text; the other
-# characters it rewrites are controls or format characters the normalisation already refuses.
+# U+202A-U+202E are format characters the normalisation already refuses.
 REWRITTEN_CHARACTERS = frozenset('\t\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u030a\u0333\u033f')
 REWRITTEN = 'new text contains characters Telegram rewrites (tab, U+2028–U+202E, U+030A, U+0333, U+033F)'
 PREVIEW_VERSION = 1

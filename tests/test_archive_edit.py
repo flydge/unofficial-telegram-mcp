@@ -1002,27 +1002,28 @@ class EditPrepareTests(Fixture, unittest.TestCase):
                     self.assertEqual(self.requests('getMessage'), [])  # Local normalisation precedes any read.
         self.assert_no_attempt()
 
-    def test_new_text_with_edge_whitespace_is_refused_never_stripped(self):
-        # Decision 1: Telegram trims edge whitespace, so the exact dialog text would not be stored.
-        # Checked after normalisation: NBSP, U+3000 and U+00A8 become a leading or trailing space.
-        for new in (' Hello', 'Hello ', 'Hello\n', '\nHello', '\tHello', 'Hello\t', 'Hello\r\n', 'Hello\r',
-                    'Hello\u2028', '\u2029Hello', '\u1680Hello', '\u3000Hello', 'Hello\u00a0', 'Hello\u2003',
-                    '\u00a8Hello', 'Hello there \n'):
+    def test_new_text_edge_whitespace_is_trimmed_in_the_preview(self):
+        # Owner decision 20.10.2026: Telegram trims edge whitespace, so the shared normalisation trims it before the
+        # preview and the dialog shows the stored text. NBSP, U+3000 and U+00A8 become a space first (NFKC).
+        for new, stored in ((' Hello', 'Hello'), ('Hello ', 'Hello'), ('Hello\n', 'Hello'), ('\nHello', 'Hello'),
+                            ('\tHello', 'Hello'), ('Hello\t', 'Hello'), ('Hello\r\n', 'Hello'), ('Hello\r', 'Hello'),
+                            ('Hello\u2028', 'Hello'), ('\u2029Hello', 'Hello'), ('\u1680Hello', 'Hello'),
+                            ('\u3000Hello', 'Hello'), ('Hello\u00a0', 'Hello'), ('Hello\u2003', 'Hello'),
+                            ('\u00a8Hello', '\u0308Hello'), ('Hello there \n', 'Hello there')):
+            with self.subTest(new=new):
+                self.setUp()
+                self.assertEqual(self.prepare_edit(new)['new_text'], MARK + escape(stored))
+        self.setUp()
+        preview = self.prepare_edit('Hello  there\nnext')  # Interior spaces and line breaks are kept.
+        self.assertEqual(preview['new_text'], MARK + escape('Hello  there\nnext'))
+        for new in ('   ', '\n\t\u2028'):  # Nothing is left after the rewrite: refused like an empty text.
             with self.subTest(new=new):
                 self.setUp()
                 result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
-                self.assertEqual(result, {'status': 'refused', 'text_edit': None, 'refusal': 'invalid_input',
-                                          'detail': WHITESPACE})
+                self.assertEqual((result['status'], result['refusal']), ('refused', 'invalid_input'))
                 self.assertEqual(self.requests('getMessage'), [])
-                self.assertEqual(self.broker._drafts.known_ids(), set())
-                proxy = BrokerClient(socket_path=Path('/nonexistent/no.sock'), policy=EDIT)
-                proxy._request = lambda *args: copy.deepcopy(result); self.addCleanup(proxy.close)
-                request = PrepareTextEditRequest(chat=CHAT, message_id=MID, new_text=new)
-                self.assertEqual(proxy.prepare_text_edit(request).model_dump(mode='json'), result)
-        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
-        preview = self.prepare_edit('Hello  there\nnext')  # Interior spaces and line breaks are not refused.
-        self.assertEqual(preview['new_text'], MARK + escape('Hello  there\nnext'))
-        for value in (' New', 'New\n', 'New\u2028'):
+        self.assert_no_attempt()
+        for value in (' New', 'New\n', 'New\u2028'):  # The models still refuse text that skipped normalisation.
             with self.subTest(value=value), self.assertRaises(ValueError):
                 TextEditSpec(snapshot=edit_snapshot(), new_text=value)
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -1032,35 +1033,26 @@ class EditPrepareTests(Fixture, unittest.TestCase):
             with self.subTest(status=status, refusal=refusal), self.assertRaises(ValueError):
                 PrepareTextEditResponse(status=status, refusal=refusal, detail=detail)
 
-    def test_new_text_with_characters_telegram_rewrites_is_refused(self):
-        # Lead decision (spec §8 amendment 7): the pinned TDLib turns a tab into a space and removes U+2028-U+202E,
-        # U+030A, U+0333 and U+033F, so such a text would not be stored as the dialog shows it. Checked after
-        # NFKC: U+02DA and U+2017 become a space plus U+030A or U+0333; a + U+030A composes to U+00E5 and passes.
-        for new in ('a\tb', 'Hello\u2028there', 'Hello\u2029there', 'x\u030a', 'a\u0333b', 'a\u033fb',
-                    'Temp 5\u02da', 'x\u2017y', 'tab\tinside and \u2028 too'):
+    def test_characters_telegram_rewrites_are_rewritten_in_the_preview_and_sent_exactly(self):
+        # Owner decision 20.10.2026: a tab becomes a space and U+2028, U+2029, U+030A, U+0333 and U+033F are removed
+        # before the preview, as the pinned TDLib would, so the dialog shows the stored text. After NFKC, U+02DA and
+        # U+2017 are a space plus U+030A or U+0333; a + U+030A composes to U+00E5 and is kept.
+        for new, stored in (('a\tb', 'a b'), ('Hello\u2028there', 'Hellothere'), ('Hello\u2029there', 'Hellothere'),
+                            ('x\u030a', 'x'), ('a\u0333b', 'ab'), ('a\u033fb', 'ab'), ('Temp 5\u02da', 'Temp 5'),
+                            ('x\u2017y', 'x y'), ('tab\tinside and \u2028 too', 'tab inside and  too'),
+                            ('Ra\u030ad', 'R\u00e5d')):
             with self.subTest(new=new):
                 self.setUp()
-                result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
-                self.assertEqual(result, {'status': 'refused', 'text_edit': None, 'refusal': 'invalid_input',
-                                          'detail': REWRITTEN})
-                self.assertEqual(self.requests('getMessage'), [])
-                self.assertEqual(self.broker._drafts.known_ids(), set())
-                proxy = BrokerClient(socket_path=Path('/nonexistent/no.sock'), policy=EDIT)
-                proxy._request = lambda *args: copy.deepcopy(result); self.addCleanup(proxy.close)
-                request = PrepareTextEditRequest(chat=CHAT, message_id=MID, new_text=new)
-                self.assertEqual(proxy.prepare_text_edit(request).model_dump(mode='json'), result)
-        for new, detail in (('\u202ex', 'message is not eligible for an own text edit; no draft was created'),
-                            ('Hello\t', WHITESPACE), ('\u2028Hello', WHITESPACE)):
-            with self.subTest(new=new):  # Format characters fail normalisation first; edge whitespace precedes.
-                self.setUp()
-                result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': new})
-                self.assertEqual((result['status'], result['refusal'], result['detail']),
-                                 ('refused', 'invalid_input', detail))
-        self.assert_no_attempt(); self.assertEqual(self.approvals, [])
+                self.assertEqual(self.prepare_edit(new)['new_text'], MARK + escape(stored))
         self.setUp()
-        preview = self.prepare_edit('Ra\u030ad')  # NFKC composes the ring: the preview shows U+00E5.
-        self.assertEqual(preview['new_text'], MARK + escape('R\u00e5d'))
-        for value in ('a\tb', 'a\u2029b', 'x\u030a', 'a\u0333b', 'a\u033fb'):
+        preview = self.prepare_edit('one\ttwo')
+        self.assertEqual(self.apply_edit(preview['draft_id'])['status'], 'applied')
+        [request] = self.requests('editMessageText')
+        self.assertEqual(request['input_message_content']['text']['text'], 'one two')
+        self.setUp()  # Format characters still fail normalisation.
+        result = self.dispatch('prepare_text_edit', {'chat': CHAT, 'message_id': MID, 'new_text': '\u202ex'})
+        self.assertEqual((result['status'], result['refusal']), ('refused', 'invalid_input'))
+        for value in ('a\tb', 'a\u2029b', 'x\u030a', 'a\u0333b', 'a\u033fb'):  # Models refuse unnormalised text.
             with self.subTest(value=value), self.assertRaises(ValueError):
                 TextEditSpec(snapshot=edit_snapshot(), new_text=value)
             with self.subTest(value=value), self.assertRaises(ValueError):

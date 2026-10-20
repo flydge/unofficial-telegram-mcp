@@ -5,7 +5,19 @@
 Release candidate. The real QR-first acceptance on the owner's Mac is recorded below, along with real
 approved forward/copy, native video, archive/unarchive and own-text edit runs. A clean macOS user
 installing the bundle that carries the application identity is deferred to the backlog
-([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). No version change or tag yet.
+([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). The owner reviewed the delegated
+F14/F15a/F17a decisions on 20.10.2026. No version change or tag yet.
+
+- Apply Telegram's own text rewrite before every preview (owner decision): text sends, replies, topic
+  sends, captions and own-text edits share one normalization.
+  - A tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed (with NFKC repeated
+    until stable); edge whitespace is trimmed.
+  - The reviewed text is now the stored text. Edits no longer refuse such texts, and sends no longer
+    send a text that Telegram silently changes.
+  - Style span offsets refer to this final text.
+- Require `read` for `archive_chats` and `edit_own_text` (owner decision): their prepare step reveals an
+  own message's text or a chat's title and list, so these narrow reads now need `read`. `read` is on by
+  default, so a normal setup is unaffected. A refusal names the missing `read`.
 
 - Real acceptance on the owner's Mac, 20.10.2026 (owner's macOS user, source install, Keychain
   identity): QR login, refresh, page Cancel and screen expiry; a 2FA login with the password typed
@@ -78,12 +90,11 @@ installing the bundle that carries the application identity is deferred to the b
   and makes one closed-shape `addChatToList` or `editMessageText` attempt with no retry. A move is
   `applied` only after the target list is observed, an edit only when the returned message carries
   exactly the new text and a non-zero edit date; anything else is `outcome_unknown`, and only a 4xx
-  provider error is `failed`. A new text with leading or trailing whitespace, or with a tab, U+2028 to
-  U+202E, U+030A, U+0333 or U+033F (which Telegram trims or rewrites), is refused instead of silently
-  changed; sponsored or announcement list positions are not list membership. The `_manifest`
+  provider error is `failed`. The new text gets the shared normalization, which applies Telegram's own
+  rewrite before the preview (see below); sponsored or announcement list positions are not list membership. The `_manifest`
   `forbidden` list now names exactly these two mutations instead of all edits. `get_send_status` reads
-  coarsely and never `sent` for these drafts, the generic draft tools do not expose them, and enabling
-  either capability also lets its prepare tool reveal that chat's or message's content. The earlier 51
+  coarsely and never `sent` for these drafts, the generic draft tools do not expose them, and because
+  each prepare tool reveals that chat's or message's content, both capabilities also require `read`. The earlier 51
   tool schemas are unchanged. A real own-text edit and a real archive and unarchive of a supergroup
   were applied and read back on 20.10.2026. See [reference](docs/reference.md#archiveunarchive-and-own-text-edit-f17a)
   and [security](docs/security.md#archive-and-own-text-edit-boundary-f17a-candidate).

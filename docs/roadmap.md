@@ -43,8 +43,13 @@ source install, the Keychain identity and two Telegram accounts:
 - **Bundle:** a bundle carrying the owner's application identity is assembled and verified offline
   with `bootstrap.sh --prepare-only`. It has not been installed yet.
 
-**Remaining 0.52.0 steps:** owner review of the delegated decisions in the F14, F15a and F17a
-specs, then the version and the tag.
+**Owner review done** on 20.10.2026: the delegated F14, F15a and F17a decisions are accepted. Two
+behaviour changes came out of it:
+- Telegram's own text rewrite is applied before every text, caption and edit preview, so the reviewed
+  text is the stored text.
+- `archive_chats` and `edit_own_text` also require `read`.
+
+**Remaining 0.52.0 step:** the version and the tag.
 
 **Moved to the backlog** by the owner on 20.10.2026: installing that bundle on a clean macOS user and
 connecting there. A kit is ready. Until that run happens, the bundle path is verified offline only.
@@ -73,10 +78,8 @@ connecting there. A kit is ready. Until that run happens, the bundle path is ver
   - an own-text edit was applied and read back;
   - a supergroup was archived and unarchived, with the target list observed each time;
   - Telegram's refusal to archive the service chat surfaced as `failed`, with no retry.
-- **Recorded residuals:**
-  - informational reads are granted by the two capabilities;
-  - a concurrent caller can read `outcome_unknown`;
-  - plain text sends are still rewritten by TDLib.
+- **Recorded residual:** a concurrent caller can read `outcome_unknown`. The informational reads and the
+  TDLib text rewrite were closed by the owner review.
 - **Not started:** captions, styled edits, pin/unpin and deletion.
 
 The local transfer CLI can now consume a short-lived upload authority issued by
@@ -106,7 +109,7 @@ packets remain failed evidence; they are not reclassified as successful runs.
 
 Still unfinished:
 
-- **First (0.52.0):** owner review of the F14, F15a and F17a delegated decisions.
+- **First (0.52.0):** the version and the tag.
 - **Backlog (deferred by the owner on 20.10.2026):** the clean macOS user install of the identity
   bundle, including an interrupted helper and a logout/login on that user.
 - **Next version — client coverage and distribution** (chosen by the owner on 20.10.2026):
@@ -172,8 +175,8 @@ different license are being considered, with no committed migration date; see
 | F11 | Draft inspection/revision/cancel/refresh | Implemented | Drafts are finite and client-scoped; reconnect/restart can invalidate state. |
 | F12 | Send-status inspection/correlation | Implemented | Unknown after state loss remains unknown; no automatic send retry or crash-boundary exactly-once promise. |
 | F13 | Replies, topic sends and outgoing styles | Partial | Plain/topic/reply paths and five text styles exist; retained rare source entities, formatted captions and applicable remaining live scenarios are not complete. |
-| F14 | Forward/copy | Partial (0.52 candidate): one-message forward/copy with real owner-approved copy and forward, read back through the official MCP SDK client (20.10.2026) | Visual check of the forward header in a Telegram app, and owner review of the spec's delegated decisions. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
-| F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); albums (F15b) planned | Ordered albums (F15b) with partial outcomes, and owner review of the spec's delegated decisions. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
+| F14 | Forward/copy | Partial (0.52 candidate): one-message forward/copy with real owner-approved copy and forward, read back through the official MCP SDK client (20.10.2026) | Visual check of the forward header in a Telegram app. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
+| F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); albums (F15b) planned | Ordered albums (F15b) with partial outcomes. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
 | F17 | Archive/edit/delete/pin actions | Partial (0.52 candidate): archive/unarchive of one chat and plain-text edit of one own message (F17a), with real owner-approved runs read back (20.10.2026) | Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
 | F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist. The 0.52 candidate adds real Codex (`codex exec`) and Claude Code searches on the owner's Mac. Still open: clean-user onboarding, Claude Desktop and plugin installs (next version), full source-family/protocol/recovery coverage and controlled TDLib upgrades. |
@@ -216,8 +219,9 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
    [approved requirements and acceptance gate](plans/0.52-qr-onboarding.md).
    - **Done:** QR-first onboarding is implemented (phases A–E) and accepted for real on the owner's
      Mac, including 2FA, revoke/reconnect and Claude Code and Codex searches (phase F, most of it).
-   - **Remaining:** owner review of the delegated F14/F15a/F17a decisions, then the version and
-     tag. The clean macOS user install is in the backlog (deferred by the owner on 20.10.2026).
+   - **Remaining:** the version and the tag. The owner reviewed the delegated F14/F15a/F17a decisions
+     on 20.10.2026. The clean macOS user install is in the backlog (deferred by the owner on the same
+     day).
    - **Out of scope:** mandatory end-user API-pair entry or Terminal-only login does not satisfy
      this scope.
 2. **Priority #2 — client coverage and distribution (next version):** the same QR-first setup

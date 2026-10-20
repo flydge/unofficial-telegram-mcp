@@ -1071,11 +1071,10 @@ messages, forwarded messages, messages with buttons, scheduled or self-destructi
 replacement text, several messages and deletion are unsupported.
 
 Settle the new text with the owner before preparing. `new_text` replaces the WHOLE text and is plain: all
-formatting of the old message is lost. It is normalized like a text send (NFKC, line feed line breaks). It
-must not start or end with whitespace, and must not contain a tab, U+2028 to U+202E, U+030A, U+0333 or
-U+033F: Telegram trims or rewrites those, so `prepare_text_edit` refuses them with `invalid_input` and a
-fixed detail instead of changing them. Report that to the owner; do not trim or substitute characters
-yourself.
+formatting of the old message is lost. It is normalized like a text send: NFKC, line feed line breaks,
+and Telegram's own rewrite (a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed;
+edge whitespace is trimmed). Show the owner the preview's new text, which is exactly what Telegram will
+store.
 
 Call `prepare_text_edit(chat, message_id, new_text)`. A `refused` or `unavailable` response is final for
 that request and content-free: report the code (`invalid_input`, `not_outgoing`,
