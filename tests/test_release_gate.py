@@ -503,6 +503,28 @@ class PrivacyAndIdentityTests(GateCase):
         history = gate.history_scan(gate.Git(repo), previous, merge, guard, ())
         self.assertEqual((history["commits"], history["findings"]), (3, [f"{merge[:12]}:README.md:2:chat_id"]))
 
+    def test_committed_attributes_cannot_hide_added_lines(self) -> None:
+        hit = f"fine\nID = {ALLOWED_ID}\n"
+        report, history, head = self.scan({".gitattributes": "*.md -diff binary\n", "docs/notes.md": hit})
+        self.assertIn("diff/docs/notes.md:2:chat_id", report["hits"])
+        self.assertIn(f"{head[:12]}:docs/notes.md:2:chat_id", history["findings"])
+
+    def test_octopus_merge_refuses_the_history_scan(self) -> None:
+        tree = self.root / "guard"
+        (tree / "tests").mkdir(parents=True)
+        (tree / gate.PRIVACY_SOURCE).write_text(GUARD)
+        guard = gate.load_guard(tree, {gate.PRIVACY_SOURCE: (sha(GUARD.encode()), False)})
+        repo, previous, _ = synthetic_repo(self.root, {"README.md": "one\n"}, {"README.md": "one\nmain\n"})
+        for branch in ("x", "y"):
+            git(repo, "checkout", "-q", "-b", branch, previous)
+            (repo / f"{branch}.txt").write_text(branch + "\n")
+            git(repo, "add", f"{branch}.txt")
+            git(repo, "commit", "-qm", branch)
+        git(repo, "checkout", "-q", "main")
+        git(repo, "merge", "-q", "--no-edit", "x", "y")
+        with self.refused("privacy_scan_bounds"):
+            gate.history_scan(gate.Git(repo), previous, git(repo, "rev-parse", "HEAD"), guard, ())
+
     def test_missing_or_broken_privacy_guard_refuses(self) -> None:
         guards = (None, "ALLOW = ()\n", "def scan_text(path, text, literals=()):\n    return []\n",
                   "raise SystemExit(3)\n", "ALLOW = ()\ndef scan_text(path, text, literals=()):\n    return None\n")

@@ -101,6 +101,7 @@ C_ESCAPES = dict(zip(b'abtnvfr"\\', b'\a\b\t\n\v\f\r"\\'))
 PATCH = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-prefix", "-U0",
          "--inter-hunk-context=0")
 MAX_HISTORY = 2000
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 RULE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_HITS = 100
 VERSION = re.compile(r'^__version__ = "([0-9]+(?:\.[0-9]+){1,3}(?:(?:a|b|rc)[0-9]+)?'
@@ -254,10 +255,14 @@ class Git:
                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1",
                     "LC_ALL": "C"}
 
-    def __call__(self, *args: str, code: str = "git_failed", check: bool = True, stdout: Path | None = None):
-        return _run([self.executable, "-C", self.repo, "-c", "core.quotepath=false", "-c", "tar.umask=0022",
-                     "-c", "core.attributesFile=" + os.devnull, *args], code, timeout=GIT_TIMEOUT, env=self.env,
-                    stdout=stdout, check=check)
+    def __call__(self, *args: str, code: str = "git_failed", check: bool = True, stdout: Path | None = None,
+                 tree_attributes: bool = True):
+        # tree_attributes=False reads attributes from the empty tree, so a committed .gitattributes
+        # (-diff, binary) cannot hide added lines from the privacy scans.
+        source = () if tree_attributes else ("--attr-source=" + EMPTY_TREE,)
+        return _run([self.executable, *source, "-C", self.repo, "-c", "core.quotepath=false", "-c",
+                     "tar.umask=0022", "-c", "core.attributesFile=" + os.devnull, *args], code, timeout=GIT_TIMEOUT,
+                    env=self.env, stdout=stdout, check=check)
 
     def text(self, *args: str, code: str = "git_failed") -> str:
         try:
@@ -761,8 +766,12 @@ def history_scan(git: Git, previous: str, commit: str, guard, literals: tuple[st
 
     Text added and removed again inside the range never reaches the tip diff, but stays in history,
     whose remediation is the owner's decision. A finding is `<12-hex commit>:<path>:<line>:<rule>`."""
+    # remerge diffs cover two-parent merges only; an octopus merge would add text this scan cannot see.
+    need(not git.text("rev-list", "--min-parents=3", f"{previous}..{commit}", code="privacy_scan_bounds"),
+         "privacy_scan_bounds")
     output = git("log", "-p", "--raw", "--format=commit %H", *PATCH, "--diff-merges=remerge", "--root",
-                 "--no-show-signature", f"{previous}..{commit}", "--", code="privacy_scan_bounds").stdout
+                 "--no-show-signature", f"{previous}..{commit}", "--", code="privacy_scan_bounds",
+                 tree_attributes=False).stdout
     commits: list[tuple[str, list[bytes]]] = []
     for line in output.split(b"\n"):
         mark = MARK.fullmatch(line)
@@ -808,7 +817,8 @@ def privacy_scan(git: Git, previous: str, commit: str, tree: Path, sources: dict
 
     names = git("diff", "--no-color", "--no-ext-diff", "--no-renames", "--diff-filter=d", "--name-only", "-z",
                 previous, commit, "--", code="privacy_scan_bounds").stdout
-    patch = git("diff", *PATCH, "--diff-filter=d", previous, commit, "--", code="privacy_scan_bounds").stdout
+    patch = git("diff", *PATCH, "--diff-filter=d", previous, commit, "--", code="privacy_scan_bounds",
+                tree_attributes=False).stdout
     added, _, scanned["diff_lines"] = parse_patch(patch.split(b"\n"))
     try:
         changed = [name.decode("utf-8") for name in names.split(b"\0") if name]
