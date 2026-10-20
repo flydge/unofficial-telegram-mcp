@@ -1734,7 +1734,7 @@ or capability:43 tools and28 capabilities (at that slice). Installed synthetic e
 separate from actual owner-dialog, live delivery, native consumer and release gates.
 ## Unreleased bundled first-install boundary
 
-Candidate `0.52.0.dev0` authenticates a bounded USTAR/gzip index and every
+Version 0.52.0 authenticates a bounded USTAR/gzip index and every
 member using an independently pinned prebuilt native seed before extraction or
 Python execution. Archive links, traversal, duplicates, extension headers,
 special files and unexpected entries refuse. Builder-only internal Python

@@ -66,7 +66,7 @@ build instructions. Separately installed dependencies and external runtime tools
 must retain their respective upstream licenses and corresponding-source obligations.
 # Unreleased bundled candidate inventory
 
-The `0.52.0.dev0` private bundle vendors standalone CPython/PBS, all 32 exact
+The 0.52.0 private bundle vendors standalone CPython/PBS, all 32 exact
 runtime distributions, installer-only tomlkit 0.13.3, TDLib/OpenSSL and an adapted
 native verifier under this project's selected AGPL license. The bundle keeps
 full upstream notices, the four installed SBOMs, available project/verifier

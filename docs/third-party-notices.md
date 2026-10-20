@@ -9,7 +9,7 @@ reference inventory and copied upstream notices accompany the source and package
 
 ## Direct dependencies
 
-The unreleased `0.52.0.dev0` standalone bundle additionally vendors the exact
+The 0.52.0 private standalone bundle (not distributed) additionally vendors the exact
 32-distribution closure, standalone CPython/PBS, pinned TDLib/OpenSSL and
 installer-only tomlkit 0.13.3. Its full copied notices, relative component
 inventory and four installed SBOMs accompany the archive. Cryptography's SBOM

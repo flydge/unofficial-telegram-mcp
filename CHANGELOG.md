@@ -1,12 +1,14 @@
 # Changelog
 
-## 0.52.0.dev0 — unreleased
+## 0.52.0 — 2026-10-20
 
-Release candidate. The real QR-first acceptance on the owner's Mac is recorded below, along with real
-approved forward/copy, native video, archive/unarchive and own-text edit runs. A clean macOS user
-installing the bundle that carries the application identity is deferred to the backlog
-([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). The owner reviewed the delegated
-F14/F15a/F17a decisions on 20.10.2026. No version change or tag yet.
+QR-first onboarding, forward/copy, native video, archive/unarchive and own-text edit
+([release notes](docs/release-notes-0.52.0.md)). The real QR-first acceptance on the owner's Mac is
+recorded below, along with real approved forward/copy, native video, archive/unarchive and own-text edit
+runs. A clean macOS user installing the bundle that carries the application identity is deferred to the
+backlog ([phase F record](docs/plans/0.52-qr-onboarding-spec.tasks.md)). The owner reviewed the delegated
+F14/F15a/F17a decisions on 20.10.2026. The release is an annotated tag with release-gate evidence; the
+private bundle is not distributed.
 
 - Apply Telegram's own text rewrite before every preview (owner decision): text sends, replies, topic
   sends, captions and own-text edits share one normalization.

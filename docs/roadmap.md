@@ -3,16 +3,17 @@
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md)
 
 Updated **2026-10-20**. The released baseline remains **0.51.0**; the
-**0.52.0.dev0** release candidate is recorded below.
+**0.52.0** release is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## Current release candidate — 0.52.0.dev0
+## Current release — 0.52.0
 
-The **0.52.0.dev0** release candidate (branch `qr-onboarding-052`) contains QR-first onboarding and
+The **0.52.0** release contains QR-first onboarding and
 three opt-in action slices: F14 forward/copy, F15a native video, and F17a archive/unarchive with own
-text edit. All four have real owner-approved evidence from 20.10.2026. It is not tagged, not an
-installer distribution and not a PyPI publication.
+text edit. All four have real owner-approved evidence from 20.10.2026. It is an annotated tag with
+release-gate evidence ([release notes](release-notes-0.52.0.md)); it is not an installer distribution or
+a PyPI publication.
 
 **Approved 0.52 requirement:** [QR-first Telegram onboarding](plans/0.52-qr-onboarding.md).
 - **The normal user path:** install MCP + skills, then a local QR screen, confirmation in the
@@ -49,7 +50,7 @@ behaviour changes came out of it:
   text is the stored text.
 - `archive_chats` and `edit_own_text` also require `read`.
 
-**Remaining 0.52.0 step:** the version and the tag.
+**Release:** 0.52.0 is cut as an annotated tag with release-gate evidence; publishing `main` and the tag waits for the owner's history decision (see the [completion plan](plans/completion-plan.md)).
 
 **Moved to the backlog** by the owner on 20.10.2026: installing that bundle on a clean macOS user and
 connecting there. A kit is ready. Until that run happens, the bundle path is verified offline only.
