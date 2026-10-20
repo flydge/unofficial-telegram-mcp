@@ -31,7 +31,7 @@ from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityE
 from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
-                       SEND_DEPENDENT_CAPABILITIES)
+                       required_capabilities)
 from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPageResponse,
     PageSelection, AttachmentCursor)
 from .spreadsheet_models import (ReadSpreadsheetRequest, ReadSpreadsheetResponse,
@@ -1461,7 +1461,7 @@ def build_server(
                         raise CompatibilityError("client_schema_mismatch")
                     require_current(runtime_policy)
                     contract_descriptor(runtime_policy)
-                    required = (_capability, "send") if _capability in SEND_DEPENDENT_CAPABILITIES else (_capability,)
+                    required = required_capabilities(_capability)
                     if kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None:
                         required += ('retained_selections',)
                     missing = [name for name in required if name not in runtime_policy.enabled_capabilities]

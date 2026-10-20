@@ -40,7 +40,7 @@ from .broker_protocol import (
 )
 from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, RuntimePolicy, load_runtime_policy
 from .contract import (CompatibilityError, contract_descriptor, require_compatible, require_current, OPERATION_CAPABILITIES,
-                       SEND_DEPENDENT_CAPABILITIES)
+                       required_capabilities)
 from .document_reader import read_document
 from .media_analyzer import analyze_media
 from .local_upload import LocalUploadRegistry, UploadError
@@ -464,8 +464,7 @@ class Broker(SelectionBrokerMixin):
             raise CompatibilityError('generation_stale')
         operation = request['operation']
         capability = OPERATION_CAPABILITIES.get(operation)
-        if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in SEND_DEPENDENT_CAPABILITIES and 'send' not in self._policy.enabled_capabilities)):
+        if capability is not None and not set(required_capabilities(capability)) <= set(self._policy.enabled_capabilities):
             raise CompatibilityError('capability_disabled')
         remaining = request['deadline'] - time.monotonic()
         if remaining <= 0:
@@ -593,8 +592,7 @@ class Broker(SelectionBrokerMixin):
             raise CompatibilityError("generation_stale")
         operation = request["operation"]
         capability = OPERATION_CAPABILITIES.get(operation)
-        if capability is not None and (capability not in self._policy.enabled_capabilities or
-                (capability in SEND_DEPENDENT_CAPABILITIES and "send" not in self._policy.enabled_capabilities)):
+        if capability is not None and not set(required_capabilities(capability)) <= set(self._policy.enabled_capabilities):
             raise CompatibilityError("capability_disabled")
         self._expire_contexts()
         payload = request["payload"]
@@ -2289,7 +2287,7 @@ class Broker(SelectionBrokerMixin):
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)
-        if capability not in ('archive_chats', 'edit_own_text') or not {'send', capability} <= set(
+        if capability not in ('archive_chats', 'edit_own_text') or not set(required_capabilities(capability)) <= set(
                 self._policy.enabled_capabilities):
             raise CompatibilityError('capability_disabled')
 
@@ -2417,7 +2415,7 @@ class Broker(SelectionBrokerMixin):
                                        provider_epoch=provider.send_observation_epoch)
             def archive_guard():
                 require_current(self._policy)
-                return ({'send', 'archive_chats'} <= set(self._policy.enabled_capabilities)
+                return (set(required_capabilities('archive_chats')) <= set(self._policy.enabled_capabilities)
                     and self._shared_client() is provider and provider.send_observation_epoch is epoch
                     and self._drafts.change_claim_current(draft_id, owner=owner, kind='archive', provider=provider,
                                                           provider_epoch=epoch))
@@ -2585,7 +2583,7 @@ class Broker(SelectionBrokerMixin):
                                        provider_epoch=provider.send_observation_epoch)
             def edit_guard():
                 require_current(self._policy)
-                return ({'send', 'edit_own_text'} <= set(self._policy.enabled_capabilities)
+                return (set(required_capabilities('edit_own_text')) <= set(self._policy.enabled_capabilities)
                     and self._shared_client() is provider and provider.send_observation_epoch is epoch
                     and self._drafts.change_claim_current(draft_id, owner=owner, kind='text_edit', provider=provider,
                                                           provider_epoch=epoch))

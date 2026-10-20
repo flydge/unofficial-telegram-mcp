@@ -44,6 +44,14 @@ OPERATION_CAPABILITIES = {
 # Default-off capabilities that change Telegram state; each also requires `send`.
 SEND_DEPENDENT_CAPABILITIES = frozenset({"reply_text_send", "reply_artifact_send", "forward_send", "video_send",
                                          "archive_chats", "edit_own_text"})
+# Their prepare step reveals content (an own message's text, a chat's title and list); owner decision 20.10.2026.
+READ_DEPENDENT_CAPABILITIES = frozenset({"archive_chats", "edit_own_text"})
+
+
+def required_capabilities(capability: str) -> tuple[str, ...]:
+    """The capability, then `send` and `read` when it depends on them, in that order."""
+    return ((capability,) + (("send",) if capability in SEND_DEPENDENT_CAPABILITIES else ())
+            + (("read",) if capability in READ_DEPENDENT_CAPABILITIES else ()))
 TOOL_OPERATIONS = {"resolve_target": "resolve", "discover_targets": "discover", "search_correspondence": "search",
                    **{name: name for name in OPERATION_CAPABILITIES if name not in {"resolve", "discover", "search"}}}
 # Supplier transport is capability-checked but deliberately absent from MCP tools.

@@ -48,9 +48,10 @@ CHAT = -1001234
 SECRET = 9000
 ACCOUNT = 7
 MID = 1048576
-ARCHIVE = RuntimePolicy(enabled_capabilities=('send', 'archive_chats'))
-EDIT = RuntimePolicy(enabled_capabilities=('send', 'edit_own_text'))
-BOTH = RuntimePolicy(enabled_capabilities=('send', 'archive_chats', 'edit_own_text'))
+ARCHIVE = RuntimePolicy(enabled_capabilities=('send', 'read', 'archive_chats'))
+EDIT = RuntimePolicy(enabled_capabilities=('send', 'read', 'edit_own_text'))
+BOTH = RuntimePolicy(enabled_capabilities=('send', 'read', 'archive_chats', 'edit_own_text'))
+NO_READ = RuntimePolicy(enabled_capabilities=('send', 'archive_chats', 'edit_own_text'))  # Owner decision 20.10.2026.
 DID = 'draft_' + '1' * 32
 EXPIRY = datetime(2030, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 MARK = '[untrusted Telegram evidence] '
@@ -343,6 +344,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                                             (RuntimePolicy(enabled_capabilities=('archive_chats',)), False, False),
                                             (RuntimePolicy(enabled_capabilities=('edit_own_text',)), False, False),
                                             (RuntimePolicy(enabled_capabilities=('archive_chats', 'edit_own_text')), False, False),
+                                            (NO_READ, False, False),
                                             (ARCHIVE, True, False), (EDIT, False, True), (BOTH, True, True)):
             calls = []
             class Service:
@@ -403,6 +405,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for policy, archive_on, edit_on in ((RuntimePolicy(), False, False),
                                             (RuntimePolicy(enabled_capabilities=('send',)), False, False),
                                             (RuntimePolicy(enabled_capabilities=('archive_chats', 'edit_own_text')), False, False),
+                                            (NO_READ, False, False),
                                             (ARCHIVE, True, False), (EDIT, False, True)):
             connects = []
             def connector(path):
@@ -432,6 +435,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         for policy, ops in ((RuntimePolicy(), archive_ops + edit_ops),
                             (RuntimePolicy(enabled_capabilities=('send',)), archive_ops + edit_ops),
                             (RuntimePolicy(enabled_capabilities=('archive_chats', 'edit_own_text')), archive_ops + edit_ops),
+                            (NO_READ, archive_ops + edit_ops),
                             (EDIT, archive_ops), (ARCHIVE, edit_ops)):
             with tempfile.TemporaryDirectory() as directory:
                 opened = []

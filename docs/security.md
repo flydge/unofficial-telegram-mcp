@@ -2200,7 +2200,8 @@ Residual risks, recorded rather than closed:
 
 `prepare_chat_archive`, `apply_prepared_archive`, `prepare_text_edit` and `apply_prepared_text_edit`
 add two default-off capabilities, `archive_chats` and `edit_own_text`. Each is effective only together
-with `send` (the existing "this tool changes Telegram state" authority) and neither enables the other.
+with `send` (the existing "this tool changes Telegram state" authority) and `read` (preparation reveals
+content; owner decision 20.10.2026), and neither enables the other.
 The conjunction is enforced by the SDK guard, by the proxy before it connects, by the broker before
 dispatch, by preparation and apply ownership checks (repeated after the owner dialog and before the
 attempt is reported), again for status and receipt replay of a draft of that feature, inside the
@@ -2310,12 +2311,11 @@ detects again (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCom
 
 Residual risks, recorded rather than closed:
 
-- **Informational read side effect.** With `edit_own_text` and `send`, `prepare_text_edit` reveals the
-  exact current text, entities and edit date of an own outgoing text message, and the chat's title and
-  kind, without any read capability. With `archive_chats` and `send`, `prepare_chat_archive` reveals a
-  chat's sanitized title, kind and Main/Archive membership, including through the `already_in_target` and
-  `unsupported_chat` answers, without any read capability. Enabling either capability therefore also
-  grants these narrow reads.
+- **Informational read side effect, closed by requiring `read`.** `prepare_text_edit` reveals the exact
+  current text, entities and edit date of an own outgoing text message, and the chat's title and kind;
+  `prepare_chat_archive` reveals a chat's sanitized title, kind and Main/Archive membership, including
+  through the `already_in_target` and `unsupported_chat` answers. Since 20.10.2026 both capabilities
+  also require `read`, so these narrow reads are never available without it.
 - **Concurrent applies.** Two concurrent applies of one draft make exactly one provider attempt, but both
   callers may see the dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt
   authority is unavailable; do not retry automatically") although it made no attempt. This is the shared

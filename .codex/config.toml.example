@@ -42,9 +42,9 @@ enabled_tools = ["_manifest", "resolve_target", "discover_targets", "search_corr
 # One native MP4/MOV video (at most 64 MiB, metadata probed locally) requires default-off
 # video_send alongside send; each attempt needs the local owner dialog and never retries.
 
-# Moving one chat between Main and Archive requires default-off archive_chats alongside send;
-# replacing the plain text of one own text message requires default-off edit_own_text alongside
-# send. They are independent; each attempt needs the local owner dialog and never retries.
+# Moving one chat between Main and Archive requires default-off archive_chats alongside send and
+# read; replacing the plain text of one own text message requires default-off edit_own_text
+# alongside send and read. They are independent; each attempt needs the local owner dialog and never retries.
 
 # Exact retained-source reuse additionally requires default-off retained_selections.
 # It does not enable other readers, recipient selection or send approval.

@@ -31,7 +31,7 @@ from .broker_protocol import (
 )
 from .config import RuntimePolicy, load_runtime_policy
 from .contract import (CompatibilityError, COMPATIBILITY_CODES, contract_descriptor, require_compatible, fingerprint,
-                       require_current, OPERATION_CAPABILITIES, SEND_DEPENDENT_CAPABILITIES)
+                       require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, send_status
 from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareReplyArtifactSendResponse,
     GetReplyArtifactDraftRequest, GetReplyArtifactDraftResponse, UpdateReplyArtifactDraftRequest,
@@ -359,8 +359,7 @@ class BrokerClient(SelectionClientMixin):
             require_current(self._policy)
             local = contract_descriptor(self._policy)
             capability = OPERATION_CAPABILITIES.get(operation)
-            if capability is not None and (capability not in self._policy.enabled_capabilities or
-                    (capability in SEND_DEPENDENT_CAPABILITIES and "send" not in self._policy.enabled_capabilities)):
+            if capability is not None and not set(required_capabilities(capability)) <= set(self._policy.enabled_capabilities):
                 raise CompatibilityError("capability_disabled")
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None

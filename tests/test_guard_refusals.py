@@ -53,6 +53,17 @@ class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
                                  {'draft_id': 'draft_' + 'a' * 32, 'approved': True})
         self.assertRefused(result, 'send_prepared_forward', 'capability_disabled: forward_send' + OWNER)
 
+    async def test_archive_and_edit_also_name_read(self):
+        args = {'chat': 1, 'message_id': 1, 'new_text': 'x'}
+        for enabled, missing in ((('send', 'edit_own_text'), 'read'), ((), 'edit_own_text, send, read'),
+                                 (('read',), 'edit_own_text, send')):
+            with self.subTest(enabled=enabled):
+                result = await self.call(RuntimePolicy(enabled_capabilities=enabled), 'prepare_text_edit', args)
+                self.assertRefused(result, 'prepare_text_edit', 'capability_disabled: ' + missing + OWNER)
+        result = await self.call(RuntimePolicy(enabled_capabilities=('send', 'archive_chats')), 'prepare_chat_archive',
+                                 {'chat': 1, 'target_list': 'archive'})
+        self.assertRefused(result, 'prepare_chat_archive', 'capability_disabled: read' + OWNER)
+
     async def test_disabled_selection_names_retained_selections(self):
         policy = RuntimePolicy(enabled_capabilities=('read', 'read_messages'))
         result = await self.call(policy, 'read_messages', {'selection_id': 'selection_' + 'a' * 64})

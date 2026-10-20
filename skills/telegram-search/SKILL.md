@@ -1022,7 +1022,7 @@ video send is still pending the owner's check.
 ## Archive or unarchive one chat
 
 Use this only when the owner asks to move ONE specific chat to the Archive or back to Main. Require
-`archive_chats` **and** `send` in the compatible manifest (default-off; no read, reply or other send
+`archive_chats`, `send` **and** `read` in the compatible manifest (default-off; no reply or other send
 capability substitutes) and both archive tools in the allowlist. Resolve the chat to an exact numeric
 chat ID first; `@username` and aliases are not accepted. Secret chats, chat folders, several chats at
 once (no "archive all old chats"), pinning and deletion are unsupported. Settle the direction with the
@@ -1057,15 +1057,14 @@ only if the owner still wants it. `local_failed` means no attempt was made and t
 `failed` is a provider rejection (the detail names at most an error code). `outcome_unknown` means the move
 may or may not have happened: never retry, never prepare a new draft to try again; check the chat in
 Telegram (or with `list_chats` when enabled) and tell the owner. A repeated `apply_prepared_archive` only
-replays the receipt. `get_send_status(draft_id)` (needs `send` and `archive_chats`) is coarse for these
-drafts and never reports `sent`; the apply response is the record. A real approved archive and unarchive
-are still pending the owner's check.
+replays the receipt. `get_send_status(draft_id)` (needs `send`, `read` and `archive_chats`) is coarse for these
+drafts and never reports `sent`; the apply response is the record.
 
 
 ## Edit one own text message
 
 Use this only when the owner asks to change the text of ONE specific message that the owner sent. Require
-`edit_own_text` **and** `send` in the compatible manifest (default-off, independent of `archive_chats`) and
+`edit_own_text`, `send` **and** `read` in the compatible manifest (default-off, independent of `archive_chats`) and
 both edit tools in the allowlist. Take the exact numeric `chat` ID and the committed `message_id` from
 observed evidence. Only an own, outgoing, plain-text message qualifies. Captions, media, other people's
 messages, forwarded messages, messages with buttons, scheduled or self-destructing messages, styled
@@ -1112,6 +1111,5 @@ preview and approval only if the owner still wants it. `local_failed` means no a
 draft is consumed. `failed` is a provider rejection (the detail names at most an error code).
 `outcome_unknown` means the edit may have been applied: never retry, never prepare a new draft to try
 again; check the message in Telegram (or with `read_messages` when enabled) and tell the owner. A repeated
-`apply_prepared_text_edit` only replays the receipt. `get_send_status(draft_id)` (needs `send` and
-`edit_own_text`) is coarse and never reports `sent`. A real approved edit of an own test message is still
-pending the owner's check.
+`apply_prepared_text_edit` only replays the receipt. `get_send_status(draft_id)` (needs `send`, `read` and
+`edit_own_text`) is coarse and never reports `sent`.

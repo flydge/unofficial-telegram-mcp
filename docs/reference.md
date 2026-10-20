@@ -26,8 +26,8 @@ The public surface of the current candidate contains fifty-five tools (published
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 - `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
-- `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
-- `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+- `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+- `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -68,7 +68,7 @@ Package version 0.51.0 retains contract version 1, private IPC version 2 and the
 
 Development candidate `0.52.0.dev0` adds the tools `prepare_forward_send` and `send_prepared_forward` with the default-off capability `forward_send`, and the tools `prepare_video_send` and `send_prepared_video` with the default-off capability `video_send` (fifty-one tools in total). Contract 1 and private IPC 2 are unchanged; the new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. Existing tool schemas are byte-identical. `forward_send` and `video_send` are absent from the legacy defaults and each always requires `send` as well; see [Exact forward/copy (F14)](#exact-forwardcopy-f14) and [Native video send (F15a)](#native-video-send-f15a). The video slice also changes a response, not a schema: a `send_prepared_artifact` call that has already made its attempt no longer reads `expired` if artifact authority is lost afterwards (see [Development-candidate artifact ownership](#development-candidate-artifact-ownership)). This declaration does not establish release, owner-approved live delivery or consumer acceptance for either slice.
 
-The same candidate then adds the tools `prepare_chat_archive` and `apply_prepared_archive` with the default-off capability `archive_chats`, and the tools `prepare_text_edit` and `apply_prepared_text_edit` with the default-off capability `edit_own_text` (fifty-five tools in total, listed after the fifty-one above in this order). Contract 1 and private IPC 2 are unchanged; the four new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. The fifty-one earlier tool entries (name, input and output schema, annotations) are byte-identical. `archive_chats` and `edit_own_text` are absent from the legacy defaults, are independent of each other, and each always requires `send` as well; with only one of the two the tools stay listed but are refused at the SDK guard, the proxy (before it connects) and the broker. These are the first tools that change Telegram state without sending, so one visible runtime text changes: the `forbidden` list returned by `_manifest` no longer says "mutations including edits, deletes, reactions, and moderation operations" but "mutations other than one approved Main/Archive move or one approved plain-text edit of an own text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, bulk and moderation operations". Edits and archive moves are therefore no longer unconditionally forbidden, but only through these four tools and only when their capability is enabled. See [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a). This declaration does not establish release, owner-approved real archive or edit, or consumer acceptance.
+The same candidate then adds the tools `prepare_chat_archive` and `apply_prepared_archive` with the default-off capability `archive_chats`, and the tools `prepare_text_edit` and `apply_prepared_text_edit` with the default-off capability `edit_own_text` (fifty-five tools in total, listed after the fifty-one above in this order). Contract 1 and private IPC 2 are unchanged; the four new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. The fifty-one earlier tool entries (name, input and output schema, annotations) are byte-identical. `archive_chats` and `edit_own_text` are absent from the legacy defaults, are independent of each other, and each always requires `send` and `read` as well (`read` since the owner's 20.10.2026 decision, because preparation reveals content); with any of them missing the tools stay listed but are refused at the SDK guard, the proxy (before it connects) and the broker. These are the first tools that change Telegram state without sending, so one visible runtime text changes: the `forbidden` list returned by `_manifest` no longer says "mutations including edits, deletes, reactions, and moderation operations" but "mutations other than one approved Main/Archive move or one approved plain-text edit of an own text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, bulk and moderation operations". Edits and archive moves are therefore no longer unconditionally forbidden, but only through these four tools and only when their capability is enabled. See [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a). This declaration does not establish release, owner-approved real archive or edit, or consumer acceptance.
 
 Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
@@ -96,7 +96,7 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 - `Error executing tool <tool>: config_stale (restart matching components)`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Argument-schema errors keep the SDK's detailed text, and any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Argument-schema errors keep the SDK's detailed text, and any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`. Schemas and the schema fingerprint are unchanged.
 
 ## Codex skill
 
@@ -204,7 +204,7 @@ chat and temporary message ID plus a final `messageVideo`; see
 
 Archive and text-edit drafts (F17a) are not sends and have no message to correlate, so the
 same tool reports them only coarsely and never as `sent`; it needs `archive_chats` or
-`edit_own_text` in addition to `send`. See [Status of archive and edit drafts](#status-of-archive-and-edit-drafts).
+`edit_own_text` in addition to `send` and `read`. See [Status of archive and edit drafts](#status-of-archive-and-edit-drafts).
 
 ## Inspect, revise or cancel an unsent draft
 
@@ -2508,8 +2508,8 @@ checks at apply time, asks the local owner to confirm the same facts, makes one 
 so far is technical (synthetic provider); a real archive/unarchive and a real edit are still
 pending the owner.
 
-Enable `archive_chats` **and** `send` for the archive tools, and `edit_own_text` **and** `send`
-for the edit tools, in trusted runtime policy, restart matching components and add the tools to
+Enable `archive_chats`, `send` **and** `read` for the archive tools, and `edit_own_text`, `send`
+**and** `read` for the edit tools, in trusted runtime policy, restart matching components and add the tools to
 the consumer allowlist. The two capabilities are absent from the legacy defaults, independent of
 each other, and no read, reply or other send capability enables either. Without both of its
 capabilities a tool stays listed but is refused with `capability_disabled` at the SDK guard, the
@@ -2581,7 +2581,7 @@ has there is lost, and an archived chat can come back to Main.
 `apply_prepared_archive(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
 
 1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
-2. Policy (`send` and `archive_chats`) and owner (proxy client and current account) are checked;
+2. Policy (`send`, `read` and `archive_chats`) and owner (proxy client and current account) are checked;
    a draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
 3. A stored receipt is replayed; no dialog, no provider call.
 4. The in-memory chat record must exist (lost on broker restart: `expired`) and the draft must be
@@ -2762,7 +2762,7 @@ chat and its kind, and the edit date. The whole text is replaced; there is no pa
 `apply_prepared_text_edit(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
 
 1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
-2. Policy (`send` and `edit_own_text`) and owner (proxy client and current account) are checked; a
+2. Policy (`send`, `read` and `edit_own_text`) and owner (proxy client and current account) are checked; a
    draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
 3. A stored receipt is replayed; no dialog, no provider call.
 4. The in-memory chat record must exist (lost on broker restart: `expired`) and the draft must be
@@ -2874,7 +2874,7 @@ local confirmation.
 
 ### Status of archive and edit drafts
 
-`get_send_status` needs `send` and the draft's capability (`archive_chats` or `edit_own_text`) and is
+`get_send_status` needs `send`, `read` and the draft's capability (`archive_chats` or `edit_own_text`) and is
 read-only. A change has no message to correlate, so the status stays coarse: a pending draft reads
 `pending` with evidence `local_pending`, a claim without a result `pending` with `local_claimed`, a
 local failure `failed` with `local_failed`, and everything after a provider attempt (applied,
@@ -2885,12 +2885,12 @@ seconds from the attempt), is the only outcome record.
 
 ### Informational read side effect
 
-Preparation reads provider state to build the preview, and the preview discloses part of it without
-any read capability. With `edit_own_text` and `send`, `prepare_text_edit` reveals the exact current text,
-entities and edit date of an own outgoing text message, and the title and kind of its chat. With
-`archive_chats` and `send`, `prepare_chat_archive` reveals a chat's sanitized title, kind and Main/Archive
-membership, including through the `already_in_target` and `unsupported_chat` answers. Enabling either
-capability therefore also grants these narrow reads of exactly named chats and messages. Everything
+Preparation reads provider state to build the preview, and the preview discloses part of it:
+`prepare_text_edit` reveals the exact current text, entities and edit date of an own outgoing text
+message, and the title and kind of its chat; `prepare_chat_archive` reveals a chat's sanitized title,
+kind and Main/Archive membership, including through the `already_in_target` and `unsupported_chat`
+answers. Since the owner's 20.10.2026 decision both capabilities therefore also require `read`, so
+these narrow reads of exactly named chats and messages are never granted without it. Everything
 returned is untrusted Telegram data (texts carry the evidence marker), never instructions.
 
 ### Archive and edit limits
