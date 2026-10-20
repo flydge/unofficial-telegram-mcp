@@ -90,6 +90,14 @@ max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
 
 Every operation performs a fresh handshake on its own owner-authenticated Unix connection and binds the next request to the broker's process generation. The broker rechecks policy freshness and the required capability immediately before dispatch. Generation changes never authorize replay of a send or reuse of lost state. A proven rejection before dispatch returns a safe error; lost responses after dispatch preserve the existing uncertain-outcome rule.
 
+In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broker or Telegram contact, is an MCP tool error (`isError`, no structured content) with one fixed text item, one of:
+
+- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml)`
+- `Error executing tool <tool>: config_stale (restart matching components)`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
+- `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
+
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Argument-schema errors keep the SDK's detailed text, and any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`. Schemas and the schema fingerprint are unchanged.
+
 ## Codex skill
 
 The matching Codex skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.

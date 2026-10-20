@@ -80,6 +80,12 @@
   remains as the fallback; the setup skill is rewritten for the connect/wait flow.
   Verified with synthetic fakes only; real clean-user acceptance (phase F) is pending.
 
+- Report SDK guard refusals with a fixed reason instead of the bare `Error executing tool <name>`:
+  `capability_disabled` names only the missing capabilities (for example `read_history`, or
+  `reply_text_send, send`), and `config_stale` and `client_schema_mismatch` carry a fixed hint.
+  No input or provider text is echoed; local upload authority tools still return `unavailable`.
+  See [reference](docs/reference.md#runtime-contract-and-compatibility).
+
 - Record the approved [QR-first onboarding requirement](docs/plans/0.52-qr-onboarding.md)
   as the next priority and a mandatory 0.52.0 release gate. Application-supplied
   API credentials replace mandatory end-user API application creation/entry in
