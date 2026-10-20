@@ -6,8 +6,9 @@
 
 run builds only from `git archive <commit>`, never from a working tree, into a
 fresh absolute workdir outside the repository and outside the OS-cleared temp
-roots (/tmp, /var/folders and their /private forms, compared casefolded), and
-writes <workdir>/evidence.json beside the artifacts. Its only network use is pip
+roots (/tmp, /var/folders and their /private forms, compared casefolded and by
+the file identity of every existing ancestor, so firmlink aliases are refused),
+and writes <workdir>/evidence.json beside the artifacts. Its only network use is pip
 downloading the pinned, hash-checked wheels (TOOLS below and
 packaging/constraints-<release>.txt at the commit) into the workdir. The privacy
 scan runs the commit's own tests/test_public_tree_privacy.py (scan_text with its
@@ -74,7 +75,8 @@ SHIPPED_INTERNAL = frozenset({"docs/plans/initial-roadmap.md"})
 GENERATED = ("PKG-INFO", "setup.cfg") + tuple(f"src/{DIST}.egg-info/{name}" for name in (
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt", "requires.txt", "top_level.txt"))
 DIST_INFO = ("METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt")
-# The OS clears these (macOS TMPDIR lives under /var/folders); compared casefolded, as APFS does.
+# The OS clears these (macOS TMPDIR lives under /var/folders); compared casefolded, as APFS does,
+# and by (st_dev, st_ino) of every existing ancestor, which also catches firmlink aliases.
 TMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # Downloads are hash-checked, so a proxy or CA bundle cannot change what is installed.
@@ -289,8 +291,32 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
+def _identity(path: str) -> tuple[int, int] | None:
+    try:
+        metadata = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return metadata.st_dev, metadata.st_ino
+
+
+def _held(resolved: str, roots: tuple[str, ...]) -> bool:
+    """Whether `resolved` or an existing ancestor of it is the same directory as one of `roots`.
+
+    Identity, not spelling: a macOS firmlink (/System/Volumes/Data/private/tmp is /private/tmp)
+    or a case variant names the same (st_dev, st_ino) as the root it aliases."""
+    keys = {key for key in map(_identity, roots) if key is not None}
+    current = resolved
+    while True:
+        if _identity(current) in keys:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def outside_tmp(path: Path, repo: Path | None, code: str = "invalid_workdir") -> Path:
-    """An absolute real path outside the temp roots and the repository, compared casefolded."""
+    """An absolute real path outside the temp roots and the repository, by spelling and by identity."""
     need(path.is_absolute(), code)
     try:
         resolved = os.path.realpath(path)
@@ -299,7 +325,10 @@ def outside_tmp(path: Path, repo: Path | None, code: str = "invalid_workdir") ->
     need(os.path.isabs(resolved), code)
     for candidate in (_folded(os.fspath(path)), _folded(resolved)):
         need(not any(_under(candidate, _folded(root)) for root in TMP_ROOTS), "workdir_under_tmp")
-    need(repo is None or not _under(_folded(resolved), _folded(os.fspath(repo))), "workdir_inside_repo")
+    need(not _held(resolved, TMP_ROOTS), "workdir_under_tmp")
+    if repo is not None:
+        need(not _under(_folded(resolved), _folded(os.fspath(repo))) and not _held(resolved, (os.fspath(repo),)),
+             "workdir_inside_repo")
     return Path(resolved)
 
 

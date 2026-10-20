@@ -34,6 +34,7 @@ EPOCH = 1700000000
 GUARD = (TESTS / "test_public_tree_privacy.py").read_text(encoding="utf-8")
 ALLOWED_ID = "-100" "1234567890"  # allowlisted by the guard for tests/test_schemas.py only
 COUNTS = {"tests": 2, "passed": 1, "failed": 0, "errors": 0, "skipped": 1}
+FIRMLINK = "/System/Volumes/Data"  # macOS: /System/Volumes/Data/private/tmp is the directory /private/tmp
 
 
 def admitting(root: Path):
@@ -203,6 +204,40 @@ class RunRefusalTests(GateCase):
                 self.assertEqual(self.run_in(workdir), (1, "", "release gate refused: invalid_workdir\n"))
         for workdir in refused + (f"tgmcp-gate-{token}",):
             self.assertFalse(Path(workdir).exists())
+
+    def firmlinked(self, directory: str) -> list[str]:
+        """The existing `directory` through the macOS Data-volume firmlink, and its upper-case spelling
+        where the volume is case-insensitive; skipped where the firmlink alias does not exist."""
+        alias = FIRMLINK + directory
+        if not (os.path.isdir(directory) and os.path.isdir(alias)):
+            self.skipTest("no Data-volume firmlink for this directory on this machine")
+        return [alias] + ([alias.upper()] if os.path.isdir(alias.upper()) else [])
+
+    def test_firmlink_alias_of_a_temp_root_is_refused_by_identity(self) -> None:
+        token = secrets.token_hex(8)
+        refused = [alias + suffix for directory, suffix in (
+            ("/private/tmp", f"/tgmcp-gate-{token}"), ("/private/var/folders", f"/tgmcp-gate-{token}/x"),
+            (str(self.root), f"/work-{token}")) for alias in self.firmlinked(directory)]
+        for workdir in refused:
+            with self.subTest(workdir=workdir):
+                self.assertFalse(any(gate._under(gate._folded(workdir), gate._folded(root)) for root in gate.TMP_ROOTS))
+                self.assertEqual(self.run_in(workdir), (1, "", "release gate refused: workdir_under_tmp\n"))
+                with self.refused("workdir_under_tmp"):
+                    gate.outside_tmp(Path(workdir), None)
+                self.assertFalse(os.path.lexists(workdir))
+        evidence = self.firmlinked("/private/tmp")[0] + f"/tgmcp-{token}/evidence.json"
+        self.assertEqual(self.main("verify", "--evidence", evidence), (1, "", "release gate refused: workdir_under_tmp\n"))
+
+    def test_firmlink_alias_of_the_repository_is_refused_by_identity(self) -> None:
+        self.admit()
+        for alias in self.firmlinked(str(self.repo)):
+            for workdir in (alias + "/evidence", alias + "/x/y"):
+                with self.subTest(workdir=workdir):
+                    self.assertFalse(gate._under(gate._folded(workdir), gate._folded(str(self.repo))))
+                    self.assertEqual(self.run_in(workdir), (1, "", "release gate refused: workdir_inside_repo\n"))
+        self.assertFalse((self.repo / "evidence").exists() or (self.repo / "x").exists())
+        outside = self.root / "outside"
+        self.assertEqual(gate.outside_tmp(outside, self.repo), outside)
 
     def test_workdir_inside_repo_or_not_empty_is_refused(self) -> None:
         self.admit()

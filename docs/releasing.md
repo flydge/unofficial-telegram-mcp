@@ -85,7 +85,9 @@ details in `<dir>/refusal.json`. Both must exit 0.
   `v<major>.<minor>.<patch>rc<n>`, and must be an ancestor of `<sha>`.
 - `<dir>` is an absolute path that is missing or empty, outside the repository and outside the
   temp roots the OS clears: `/tmp`, `/var/folders` (the macOS `TMPDIR`) and their `/private`
-  forms, compared case-insensitively, so `/PRIVATE/TMP/x` is refused too.
+  forms. Paths are compared case-insensitively and by file identity (device and inode) of every
+  existing ancestor, so `/PRIVATE/TMP/x` and firmlink aliases such as
+  `/System/Volumes/Data/private/tmp/x` or `/System/Volumes/Data<repository>/x` are refused too.
 - `run` builds everything from `git archive <sha>`, never from the working tree. Its only network
   use is pip downloading the hash-pinned build and test tools and the closure of
   `packaging/constraints-<version>.txt` into `<dir>/toolhouse` and `<dir>/wheelhouse`. It builds
