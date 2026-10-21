@@ -654,6 +654,9 @@ The server offers four client-neutral MCP prompts, each at most 1,500 characters
 optional `request` argument, the user's words; it is sanitized like Telegram text, cut to 200 characters
 and inserted as a JSON-quoted string labelled as intent, never as instructions or a tool argument. A
 prompt grants no capability or approval; the tools, the policy and the owner's dialog decide.
+`reply_with_file` prefers `prepare_reply_artifact_send`; when that tool is not usable it falls back to
+`prepare_artifact_send` and tells the model to say in the preview that the file goes out as a new
+message, not as a reply, and to get the user's agreement.
 `prompts/list` follows the loaded policy like `tools/list`: a prompt is listed only while every tool it
 relies on is in `available_tools` (`check_connection` needs only `_manifest`, so a stale policy lists only
 it). `prompts/get` answers an unknown or unlisted prompt with the fixed protocol error

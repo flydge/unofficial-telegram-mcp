@@ -122,6 +122,28 @@ class DescriptionBudgetTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=name):
                 self.assertIn(shared, self.tools[name].description)
 
+    def test_entity_offsets_name_the_normalization_the_code_applies(self):
+        from telegram_search_mcp.outgoing_drafts import _TELEGRAM_REWRITE
+        text = self.tools['prepare_text_send'].description
+        self.assertIn('UTF-16 code units of the final text: NFKC, CRLF/CR to LF, tab to space', text)
+        removed = [f'U+{code:04X}' for code, replacement in _TELEGRAM_REWRITE.items() if replacement is None]
+        self.assertEqual(len(removed), 5)
+        for code in removed:
+            self.assertIn(code, text)
+        self.assertEqual(_TELEGRAM_REWRITE[ord('\t')], ' ')
+        self.assertIn('leading and trailing spaces and line feeds trimmed', text)
+
+    def test_lost_cautions_are_kept(self):
+        for name in ('read_history', 'list_topics', 'read_topic_history', 'search_messages', 'list_chats',
+                     'search_chats'):
+            with self.subTest(tool=name):
+                self.assertIn(server_module._LOST, self.tools[name].description)
+        self.assertIn('never restart silently', server_module._LOST)
+        self.assertIn('hidden rows and columns are not filtered', self.tools['read_spreadsheet'].description)
+        source = server_module._FIELD_DOCS['expected_schema_fingerprint']
+        self.assertTrue(source.startswith('schema_fingerprint from an earlier _manifest'))
+        self.assertIn('schema_fingerprint from an earlier _manifest', self.tools['_manifest'].description)
+
     def test_selection_tools_carry_the_policy_bounded_lifetime(self):
         note = server_module._SELECTION
         self.assertIn("bounded time set by the owner's policy", note)
@@ -215,6 +237,13 @@ class PromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text.count('\nUser request'), 1)
         empty = (await self.get('find_and_summarize')).messages[0].content.text
         self.assertIn('(none given; ask the user)', empty)
+
+    async def test_reply_with_file_says_when_the_file_is_not_a_reply(self):
+        text = (await self.get('reply_with_file')).messages[0].content.text
+        self.assertIn('Otherwise prepare_artifact_send to the same chat sends a new message, not a reply: say so in '
+                      "the preview and get the user's agreement.", text)
+        # Listed without prepare_reply_artifact_send, so the fallback is the usual case under read+artifacts+send.
+        self.assertNotIn('prepare_reply_artifact_send', server_module._PROMPTS['reply_with_file'].tools)
 
     async def test_prompts_follow_the_policy_like_tools_list(self):
         stale = RuntimePolicy(enabled_capabilities=('read', 'artifacts'), expected_package_version='0.0.0')
