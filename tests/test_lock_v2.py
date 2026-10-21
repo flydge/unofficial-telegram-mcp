@@ -1,5 +1,4 @@
 """Native lock grammar: v1 stays admitted; v2 is data-driven by the reviewed APPROVED_PINS table."""
-import dataclasses
 import hashlib
 import json
 from pathlib import Path

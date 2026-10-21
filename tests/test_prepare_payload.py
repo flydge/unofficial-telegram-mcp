@@ -4,7 +4,6 @@ Synthetic PBS/TDLib archives and wheels, a throwaway git checkout holding this p
 sources, and inert natives. The manifest probe imports the exported package (real contract).
 No network, Keychain or real runtime.
 """
-import contextlib
 import hashlib
 import importlib.util
 import io
