@@ -433,19 +433,33 @@ def read_config(config_path: Path) -> bytes:
         os.close(fd)
 
 
+def new_temporary() -> str:
+    """A fresh temporary name; a journaling caller records it before `_atomic_write` creates it."""
+    return TEMPORARY_PREFIX + uuid.uuid4().hex + '.tmp'
+
+
+def is_temporary(name: object) -> bool:
+    return type(name) is str and _TEMPORARY.fullmatch(name) is not None
+
+
 def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | None = None,
                   require_existing: bool | None = None, before_replace=None, max_mode: int = PRIVATE_MODE,
-                  preserve_mode: bool = False):
+                  preserve_mode: bool = False, temporary: str | None = None):
     """Owner-safe atomic replacement, optionally guarding exact source bytes.
 
     `max_mode` only widens which existing file modes are read (see `_read_at`). The replacement is
     0600, or with `preserve_mode` the admitted mode of the file it replaces (a new file is 0600).
+    `temporary` is a `new_temporary()` name the caller journaled first, so a kill right after its
+    creation still leaves a name the resume can find.
     """
     if type(candidate) is not bytes or len(candidate) > maximum:
         raise ConfigConflict('invalid_change')
+    if temporary is None:
+        temporary = new_temporary()
+    elif not is_temporary(temporary):
+        raise ConfigConflict('invalid_change')
     directory_fd = _open_parent(path)
     name = Path(path).name
-    temporary = TEMPORARY_PREFIX + uuid.uuid4().hex + '.tmp'
     temporary_created = False
     try:
         original, existed, mode = _read_at_mode(directory_fd, name, maximum, max_mode)
@@ -492,14 +506,18 @@ def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | 
 
 
 def discard_temporary(path: Path, record: object) -> bool:
-    """Unlink a journaled temporary left by a killed `_atomic_write`, only while it is that exact inode.
+    """Unlink a journaled temporary left by a killed `_atomic_write`; True when it was removed.
 
-    `record` is the journaled `{'object': binding, 'temporary': name}`; True when it was removed.
+    `record` is `{'temporary': name}`, journaled before the name was created, or `{'object': binding,
+    'temporary': name}` once its flushed inode was. With a binding only that exact inode is unlinked;
+    without one the random journaled name is the evidence, and only an owner-owned single-link regular
+    file is unlinked. A name created by neither record is never touched.
     """
-    if (type(record) is not dict or type(record.get('temporary')) is not str
-            or _TEMPORARY.fullmatch(record['temporary']) is None or type(record.get('object')) is not dict):
+    if type(record) is not dict or not is_temporary(record.get('temporary')) or set(record) - {'object', 'temporary'}:
         return False
-    binding = record['object']
+    binding = record.get('object')
+    if binding is not None and type(binding) is not dict:
+        return False
     directory_fd = _open_parent(path)
     try:
         try:
@@ -508,7 +526,8 @@ def discard_temporary(path: Path, record: object) -> bool:
             return False
         observed = {'kind': 'file', 'dev': metadata.st_dev, 'ino': metadata.st_ino, 'uid': metadata.st_uid,
                     'mode': stat.S_IMODE(metadata.st_mode), 'bytes': metadata.st_size, 'nlink': metadata.st_nlink}
-        if not stat.S_ISREG(metadata.st_mode) or observed != binding:
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
+                or binding is not None and observed != binding):
             return False
         os.unlink(record['temporary'], dir_fd=directory_fd)
         os.fsync(directory_fd)

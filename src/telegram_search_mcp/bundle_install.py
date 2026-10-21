@@ -27,12 +27,12 @@ from .bundle_paths import (ensure_owned_private_directory, open_owned_directory,
 from .bundle_runtime import (validate_tree, require_platform, read, unique_json, digest, BundleError,
                              CLAUDE_CODE_MODES, CLAUDE_MODE_STATUSES, CLAUDE_SKILLS_STATUSES, CLAUDE_DESKTOP_STATUSES,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
-                             transaction_name)
+                             transaction_name, ADOPTED_NAME, MAX_ADOPTED, check_adopted)
 from .session_owner import SessionOwnerLease, OwnerLeaseError
 from . import claude_desktop_registration, claude_registration
 from .codex_registration import (Registration, Receipt, ConfigConflict, read_config,
     merge_registration, rollback_registration, adopt_registration, owned_subtree, discard_temporary,
-    commit_transaction, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
+    commit_transaction, new_temporary, is_temporary, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
 
 
 class InstallError(ValueError):
@@ -214,11 +214,31 @@ def _initialize(root, identity, change, existed, checkpoint, adopted=None):
     checkpoint('published:root')
 
 
+def _file_object(value):
+    return {'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
+
+
+def _sweep_temporaries(directory):
+    """Unlink the temporaries killed writes left in an owner-only transaction directory (held under the lease)."""
+    with open_owned_directory(directory,private=True) as fd:
+        names=os.listdir(fd)
+        if len(names)>4096:raise InstallError('recovery_limit')
+        for name in names:
+            if not is_temporary(name):continue
+            metadata=os.stat(name,dir_fd=fd,follow_symlinks=False)
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_uid==os.getuid():os.unlink(name,dir_fd=fd)
+        os.fsync(fd)
+
+
 class _Journal:
-    """One transaction's journal under the installer lease; each update is compare-before-replace."""
+    """One transaction's journal under the installer lease; each update is compare-before-replace.
+
+    Opening it removes what a killed journal update left in the transaction directory.
+    """
 
     def __init__(self, tx, lease, steps, checkpoint):
         self.tx,self.lease,self.steps,self.checkpoint=tx,lease,steps,checkpoint
+        _sweep_temporaries(tx)
         self.value=unique_json(read(tx/'journal.json',mode=0o600))
         if type(self.value.get('publications')) is not dict or self.value.get('stage') not in steps:
             raise InstallError('transaction_conflict')
@@ -226,7 +246,7 @@ class _Journal:
     def __getitem__(self, key):
         return self.value[key]
 
-    def update(self, stage=None, publication=None, single=None):
+    def update(self, stage=None, publication=None, single=None, amend=None):
         self.lease.check();next_value={**self.value}
         if stage is not None:next_value['stage']=stage
         if publication is not None:
@@ -234,6 +254,13 @@ class _Journal:
             attempts=self.value['publications'].get(name,[])
             if type(attempts) is not list or len(attempts)>=8:raise InstallError('recovery_limit')
             next_value['publications']={**self.value['publications'],name:[*attempts,proof]}
+        if amend is not None:
+            # The last attempt's journaled temporary gains its flushed inode; the attempt count stays.
+            name,proof=amend
+            attempts=self.value['publications'].get(name)
+            if type(attempts) is not list or not attempts or attempts[-1]!={'temporary':proof['temporary']}:
+                raise InstallError('transaction_conflict')
+            next_value['publications']={**self.value['publications'],name:[*attempts[:-1],proof]}
         if single is not None:
             # Single records are written once per transaction and never count toward a recovery cap.
             name,value=single
@@ -249,9 +276,30 @@ class _Journal:
         if not self.reached(value):self.update(value)
 
     def proof(self, name):
-        attempts=self.value['publications'].get(name,[])
-        if type(attempts) is not list or len(attempts)>8:raise InstallError('transaction_conflict')
+        attempts=self.attempts(name)
         return attempts[-1] if attempts else None
+
+    def attempts(self, name):
+        attempts=self.value['publications'].get(name,[])
+        if type(attempts) is not list or len(attempts)>8 or any(type(a) is not dict for a in attempts):
+            raise InstallError('transaction_conflict')
+        return attempts
+
+    def discard(self, name, path, discard=discard_temporary):
+        """Unlink every temporary a killed attempt of `name` left beside `path` (see `attempt`)."""
+        attempts=self.attempts(name)
+        if attempts and os.path.lexists(Path(path).parent):
+            for record in attempts:discard(path,record)
+
+    def attempt(self, name, write):
+        """One journaled atomic write: its temporary's name is recorded before `write(temporary, admit)`
+        creates it, and `admit` adds the flushed inode before the replace. A resume finds either record."""
+        temporary=new_temporary()
+        self.update(publication=(name,{'temporary':temporary}))
+        def admit(value):
+            self.update(amend=(name,{'object':_file_object(value),'temporary':temporary}))
+            self.checkpoint('recorded:'+name)
+        write(temporary,admit)
 
     def recorded(self, name, publications=None):
         records=(self.value['publications'] if publications is None else publications).get(name)
@@ -311,21 +359,17 @@ class _Journal:
 
     def write(self, name, path, data, expected, *, existed, maximum, max_mode=0o600, preserve_mode=False):
         """Journaled compare-before-replace of an external file; a killed attempt's temporary is discarded."""
+        self.discard(name,path)
         bound=self.proof(name)
-        if bound is not None:
-            discard_temporary(path,bound)
+        if bound is not None and 'object' in bound:
             try:
                 require_object_binding(path,bound['object']);return
             except RuntimePathError:pass
         current,exists=_read_file(path,maximum,max_mode)
         if exists and current==data:return
         if current!=expected or exists!=existed:raise InstallError('target_conflict')
-        def admit(value):
-            obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
-            self.update(publication=(name,{'object':obj,'temporary':value['temporary']}))
-            self.checkpoint('recorded:'+name)
-        _atomic_write(path,data,maximum,expected=expected,require_existing=existed,before_replace=admit,
-                      max_mode=max_mode,preserve_mode=preserve_mode)
+        self.attempt(name,lambda temporary,admit:_atomic_write(path,data,maximum,expected=expected,require_existing=existed,
+                     before_replace=admit,max_mode=max_mode,preserve_mode=preserve_mode,temporary=temporary))
         self.checkpoint('published:'+name)
 
 
@@ -334,6 +378,29 @@ def _read_file(path, maximum, max_mode=0o600):
     fd=_open_parent(path)
     try:return _read_at(fd,Path(path).name,maximum,max_mode)
     finally:os.close(fd)
+
+
+def _desktop_discard(j, home):
+    """Our journaled Claude Desktop temporaries (a write, a best-effort restore) a killed attempt left."""
+    for name in ('claude_desktop_write','claude_desktop_restore'):
+        j.discard(name,claude_desktop_registration.config_path(home),
+                  lambda _,record:claude_desktop_registration.discard_temporary(home,record))
+
+
+def _desktop_write(j, home, plan):
+    """One journaled compare-before-replace attempt; the confirming read decides its outcome."""
+    def write(temporary, admit):
+        try:claude_desktop_registration.write(home,plan,admit,temporary)
+        except ConfigConflict:pass
+    j.attempt('claude_desktop_write',write)
+
+
+def _desktop_unchanged(j, add, plan):
+    """Whether the config is still byte-identical to the write-ahead record's preimage (the same write is safe
+    again), within the bounded attempts."""
+    return (plan is not None and type(add) is dict and add.get('existed')==plan.existed
+            and add.get('source_sha256')==plan.source_sha256 and add.get('candidate_sha256')==plan.candidate_sha256
+            and len(j.attempts('claude_desktop_write'))<8)
 
 
 CLAUDE_SKILLS = CLAUDE_SKILLS_STATUSES
@@ -468,26 +535,39 @@ class _Service:
         python,app=_probe_python(payload)
         if self.pending(self.home,python,app)!='none':raise InstallError('pending_send_unresolved')
 
-    def stop(self, j):
-        """Record the observation once, then boot out only a still-loaded exact registration."""
-        fresh=j.recorded('service') is None
-        if fresh:
+    def _observed(self, j):
+        observed=j.recorded('service')
+        if (observed is None or type(observed.get('loaded')) is not bool
+                or observed.get('plist') not in ('absent','to','adopted',*self.known)):
+            raise InstallError('transaction_conflict')
+        return observed
+
+    def _recheck(self):
+        """True while the exact registration is still loaded and holds no pending send; False once it is gone."""
+        live=_live(self.runner,self.label)
+        if live is None:return False
+        kind,_,payload=self.kind()
+        if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
+        self.gate(payload)
+        return True
+
+    def observe(self, j):
+        """Before the first client write: record the observation once; while a recorded loaded broker runs,
+        every run passes the pending-send gate here, so a late send refuses with no client changed."""
+        if j.recorded('service') is None:
             kind,loaded=self.check()
             j.update(single=('service',{'plist':kind,'loaded':loaded}))
-        observed=j.recorded('service')
-        if type(observed.get('loaded')) is not bool or observed.get('plist') not in ('absent','to','adopted',*self.known):
-            raise InstallError('transaction_conflict')
+            return
+        if self._observed(j)['loaded'] and j.recorded('service_stopped') is None:self._recheck()
+
+    def stop(self, j):
+        """Boot out only a still-loaded exact registration, gated again right before, then rewrite the plist."""
+        observed=self._observed(j)
         if observed['loaded'] and j.recorded('service_stopped') is None:
-            # Just checked (definition, live registration, pending sends), or re-checked on resume.
-            live=True if fresh else _live(self.runner,self.label)
-            if live is not None:
-                if not fresh:
-                    kind,_,payload=self.kind()
-                    if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
-                    self.gate(payload)
-                _bootout(self.runner,self.label)
+            if self._recheck():_bootout(self.runner,self.label)
             j.update(single=('service_stopped',{'attempt':1}));j.checkpoint('stopped:service')
         if observed['plist']!='absent':
+            j.discard('plist',self.plist)
             kind,data,_=self.kind()
             if kind!='to':j.write('plist',self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
@@ -534,6 +614,7 @@ def _policy_candidate(data, old, new):
 def _policy_step(j, session_root, old, new):
     policy=session_root/'runtime.toml'
     if not os.path.lexists(session_root):return
+    j.discard('policy',policy)
     data,exists=_read_file(policy,MAX_POLICY_BYTES)
     candidate=_policy_candidate(data,old,new) if exists else None
     if candidate is not None and candidate!=data:
@@ -659,6 +740,34 @@ def _result_extras(result, claude_status, desktop_status, command, arguments):
     return result
 
 
+_ROOT_NAMES = frozenset({'transactions','releases','.install.lock','receipt.json','current.json',ADOPTED_NAME})
+
+
+def _adopted_file(root):
+    """(bytes or None, backup records) of the installation's adopted.json."""
+    path=root/ADOPTED_NAME
+    if not os.path.lexists(path):return None,[]
+    data=read(path,mode=0o600)
+    try:return data,check_adopted(unique_json(data))
+    except BundleError:raise InstallError('metadata_conflict') from None
+
+
+def _record_adopted(j, root, adopted, transaction):
+    """Before any client write: this transaction's adoption backups listed in adopted.json, which no receipt
+    schema touches. Published from a bound packet like receipt.json (never a temporary in the root)."""
+    if not adopted:return
+    data,records=_adopted_file(root)
+    known={(r['transaction'],r['client']) for r in records}
+    new=[{'client':c,'transaction':transaction,'sha256':v['sha256'],'bytes':v['bytes']}
+         for c,v in sorted(adopted.items()) if (transaction,c) not in known]
+    if not new:return
+    if len(records)+len(new)>MAX_ADOPTED:raise InstallError('recovery_limit')
+    value=encoded({'schema_version':1,'backups':records+new})
+    def replaceable(p):
+        if data is None or read(p,mode=0o600)!=data:raise InstallError('metadata_conflict')
+    j.replace('adopted_sidecar',root/ADOPTED_NAME,lambda p:create(p,value),_exact(value),replaceable)
+
+
 def _adopted_records(records, transaction):
     return {c:{'sha256':v['sha256'],'bytes':v['bytes'],'transaction':transaction} for c,v in (records or {}).items()}
 
@@ -691,8 +800,10 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
     refuses before anything is created. Otherwise it never blocks the install.
 
     `adopt_legacy`: a foreign `telegram_search` entry (Codex, Claude Code, Claude Desktop) or a foreign
-    broker plist is replaced only after its exact backup is recorded in the transaction and receipt;
-    never by default. `launchctl` and `pending_sends` are the injectable service boundary.
+    broker plist is replaced only after its exact backup is recorded in the transaction, adopted.json and
+    the receipt; never by default. `launchctl` and `pending_sends` are the injectable service boundary.
+    Over an installed root this is an upgrade (`_change`); a lower package version refuses
+    (`downgrade_refused`): going back is only `rollback`.
     """
     try:
         require_platform()
@@ -770,7 +881,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         else:source=b'';existed=False;change=None;adopted=None
         _initialize(root,identity,change,existed,checkpoint,adopted)
         with SessionOwnerLease(root/'.install.lock') as lease:
-            if set(p.name for p in root.iterdir())-{'transactions','releases','.install.lock','receipt.json','current.json'}:
+            if set(p.name for p in root.iterdir())-_ROOT_NAMES:
                 raise InstallError('runtime_conflict')
             j=_Journal(tx,lease,_INSTALL_STEPS,checkpoint)
             journal=j.value
@@ -792,6 +903,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 _check_existing_service(plist,installed,agent_label)
             for client_root in (codex,skills):ensure_owned_private_directory(client_root,private_leaf=False)
             update,reached,proof,recorded=j.update,j.reached,j.proof,j.recorded
+            if not reached('release_pending'):_record_adopted(j,root,adopted,tx.name)
             checkpoint('prepared')
             if not reached('release_pending'):update('release_pending')
             j.publish('release',installed,lambda p:_copy_release(release,p,index,index_bytes,index_sha256),
@@ -801,25 +913,22 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             # Only an adopted foreign broker is ever stopped here; its definition is replaced by ours.
             service=_Service(plist,agent_label,_service_payload(installed,agent_label),adopted=adopted['service']['sha256'],
                              runner=launchctl,pending=probe,home=home) if 'service' in adopted else None
+            # Its observation and pending-send gate come before the first client write.
+            if service is not None and not reached('service'):service.observe(j)
             if not reached('registration'):
                 if not reached('registration_pending'):update('registration_pending')
+                # A killed earlier attempt leaves its journaled temporary beside the config.
+                j.discard('registration',config)
                 current,exists=_config(config);bound=proof('registration')
                 owned=False
-                if bound is not None and exists:
+                if bound is not None and exists and 'object' in bound:
                     try:require_object_binding(config,bound['object']);owned=current==candidate
                     except RuntimePathError:pass
                 if not owned:
-                    # A killed earlier attempt leaves its journaled temporary beside the config.
-                    if bound is not None:discard_temporary(config,bound)
                     if current!=before or exists!=journal['config_existed']:raise InstallError('foreign_registration')
-                    # Bound retries even when a process dies during temporary
-                    # creation before its flushed inode can be recorded.
-                    update(publication=('registration_attempts',{'attempt':len(j['publications'].get('registration_attempts',[]))+1}))
-                    def admit_config(value):
-                        obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
-                        update(publication=('registration',{'object':obj,'temporary':value['temporary']}))
-                        checkpoint('recorded:registration')
-                    _atomic_write(config,candidate,MAX_CONFIG_BYTES,expected=before,require_existing=journal['config_existed'],before_replace=admit_config)
+                    # Each attempt is journaled (and counted) before its temporary exists.
+                    j.attempt('registration',lambda temporary,admit:_atomic_write(config,candidate,MAX_CONFIG_BYTES,expected=before,
+                              require_existing=journal['config_existed'],before_replace=admit,temporary=temporary))
                     checkpoint('published:registration')
                     require_object_binding(config,proof('registration')['object'])
                 update('registration')
@@ -886,38 +995,34 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 except Exception:pass
             desktop_change=None;desktop_written=False
             def register_desktop():
-                """This transaction's Claude Desktop outcome. Only an absent (or adopted) entry is written, at most once."""
-                nonlocal desktop_change
-                if recorded('claude_desktop_add') is not None:
-                    # Attempted before an interruption: drop our journaled temporary if a kill left it, confirm
-                    # from the file, never write again.
-                    written=recorded('claude_desktop_write')
-                    if written is not None:claude_desktop_registration.discard_temporary(home,written)
-                    return 'registered' if desktop_state()=='exact' else 'failed'
+                """This transaction's Claude Desktop outcome. Only an absent (or adopted) entry is written; after an
+                interruption the same write is made again only over a file still byte-identical to its recorded preimage."""
+                nonlocal desktop_change,desktop_written
+                add=recorded('claude_desktop_add')
+                if add is not None:
+                    # Attempted before an interruption: drop our journaled temporaries a kill left, then confirm.
+                    _desktop_discard(j,home)
+                    if desktop_state()=='exact':return 'registered'
                 if 'claude_desktop' in adopted:
                     state,change=claude_desktop_registration.observe_change(home,None,command,arguments,
                                                                             adopted=adopted['claude_desktop']['sha256'])
                     state='absent' if state=='adopted' else state
                 else:state,change=claude_desktop_registration.observe(home,command,arguments)
-                if state in ('skipped','unavailable'):return state
-                if state=='exact':return 'reused'
-                if state=='unsupported':return 'unavailable'
-                if state!='absent':return 'failed'  # A different entry appeared mid-transaction: never touched.
-                owned=claude_desktop_registration.receipt('install_'+index_sha256[:24],'first_install',command,arguments)
-                # Write-ahead: a journaled attempt is what makes the entry ours. Hashes only; never config bytes.
-                update(single=('claude_desktop_add',{'attempt':1,'existed':change.existed,'source_sha256':change.source_sha256,
-                                                     'candidate_sha256':change.candidate_sha256,
-                                                     'ownership':unique_json(owned.to_bytes())}))
-                checkpoint('recorded:claude_desktop_add')
-                desktop_change=change
-                def admit(value):
-                    nonlocal desktop_written
-                    obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
-                    update(single=('claude_desktop_write',{'object':obj,'temporary':value['temporary']}))
-                    desktop_written=True
-                    checkpoint('recorded:claude_desktop_write')
-                try:claude_desktop_registration.write(home,change,admit)
-                except ConfigConflict:pass  # The confirming read decides.
+                if add is not None:
+                    if state!='absent' or not _desktop_unchanged(j,add,change):return 'failed'
+                else:
+                    if state in ('skipped','unavailable'):return state
+                    if state=='exact':return 'reused'
+                    if state=='unsupported':return 'unavailable'
+                    if state!='absent':return 'failed'  # A different entry appeared mid-transaction: never touched.
+                    owned=claude_desktop_registration.receipt('install_'+index_sha256[:24],'first_install',command,arguments)
+                    # Write-ahead: a journaled attempt is what makes the entry ours. Hashes only; never config bytes.
+                    update(single=('claude_desktop_add',{'attempt':1,'existed':change.existed,'source_sha256':change.source_sha256,
+                                                         'candidate_sha256':change.candidate_sha256,
+                                                         'ownership':unique_json(owned.to_bytes())}))
+                    checkpoint('recorded:claude_desktop_add')
+                desktop_change,desktop_written=change,True
+                _desktop_write(j,home,change)
                 checkpoint('published:claude_desktop_add')
                 return 'registered' if desktop_state()=='exact' else 'failed'
             def rollback_desktop():
@@ -925,8 +1030,11 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 if not desktop_written:return
                 try:
                     publications=unique_json(read(tx/'journal.json',mode=0o600))['publications']
-                    if outcome(publications,'claude_desktop') is None:
-                        claude_desktop_registration.restore(home,desktop_change,recorded('claude_desktop_write',publications)['object'])
+                    written=(publications.get('claude_desktop_write') or [None])[-1]
+                    if outcome(publications,'claude_desktop') is None and type(written) is dict and 'object' in written:
+                        temporary=new_temporary()
+                        update(publication=('claude_desktop_restore',{'temporary':temporary}))
+                        claude_desktop_registration.restore(home,desktop_change,written['object'],temporary)
                 except Exception:pass
             try:
                 # Once recorded the outcome is final for this transaction: never re-run, re-read or rolled back.
@@ -995,6 +1103,24 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         raise InstallError('installation_refused') from None
 
 
+_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})((?:\.(?:0|[1-9][0-9]{0,5})){0,4})(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?'
+                      r'(?:\.post(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
+_INF = float('inf')
+
+
+def _version_key(value):
+    """PEP 440 order of a public release version (N[.N]*[{a|b|rc}N][.postN][.devN]); anything else refuses."""
+    match=_VERSION.fullmatch(value) if type(value) is str else None
+    if match is None:raise InstallError('downgrade_refused')
+    head,rest,letter,number,post,dev=match.groups()
+    release=[int(head),*(int(p) for p in rest.split('.')[1:])]
+    while len(release)>1 and release[-1]==0:release.pop()
+    if letter is not None:pre=(('a','b','rc').index(letter),int(number))
+    elif dev is not None and post is None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
+    else:pre=(_INF,0)
+    return (tuple(release),pre,-_INF if post is None else int(post),_INF if dev is None else int(dev))
+
+
 def _changing(root, index_sha256):
     """Whether a rerun over this root is (or resumes) an upgrade rather than the first install's repeat."""
     name,journal=_latest_change(root)
@@ -1028,14 +1154,16 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             checkpoint, cli, claude_runner, launchctl, pending_sends):
     """Upgrade (to `source`) or rollback (to the receipt's previous release) of an installed root.
 
-    Order: release, Codex, skills, Claude Code, Claude Desktop, broker stop and plist, the runtime.toml
+    Every refusal (a downgrade, a foreign or drifted object, a pending send) comes before the transaction
+    exists. Order: adoption records (adopted.json), release, the broker observation with its pending-send
+    gate, Codex, skills, Claude Code, Claude Desktop, broker stop (gated again) and plist, the runtime.toml
     version line, receipt.json, then current.json (the commit). Only a broker that was loaded is
     bootstrapped again, after the commit, because a release is admitted only once current.json names it.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
     with SessionOwnerLease(root/'.install.lock') as lease:
-        if set(p.name for p in root.iterdir())-{'transactions','releases','.install.lock','receipt.json','current.json'}:
+        if set(p.name for p in root.iterdir())-_ROOT_NAMES:
             raise InstallError('runtime_conflict')
         name,journal=_latest_change(root)
         resuming=journal is not None and journal.get('stage')!='finished'
@@ -1085,7 +1213,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         payloads={}
         if from_root.exists():payloads['from']=_service_payload(from_root,label)
         if not resuming:
-            # Every refusal comes before the first mutation: a foreign or drifted object, a pending send.
+            # Every refusal comes before the transaction exists: a downgrade, a foreign or drifted object, a pending send.
+            if kind=='upgrade':
+                # Going back is only the rollback action, with its session-state checks.
+                if _version_key(to_manifest['package_version'])<_version_key(current['package_version']):
+                    raise InstallError('downgrade_refused')
+                if to_root.exists() or to_root.is_symlink():
+                    validate_tree(to_root,to_root/'bundle-index.json',to_index,installed=True)
             if kind=='rollback':
                 state=unique_json(read(root/'transactions'/current['transaction']/'journal.json',mode=0o600)).get('state')
                 now=_state(session_root)
@@ -1137,6 +1271,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             if os.path.lexists(session_root):
                 data,exists=_read_file(session_root/'runtime.toml',MAX_POLICY_BYTES)
                 if exists:_policy_candidate(data,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
+            if len(_adopted_file(root)[1])+len(adopted)>MAX_ADOPTED:raise InstallError('recovery_limit')
             identity=dict(schema_version=1,kind=kind,index_sha256=to_index,release_root=str(to_root),installation_root=str(root),
                           codex_home=str(codex),skills_root=str(skills),claude_skills_root=str(claude_skills),user_home=str(home),
                           package_version=to_manifest['package_version'],claude_code_mode=mode,from_index_sha256=from_index,
@@ -1169,6 +1304,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         fresh=(adopt_registration(before,to_registration) if 'codex' in adopted
                else _codex_change(before,to_registration,ownership))
         if candidate!=fresh.candidate or new_ownership.post_subtree_hash!=fresh.post_subtree_hash:raise InstallError('transaction_conflict')
+        if not j.reached('release_pending'):_record_adopted(j,root,adopted,name)
         checkpoint('prepared')
         # Release: the new one is copied once; an existing exact tree (an earlier upgrade) is reused.
         j.advance('release_pending')
@@ -1182,6 +1318,10 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         else:require_object_binding(to_root,target['publication_objects']['release']['object'])
         j.advance('release');checkpoint('release')
         to_payload=_service_payload(to_root,label)
+        service=_Service(plist,label,to_payload,known=payloads,adopted=adopted['service']['sha256'] if 'service' in adopted else None,
+                         runner=launchctl,pending=pending_sends,home=home)
+        # The broker observation and its pending-send gate come before the first client write.
+        if not j.reached('service'):service.observe(j)
         # Codex: our owned subtree replaced in place (compare-before-replace over the exact preimage).
         if not j.reached('registration'):
             j.advance('registration_pending')
@@ -1246,30 +1386,29 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             checkpoint('published:claude_add')
             return 'registered' if state()=='exact' else 'failed'
         def register_desktop():
-            """Owned (or adopted) replace, or an absent entry added; written at most once, mode kept."""
+            """Owned (or adopted) replace, or an absent entry added, mode kept; after an interruption the same
+            write is made again only over a file still byte-identical to its recorded preimage."""
             def state():return claude_desktop_registration.state(home,to_command,to_arguments)
-            if j.recorded('claude_desktop_add') is not None:
-                written=j.recorded('claude_desktop_write')
-                if written is not None:claude_desktop_registration.discard_temporary(home,written)
-                return 'registered' if state()=='exact' else 'failed'
+            add=j.recorded('claude_desktop_add')
+            if add is not None:
+                _desktop_discard(j,home)
+                if state()=='exact':return 'registered'
             observed,plan=claude_desktop_registration.observe_change(
                 home,(from_command,from_arguments) if desktop_owned else None,to_command,to_arguments,
                 adopted=adopted['claude_desktop']['sha256'] if 'claude_desktop' in adopted else None)
-            if observed in ('skipped','unavailable'):return observed
-            if observed=='exact':return 'reused'
-            if observed=='unsupported':return 'unavailable'
-            if observed not in ('owned','adopted','absent'):return 'failed'
-            owned=claude_desktop_registration.receipt(ownership.installation_id,name,to_command,to_arguments)
-            j.update(single=('claude_desktop_add',{'attempt':1,'existed':plan.existed,'source_sha256':plan.source_sha256,
-                                                   'candidate_sha256':plan.candidate_sha256,
-                                                   'ownership':unique_json(owned.to_bytes())}))
-            checkpoint('recorded:claude_desktop_add')
-            def admit(value):
-                obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
-                j.update(single=('claude_desktop_write',{'object':obj,'temporary':value['temporary']}))
-                checkpoint('recorded:claude_desktop_write')
-            try:claude_desktop_registration.write(home,plan,admit)
-            except ConfigConflict:pass
+            if add is not None:
+                if observed not in ('owned','adopted','absent') or not _desktop_unchanged(j,add,plan):return 'failed'
+            else:
+                if observed in ('skipped','unavailable'):return observed
+                if observed=='exact':return 'reused'
+                if observed=='unsupported':return 'unavailable'
+                if observed not in ('owned','adopted','absent'):return 'failed'
+                owned=claude_desktop_registration.receipt(ownership.installation_id,name,to_command,to_arguments)
+                j.update(single=('claude_desktop_add',{'attempt':1,'existed':plan.existed,'source_sha256':plan.source_sha256,
+                                                       'candidate_sha256':plan.candidate_sha256,
+                                                       'ownership':unique_json(owned.to_bytes())}))
+                checkpoint('recorded:claude_desktop_add')
+            _desktop_write(j,home,plan)
             checkpoint('published:claude_desktop_add')
             return 'registered' if state()=='exact' else 'failed'
         claude_status=outcome('claude_code')
@@ -1284,8 +1423,6 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             j.update(single=('claude_desktop',{'status':desktop_status}))
         if desktop_status not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
         j.advance('claude_desktop');checkpoint('claude_desktop')
-        service=_Service(plist,label,to_payload,known=payloads,adopted=adopted['service']['sha256'] if 'service' in adopted else None,
-                         runner=launchctl,pending=pending_sends,home=home)
         if not j.reached('service'):
             j.advance('service_pending');service.stop(j);j.update('service')
         checkpoint('service')
@@ -1369,12 +1506,48 @@ def _sweep(root):
         read(intent,mode=0o600);intent.unlink()
 
 
+def _codex_removal(config, owner):
+    """('remove', source, candidate) for our exact Codex subtree, else ('absent'|'kept', source, None)."""
+    source,exists=_config(config)
+    subtree=owned_subtree(source) if exists else None
+    if subtree is None:return 'absent',source,None
+    if digest(subtree)!=owner.post_subtree_hash:return 'kept',source,None
+    plan=rollback_registration(source,Receipt(owner.installation_id,owner.transaction_id,None,owner.post_subtree_hash,None))
+    return 'remove',source,plan.candidate
+
+
+def _adoption_backups(root, receipt):
+    """Every recorded `--adopt-legacy` backup: adopted.json plus a v2 receipt's own records, sorted."""
+    _,records=_adopted_file(root)
+    out={(r['transaction'],r['client']):r for r in records}
+    if receipt['schema_version']==2:
+        for client,value in receipt['adopted'].items():
+            out.setdefault((value['transaction'],client),{'client':client,**value})
+    return [out[k] for k in sorted(out)]
+
+
+def _backup_path(root, value):
+    return root/'transactions'/value['transaction']/('adopted-'+value['client'])
+
+
+def _uninstall_service(service):
+    """(kind, loaded) of the broker; a foreign definition is kept, never stopped."""
+    try:return service.check()
+    except InstallError as error:
+        if str(error)!='service_conflict':raise
+        return 'foreign',False
+
+
 def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude_candidates=None,
               claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None):
     """Remove only owned objects: the broker plist (exact label booted out first), the Codex, Claude Code and
     Claude Desktop entries the receipt owns, the owned skill copies and the installation root with its
     releases. The Telegram session, enrollment and Keychain are never touched; `--adopt-legacy` backups
-    are kept beside the removed root.
+    (adopted.json and a v2 receipt's records) are kept beside the removed root.
+
+    Every refusal, the pending-send gate included, comes before the transaction exists. After a write-ahead
+    removal attempt of a Claude Code or Claude Desktop entry the receipt and root stay until the entry is
+    confirmed gone (or no longer ours): a still exact entry is removed again, otherwise `uninstall_incomplete`.
     """
     try:
         require_platform()
@@ -1392,27 +1565,37 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 raise InstallError('transaction_pending')
             receipt,_=_installation(root)
             if str(home)!=receipt['user_home']:raise InstallError('upgrade_conflict')
+            installed=Path(receipt['release_root'])
+            command,arguments=_commands(installed)
+            config=Path(receipt['codex_home'])/'config.toml'
+            owner=_codex_ownership(root,receipt)
+            owned=_desktop_ownership(root,receipt,command,arguments)
+            backups=_adoption_backups(root,receipt)
+            service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
+            observed=None
             if journal is None or journal.get('kind')!='uninstall':
+                # Every refusal before the transaction exists: a refused uninstall leaves nothing that blocks a
+                # later upgrade, repair or rollback.
+                for value in backups:
+                    if digest(read(_backup_path(root,value),MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:
+                        raise InstallError('transaction_conflict')
+                _codex_removal(config,owner)
+                observed=_uninstall_service(service)
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
                 name=_open_change(root,lambda _:{'journal.json':encoded({**identity,'stage':'prepared','publications':{}})})
             tx=root/'transactions'/name
             j=_Journal(tx,lease,_UNINSTALL_STEPS,checkpoint)
             if j['index_sha256']!=receipt['index_sha256'] or j['installation_root']!=str(root):raise InstallError('transaction_conflict')
-            installed=Path(receipt['release_root'])
-            command,arguments=_commands(installed)
             def done(step,status):
                 if j.recorded(step) is None:j.update(single=(step,{'status':status}))
                 j.advance(step);checkpoint(step)
                 return j.recorded(step)['status']
             out={}
-            # Broker: only our exact definition; a loaded one is booted out by label after the pending-send gate.
+            # Broker: only our exact definition; a loaded one is booted out by label after the pending-send gate
+            # (just passed above, or again on a resume).
             if j.recorded('service') is None:
-                service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
-                try:kind,loaded=service.check()
-                except InstallError as error:
-                    if str(error)!='service_conflict':raise
-                    kind,loaded='foreign',False
+                kind,loaded=observed if observed is not None else _uninstall_service(service)
                 if kind=='to':
                     if loaded and _live(launchctl,label) is not None:_bootout(launchctl,label)
                     checkpoint('stopped:service')
@@ -1422,59 +1605,60 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             out['service']=done('service',status)
             # Codex: our subtree removed only while it is exactly what our ownership receipt records.
             if j.recorded('registration') is None:
-                config=Path(receipt['codex_home'])/'config.toml'
-                owner=_codex_ownership(root,receipt)
-                source,exists=_config(config)
-                subtree=owned_subtree(source) if exists else None
-                if subtree is None:status='absent'
-                elif digest(subtree)!=owner.post_subtree_hash:status='kept'
-                else:
-                    plan=rollback_registration(source,Receipt(owner.installation_id,name,None,owner.post_subtree_hash,None))
-                    j.write('codex',config,plan.candidate,source,existed=True,maximum=MAX_CONFIG_BYTES)
+                j.discard('codex',config)
+                status,source,candidate=_codex_removal(config,owner)
+                if status=='remove':
+                    j.write('codex',config,candidate,source,existed=True,maximum=MAX_CONFIG_BYTES)
                     status='removed'
             else:status=None
             out['codex']=done('registration',status)
-            # Claude Code: our owned user-scope entry, write-ahead, removed at most once.
+            # Claude Code: our owned user-scope entry, write-ahead; while it stays exactly ours it is removed again.
             if j.recorded('claude_code') is None:
                 status='skipped'
                 if receipt['claude_code_mode']=='user':
+                    attempts=j.attempts('claude_remove')
                     state=claude_registration.state(home,command,arguments)
-                    if j.recorded('claude_remove') is not None:status='removed' if state=='absent' else 'failed'
-                    elif state=='absent':status='absent'
-                    elif state=='unavailable':status='unavailable'
-                    elif state!='exact' or receipt['claude_code']!='registered':status='kept'
+                    if not attempts and state=='absent':status='absent'
+                    elif not attempts and state=='unavailable':status='unavailable'
+                    elif not attempts and (state!='exact' or receipt['claude_code']!='registered'):status='kept'
                     else:
-                        cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
-                        if cli is None:status='not_found'
-                        else:
-                            j.update(single=('claude_remove',{'attempt':1}));checkpoint('recorded:claude_remove')
+                        cli=None
+                        if state=='exact':
+                            cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
+                        if state=='exact' and cli is not None and len(attempts)<8:
+                            j.update(publication=('claude_remove',{'attempt':len(attempts)+1}));checkpoint('recorded:claude_remove')
                             try:claude_registration.remove(claude_runner,cli,home)
                             except claude_registration.ClaudeCliError:pass
                             checkpoint('published:claude_remove')
-                            status='removed' if claude_registration.state(home,command,arguments)=='absent' else 'failed'
+                            state=claude_registration.state(home,command,arguments)
+                        if not attempts and cli is None:status='not_found'
+                        elif state=='absent':status='removed'
+                        elif state=='different':status='kept'  # No longer ours.
+                        else:raise InstallError('uninstall_incomplete')
             else:status=None
             out['claude_code']=done('claude_code',status)
-            # Claude Desktop: our owned entry removed, neighbours and the file's mode kept.
+            # Claude Desktop: our owned entry removed, neighbours and the file's mode kept; compare-before-replace,
+            # so a still exact entry is removed again after an interruption.
             if j.recorded('claude_desktop') is None:
-                owned=_desktop_ownership(root,receipt,command,arguments)
-                if j.recorded('claude_desktop_add') is not None:
-                    written=j.recorded('claude_desktop_write')
-                    if written is not None:claude_desktop_registration.discard_temporary(home,written)
-                    status='removed' if claude_desktop_registration.state(home,command,arguments)=='absent' else 'failed'
-                else:
-                    state,plan=claude_desktop_registration.observe_removal(home,command,arguments)
+                add=j.recorded('claude_desktop_add')
+                if add is not None:_desktop_discard(j,home)
+                state,plan=claude_desktop_registration.observe_removal(home,command,arguments)
+                status=None
+                if add is None:
                     if state in ('skipped','unavailable','absent'):status=state
                     elif state!='exact' or owned is None:status='kept'
                     else:
-                        j.update(single=('claude_desktop_add',{'attempt':1}));checkpoint('recorded:claude_desktop_add')
-                        def admit(value):
-                            obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
-                            j.update(single=('claude_desktop_write',{'object':obj,'temporary':value['temporary']}))
-                            checkpoint('recorded:claude_desktop_write')
-                        try:claude_desktop_registration.write(home,plan,admit)
-                        except ConfigConflict:pass
+                        j.update(single=('claude_desktop_add',{'attempt':1,'existed':plan.existed,'source_sha256':plan.source_sha256,
+                                                               'candidate_sha256':plan.candidate_sha256}))
+                        checkpoint('recorded:claude_desktop_add')
+                if status is None:
+                    if state=='exact' and len(j.attempts('claude_desktop_write'))<8:
+                        _desktop_write(j,home,plan)
                         checkpoint('published:claude_desktop_add')
-                        status='removed' if claude_desktop_registration.state(home,command,arguments)=='absent' else 'failed'
+                        state,_=claude_desktop_registration.observe_removal(home,command,arguments)
+                    if state in ('absent','skipped'):status='removed'
+                    elif state=='different':status='kept'  # No longer ours.
+                    else:raise InstallError('uninstall_incomplete')
             else:status=None
             out['claude_desktop']=done('claude_desktop',status)
             # Skill copies: only the exact directories the receipt binds; moved into the retiring root.
@@ -1496,18 +1680,17 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             j.advance('skills');checkpoint('skills')
             out['skills']=j.recorded('skills')['status']
             # Adoption backups outlive the root; the session and Keychain are not part of it.
-            backups=None
-            if receipt['schema_version']==2 and receipt['adopted']:
+            kept_root=None
+            if backups:
                 record=j.recorded('backups')
                 if record is None:
                     j.update(single=('backups',{'path':str(root.parent/('.'+root.name+'-adopted-'+uuid.uuid4().hex[:24]))}))
                     record=j.recorded('backups')
-                backups=Path(record['path'])
-                if backups.parent!=root.parent or not backups.name.startswith('.'+root.name+'-adopted-'):raise InstallError('transaction_conflict')
-                ensure_owned_private_directory(backups)
-                for client,value in sorted(receipt['adopted'].items()):
-                    origin=root/'transactions'/value['transaction']/('adopted-'+client)
-                    kept=backups/(value['transaction']+'-'+client)
+                kept_root=Path(record['path'])
+                if kept_root.parent!=root.parent or not kept_root.name.startswith('.'+root.name+'-adopted-'):raise InstallError('transaction_conflict')
+                ensure_owned_private_directory(kept_root)
+                for value in backups:
+                    origin,kept=_backup_path(root,value),kept_root/(value['transaction']+'-'+value['client'])
                     if not kept.exists():
                         if digest(read(origin,MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:raise InstallError('transaction_conflict')
                         _rename(origin,kept)
@@ -1516,7 +1699,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             _rename(root,retired);checkpoint('published:retired')
         _sweep(root)
         result={'status':'uninstalled','installation':'removed','next_action':'restart_mcp_clients',**out}
-        if backups is not None:result['legacy_backups']=str(backups)
+        if kept_root is not None:result['legacy_backups']=str(kept_root)
         return result
     except InstallError:raise
     except _REFUSALS:

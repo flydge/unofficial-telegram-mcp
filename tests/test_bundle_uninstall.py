@@ -17,7 +17,7 @@ import unittest
 from unittest import mock
 
 from claude_fake import entry
-from test_bundle_upgrade import ChangeHarness, NEIGHBOUR_CODEX, WRITE_AHEAD
+from test_bundle_upgrade import ChangeHarness, NEIGHBOUR_CODEX
 from telegram_search_mcp import claude_desktop_registration as desktop
 
 
@@ -131,9 +131,9 @@ class UninstallTests(ChangeHarness, unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     self.change('uninstall', checkpoint=crash)
                 result = self.change('uninstall')
-                window = WRITE_AHEAD.get(stage)
-                self.assertRemoved(result, claude=window != 'claude', desktop_entry=window != 'desktop')
-                self.assertEqual(self.claude().verbs()[calls:], [] if stage == 'recorded:claude_remove' else ['remove'])
+                # A write-ahead window is retried while the entry is still exactly ours: everything is removed.
+                self.assertRemoved(result)
+                self.assertEqual(self.claude().verbs()[calls:], ['remove'])
                 self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
                 self.assertEqual(self.everything(), before)
                 self.assertEqual(sorted(p.name for p in desktop.directory(self.home).iterdir()), [desktop.CONFIG_NAME])

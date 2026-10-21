@@ -8,7 +8,10 @@ import io
 import json
 from pathlib import Path
 import plistlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -94,8 +97,8 @@ class AdoptLegacyTests(AdoptionHarness, unittest.TestCase):
         self.assertEqual(plistlib.loads(self.plist.read_bytes())['ProgramArguments'][4], str(installed / 'launcher.py'))
         self.assertEqual(self.launchctl.loaded[4], str(installed / 'launcher.py'))
         self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
-        self.assertEqual([p for p, _ in self.probes], [Path(LEGACY_PYTHON)] * 2)
-        self.assertEqual([a for _, a in self.probes], [None, None])
+        self.assertEqual([p for p, _ in self.probes], [Path(LEGACY_PYTHON)] * 3)
+        self.assertEqual([a for _, a in self.probes], [None, None, None])
         self.assertIn(b'expected_package_version = "0.53.0.dev0"', (self.session_root / 'runtime.toml').read_bytes())
         self.assertEqual(self.session_hashes(), before)
         receipt = self.receipt()
@@ -211,6 +214,66 @@ class AdoptFlagGrammarTests(unittest.TestCase):
                         self.REQUIRED + ['--adopt-legacy', 'yes'], self.REQUIRED[:2] + ['--adopt-legacy'] + self.REQUIRED[2:]):
             with self.subTest(options=options):
                 self.assertEqual(self.run_launcher(options), (2, '', generic, []))
+
+
+class AdoptBootstrapTests(unittest.TestCase):
+    """The supported entry point: bootstrap.sh runs for real and passes --adopt-legacy to a stub launcher last."""
+
+    def setUp(self):
+        from test_claude_code_modes import synthetic_kit
+        self.base = Path(tempfile.mkdtemp(prefix='tg-adopt-')).resolve()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+        self.home = self.base / 'home'
+        self.home.mkdir(mode=0o700)
+        self.out = self.base / 'out'
+        self.out.mkdir(mode=0o700)
+        (self.seed, self.index, self.archive), self.seed_sha, self.seed_bytes, self.index_sha = synthetic_kit(
+            self.base / 'kit', self.home, self.out)
+
+    def bootstrap(self, *extra):
+        from test_claude_code_modes import BOOTSTRAP
+        argv = ['/bin/sh', '-p', str(BOOTSTRAP), '--seed', str(self.seed), '--seed-sha256', self.seed_sha,
+                '--seed-bytes', str(self.seed_bytes), '--archive', str(self.archive), '--index', str(self.index),
+                '--trusted-index-sha256', self.index_sha, '--installation-root', str(self.home / 'runtime'), *extra]
+        return subprocess.run(argv, capture_output=True, text=True, timeout=120, env={'PATH': '/usr/bin:/bin'})
+
+    def test_the_flag_reaches_the_launcher_last_and_only_when_given(self):
+        for extra, mode, adopt in (((), 'user', False), (('--adopt-legacy',), 'user', True),
+                                   (('--claude-code', 'plugin', '--adopt-legacy'), 'plugin', True),
+                                   (('--json', '--claude-code', 'skip', '--adopt-legacy'), 'skip', True)):
+            with self.subTest(extra=extra):
+                done = self.bootstrap(*extra)
+                self.assertEqual((done.returncode, done.stderr), (0, ''))
+                argv = (self.out / 'launcher-argv').read_text().splitlines()
+                stage = argv[3][:-len('/release/launcher.py')]
+                self.assertEqual(argv, ['-I', '-S', '-B', stage + '/release/launcher.py', 'bootstrap-install',
+                                        '--installation-root', str(self.home / 'runtime'),
+                                        '--codex-home', str(self.home / '.codex'),
+                                        '--skills-root', str(self.home / '.agents/skills'),
+                                        '--index', stage + '/verified-index.json',
+                                        '--trusted-index-sha256', self.index_sha, '--claude-code', mode]
+                                 + (['--adopt-legacy'] if adopt else []))
+                (self.out / 'launcher-argv').unlink()
+
+    def test_anywhere_but_last_or_twice_refuses_before_the_seed_runs(self):
+        for extra in (('--adopt-legacy', '--claude-code', 'user'), ('--adopt-legacy', '--adopt-legacy'),
+                      ('--adopt-legacy', 'yes'), ('--adopt-legacy', '--json')):
+            with self.subTest(extra=extra):
+                done = self.bootstrap(*extra)
+                self.assertEqual(done.returncode, 6)
+                self.assertEqual(json.loads(done.stderr), {'schema_version': 1, 'error_code': 'selection_invalid',
+                                                           'retained_stage': ''})
+                self.assertFalse((self.out / 'seed-ran').exists())
+
+    def test_install_command_and_the_plugin_never_pass_it_and_the_spec_names_the_command(self):
+        root = Path(__file__).parents[1]
+        for path in [root / 'packaging/install_command.py', *(p for p in (root / 'plugins').rglob('*') if p.is_file())]:
+            with self.subTest(path=str(path.relative_to(root))):
+                self.assertNotIn(b'--adopt-legacy', path.read_bytes())
+        spec = (root / 'docs/plans/0.53-client-distribution-spec.md').read_text()
+        section = spec[spec.index('### E '):spec.index('### F ')]
+        self.assertIn('/usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh"', section)
+        self.assertIn('--adopt-legacy`', section)
 
 
 if __name__ == '__main__': unittest.main()

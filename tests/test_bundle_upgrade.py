@@ -21,9 +21,9 @@ NEIGHBOUR_DESKTOP = '{\n  "globalShortcut": "Alt+Space",\n  "mcpServers": {\n   
 NEIGHBOUR_CODEX = b'# preserved neighbor\nmodel = "example"\n'
 OLD_VERSION = '0.52.9'
 V2_KEYS = ('transaction', 'claude_desktop_ownership', 'previous', 'adopted')
-# A crash in a write-ahead window before the client effect: never retried, the outcome is `failed`.
-WRITE_AHEAD = {'recorded:claude_remove': 'claude', 'recorded:claude_add': 'claude',
-               'recorded:claude_desktop_add': 'desktop', 'recorded:claude_desktop_write': 'desktop'}
+# A crash in a Claude Code write-ahead window before the CLI effect: never retried, the outcome is `failed`.
+# Claude Desktop writes are compare-before-replace: an unchanged file gets the same write again on resume.
+WRITE_AHEAD = {'recorded:claude_remove': 'claude', 'recorded:claude_add': 'claude'}
 
 
 class FakeLaunchctl:
@@ -271,9 +271,10 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         self.assertUpgradedTo(new_root, old['release_root'])
         self.assertTrue(Path(old['release_root']).is_dir())  # Kept for rollback.
         self.assertEqual(fake.verbs(), ['add-json', 'remove', 'add-json'])
-        self.assertEqual(self.launchctl.verbs(), ['print', 'print', 'bootout', 'print', 'print', 'bootstrap'])
+        # Gated before the transaction, before the first client write and right before the stop.
+        self.assertEqual(self.launchctl.verbs(), ['print', 'print', 'print', 'bootout', 'print', 'print', 'bootstrap'])
         self.assertEqual(self.launchctl.loaded[4], str(new_root / 'launcher.py'))
-        self.assertEqual([p[0] for p in self.probes], [Path(old['release_root']) / 'python/bin/python3'] * 2)
+        self.assertEqual([p[0] for p in self.probes], [Path(old['release_root']) / 'python/bin/python3'] * 3)
         self.assertEqual(self.session_hashes(), before)
         self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
                          policy.replace(OLD_VERSION.encode(), b'0.53.0.dev0'))
@@ -513,8 +514,8 @@ class KilledWriteTests(ChangeHarness, unittest.TestCase):
                 result = self.install(new)
                 self.assertEqual(result['status'], 'upgraded')
                 self.assertEqual([p for p in directory().iterdir() if p.name.startswith('.telegram-search-')], [])
-                self.assertUpgradedTo(self.runtime / 'releases' / new[3], old['release_root'],
-                                      desktop=stage != 'recorded:claude_desktop_write')
+                self.assertUpgradedTo(self.runtime / 'releases' / new[3], old['release_root'])
+                self.assertEqual(result['claude_desktop'], 'registered')
                 self.selection_check()
 
 
