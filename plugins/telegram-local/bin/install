@@ -8,13 +8,17 @@
 # <the pinned Team ID>, and the installer JSON is printed on stdout. Exactly the results the installer returns
 # for a kit are a success: a first install (activation_required with installation installed or reused), an
 # upgrade or its repeat (upgraded with installation upgraded or reused), or the repeat of the release a finished
-# rollback went back to (rolled_back with installation reused); any other result refuses as result_invalid. The directory is removed on success and kept on failure. The reviewed plugin
-# commit, pinned by the marketplace, is the trust input: no environment value, argument or downloaded
-# byte selects a URL, pin or path. Published pins must carry
+# rollback went back to (rolled_back with installation reused); any other result refuses as result_invalid.
+# The directory is removed on success and kept on failure.
+# Trust input: this plugin's files (this script and release-pins.json, the release build's file copied byte
+# for byte in the release commit) as the user's marketplace clone holds them. The marketplace names the
+# plugin by a relative path with no ref, so that is whatever commit the clone last updated to, and a
+# marketplace update can change both; inspect release-pins.json (team_id, version) before running this.
+# No environment value, argument or downloaded byte selects a URL, pin or path. Published pins must carry
 # a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
-# evaluates the downloaded seed, and bootstrap.sh's --seed-team check of its Developer ID designated
-# requirement is what binds it to the publisher, on top of the sha256 pins. Stock absolute tools only;
-# every refusal is one fixed JSON line on stderr.
+# evaluates the downloaded seed; bootstrap.sh's --seed-team check of its Developer ID designated
+# requirement binds it to that Team ID, on top of the sha256 pins, and both come from this plugin's pins.
+# Stock absolute tools only; every refusal is one fixed JSON line on stderr.
 set -eu
 umask 077
 
@@ -101,7 +105,7 @@ tg_file "$tg_pins" 4096 || tg_refuse pins_invalid
 tg_pins_size=$tg_size
 [ "$(tg_pin schema_version integer)" = 1 ] || tg_refuse pins_invalid
 tg_publication=$(tg_pin publication string) || tg_refuse pins_invalid
-case "$tg_publication" in published|unpublished) ;; *) tg_refuse pins_invalid;; esac
+case "$tg_publication" in published|unreleased) ;; *) tg_refuse pins_invalid;; esac
 tg_version=$(tg_pin version string) || tg_refuse pins_invalid
 [ "${#tg_version}" -le 32 ] || tg_refuse pins_invalid
 case "$tg_version" in [0123456789]*) ;; *) tg_refuse pins_invalid;; esac

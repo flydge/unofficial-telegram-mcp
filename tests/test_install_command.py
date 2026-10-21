@@ -222,6 +222,23 @@ class InstallCommandTests(unittest.TestCase):
                 IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX, **options)
             self.assertEqual(str(caught.exception), 'pins_invalid')
 
+    def test_render_pins_embeds_the_values_of_one_release_pins_file(self):
+        pins = {'schema_version': 1, 'version': '1.2.3', 'publication': 'published', 'team_id': TEAM,
+                'bootstrap_sha256': 'c' * 64, 'bootstrap_bytes': 100, 'seed_sha256': SEED, 'seed_bytes': 71600,
+                'index_sha256': INDEX, 'index_bytes': 200, 'archive_sha256': 'd' * 64, 'archive_bytes': 300}
+        data = (json.dumps(pins, indent=2, sort_keys=True) + '\n').encode()
+        self.assertEqual(IC.render_pins(data), IC.render(seed_sha256=SEED, seed_bytes=71600, index_sha256=INDEX,
+                                                         team_id=TEAM, published=True))
+        unreleased = (json.dumps({**pins, 'publication': 'unreleased', 'team_id': ''}, indent=2, sort_keys=True)
+                      + '\n').encode()
+        self.assertEqual(IC.render_pins(unreleased), IC.render(seed_sha256=SEED, seed_bytes=71600, index_sha256=INDEX))
+        for bad in (data.replace(b'\n', b'', 1), json.dumps({**pins, 'team_id': ''}, indent=2, sort_keys=True).encode()
+                    + b'\n', b'{}\n', (json.dumps({**pins, 'seed_bytes': 0, 'publication': 'unreleased',
+                                                   'team_id': ''}, indent=2, sort_keys=True) + '\n').encode()):
+            with self.subTest(bad=bad), self.assertRaises(IC.InstallCommandError) as caught:
+                IC.render_pins(bad)
+            self.assertEqual(str(caught.exception), 'pins_invalid')
+
     def test_a_relative_invocation_is_refused(self):
         result = subprocess.run(['/bin/sh', '-p', 'Install.command'], cwd=self.kit, capture_output=True, text=True,
                                 timeout=60, env={'PATH': '/usr/bin:/bin'})

@@ -14,14 +14,22 @@ exactly the installed release's python3 with -I -S -B, its launcher.py and `conn
 session it reports `already_connected`. Any other status or installation refuses. bootstrap.sh gets no `--claude-code`, so an upgrade keeps the installed mode. `--prepare-only`
 stops after verification. Every refusal prints one fixed code.
 
-When release-pins.json carries a Team ID (a Developer ID kit), it is a literal too and bootstrap.sh gets
-`--seed-team <TEAMID>`, so the staged seed must satisfy the Developer ID designated requirement before it
-runs. A published kit without a Team ID is refused at render time (`team_required`); only the
-unpublished ad hoc test kit runs without one.
+The release build calls `render_pins` with the kit's release-pins.json bytes (release_pins.py, the one
+schema the plugin's bin/install reads too), so the embedded pins are those bytes' values. When they carry
+a Team ID (a Developer ID kit), it is a literal too and bootstrap.sh gets `--seed-team <TEAMID>`, so the
+staged seed must satisfy the Developer ID designated requirement before it runs. A published kit without
+a Team ID is refused at render time (`team_required`, or `pins_invalid` from the schema); only the
+unreleased ad hoc test kit runs without one.
+
+Install.command itself is not code-signed: the DMG's Developer ID signature and stapled ticket cover the
+image it ships in. How Gatekeeper treats the double-clicked script is an owner-session observation.
 """
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 import re
+import sys
 
 CODES = frozenset({'pins_invalid', 'team_required'})
 HASH = re.compile(r'[0-9a-f]{64}')
@@ -137,3 +145,23 @@ def render(*, seed_sha256, seed_bytes, index_sha256, team_id=None, published=Fal
     if re.search(r'@[A-Z0-9_]+@', text):  # every placeholder replaced; "$@" is the script's own
         raise InstallCommandError('pins_invalid')
     return text.encode('ascii')
+
+
+def _release_pins():
+    name = 'install_command_release_pins'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / 'release_pins.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]
+
+
+def render_pins(data):
+    """The Install.command bytes for one kit's release-pins.json bytes, parsed under the one schema."""
+    try:
+        pins = _release_pins().parse(data)
+    except ValueError:
+        raise InstallCommandError('pins_invalid') from None
+    return render(seed_sha256=pins['seed_sha256'], seed_bytes=pins['seed_bytes'], index_sha256=pins['index_sha256'],
+                  team_id=pins['team_id'] or None, published=pins['publication'] == 'published')

@@ -41,6 +41,8 @@ def load(name, file):
 
 RB = load('release_build_under_test', 'release_build.py')
 SP = load('sign_payload_for_release_build', 'sign_payload.py')
+PINS = load('release_pins_for_release_build', 'release_pins.py')
+PLUGIN = f'plugins/{product_identity.PLUGIN_NAME}'
 
 
 def sha(data):
@@ -76,6 +78,7 @@ class Fakes:
         self.signature_call = None
         self.dmg_tamper = False
         self.notarized = None
+        self.publication = 'unreleased'
 
     def steps(self):
         names = ('prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'signatures', 'notarize')
@@ -104,7 +107,7 @@ class Fakes:
         files = {'tdlib-lock.json': self.test.v1, 'provenance/components.json': b'{"wheels": []}\n',
                  'native/libtdjson.dylib': b'native', 'manifest/release.json': json.dumps({
                      'schema_version': 2, 'publisher': {'kind': 'adhoc', 'team_id': None}, 'native_lock_sha256': '0' * 64,
-                     'publication': 'unreleased', 'source_completeness': 'incomplete'}).encode()}
+                     'publication': self.publication, 'source_completeness': 'incomplete'}).encode()}
         for name, data in files.items():
             self.write(output / name, data)
         return {'source_commit': self.test.commit, 'package_version': VERSION, 'tree_sha256': '1' * 64, 'files': 4,
@@ -188,7 +191,9 @@ class ReleaseBuildTests(unittest.TestCase):
         self.v1 = json.dumps({'manifest_version': 1, 'tdlib_version': '1.8.67'}).encode()
         files = {'packaging/bootstrap.sh': b'#!/bin/sh -p\n# synthetic\n', 'packaging/tdlib-lock.json': self.v1,
                  'packaging/payload-lock.json': b'{}', 'packaging/release_build.py': b'# copy\n',
-                 'LICENSE': b'license text\n', 'NOTICE': b'notice text\n', 'docs/third-party-notices.md': b'# notices\n'}
+                 'LICENSE': b'license text\n', 'NOTICE': b'notice text\n', 'docs/third-party-notices.md': b'# notices\n',
+                 f'{PLUGIN}/.claude-plugin/plugin.json': json.dumps({'version': VERSION}).encode(),
+                 f'{PLUGIN}/release-pins.json': b'placeholder\n'}
         for name, data in files.items():
             (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / name).write_bytes(data)
@@ -229,12 +234,18 @@ class ReleaseBuildTests(unittest.TestCase):
             for name, record in evidence[group].items():
                 self.assertEqual((sha((out / group / name).read_bytes()), (out / group / name).stat().st_size),
                                  (record['sha256'], record['bytes']))
-        pins = json.loads((out / 'kit/release-pins.json').read_bytes())
-        self.assertEqual(pins['seed'], {'file': 'bootstrap-verifier', 'sha256': sha(b'synthetic seed'), 'bytes': 14})
-        self.assertEqual((pins['publisher'], pins['team_id'], pins['publication']), ('adhoc', None, 'unreleased'))
-        self.assertEqual(set(pins), RB.PIN_KEYS)
+        pins = PINS.parse((out / 'kit/release-pins.json').read_bytes())  # The one schema bin/install reads.
+        self.assertEqual((pins['seed_sha256'], pins['seed_bytes']), (sha(b'synthetic seed'), 14))
+        bootstrap = b'#!/bin/sh -p\n# synthetic\n'
+        self.assertEqual((pins['bootstrap_sha256'], pins['bootstrap_bytes']), (sha(bootstrap), len(bootstrap)))
+        for name, asset, _ in PINS.ASSETS:
+            self.assertEqual((pins[name + '_sha256'], pins[name + '_bytes']),
+                             (evidence['kit'][asset]['sha256'], evidence['kit'][asset]['bytes']))
+        self.assertEqual((pins['version'], pins['team_id'], pins['publication']), (VERSION, '', 'unreleased'))
         command = (out / 'kit/Install.command').read_text()
-        self.assertIn(f"install_index_sha256={pins['index']['sha256']}\n", command)
+        self.assertIn(f"install_index_sha256={pins['index_sha256']}\n", command)
+        self.assertEqual(command.encode(), RB._sibling('install_command').render_pins(
+            (out / 'kit/release-pins.json').read_bytes()))
         self.assertIn("install_seed_team=''\n", command)
         self.assertEqual((out / 'kit/Install.command').stat().st_mode & 0o777, 0o555)
         self.assertEqual((out / 'kit/bootstrap.sh').read_bytes(), b'#!/bin/sh -p\n# synthetic\n')
@@ -282,8 +293,8 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(fakes.signature_call[2:4], ('developer-id', TEAM))
         self.assertEqual(fakes.calls.index('signatures') + 1, fakes.calls.index('notarize'))
         self.assertEqual(evidence['mode'], 'developer-id')
-        pins = json.loads((self.root / 'out/kit/release-pins.json').read_bytes())
-        self.assertEqual((pins['publisher'], pins['team_id']), ('developer-id', TEAM))
+        pins = PINS.parse((self.root / 'out/kit/release-pins.json').read_bytes())
+        self.assertEqual((pins['team_id'], pins['publication']), (TEAM, 'unreleased'))
         self.assertIn(f"install_seed_team='{TEAM}'\n", (self.root / 'out/kit/Install.command').read_text())
         provenance = json.loads((self.root / 'out/assets/release-provenance.json').read_bytes())
         self.assertEqual(provenance['native_signing'], RB.NATIVE_SIGNING['developer-id'])
@@ -293,6 +304,55 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / 'out/work/signed/manifest/release.json').read_bytes())['publisher'],
                          {'kind': 'developer-id', 'team_id': TEAM})
         self.assertEqual(RB.check(self.root / 'out', self.repo)['mode'], 'developer-id')
+
+    def release_commit(self, out, data=None, extra=None):
+        """The build commit's child holding the kit's pins (or `data`) as the plugin's copy, and `extra` files."""
+        (self.repo / PLUGIN / 'release-pins.json').write_bytes(
+            data if data is not None else (out / 'kit/release-pins.json').read_bytes())
+        for name, value in (extra or {}).items():
+            (self.repo / name).write_bytes(value)
+        git(self.repo, 'add', '-A')
+        git(self.repo, 'commit', '-q', '-m', 'release pins')
+        return git(self.repo, 'rev-parse', 'HEAD')
+
+    def test_release_commit_is_the_build_commit_plus_the_kit_pins_copy(self):
+        self.build(dry_run=False, identity=IDENTITY, team_id=TEAM, notary_profile='release-notary')
+        out = self.root / 'out'
+        head = self.release_commit(out)
+        self.assertEqual(RB.release_commit(out, self.repo), {'status': 'verified', 'release_commit': head,
+                                                             'source_commit': self.commit, 'tag': None,
+                                                             'publication': 'unreleased'})
+        git(self.repo, 'tag', 'v1.2.4')
+        self.assertEqual(RB.release_commit(out, self.repo, 'v1.2.4')['tag'], 'v1.2.4')
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(RB.main(['release-commit', '--output', str(out), '--checkout', str(self.repo)]), 0)
+        self.assertEqual(json.loads(printed.getvalue())['release_commit'], head)
+
+        def refused(code, tag=None):
+            with self.assertRaises(RB.BuildError) as caught:
+                RB.release_commit(out, self.repo, tag)
+            self.assertEqual(str(caught.exception), code)
+            self.assertIsNone(caught.exception.__cause__)
+        refused('tag_mismatch', 'v1.2.3')  # The build commit's tag, not HEAD's.
+        (self.repo / 'NOTICE').write_text('dirty\n')
+        refused('checkout_dirty')
+        git(self.repo, 'checkout', '-q', '--', 'NOTICE')
+        for label, data, extra, code in (
+                ('reformatted pins', json.dumps(json.loads((out / 'kit/release-pins.json').read_bytes())).encode(), None,
+                 'release_commit_invalid'),
+                ('another file too', None, {'NOTICE': b'changed\n'}, 'release_commit_invalid')):
+            with self.subTest(label):
+                git(self.repo, 'reset', '-q', '--hard', self.commit)
+                self.release_commit(out, data, extra)
+                refused(code)
+        self.release_commit(out, b'second\n')  # Two commits past the build: HEAD's parent is not its commit.
+        refused('evidence_mismatch')
+        git(self.repo, 'reset', '-q', '--hard', self.commit)
+        self.build('adhoc')
+        self.release_commit(self.root / 'adhoc')
+        with self.assertRaises(RB.BuildError) as caught:
+            RB.release_commit(self.root / 'adhoc', self.repo)
+        self.assertEqual(str(caught.exception), 'release_commit_invalid')  # A dry-run kit never becomes the pins.
 
     def test_named_identity_service_is_recorded_by_fingerprint_only(self):
         fakes = Fakes(self, service=SERVICE)
@@ -411,12 +471,18 @@ class ReleaseBuildTests(unittest.TestCase):
         command = (out / 'kit/Install.command').read_bytes()
         cases = {'not json': (b'\xff\xfe pins', 'evidence_invalid'),
                  'not a dict': (b'[1, 2]\n', 'evidence_invalid'),
-                 'missing seed': (RB.json_bytes({k: v for k, v in good.items() if k != 'seed'}), 'evidence_invalid'),
-                 'seed not a dict': (RB.json_bytes({**good, 'seed': 'x'}), 'evidence_invalid'),
-                 'seed without sha': (RB.json_bytes({**good, 'seed': {'bytes': 1}}), 'evidence_invalid'),
+                 'missing seed': (RB.json_bytes({k: v for k, v in good.items() if k != 'seed_sha256'}),
+                                  'evidence_invalid'),
+                 'old nested seed': (RB.json_bytes({**good, 'seed': {'sha256': good['seed_sha256']}}), 'evidence_invalid'),
+                 'string size': (RB.json_bytes({**good, 'seed_bytes': str(good['seed_bytes'])}), 'evidence_invalid'),
+                 'compact': (json.dumps(good, sort_keys=True).encode() + b'\n', 'evidence_invalid'),
+                 'old vocabulary': (RB.json_bytes({**good, 'publication': 'unpublished'}), 'evidence_invalid'),
+                 'published without a team': (RB.json_bytes({**good, 'publication': 'published'}), 'evidence_invalid'),
                  'ad hoc with a team': (RB.json_bytes({**good, 'team_id': TEAM}), 'evidence_mismatch'),
-                 'ad hoc published': (RB.json_bytes({**good, 'publication': 'published'}), 'evidence_mismatch'),
-                 'developer-id publisher': (RB.json_bytes({**good, 'publisher': 'developer-id'}), 'evidence_mismatch')}
+                 'other version': (RB.json_bytes({**good, 'version': '1.2.4'}), 'evidence_mismatch'),
+                 'other bootstrap': (RB.json_bytes({**good, 'bootstrap_sha256': 'f' * 64}), 'evidence_mismatch'),
+                 'other index size': (RB.json_bytes({**good, 'index_bytes': good['index_bytes'] + 1}),
+                                      'evidence_mismatch')}
         for label, (data, code) in cases.items():
             with self.subTest(label), self.assertRaises(RB.BuildError) as caught:
                 self.forge(out, pins=data)
