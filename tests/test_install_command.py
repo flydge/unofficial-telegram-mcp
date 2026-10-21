@@ -37,6 +37,7 @@ python="$root/python/bin/python3"
 launcher="$root/launcher.py"
 verb=connect
 status=activation_required
+installation=',"installation":"installed"'
 extra=''
 case "$mode" in
     fail) /usr/bin/printf '%s\n' '{"schema_version":1,"error_code":"integrity_failure"}' >&2; exit 6;;
@@ -46,6 +47,8 @@ case "$mode" in
     other-verb) verb=setup;;
     other-status) status=installed;;
     seven) extra=',"--json"';;
+    first:*) installation=',"installation":"'"${mode#*:}"'"';;
+    first-bare) installation='';;
     upgraded:*|rolled_back:*|upgraded-other-root:*|upgraded-bare)
         # An upgrade or repeat result: no activation argv, installation as the mode names it.
         status=${mode%%:*}
@@ -57,8 +60,8 @@ case "$mode" in
         esac
         exit 0;;
 esac
-/usr/bin/printf '{"status":"%s","release_root":"%s","activation_arguments":["%s","-I","-S","-B","%s","%s"%s]}\n' \
-    "$status" "$root" "$python" "$launcher" "$verb" "$extra"
+/usr/bin/printf '{"status":"%s"%s,"release_root":"%s","activation_arguments":["%s","-I","-S","-B","%s","%s"%s]}\n' \
+    "$status" "$installation" "$root" "$python" "$launcher" "$verb" "$extra"
 '''
 PYTHON = r'''#!/bin/sh
 here=$(cd "$(/usr/bin/dirname "$0")/../.." && /bin/pwd -P)
@@ -116,6 +119,16 @@ class InstallCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(lines[0])['status'], 'activation_required')
         self.assertEqual(lines[-2:], ['{"status":"connected"}', 'Install.command finished.'])
 
+    def test_a_repeated_first_install_runs_connect_like_the_first(self):
+        self.mode('first:reused')
+        result = self.run_command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual((json.loads(lines[0])['status'], json.loads(lines[0])['installation']), ('activation_required', 'reused'))
+        self.assertEqual(lines[1], 'Installed. Starting the Telegram login (connect) in this window.')
+        self.assertEqual((self.release / 'activation.argv').read_text().splitlines(),
+                         ['-I', '-S', '-B', f'{self.release}/launcher.py', 'connect'])
+
     def test_an_upgrade_or_a_repeat_prints_its_result_then_runs_connect_inline(self):
         for mode in ('upgraded:upgraded', 'upgraded:reused', 'rolled_back:reused'):
             with self.subTest(mode=mode):
@@ -149,7 +162,9 @@ class InstallCommandTests(unittest.TestCase):
         cases = [('fail', (), 'bootstrap_failed', 4), ('other-root', (), 'activation_unexpected', 5),
                  ('other-python', (), 'activation_unexpected', 5), ('other-verb', (), 'activation_unexpected', 5),
                  ('other-status', (), 'activation_unexpected', 5), ('seven', (), 'activation_unexpected', 5),
-                 ('rolled_back:rolled_back', (), 'activation_unexpected', 5),
+                 ('rolled_back:rolled_back', (), 'activation_unexpected', 5), ('rolled_back:upgraded', (), 'activation_unexpected', 5),
+                 ('first:upgraded', (), 'activation_unexpected', 5), ('first:rolled_back', (), 'activation_unexpected', 5),
+                 ('first-bare', (), 'activation_unexpected', 5),
                  ('upgraded:installed', (), 'activation_unexpected', 5), ('upgraded-bare', (), 'activation_unexpected', 5),
                  ('upgraded-other-root:upgraded', (), 'activation_unexpected', 5),
                  ('ok', ('--json',), 'usage', 2), ('ok', ('--prepare-only', '--prepare-only'), 'usage', 2)]

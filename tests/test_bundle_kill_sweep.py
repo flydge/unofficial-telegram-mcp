@@ -642,8 +642,9 @@ class LeftoverOwnershipTests(AdoptionHarness, unittest.TestCase):
 
 
 class UnfinishedActionTests(AdoptionHarness, unittest.TestCase):
-    """Uninstall's sweep removes only the retired root it can prove (the directory the install intent binds), and an
-    unfinished first install or uninstall is named by the next action, never half-removed. Real kills only."""
+    """Uninstall's sweep removes only the retired root it can prove (the directory the install intent binds); an
+    uninstall interrupted after its retiring rename (its last journaled step) is finished by the next install or
+    uninstall, and an unfinished first install is named by the next action, never half-removed. Real kills only."""
 
     ABSENT = {'status': 'uninstalled', 'installation': 'absent'}
 
@@ -702,30 +703,181 @@ class UnfinishedActionTests(AdoptionHarness, unittest.TestCase):
         self.assertEqual(self.change('uninstall'), self.ABSENT)  # Nothing installed: the lookalikes still stay.
         self.assertKept(lookalikes)
 
-    def test_a_kill_after_the_retiring_rename_is_named_by_install_and_finished_by_uninstall(self):
-        lookalikes = self.lookalikes()
-        packet, _ = self.full()
-        code = self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl),
-                           lambda count, kind, where: kind == 'renameatx' and re.search(r'/\.runtime-removed-[0-9a-f]{32}\Z', where))
-        self.assertEqual(code, 9)
+    RETIRING = staticmethod(lambda count, kind, where: kind == 'renameatx'
+                            and re.search(r'/\.runtime-removed-[0-9a-f]{32}\Z', where))
+    # The first entry the closing sweep removes from the retired root.
+    SWEEPING = staticmethod(lambda count, kind, where: kind == 'unlink' and re.search(r'/\.runtime-removed-[0-9a-f]{32}/', where))
+
+    def uninstall_at(self, path):
+        """`uninstall` as the launcher inside `path` runs it: that release passes its own installation root."""
+        with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
+            return bundle_install.uninstall(path, user_home=self.home, launchctl=self.launchctl, pending_sends=self.probe,
+                                            claude_candidates=(self.claude_cli,), claude_runner=self.claude())
+
+    def retired(self, lookalikes=()):
+        """The retired root a killed uninstall left (exactly one, beside the intent)."""
         left = [n for n in self.beside() if n not in {p.name for p in lookalikes}]
         self.assertEqual(sorted(re.sub('[0-9a-f]{32}', '*', n) for n in left), ['.runtime-removed-*', '.runtime.install-intent.json'])
         self.assertFalse(self.runtime.exists())
-        with mock.patch('telegram_search_mcp.__version__', '0.52.9'):
-            self.assertPending(lambda: self.install(packet), 'uninstall')
-        self.assertPending(lambda: self.install(self.build('b', launcher=b'# second release\n')), 'uninstall')
+        return self.home / next(n for n in left if '-removed-' in n)
+
+    def test_a_kill_after_the_retiring_rename_is_finished_by_the_retired_roots_launcher(self):
+        lookalikes = self.lookalikes()
+        self.full()
+        self.assertEqual(self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl), self.RETIRING), 9)
+        retired = self.retired(lookalikes)
         self.assertPending(lambda: self.change('rollback'), 'uninstall')
-        # The retry: the only launcher left is the retired root's own, which passes that root's path.
-        [retired] = [n for n in left if '-removed-' in n]
-        with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
-            result = bundle_install.uninstall(self.home / retired, user_home=self.home, launchctl=self.launchctl,
-                                              pending_sends=self.probe, claude_candidates=(self.claude_cli,),
-                                              claude_runner=self.claude())
-        self.assertEqual(result, self.ABSENT)
+        # The only launcher left is the retired root's own, which passes that root's path.
+        self.assertEqual(self.uninstall_at(retired), self.ABSENT)
         self.assertEqual(self.beside(), sorted(p.name for p in lookalikes))
         self.assertKept(lookalikes)
         self.assertEqual(self.change('uninstall'), self.ABSENT)
         self.assertEqual(self.install(self.build('c', launcher=b'# third release\n'))['installation'], 'installed')
+
+    def test_a_kill_after_the_retiring_rename_or_inside_its_sweep_is_finished_by_install_or_uninstall(self):
+        """The rename is the uninstall's last journaled step: a kill after it, or partway through the retired root's
+        removal (whose own launcher may then no longer start), is finished by the next install (this kit or another)
+        or uninstall, never refused as `transaction_pending`. Lookalikes stay."""
+        entries = {}
+        def release_file(count, kind, where):  # The first file removed from the retired release tree.
+            return kind == 'unlink' and re.search(r'/\.runtime-removed-[0-9a-f]{32}/releases/', where)
+        for point, predicate in (('rename', self.RETIRING), ('sweep', self.SWEEPING), ('release file', release_file)):
+            for follow in ('same kit', 'other kit', 'uninstall'):
+                with self.subTest(point=point, follow=follow):
+                    self.setUp()
+                    lookalikes = self.lookalikes()
+                    packet, _ = self.full()
+                    self.assertEqual(self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl),
+                                                 predicate), 9)
+                    retired = self.retired(lookalikes)
+                    entries[point] = sum(1 for _ in retired.rglob('*'))
+                    if point == 'sweep':
+                        self.assertEqual(entries['sweep'], entries['rename'] - 1)  # Partly removed: one entry gone.
+                    if point == 'release file':
+                        # A file its own launcher's admission requires is gone: that launcher no longer starts.
+                        release = retired / 'releases' / packet[3]
+                        files = [f['path'] for f in json.loads(packet[2].read_text())['files']] + ['bundle-index.json']
+                        self.assertNotEqual([f for f in files if not (release / f).exists()], [])
+                    if follow == 'uninstall':
+                        self.assertEqual(self.change('uninstall'), self.ABSENT)
+                        self.assertEqual(self.beside(), sorted(p.name for p in lookalikes))
+                    else:
+                        with mock.patch('telegram_search_mcp.__version__', '0.52.9') if follow == 'same kit' else contextlib.nullcontext():
+                            kit = packet if follow == 'same kit' else self.build('b', launcher=b'# second release\n')
+                            result = self.install(kit)
+                        self.assertEqual((result['status'], result['installation']), ('activation_required', 'installed'))
+                        self.assertEqual(self.pointer()['index_sha256'], kit[3])
+                        self.assertEqual(self.beside(), sorted([p.name for p in lookalikes] + ['.runtime.install-intent.json']))
+                        self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                        self.assertEqual(self.beside(), sorted(p.name for p in lookalikes))
+                    self.assertKept(lookalikes)
+
+    def test_lookalikes_and_a_copy_of_the_retired_root_survive_every_finishing_action(self):
+        """Lookalikes under every installer prefix, and an exact copy of the retired root under another retired name
+        (the same bytes, another inode), survive an install, a killed uninstall and its finish by the copy's launcher
+        (refused: not the root the intent binds) and by the next install."""
+        h, made = self.home, {}
+
+        def directory(name, files=()):
+            made[name] = h / name
+            made[name].mkdir(mode=0o700)
+            for file in files:
+                (made[name] / file).parent.mkdir(parents=True, exist_ok=True)
+                (made[name] / file).write_bytes(b'x')
+
+        directory('.runtime-removed-' + '1' * 32, ['notes.txt'])
+        directory('.runtime-removed-' + '2' * 32)
+        directory('.runtime-removed-' + '3' * 32, ['releases/x/launcher.py', 'receipt.json'])
+        made['file'] = h / ('.runtime-removed-' + '4' * 32)
+        made['file'].write_bytes(b'file')
+        made['link'] = h / ('.runtime-removed-' + '5' * 32)
+        os.symlink(self.base, made['link'])
+        directory('.runtime-initial-randomxx', ['notes.txt'])
+        directory(bundle_install._staged_names(self.runtime)[0], ['foreign.bin'])  # Not empty: not provably ours.
+        made['temporary'] = h / ('.runtime-intent-' + 'f' * 32 + '.tmp')
+        made['temporary'].write_bytes(b'garbage')
+        made['bak'] = h / '.runtime.install-intent.json.bak'
+        made['bak'].write_bytes(b'{}')
+        directory('.runtime-adopted-' + 'a' * 24, ['x'])
+
+        def snapshot():
+            return {k: os.readlink(p) if p.is_symlink() else sorted(str(q.relative_to(p)) for q in p.rglob('*'))
+                    if p.is_dir() else p.read_bytes() for k, p in made.items()}
+
+        before = snapshot()
+        self.full()
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl), self.RETIRING), 9)
+        retired = self.retired(made.values())
+        made['copy'] = h / ('.runtime-removed-' + '6' * 32)
+        shutil.copytree(retired, made['copy'], symlinks=True)
+        before = snapshot()
+        self.assertPending(lambda: self.change('rollback'), 'uninstall')
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.uninstall_at(made['copy'])
+        self.assertEqual(str(caught.exception), 'metadata_conflict')
+        self.assertEqual(snapshot(), before)
+        self.assertTrue(retired.is_dir())
+        result = self.install(self.build('b', launcher=b'# second release\n'))
+        self.assertEqual((result['status'], result['installation']), ('activation_required', 'installed'))
+        self.assertFalse(os.path.lexists(retired))
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(self.change('uninstall')['installation'], 'removed')
+        self.assertEqual(self.beside(), sorted(p.name for p in made.values()))
+        self.assertEqual(snapshot(), before)
+
+    def test_lookalikes_under_the_retired_name_stay_through_an_uninstall(self):
+        lookalikes = {'file': lambda p: p.write_bytes(b'file'), 'symlink': lambda p: os.symlink(self.base, p),
+                      'directory 0755': lambda p: p.mkdir(mode=0o755), 'empty directory 0700': lambda p: p.mkdir(mode=0o700)}
+        for number, (kind, make) in enumerate(lookalikes.items(), start=4):
+            with self.subTest(kind=kind):
+                self.setUp()
+                lookalike = self.home / ('.runtime-removed-' + str(number) * 32)
+                make(lookalike)
+                self.full()
+                self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                self.assertEqual(self.beside(), [lookalike.name])
+                self.assertEqual(self.change('uninstall'), self.ABSENT)
+                self.assertEqual(self.beside(), [lookalike.name])
+
+    def test_a_lookalike_at_the_recorded_staged_name_never_stops_an_uninstall_halfway(self):
+        """After the root's publication its recorded staged name is free: whatever appears there is not the directory
+        the intent binds, so it names no unfinished first install. Uninstall completes and the lookalike stays."""
+        lookalikes = {'directory with data': lambda p: (p.mkdir(mode=0o700), (p / 'mine.txt').write_bytes(b'user data')),
+                      'directory 0755': lambda p: p.mkdir(mode=0o755), 'file': lambda p: p.write_bytes(b'file'),
+                      'symlink': lambda p: os.symlink(self.base, p)}
+        for kind, make in lookalikes.items():
+            with self.subTest(kind=kind):
+                self.setUp()
+                self.full()
+                staged = Path(json.loads((self.home / '.runtime.install-intent.json').read_text())['staged_root'])
+                self.assertEqual(staged.name, bundle_install._staged_names(self.runtime)[0])
+                make(staged)
+                kept = lambda: (os.path.islink(staged), staged.is_dir(), sorted(os.listdir(staged)) if staged.is_dir() and not staged.is_symlink() else None)
+                before = kept()
+                result = self.change('uninstall')
+                self.assertEqual((result['installation'], result['codex'], result['claude_code'], result['claude_desktop']),
+                                 ('removed', 'removed', 'removed', 'removed'))
+                self.assertEqual(self.beside(), [staged.name])
+                self.assertEqual(self.change('uninstall'), self.ABSENT)
+                result = self.install(self.build('b', launcher=b'# second release\n'))
+                self.assertEqual((result['status'], result['installation']), ('activation_required', 'installed'))
+                self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                self.assertEqual((self.beside(), kept()), ([staged.name], before))
+
+    def test_an_intent_the_closing_sweep_could_not_read_refuses_the_uninstall_before_any_removal(self):
+        self.full()
+        intent = self.home / '.runtime.install-intent.json'
+        intent.write_bytes(intent.read_bytes().replace(b'"staged_root"', b'"staged_rooted"'))
+        receipt, config, desktop = self.receipt(), (self.codex / 'config.toml').read_bytes(), self.desktop_config.read_bytes()
+        transactions = sorted(os.listdir(self.runtime / 'transactions'))
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.change('uninstall')
+        self.assertEqual(str(caught.exception), 'initialization_conflict')
+        self.assertEqual((self.receipt(), (self.codex / 'config.toml').read_bytes(), self.desktop_config.read_bytes()),
+                         (receipt, config, desktop))
+        self.assertEqual(sorted(os.listdir(self.runtime / 'transactions')), transactions)
+        self.assertIsNotNone(self.launchctl.loaded)
 
     def test_an_intent_left_after_the_retired_root_is_gone_is_removed_by_the_next_install(self):
         """Killed after the retired root's removal, before the intent's: no launcher is left, so the next install
@@ -784,6 +936,54 @@ class UnfinishedActionTests(AdoptionHarness, unittest.TestCase):
                 self.assertEqual(self.change('uninstall')['installation'], 'removed')
                 self.assertEqual(self.beside(), [])
         self.assertEqual(outcomes, {'complete', 'install pending', 'staging removed'})
+
+    def test_a_first_install_killed_beside_lookalikes_never_removes_one(self):
+        """Lookalikes under the retired, staged and intent-temporary prefixes (one not empty under a derived attempt
+        name) beside a first install killed after each effect up to just past its publication, and after its last:
+        the uninstall that follows refuses as an unfinished `install` or completes, and neither it nor the finished
+        install and uninstall after it removes a lookalike or leaves anything else."""
+        def prepare():
+            self.codex_present()
+            self.desktop_present()
+            (self.home / '.claude').mkdir(mode=0o755)
+            self.claude()
+            self.packet = self.build('a')
+            names = ['.runtime-intent-' + 'e' * 32 + '.tmp']
+            (self.home / names[0]).write_bytes(b'{}')
+            for name, files in (('.runtime-removed-' + '1' * 32, ['n.txt']), ('.runtime-removed-' + '2' * 32, []),
+                                ('.runtime-initial-zzzzzzzz', ['n.txt']), ('.runtime-initial-yyyyyyyy', []),
+                                (bundle_install._staged_names(self.runtime)[7], ['n.txt'])):
+                (self.home / name).mkdir(mode=0o700)
+                for file in files:
+                    (self.home / name / file).write_bytes(b'x')
+                names.append(name)
+            return sorted(names)
+
+        def first(lc, cl):
+            return self.install(self.packet, launchctl=lc, claude_runner=cl)
+        trace = []
+        prepare()
+        self.perform(first, Effects(self.base, lambda count, kind, where: trace.append((kind, where))))
+        published = trace.index(('renameatx', 'user/runtime')) + 1
+        outcomes = set()
+        for n in sorted({*range(1, published + 2), len(trace)}):
+            with self.subTest(kill=n, after=trace[n - 1]):
+                self.setUp()
+                lookalikes = prepare()
+                self.assertEqual(self.killed(first, lambda count, *_: count == n), 9)
+                try:
+                    outcome = self.change('uninstall')['installation']
+                except bundle_install.InstallError as error:
+                    outcome = (str(error), error.pending_action)
+                    self.assertEqual(outcome, ('transaction_pending', 'install'))
+                outcomes.add(str(outcome))
+                self.assertEqual([name for name in lookalikes if not os.path.lexists(self.home / name)], [])
+                if outcome in ('absent', 'removed'):
+                    self.assertEqual(self.beside(), lookalikes)
+                self.assertEqual(self.install(self.packet)['status'], 'activation_required')
+                self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                self.assertEqual(self.beside(), lookalikes)
+        self.assertEqual(outcomes, {'absent', 'removed', str(('transaction_pending', 'install'))})
 
 
 if __name__ == '__main__':

@@ -251,7 +251,7 @@ for a in "$@"; do printf '%s\\n' "$a"; done > '@OUT@/launcher-argv'
 /usr/bin/env > '@OUT@/launcher-env'
 stage=${0%/release/python/bin/python3}
 case "$stage" in /private/tmp/telegram-bootstrap.????????) /bin/rm -rf "$stage";; esac
-printf '{"activation_command":"synthetic","claude_code":"plugin","status":"activation_required"}\\n'
+printf '{"activation_command":"synthetic","claude_code":"plugin","installation":"installed","status":"activation_required"}\\n'
 PYTHON
 /bin/chmod 700 "$dest/python/bin/python3"
 printf 'seeded\\n' > '@OUT@/seed-ran'

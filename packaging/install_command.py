@@ -5,12 +5,13 @@ sha256 and bytes and the trusted index sha256 are literals in the script, never 
 install time. Double-clicked in Finder it runs in native Terminal: the pinned
 `/usr/bin/env -i /bin/sh -p bootstrap.sh` from its own directory, then the activation command that
 the installer printed, `connect`, inline in the same Terminal, so the QR page opens and the final
-result prints there. After a first install (`activation_required`) the activation argv must be exactly
-the installed release's python3 with -I -S -B, its launcher.py and `connect`, under
-`.../releases/<index sha256>`. After an upgrade or a repeat (`upgraded` with installation `upgraded` or
-`reused`, or `rolled_back` with installation `reused`) the same `connect` runs from that `release_root`,
-which must be this kit's release; with a ready session it reports `already_connected`. Any other status
-refuses. bootstrap.sh gets no `--claude-code`, so an upgrade keeps the installed mode. `--prepare-only`
+result prints there. It accepts exactly the results the installer returns for a kit. After a first install
+(`activation_required` with installation `installed`, or `reused` on a repeat) the activation argv must be
+exactly the installed release's python3 with -I -S -B, its launcher.py and `connect`, under
+`.../releases/<index sha256>`. After an upgrade or its repeat (`upgraded` with installation `upgraded` or
+`reused`), or the repeat of the release a finished rollback went back to (`rolled_back` with installation
+`reused`), the same `connect` runs from that `release_root`, which must be this kit's release; with a ready
+session it reports `already_connected`. Any other status or installation refuses. bootstrap.sh gets no `--claude-code`, so an upgrade keeps the installed mode. `--prepare-only`
 stops after verification. Every refusal prints one fixed code.
 
 When release-pins.json carries a Team ID (a Developer ID kit), it is a literal too and bootstrap.sh gets
@@ -85,6 +86,13 @@ case "$install_root" in *//*|*/../*|*/./*) install_fail activation_unexpected 5;
 if /usr/bin/printf '%s' "$install_root" | /usr/bin/env -i LC_ALL=C /usr/bin/grep -q '[[:cntrl:]]'; then
     install_fail activation_unexpected 5
 fi
+install_kind=$(install_field installation) || install_fail activation_unexpected 5
+# Exactly the results the installer can return for a kit: a first install (installed, or reused on a repeat), an
+# upgrade or its repeat, or the repeat of the release a finished rollback went back to.
+case "$install_status:$install_kind" in
+    activation_required:installed|activation_required:reused|upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
+    *) install_fail activation_unexpected 5;;
+esac
 case "$install_status" in
     activation_required)
         [ "$(install_field activation_arguments)" = 6 ] || install_fail activation_unexpected 5
@@ -95,15 +103,9 @@ case "$install_status" in
         [ "$(install_field activation_arguments.4)" = "$install_root/launcher.py" ] || install_fail activation_unexpected 5
         [ "$(install_field activation_arguments.5)" = connect ] || install_fail activation_unexpected 5
         install_next='Installed. Starting the Telegram login (connect) in this window.';;
-    upgraded|rolled_back)
+    *)
         # An upgrade or a repeat: the installed release is this kit's; connect is the same command.
-        install_kind=$(install_field installation) || install_fail activation_unexpected 5
-        case "$install_status:$install_kind" in
-            upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
-            *) install_fail activation_unexpected 5;;
-        esac
         install_next='Installation is up to date. Running connect in this window; a ready session reports already_connected.';;
-    *) install_fail activation_unexpected 5;;
 esac
 /usr/bin/printf '%s\n' "$install_next"
 if /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C "$install_root/python/bin/python3" -I -S -B \
