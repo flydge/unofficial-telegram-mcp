@@ -44,7 +44,7 @@ CLIENT_META = 'io.modelcontextprotocol/clientInfo'
 SERVER_META = 'io.modelcontextprotocol/serverInfo'
 CORRELATED = frozenset({'initialize', 'server/discover', 'tools/list', 'tools/call'})
 METHODS = CORRELATED | frozenset({
-    'notifications/initialized', 'ping', 'tools/list', 'tools/call', 'resources/list',
+    'notifications/initialized', 'ping', 'resources/list',
     'resources/templates/list', 'resources/read', 'resources/subscribe', 'resources/unsubscribe',
     'prompts/list', 'prompts/get', 'completion/complete', 'logging/setLevel', 'roots/list',
     'sampling/createMessage', 'elicitation/create', 'notifications/cancelled', 'notifications/progress',
