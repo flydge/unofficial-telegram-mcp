@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from .artifact_store import ArtifactStore, ArtifactStoreError
 from .artifact_authority import ArtifactAuthority, ArtifactReaderClient, ArtifactUnavailable, active_scope
 from .config import ConfigurationError
-from .approval_prompt import confirm_approved_send
+from .approval_prompt import DETAILS as APPROVAL_DETAILS, NOT_GIVEN, ApprovalDecision, approval_outcome, decide_approved_send
 from .attachment_service import get_attachment, get_message_context
 from .message_reader import read_messages
 from .reply_reader import read_reply_chain
@@ -198,7 +198,7 @@ class Broker(SelectionBrokerMixin):
         max_workers: int = 8,
         artifact_store: ArtifactStore | None = None,
         download_source_root: Path = TDLIB_SESSION_DIRECTORY / "files",
-        approval_prompt: Callable[..., bool] = confirm_approved_send,
+        approval_prompt: Callable[..., ApprovalDecision | bool] = decide_approved_send,
         policy: RuntimePolicy | None = None,
     ) -> None:
         if min(max_pending, max_clients, max_workers) < 1:
@@ -1682,8 +1682,7 @@ class Broker(SelectionBrokerMixin):
 
     def _send_prepared_artifact_impl(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
         if request.approved is not True:
-            return SendPreparedArtifactResponse(status="not_approved", draft_id=request.draft_id,
-                                                detail="explicit approval was not given")
+            return SendPreparedArtifactResponse(status="declined", draft_id=request.draft_id, detail=NOT_GIVEN)
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
@@ -1753,18 +1752,20 @@ class Broker(SelectionBrokerMixin):
                 self._reply_budget_check(provider_before_dialog)
             reply_preview=((self._reply_preview if text_only else self._reply_artifact_preview)(entry,owner).model_dump(mode="json") if entry.reply_source is not None else None)
             reply_confirmation={("reply_preview" if text_only else "reply_artifact_preview"):reply_preview} if reply_preview is not None else {}
-            if (entry.topic is not None or entry.outgoing_entities) and entry.reply_source is None:
-                reply_confirmation['topic_preview'] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(
+            if entry.reply_source is None:
+                reply_confirmation[('topic_preview' if entry.topic is not None or entry.outgoing_entities
+                                    else 'draft_preview')] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
+            decision = approval_outcome(self._approval_prompt(
                 recipient_title=expected_title, recipient=entry.recipient,
                 display_name=entry.display_name, size_bytes=entry.size_bytes,
                 sha256=entry.sha256, caption=entry.caption, kind=entry.kind, text=entry.text,
                 duration_seconds=entry.duration_seconds, source_sha256=entry.source_sha256,
                 source_display_name=entry.source_display_name, **reply_confirmation,
-            ):
-                return SendPreparedArtifactResponse(status="not_approved", draft_id=request.draft_id,
+            ))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return SendPreparedArtifactResponse(status=decision, draft_id=request.draft_id,
                                                     recipient=entry.recipient if entry.topic is None and not entry.outgoing_entities else None,
-                                                    detail="local owner confirmation was declined or unavailable")
+                                                    detail=APPROVAL_DETAILS[decision])
             # The local dialog may remain open while cancellation/account/policy changes.
             if self._draft_owner(client_id) != owner:
                 raise DraftError("draft is unavailable")
@@ -1988,8 +1989,7 @@ class Broker(SelectionBrokerMixin):
     def _send_prepared_forward(self, request: SendPreparedForwardRequest, *, client_id: str,
                                deadline: float | None = None) -> SendPreparedForwardResponse:
         if request.approved is not True:
-            return SendPreparedForwardResponse(status='not_approved', draft_id=request.draft_id,
-                                               detail='explicit approval was not given')
+            return SendPreparedForwardResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
         # Capture once: account reads, owner confirmation and transport share one budget.
         bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
         with self._shared_client().request_budget(bounded):
@@ -2043,10 +2043,11 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(FORWARD_UNAVAILABLE)
             preview = self._forward_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
-                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
-                    caption='', kind='forward', forward_preview=preview):
-                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='forward', forward_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
             # The local dialog may remain open while account, policy or provider change.
             if self._forward_owner(client_id) != owner:
                 raise DraftError(FORWARD_UNAVAILABLE)
@@ -2171,8 +2172,7 @@ class Broker(SelectionBrokerMixin):
     def _send_prepared_video(self, request: SendPreparedVideoRequest, *, client_id: str,
                              deadline: float | None = None) -> SendPreparedVideoResponse:
         if request.approved is not True:
-            return SendPreparedVideoResponse(status='not_approved', draft_id=request.draft_id,
-                                             detail='explicit approval was not given')
+            return SendPreparedVideoResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
         # Capture once: account reads, owner confirmation, staging and transport share one budget.
         bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
         with self._shared_client().request_budget(bounded):
@@ -2215,10 +2215,11 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(VIDEO_UNAVAILABLE)
             preview = self._video_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
-                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
-                    caption=entry.caption, kind='video', video_preview=preview):
-                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption=entry.caption, kind='video', video_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
             # The local dialog may remain open while account, policy or provider change.
             if self._video_owner(client_id) != owner:
                 raise DraftError(VIDEO_UNAVAILABLE)
@@ -2353,8 +2354,7 @@ class Broker(SelectionBrokerMixin):
     def _apply_prepared_archive(self, request: ApplyPreparedArchiveRequest, *, client_id: str,
                                 deadline: float | None = None) -> ApplyPreparedArchiveResponse:
         if request.approved is not True:
-            return ApplyPreparedArchiveResponse(status='not_approved', draft_id=request.draft_id,
-                                                detail='explicit approval was not given')
+            return ApplyPreparedArchiveResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
         # Capture once: account reads, owner confirmation, the attempt and its observation share one budget.
         bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
         with self._shared_client().request_budget(bounded):
@@ -2401,10 +2401,11 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(ARCHIVE_UNAVAILABLE)
             preview = self._archive_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
-                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
-                    caption='', kind='archive', archive_preview=preview):
-                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='archive', archive_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
             # The local dialog may remain open while account, policy or provider change.
             if self._change_owner(client_id, 'archive_chats') != owner:
                 raise DraftError(ARCHIVE_UNAVAILABLE)
@@ -2522,8 +2523,7 @@ class Broker(SelectionBrokerMixin):
     def _apply_prepared_text_edit(self, request: ApplyPreparedTextEditRequest, *, client_id: str,
                                   deadline: float | None = None) -> ApplyPreparedTextEditResponse:
         if request.approved is not True:
-            return ApplyPreparedTextEditResponse(status='not_approved', draft_id=request.draft_id,
-                                                 detail='explicit approval was not given')
+            return ApplyPreparedTextEditResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
         # Capture once: account reads, owner confirmation and transport share one budget.
         bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
         with self._shared_client().request_budget(bounded):
@@ -2570,10 +2570,11 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
-                    display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
-                    caption='', kind='text_edit', text_edit_preview=preview):
-                return result('not_approved', 'local owner confirmation was declined or unavailable')
+            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='text_edit', text_edit_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
             # The local dialog may remain open while account, policy or provider change.
             if self._change_owner(client_id, 'edit_own_text') != owner:
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)

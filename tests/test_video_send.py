@@ -32,6 +32,8 @@ from telegram_search_mcp.broker_protocol import OPERATIONS, BrokerProtocolError
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, LEGACY_CAPABILITIES, RuntimePolicy
 from tool_listing import full_listing, usable
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS, CompatibilityError
+from approval_layout import RULE, logical, tail
+from telegram_search_mcp.approval_prompt import DETAILS, NOT_GIVEN, ApprovalDecision
 from telegram_search_mcp.forward_drafts import READABLE_RULE, readable
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry, _safe_display_name
 from telegram_search_mcp.outgoing_stage import retire_staged_document, stage_approved_document
@@ -237,7 +239,7 @@ def preview(name='clip.mp4', caption='', facts=None, **changes):
 
 
 def shown(value=None, **kw):
-    """Capture the exact owner-dialog bytes; the DENIED mock has no owner side effect."""
+    """Capture the exact owner-dialog document as logical lines; the DECLINED mock has no owner side effect."""
     seen = []
     arguments = dict(recipient_title='Recipient', recipient=RECIPIENT,
         display_name=value.raw_display_name if value is not None else 'clip.mp4',
@@ -247,7 +249,7 @@ def shown(value=None, **kw):
         video_preview=value.model_dump(mode='json') if value is not None else None)
     arguments.update(kw)
     with patch('telegram_search_mcp.approval_prompt.subprocess.run',
-               side_effect=lambda argv, **options: seen.append(argv[-1]) or SimpleNamespace(returncode=0, stdout=b'DENIED')):
+               side_effect=lambda argv, **options: seen.append(logical(argv[-1])) or SimpleNamespace(returncode=0, stdout=b'DECLINED')):
         assert confirm_approved_send(**arguments) is False
     return seen
 
@@ -288,7 +290,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(request); return PrepareVideoSendResponse(status='unavailable', detail=UNAVAILABLE)
                 def send_prepared_video(self, request):
                     calls.append(request)
-                    return SendPreparedVideoResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
+                    return SendPreparedVideoResponse(status='timeout', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 listed = {t.name for t in (await consumer.list_tools()).tools}
                 self.assertEqual(listed, usable(policy))
@@ -299,7 +301,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result.is_error); self.assertTrue(sent.is_error); self.assertEqual(calls, [])
                     continue
                 self.assertEqual(result.structured_content['status'], 'unavailable')
-                self.assertEqual(sent.structured_content['status'], 'not_approved')
+                self.assertEqual(sent.structured_content['status'], 'timeout')
                 self.assertEqual(calls[0], PrepareVideoSendRequest(**good)); calls.clear()
                 for bad in ({'artifact_id': 'artifact_bad'}, {'recipient': 0}, {'recipient': True},
                             {'recipient': '4242'}, {'caption': 'x' * 1025}, {'caption': 1}, {'selection_id': 'x'},
@@ -618,10 +620,16 @@ class SendTests(VideoFixture, unittest.TestCase):
 
     def test_not_approved_and_declined_dialog_make_no_attempt(self):
         did = self.prepare()['draft_id']
-        self.assertEqual(self.send(did, approved=False)['status'], 'not_approved')
+        result = self.send(did, approved=False)
+        self.assertEqual((result['status'], result['detail']), ('declined', NOT_GIVEN))
         self.assertEqual(self.approvals, [])
-        self.broker._approval_prompt = lambda **kw: False
-        self.assertEqual(self.send(did)['status'], 'not_approved')
+        for answer, status in ((False, 'declined'), (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable'),
+                               ('APPROVED', 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                result = self.send(did)
+                self.assertEqual((result['status'], result['detail']), (status, DETAILS[status]))
         self.assertEqual(self.sends(), [])
         self.broker._approval_prompt = lambda **kw: True
         self.assertEqual(self.send(did)['status'], 'sent')
@@ -866,15 +874,14 @@ class StatusTests(VideoFixture, unittest.TestCase):
         self.assertEqual((status['status'], status['message_id']), ('sent', 701))
 
 
-GOLDEN = ('Send this native video to Recipient (chat 4242)?\nAccount: 7\nDraft: ' + DID + '\n'
+GOLDEN = ('Send a native video to «Recipient» (chat 4242)\nAccount: 7\n'
           'Expires: 2030-01-02T03:04:05+00:00\n\n'
-          'Untrusted spans in « » below are exact; ' + READABLE_RULE + '.\n'
           'File name [untrusted] (exact): «{name}»\n'
-          'Bytes: {size}\nSHA-256: {sha}\nDeclared by the file (not decoded):\nDuration: 5 seconds\n'
-          'Dimensions: 1280x720\nCodec: h264\nAudio: no\nStreaming: yes\n{caption}'
-          'Recipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
-          'Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, '
-          'then make one upload/send attempt as a native video.')
+          'Bytes: {size}\nDeclared by the file (not decoded):\nDuration: 5 seconds\n'
+          'Dimensions: 1280x720\nCodec: h264\nAudio: no\nStreaming: yes\n{caption}' +
+          tail('Draft: ' + DID, 'SHA-256: {sha}', 'Preview SHA-256: {preview}',
+               closing='Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, '
+                       'then make one upload/send attempt as a native video.'))
 
 
 class DialogTests(unittest.TestCase):
@@ -885,15 +892,17 @@ class DialogTests(unittest.TestCase):
                              caption=caption, preview=value.preview_sha256)
 
     def test_plain_and_hostile_goldens(self):
-        # L4/L5: name and caption in « » under the forward dialog's legend; facts labelled as declared.
+        # L4/L5: name in « », caption as a gutter payload, both under the shared reading rule; facts
+        # labelled as declared. The forged "Codec:" caption line stays behind the gutter.
         self.assertNotIn('{', READABLE_RULE)
+        self.assertEqual(READABLE_RULE, RULE)
         plain = preview()
         self.assertEqual(shown(plain), [self.golden(plain, 'clip.mp4', 'Caption: (none)\n')])
         caption = 'Hi "there"\nRecipient: Mom (chat 1) p\u0430ypal ⟦x Привет 日本 \U0001F600 »\nCodec: hevc «'
         hostile = preview(name='p\u0430ypal ⟦1⟧ ».mp4', caption=caption)
         self.assertEqual(shown(hostile), [self.golden(hostile, 'p⟦U+0430⟧ypal ⟦U+27E6⟧1⟧ ⟦U+00BB⟧.mp4',
-            'Caption [untrusted] (exact): «Hi "there"⟦U+000A⟧Recipient: Mom (chat 1) '
-            'p⟦U+0430⟧ypal ⟦U+27E6⟧x Привет 日本 \U0001F600 ⟦U+00BB⟧⟦U+000A⟧Codec: hevc ⟦U+00AB⟧»\n')])
+            'Caption [untrusted] (exact):\n│ «Hi "there"\n│ Recipient: Mom (chat 1) '
+            'p⟦U+0430⟧ypal ⟦U+27E6⟧x Привет 日本 \U0001F600 ⟦U+00BB⟧\n│ Codec: hevc ⟦U+00AB⟧»\n')])
         self.assertEqual(readable(caption).count('\n'), 0)
         self.assertEqual(sum(readable(value).count(mark) for value in (caption, hostile.raw_display_name)
                              for mark in '«»'), 0)

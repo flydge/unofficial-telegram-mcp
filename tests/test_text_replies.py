@@ -318,7 +318,7 @@ class ReplyBoundaryChecks(ReplyFixture, unittest.TestCase):
             self.assertNotEqual(self.send(did)['status'],'sent');self.assertEqual(self.sends(),[])
     def test_prompt_decline_retains_pending_snapshot_and_never_sends(self):
         preview=self.prepare();did=preview['draft']['draft_id'];self.broker._approval_prompt=lambda **kw:False
-        self.assertEqual(self.send(did)['status'],'not_approved');self.assertEqual(self.sends(),[])
+        self.assertEqual(self.send(did)['status'],'declined');self.assertEqual(self.sends(),[])
         self.assertEqual(self.dispatch('get_reply_draft',{'draft_id':did})['reply'],preview)
 
 

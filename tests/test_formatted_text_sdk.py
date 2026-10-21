@@ -229,7 +229,7 @@ class FormattedTextSDKTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(inspected['reply'] if h.is_reply else inspected['draft'], preview)
                     denied = await self.call(consumer, tools, 'send_prepared_text',
                                              {'draft_id': new_id, 'approved': False})
-                    self.assertEqual((denied['status'], denied['message_id']), ('not_approved', None))
+                    self.assertEqual((denied['status'], denied['message_id']), ('declined', None))
                     self.assertEqual((h.approvals, h.claim_count, h.register_count, h.sends()), ([], 0, 0, []))
                     h.current_id = new_id; h.body = 'Affi🙂C'; h.entities = copy.deepcopy(revised_native)
                     sent = await self.call(consumer, tools, 'send_prepared_text',

@@ -1,214 +1,577 @@
-"""Out-of-band owner confirmation for a prepared Telegram document send."""
+"""Out-of-band owner confirmation for a prepared Telegram send or change.
+
+One renderer turns every bound preview into one document, in a fixed order:
+- a plain-language summary ("Send text to «Title» (chat 42)", account, expiry);
+- the exact payload: untrusted strings under `forward_drafts.READABLE_RULE`, real line breaks kept, and a
+  fixed gutter on every payload line;
+- a technical block with the draft id and hashes.
+
+One native dialog shows it: an NSAlert through `osascript -l JavaScript` with a fixed-size scrolling view,
+Cancel as the default and a timer that ends it as `timeout`. Only an explicit click on Send/Apply
+approves; anything else is `declined`, `timeout` or `dialog_unavailable`, and never a send or change.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import unicodedata
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Literal, get_args
 
 from . import product_identity as identity
 
 
-_SCRIPT = '''on run argv
-    set previewText to item 1 of argv
-    try
-        set choice to display dialog previewText with title "@@NAME@@ — approve send" buttons {"Cancel", "Send"} default button "Cancel" cancel button "Cancel" giving up after 120
-        if (gave up of choice) is false and (button returned of choice) is "Send" then
-            return "APPROVED"
-        end if
-    on error
-        return "DENIED"
-    end try
-    return "DENIED"
-end run'''
-# Archive moves and own text edits change Telegram state without sending: same Cancel default
-# and 120-second give-up, worded as a change.
-_CHANGE_SCRIPT = (_SCRIPT.replace('approve send', 'approve change')
-                  .replace('{"Cancel", "Send"}', '{"Cancel", "Apply"}').replace('is "Send"', 'is "Apply"'))
+Outcome = Literal['approved', 'declined', 'timeout', 'dialog_unavailable']
+OUTCOMES = frozenset(get_args(Outcome))
+DIALOG_SECONDS = 120
+
+
+@dataclass(frozen=True)
+class ApprovalDecision:
+    """Closed owner decision. Only `approved` is truthy, so `if not decision` stays fail-closed."""
+    outcome: Outcome
+
+    def __post_init__(self):
+        if type(self.outcome) is not str or self.outcome not in OUTCOMES:
+            raise ValueError('unknown approval outcome')
+
+    def __bool__(self) -> bool:
+        return self.outcome == 'approved'
+
+
+APPROVED, DECLINED = ApprovalDecision('approved'), ApprovalDecision('declined')
+TIMEOUT, UNAVAILABLE = ApprovalDecision('timeout'), ApprovalDecision('dialog_unavailable')
+
+# Fixed response details; never an input, a dialog text or a provider message.
+NOT_GIVEN = 'explicit approval was not given'
+DETAILS = MappingProxyType({
+    'declined': 'the owner declined in the local dialog; no attempt was made',
+    'timeout': 'the local dialog timed out without a choice; no attempt was made',
+    'dialog_unavailable': 'the local dialog could not be shown; no attempt was made',
+})
+
+
+def approval_outcome(value: object) -> Outcome:
+    """Fail-closed reading of an approval prompt result: only `True` or an approved decision approve.
+
+    A bare `False` (the compatibility path and test fakes) is a decline; any other value, such as a
+    string or another truthy object, means no dialog decision exists."""
+    if value is True:
+        return 'approved'
+    if type(value) is ApprovalDecision:
+        return value.outcome
+    return 'declined' if value is False else 'dialog_unavailable'
+
+
+# --- native dialog --------------------------------------------------------------------------------------
+
+# JXA; the document and the timer arrive only as argv (never interpolated). Cancel is the default button
+# only with an explicit Return key equivalent (AppKit gives a "Cancel" button Escape instead); Send/Apply
+# has none. Response codes are AppKit's NSAlertFirstButtonReturn (Cancel), NSAlertSecondButtonReturn and
+# NSModalResponseAbort, which the timer's abortModal produces. Any other code or any exception prints no
+# approval token. The window joins every Space and full-screen apps (canJoinAllSpaces |
+# fullScreenAuxiliary): without it the alert opened off the owner's Space, inactive, occluded and at
+# alpha 0 (dialog proof, 21.10.2026). Its appear animation is off (NSWindowAnimationBehaviorNone), so a
+# stalled animation cannot hide it either.
+_TEMPLATE = '''ObjC.import('AppKit');
+function run(argv) {
+    try {
+        if (argv.length !== 2 || !/^[1-9][0-9]{0,2}$/.test(argv[0]) || Number(argv[0]) > 120) return 'UNAVAILABLE';
+        var seconds = Number(argv[0]);
+        var app = $.NSApplication.sharedApplication;
+        app.setActivationPolicy(1);
+        var alert = $.NSAlert.alloc.init;
+        alert.messageText = $("@@NAME@@ — approve @@ACTION@@");
+        alert.informativeText = $('Cancel is the default. Without a choice this dialog closes after ' + seconds +
+            ' seconds and nothing is @@EFFECT@@.');
+        alert.addButtonWithTitle($('Cancel')).keyEquivalent = $('\\r');
+        alert.addButtonWithTitle($('@@VERB@@')).keyEquivalent = $('');
+        var scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, 740, 400));
+        scroll.hasVerticalScroller = true;
+        scroll.hasHorizontalScroller = true;
+        scroll.borderType = 2;
+        var view = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 740, 400));
+        view.editable = false;
+        view.selectable = true;
+        view.richText = false;
+        view.font = $.NSFont.monospacedSystemFontOfSizeWeight(12, 0);
+        view.horizontallyResizable = true;
+        view.verticallyResizable = true;
+        view.maxSize = $.NSMakeSize(1e7, 1e7);
+        view.textContainer.widthTracksTextView = false;
+        view.textContainer.containerSize = $.NSMakeSize(1e7, 1e7);
+        view.string = $(argv[1]);
+        scroll.documentView = view;
+        alert.accessoryView = scroll;
+        alert.layout;
+        alert.window.collectionBehavior = 257;
+        alert.window.animationBehavior = 2;
+        var timer = $.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(seconds, app, 'abortModal', $(), false);
+        $.NSRunLoop.currentRunLoop.addTimerForMode(timer, $.NSModalPanelRunLoopMode);
+        app.activateIgnoringOtherApps(true);
+        var code = Number(alert.runModal);
+        timer.invalidate;
+        return code === 1001 ? 'APPROVED' : code === 1000 ? 'DECLINED' : code === -1001 ? 'TIMEOUT' : 'UNAVAILABLE';
+    } catch (error) {
+        return 'UNAVAILABLE';
+    }
+}'''
+_SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'send').replace('@@VERB@@', 'Send').replace('@@EFFECT@@', 'sent'))
+# Archive moves and own text edits change Telegram state without sending: same default and timer.
+_CHANGE_SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'change').replace('@@VERB@@', 'Apply')
+                  .replace('@@EFFECT@@', 'changed'))
+_TOKENS = {b'APPROVED': APPROVED, b'DECLINED': DECLINED, b'TIMEOUT': TIMEOUT}
 
 
 def _dialog_script(template):
-    # Resolved per call so the dialog title follows `product_identity.DISPLAY_NAME`.
-    return template.replace('@@NAME@@', identity.DISPLAY_NAME)
+    # Resolved per call so the heading follows `product_identity.DISPLAY_NAME`, escaped as a JS string.
+    return template.replace('@@NAME@@', json.dumps(identity.DISPLAY_NAME, ensure_ascii=True)[1:-1])
 
 
+def _dialog(document: str, *, change: bool, seconds: int) -> ApprovalDecision:
+    if type(seconds) is not int or not 1 <= seconds <= DIALOG_SECONDS or type(document) is not str:
+        return UNAVAILABLE
+    try:
+        result = subprocess.run(
+            ['/usr/bin/osascript', '-l', 'JavaScript', '-e', _dialog_script(_CHANGE_SCRIPT if change else _SCRIPT),
+             '--', str(seconds), document],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=seconds + 5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return UNAVAILABLE
+    if result.returncode != 0 or type(result.stdout) is not bytes:
+        return UNAVAILABLE
+    return _TOKENS.get(result.stdout.strip(), UNAVAILABLE)
+
+
+# --- one renderer ---------------------------------------------------------------------------------------
+
+WIDTH = 96  # columns per visual row; the view never wraps, so a row is a line
+GUTTER, CONTINUED = '│ ', '┆ '
+_UNIT = re.compile(r'⟦U\+[0-9A-F]{4,6}⟧|.', re.S)
+_MARK = '[untrusted Telegram evidence]'
 _LIST_NAMES = {'main': 'Main', 'archive': 'Archive'}
 _EDIT_CHAT_KINDS = {'private': 'private', 'basic_group': 'group', 'supergroup': 'supergroup',
                     'channel': 'channel; visible to all subscribers'}
+_KIND_WORDS = {'document': 'document', 'photo': 'photo', 'voice_note': 'voice note'}
 
 
-def _outgoing_style_detail(draft):
+class _Refused(Exception):
+    """The arguments do not describe one bound preview; no dialog is shown."""
+
+
+def _require(condition: bool) -> None:
+    if not condition:
+        raise _Refused
+
+
+def _width(unit: str) -> int:
+    return sum(0 if unicodedata.category(char) in ('Mn', 'Me') else
+               2 if unicodedata.east_asian_width(char) in ('W', 'F') else 1 for char in unit)
+
+
+def _rows(line: str, prefix: str = '') -> list[str]:
+    """One logical line as visual rows of at most WIDTH columns: the first row carries `prefix`, every
+    further row starts with CONTINUED. A ⟦U+XXXX⟧ mark is never split. A row breaks before its last
+    space when that space lies in the row's latter two thirds, so the space opens the next row and stays
+    visible ("┆  word" continues after a space, "┆ word" directly); otherwise it breaks at the width."""
+    rows, current, used, space = [], [], 0, 0
+    budget = WIDTH - _width(prefix)
+    for unit in _UNIT.findall(line):
+        size = _width(unit)
+        if current and size and used + size > budget:
+            cut = space if space and 3 * space >= len(current) else len(current)
+            rows.append(''.join(current[:cut]))
+            current = current[cut:]
+            used = sum(map(_width, current))
+            space = max((index for index, item in enumerate(current) if item == ' ' and index), default=0)
+            budget = WIDTH - _width(CONTINUED)
+        if unit == ' ' and current:
+            space = len(current)
+        current.append(unit)
+        used += size
+    rows.append(''.join(current))
+    return [prefix + rows[0]] + [CONTINUED + row for row in rows[1:]]
+
+
+def _span(raw: str) -> str:
+    """An untrusted string inline: « » around its readable rendering (no line break can survive)."""
+    from .forward_drafts import readable
+    return '«' + readable(raw) + '»'
+
+
+@dataclass(frozen=True)
+class _Payload:
+    """Exact multi-line payload: every real line on its own gutter row, « » around the whole."""
+    raw: str
+
+    def rows(self) -> list[str]:
+        from .forward_drafts import readable
+        lines = [readable(line) for line in self.raw.split('\n')]
+        lines[0] = '«' + lines[0]
+        lines[-1] += '»'
+        return [row for line in lines for row in _rows(line, GUTTER)]
+
+
+def _legend() -> str:
+    from .forward_drafts import READABLE_RULE
+    return (f'Reading rule: text in « » is exact; {READABLE_RULE}. A row starting with │ is one payload line; '
+            'a row starting with ┆ continues the row above, and a space right after ┆ belongs to the text.')
+
+
+def _document(summary, body, technical, closing) -> str:
+    lines = [*summary, '', *body, '', _legend(), '', 'Technical details:', *technical, '', closing]
+    return '\n'.join(row for line in lines
+                     for row in (line.rows() if isinstance(line, _Payload) else _rows(line)))
+
+
+def _head(action: str, account_id: int, expires_at) -> list[str]:
+    return [action, f'Account: {account_id}', f'Expires: {expires_at.isoformat()}']
+
+
+def _evidence(value: str) -> str:
+    # Topic names and reply evidence carry the marker prefix; the label states it instead.
+    _require(value.startswith(_MARK + ' '))
+    return value[len(_MARK) + 1:]
+
+
+def _styles(draft) -> list[str]:
     if not draft.outgoing_entities:
-        return ''
+        return []
     from .outgoing_entity_models import caller_outgoing_entities
     from .outgoing_formatting import freeze_outgoing_entities, outgoing_entity_facts
     frozen = freeze_outgoing_entities(draft.text, caller_outgoing_entities(draft.outgoing_entities))
-    rows = outgoing_entity_facts(draft.text, frozen)
-    return ('Outgoing styles (FINAL normalized text; UTF-16 code units):\n' +
-        ''.join(f'{kind}: offset {offset}, length {length}; covered text: {covered!r}\n'
-                for offset, length, kind, covered in rows) + '\n')
+    return ['Outgoing styles (final normalized text; UTF-16 code units):'] + [
+        f'{kind}: offset {offset}, length {length}; covered {_span(covered)}'
+        for offset, length, kind, covered in outgoing_entity_facts(draft.text, frozen)]
 
 
-def _forward_detail(validated) -> str:
-    """Untrusted Telegram strings stay marked on their own lines. The text or caption, each
-    entity's covered text and each link-preview URL are enclosed in « » and rendered by
-    `readable` below a legend line stating `READABLE_RULE`: letters of every script stay
-    literal, the listed invisible, spacing, stacking, bracket and mixed-word look-alike
-    characters become reversible ⟦U+XXXX⟧, and a literal « or » inside a span is marked, so
-    no span can be closed early or start a fake line. Look-alike words in one script are not
-    marked."""
-    from .forward_drafts import READABLE_RULE, readable, unescaped
-    from .reply_drafts import EVIDENCE_MARKER
-    source, recipient = validated.source, validated.recipient
-    mode = ('FORWARD — recipients see the original sender' if validated.mode == 'forward' else
-            'COPY — sent as your own message, no attribution' + ('; caption removed' if validated.remove_caption else ''))
-    label = 'Text' if source.content_kind == 'text' else 'Caption'
-    marker = '[untrusted Telegram evidence]'
-    def body(value):
-        return value[len(EVIDENCE_MARKER):]
-    def name(value):
-        return json.dumps(body(value), ensure_ascii=False)
-    if validated.remove_caption:
-        text = 'Caption: removed — not sent\n'
-    elif source.text is None:
-        text = f'{label}: (none)\n'
+def _topic_lines(topic) -> tuple[list[str], list[str]]:
+    """(summary line, technical lines) for a bound forum topic."""
+    if topic is None:
+        return [], []
+    return ([f'Topic {_MARK}: {_span(_evidence(topic.name))} (topic {topic.forum_topic_id})'],
+            [f'Topic type: {topic.chat_type}; peer: {topic.peer_id}',
+             f'Topic created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}',
+             f'Topic general: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; '
+             f'hidden: {topic.is_hidden}',
+             f'Topic SHA-256: {topic.source_sha256}'])
+
+
+def _entity_rows(heading: str, rows) -> list[str]:
+    return ([f'{heading} (raw text UTF-16 code units):'] +
+            [f'{kind}: offset {offset}, length {length}; covered {_span(json.loads(covered))}'
+             for kind, offset, length, covered in rows]) if rows else []
+
+
+def _plain_document(draft) -> str:
+    """Ordinary text or file send without a topic, styles or reply."""
+    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
+    if draft.kind == 'text':
+        return _document(
+            _head(f'Send text to {where}', draft.account_id, draft.expires_at),
+            ['Text (exact):', _Payload(draft.text)],
+            [f'Draft: {draft.draft_id}', f'Bytes: {draft.size_bytes}', f'Text SHA-256: {draft.sha256}'],
+            f'{identity.DISPLAY_NAME} will make one send attempt.')
+    voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
+              f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
+    voice_technical = ([f'Source SHA-256: {draft.source_sha256}'] if draft.kind == 'voice_note' else [])
+    return _document(
+        _head(f'Send a {_KIND_WORDS[draft.kind]} to {where}', draft.account_id, draft.expires_at),
+        [f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}', f'Bytes: {draft.size_bytes}', *voice,
+         *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
+        [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical],
+        f'{identity.DISPLAY_NAME} will make one upload/send attempt.')
+
+
+def _topic_document(draft) -> str:
+    """Text into a forum topic, formatted text, or both (one outer preview digest)."""
+    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
+    topic, topic_technical = _topic_lines(draft.topic)
+    if draft.outgoing_entities:
+        action = f'Send formatted text to {where}'
+        rule = 'Normal notifications; no reply, link preview, schedule or draft clearing.'
+        closing = (f'{identity.DISPLAY_NAME} will revalidate this account and recipient, including any selected '
+                   'topic, then make one send attempt.')
     else:
-        text = (f'Untrusted spans in « » below are exact; {READABLE_RULE}.\n'
-                f'{label} {marker} (exact): «{readable(unescaped(source.text))}»\n')
-        rows = source.entity_rows()
-        if rows:
-            text += (f'{label} entities (raw text UTF-16 code units):\n' +
-                     ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
-                             for kind, offset, length, covered in rows))
-    link = ''
+        action = f'Send text to a topic in {where}'
+        rule = 'Plain text; normal notifications; no reply, formatting, link preview, schedule or draft clearing.'
+        closing = f'{identity.DISPLAY_NAME} will revalidate this account and topic, then make one send attempt.'
+    return _document(
+        [*_head(action, draft.account_id, draft.expires_at), *topic],
+        ['Text (exact):', _Payload(draft.text), *_styles(draft), '', rule],
+        [f'Draft: {draft.draft_id}', *topic_technical, f'Bytes: {draft.size_bytes}',
+         f'Text SHA-256: {draft.sha256}', f'Preview SHA-256: {draft.preview_sha256}'],
+        closing)
+
+
+def _reply_target(target) -> tuple[list, list[str]]:
+    """(payload lines, technical lines) for the message replied to; its text is untrusted evidence."""
+    anchor = target.anchor
+    return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}:',
+             _Payload(_evidence(target.text))],
+            [f'Target sanitized: {target.sanitized}; truncated: {target.truncated}',
+             f'Target source SHA-256: {target.source_sha256}'])
+
+
+def _reply_document(validated) -> str:
+    draft = validated.draft
+    topic, topic_technical = _topic_lines(draft.topic)
+    target, target_technical = _reply_target(validated.reply_target)
+    return _document(
+        [*_head(f'Send a reply to {_span(draft.recipient_title)} (chat {draft.recipient})', draft.account_id,
+                draft.expires_at), *topic],
+        [*target, '', 'Reply text (exact):', _Payload(draft.text), *_styles(draft)],
+        [f'Draft: {draft.draft_id}', *topic_technical, f'Bytes: {draft.size_bytes}', f'Text SHA-256: {draft.sha256}',
+         *target_technical, f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
+
+
+def _reply_artifact_document(validated) -> str:
+    draft = validated.draft
+    target, target_technical = _reply_target(validated.reply_target)
+    voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
+              f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
+    voice_technical = ([f'Source SHA-256: {draft.source_sha256}', f'Waveform (base64): {draft.waveform_base64}']
+                       if draft.kind == 'voice_note' else [])
+    return _document(
+        _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} (chat {draft.recipient})',
+              draft.account_id, draft.expires_at),
+        [*target, '', f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}',
+         f'Bytes: {draft.size_bytes}', *voice,
+         *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
+        [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical, *target_technical,
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
+
+
+def _forward_document(validated) -> str:
+    """The text or caption is an exact gutter payload; entity covered spans, link-preview URLs, file
+    facts and the author signature are « » spans, all under the readable rule."""
+    from .forward_drafts import unescaped
+    source, recipient = validated.source, validated.recipient
+    mode = ('Mode: FORWARD — recipients see the original sender' if validated.mode == 'forward' else
+            'Mode: COPY — sent as your own message, no attribution' +
+            ('; caption removed' if validated.remove_caption else ''))
+    label = 'Text' if source.content_kind == 'text' else 'Caption'
+
+    def name(value):  # marked sanitized names, not escapes
+        return _span(_evidence(value))
+    if validated.remove_caption:
+        content = ['Caption: removed — not sent']
+    elif source.text is None:
+        content = [f'{label}: (none)']
+    else:
+        content = ([f'{label} {_MARK} (exact):', _Payload(unescaped(source.text))] +
+                   _entity_rows(f'{label} entities', source.entity_rows()))
+    link = []
     if source.link_preview is not None:
         item = source.link_preview
-        link = (f'Link preview options {marker}: disabled {item.is_disabled}; URL '
-                f'{"«" + readable(unescaped(item.url)) + "»" if item.url is not None else "(none)"}; '
-                f'small media {item.force_small_media}; '
-                f'large media {item.force_large_media}; above text {item.show_above_text}\n')
+        url = _span(unescaped(item.url)) if item.url is not None else '(none)'
+        link.append(f'Link preview options {_MARK}: disabled {item.is_disabled}; URL {url}; '
+                    f'small media {item.force_small_media}; large media {item.force_large_media}; '
+                    f'above text {item.show_above_text}')
     if source.link_preview_card_url is not None:
-        link += (f'Link preview card {marker}: URL «{readable(unescaped(source.link_preview_card_url))}»; '
-                 'its title, description and media are not shown\n')
-    media = ''
+        link.append(f'Link preview card {_MARK}: URL {_span(unescaped(source.link_preview_card_url))}; '
+                    'its title, description and media are not shown')
+    media = []
     if source.media is not None:
         item = source.media
-        parts = [f'{key} {name(value)}' for key, value in (('file', item.file_name), ('MIME', item.mime_type),
-                 ('title', item.title), ('performer', item.performer)) if value is not None] + \
-            ([f'{item.duration_seconds} seconds'] if item.duration_seconds is not None else []) + \
-            ([f'{item.width}x{item.height}'] if item.width is not None and item.height is not None else []) + \
-            ([f'starts at {item.start_timestamp_seconds} seconds'] if item.start_timestamp_seconds else []) + \
-            [f'{item.size_bytes} bytes'] + ([f'{item.variants} variants'] if item.variants > 1 else []) + \
-            ([f'spoiler {item.has_spoiler}; caption above media {item.caption_above_media}']
-             if item.has_spoiler is not None else [])
-        media = f'Media {marker}: ' + '; '.join(parts) + '\n'
-    attribution = ((f'Author signature {marker}: {name(source.author_signature)}\n'
-                    if source.author_signature is not None else '') +
-                   (f'Via bot {marker}: user {source.via_bot_user_id}\n' if source.via_bot_user_id is not None else '') +
-                   ('Source is itself a forward: the copy carries no original attribution\n' if source.is_forward else ''))
-    return (f"Forward this message to {recipient.title} (chat {recipient.chat_id})?\n{mode}\n"
-            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
-            f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"Source chat: {source.chat.title} (chat {source.chat.chat_id})\n"
-            f"Message ID: {source.message_id}\n"
-            f"Sender {marker}: {source.sender.kind} {source.sender.id}\n{attribution}"
-            f"Date: {source.date.isoformat()}\nContent: {source.content_kind}\n"
-            f"{text}{link}{media}"
-            f"Source SHA-256: {source.source_sha256}\n"
-            f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
-            f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            f"{identity.DISPLAY_NAME} will revalidate the source, its permissions and the recipient, "
-            "then make one forward attempt.")
+        parts = ([f'{key} {name(value)}' for key, value in (('file', item.file_name), ('MIME', item.mime_type),
+                  ('title', item.title), ('performer', item.performer)) if value is not None] +
+                 ([f'{item.duration_seconds} seconds'] if item.duration_seconds is not None else []) +
+                 ([f'{item.width}x{item.height}'] if item.width is not None and item.height is not None else []) +
+                 ([f'starts at {item.start_timestamp_seconds} seconds'] if item.start_timestamp_seconds else []) +
+                 [f'{item.size_bytes} bytes'] + ([f'{item.variants} variants'] if item.variants > 1 else []) +
+                 ([f'spoiler {item.has_spoiler}; caption above media {item.caption_above_media}']
+                  if item.has_spoiler is not None else []))
+        media.append(f'Media {_MARK}: ' + '; '.join(parts))
+    attribution = (([f'Author signature {_MARK}: {name(source.author_signature)}']
+                    if source.author_signature is not None else []) +
+                   ([f'Via bot {_MARK}: user {source.via_bot_user_id}'] if source.via_bot_user_id is not None else []) +
+                   (['Source is itself a forward: the copy carries no original attribution'] if source.is_forward else []))
+    return _document(
+        [f'Forward a message to {_span(recipient.title)} (chat {recipient.chat_id})', mode,
+         f'Account: {validated.account_id}', f'Expires: {validated.expires_at.isoformat()}'],
+        [f'Source chat: {_span(source.chat.title)} (chat {source.chat.chat_id})', f'Message ID: {source.message_id}',
+         f'Sender {_MARK}: {source.sender.kind} {source.sender.id}', *attribution,
+         f'Date: {source.date.isoformat()}', f'Content: {source.content_kind}', *content, *link, *media],
+        [f'Draft: {validated.draft_id}', f'Source SHA-256: {source.source_sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the source, its permissions and the recipient, '
+        'then make one forward attempt.')
 
 
-def _video_detail(validated) -> str:
-    """As in the forward dialog, the untrusted file name and caption are enclosed in « » and
-    rendered by `readable` below the `READABLE_RULE` legend line, so no span can close early
-    or start a fake line. The probed facts are what the container boxes declare; nothing is
-    decoded, so they are labelled as declared by the file."""
-    from .forward_drafts import READABLE_RULE, readable
+def _video_document(validated) -> str:
+    """The probed facts are what the container boxes declare; nothing is decoded."""
     recipient = validated.recipient
-    caption = (f'Caption [untrusted] (exact): «{readable(validated.raw_caption)}»\n' if validated.caption is not None
-               else 'Caption: (none)\n')
-    return (f"Send this native video to {recipient.title} (chat {recipient.chat_id})?\n"
-            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
-            f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"Untrusted spans in « » below are exact; {READABLE_RULE}.\n"
-            f"File name [untrusted] (exact): «{readable(validated.raw_display_name)}»\n"
-            f"Bytes: {validated.size_bytes}\nSHA-256: {validated.sha256}\n"
-            "Declared by the file (not decoded):\n"
-            f"Duration: {validated.duration_seconds} seconds\nDimensions: {validated.width}x{validated.height}\n"
-            f"Codec: {validated.codec}\nAudio: {'yes' if validated.has_audio else 'no'}\n"
-            f"Streaming: {'yes' if validated.supports_streaming else 'no'}\n{caption}"
-            f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
-            f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            f"{identity.DISPLAY_NAME} will revalidate the account, the recipient and the file bytes, "
-            "then make one upload/send attempt as a native video.")
+    caption = (['Caption [untrusted] (exact):', _Payload(validated.raw_caption)] if validated.caption is not None
+               else ['Caption: (none)'])
+    return _document(
+        _head(f'Send a native video to {_span(recipient.title)} (chat {recipient.chat_id})',
+              validated.account_id, validated.expires_at),
+        [f'File name [untrusted] (exact): {_span(validated.raw_display_name)}', f'Bytes: {validated.size_bytes}',
+         'Declared by the file (not decoded):', f'Duration: {validated.duration_seconds} seconds',
+         f'Dimensions: {validated.width}x{validated.height}', f'Codec: {validated.codec}',
+         f"Audio: {'yes' if validated.has_audio else 'no'}",
+         f"Streaming: {'yes' if validated.supports_streaming else 'no'}", *caption],
+        [f'Draft: {validated.draft_id}', f'SHA-256: {validated.sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the recipient and the file bytes, '
+        'then make one upload/send attempt as a native video.')
 
 
-def _archive_detail(validated) -> str:
-    """The untrusted chat title is enclosed in « » and rendered by `readable` under the
-    `READABLE_RULE` legend, so it cannot close its span early or start a fake line."""
-    from .forward_drafts import READABLE_RULE, readable
+def _archive_document(validated) -> str:
     chat = validated.chat
     current, target = _LIST_NAMES[validated.current_list], _LIST_NAMES[validated.target_list]
     # Telegram behaviour of the move itself: the chat leaves its list (and a pin there); folders
     # that exclude archived chats hide an archived chat.
-    notes = (f'Note: the chat leaves {current} and loses any pin there; it is not pinned in {target} '
-             '(Telegram behaviour).\n')
+    notes = [f'Note: the chat leaves {current} and loses any pin there; it is not pinned in {target} '
+             '(Telegram behaviour).']
     if validated.target_list == 'archive':
-        notes += 'Note: chat folders that exclude archived chats will hide it (Telegram behaviour).\n'
+        notes.append('Note: chat folders that exclude archived chats will hide it (Telegram behaviour).')
     if validated.note is not None:
-        notes += f'Note: {validated.note} (Telegram behaviour).\n'
-    return (f"Move chat «{readable(chat.title)}» (chat {chat.chat_id}, {chat.kind}) from "
-            f"{current} to {target}?\n"
-            f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
-            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
-            f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"Current list: {current}\n"
-            f"Target list: {target}\n{notes}"
-            f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            f"{identity.DISPLAY_NAME} will revalidate the account, the chat and its current list, then make one "
-            "move attempt and report the list it observes right after.")
+        notes.append(f'Note: {validated.note} (Telegram behaviour).')
+    return _document(
+        _head(f'Move chat {_span(chat.title)} (chat {chat.chat_id}, {chat.kind}) from {current} to {target}',
+              validated.account_id, validated.expires_at),
+        [f'Current list: {current}', f'Target list: {target}', *notes],
+        [f'Draft: {validated.draft_id}', f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the chat and its current list, then make one '
+        'move attempt and report the list it observes right after.')
 
 
-def _text_edit_detail(validated) -> str:
-    """The chat title, current text, covered spans and new text are enclosed in « » and rendered
-    by `readable` under the `READABLE_RULE` legend line, like every other untrusted span. Only
-    formatting Telegram does not detect again is listed as removed."""
+def _text_edit_document(validated) -> str:
+    """Only formatting Telegram does not detect again is listed as removed."""
     from datetime import datetime, timezone
     from .edit_drafts import AUTO_DETECTED
-    from .forward_drafts import READABLE_RULE, readable
     chat = validated.chat
-    marker = '[untrusted Telegram evidence]'
-    def spans(heading, rows):
-        return (heading + ' (raw text UTF-16 code units):\n' +
-                ''.join(f'{kind}: offset {offset}, length {length}; covered «{readable(json.loads(covered))}»\n'
-                        for kind, offset, length, covered in rows)) if rows else ''
     rows = list(zip(validated.current_entities, validated.entity_rows()))
-    formatting = (spans('Current formatting, removed by this plain-text edit',
-                        [row for entity, row in rows if entity.type not in AUTO_DETECTED]) +
-                  spans('Current auto-detected entities, auto-detected again by Telegram wherever the new text '
-                        'contains them', [row for entity, row in rows if entity.type in AUTO_DETECTED]))
+    formatting = (_entity_rows('Current formatting, removed by this plain-text edit',
+                               [row for entity, row in rows if entity.type not in AUTO_DETECTED]) +
+                  _entity_rows('Current auto-detected entities, auto-detected again by Telegram wherever the new '
+                               'text contains them', [row for entity, row in rows if entity.type in AUTO_DETECTED]))
     edited = (datetime.fromtimestamp(validated.current_edit_date, tz=timezone.utc).isoformat()
               if validated.current_edit_date else 'never')
-    return (f"Edit your message {validated.message_id} in «{readable(chat.title)}» "
-            f"(chat {chat.chat_id}, {_EDIT_CHAT_KINDS[chat.kind]})?\n"
-            f"Untrusted spans in « » are exact; {READABLE_RULE}.\n"
-            f"Account: {validated.account_id}\nDraft: {validated.draft_id}\n"
-            f"Expires: {validated.expires_at.isoformat()}\n\n"
-            f"Current text {marker} (exact): «{readable(validated.raw_current_text)}»\n{formatting}"
-            f"New text (exact): «{readable(validated.raw_new_text)}»\n"
-            f"Last edited: {edited}\n"
-            f"Source SHA-256: {validated.source_sha256}\n"
-            f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            "The new text is plain text without formatting; Telegram may detect links in it and show a "
-            "link preview. Link preview settings return to Telegram's default. Recipients see the message "
-            "marked \"edited\".\n"
-            f"{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its edit "
-            "permission, then make one edit attempt.")
+    return _document(
+        [*_head(f'Edit your message {validated.message_id} in {_span(chat.title)} '
+                f'(chat {chat.chat_id}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id, validated.expires_at),
+         f'Last edited: {edited}'],
+        [f'Current text {_MARK} (exact):', _Payload(validated.raw_current_text), *formatting,
+         'New text (exact):', _Payload(validated.raw_new_text), '',
+         'The new text is plain text without formatting; Telegram may detect links in it and show a link preview. '
+         'Link preview settings return to Telegram\'s default. Recipients see the message marked "edited".'],
+        [f'Draft: {validated.draft_id}', f'Source SHA-256: {validated.source_sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its edit permission, '
+        'then make one edit attempt.')
 
 
-def confirm_approved_send(
+def _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name) -> None:
+    _require(display_name in ('Text message', 'text', '', None) and caption in ('', None) and
+             duration_seconds is None and source_sha256 is None and source_display_name is None)
+
+
+def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
+            duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
+            topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
+            draft_preview) -> tuple[str, bool]:
+    """(document, is a change) for exactly one preview bound to the broker's own arguments."""
+    previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
+                archive_preview, text_edit_preview, draft_preview)
+    _require(sum(value is not None for value in previews) == 1)
+    _require((kind == 'forward') == (forward_preview is not None) and (kind == 'video') == (video_preview is not None)
+             and (kind == 'archive') == (archive_preview is not None) and
+             (kind == 'text_edit') == (text_edit_preview is not None))
+    if archive_preview is not None or text_edit_preview is not None:
+        if archive_preview is not None:
+            from .archive_drafts import ArchiveDraftPreview, archive_digest
+            validated = ArchiveDraftPreview.model_validate(archive_preview)
+            chat = validated.chat
+            expected_sha256 = archive_digest(chat.chat_id, chat.kind, validated.current_list, validated.target_list)
+        else:
+            from .edit_drafts import TextEditDraftPreview
+            validated = TextEditDraftPreview.model_validate(text_edit_preview)
+            chat = validated.chat
+            expected_sha256 = validated.source_sha256
+        _require(chat.chat_id == recipient and chat.title == recipient_title and sha256 == expected_sha256 and
+                 text in ('', None) and caption in ('', None) and duration_seconds is None and
+                 source_sha256 is None and source_display_name is None)
+        return (_archive_document(validated) if archive_preview is not None else _text_edit_document(validated)), True
+    if video_preview is not None:
+        from .video_drafts import VideoDraftPreview
+        validated = VideoDraftPreview.model_validate(video_preview)
+        _require(validated.recipient.chat_id == recipient and validated.recipient.title == recipient_title and
+                 validated.sha256 == sha256 and validated.size_bytes == size_bytes and
+                 validated.raw_display_name == display_name and validated.raw_caption == (caption or '') and
+                 text in ('', None) and duration_seconds is None and source_sha256 is None and
+                 source_display_name is None)
+        return _video_document(validated), False
+    if forward_preview is not None:
+        from .forward_drafts import ForwardDraftPreview
+        validated = ForwardDraftPreview.model_validate(forward_preview)
+        _require(validated.recipient.chat_id == recipient and validated.recipient.title == recipient_title and
+                 validated.source.source_sha256 == sha256 and text in ('', None) and caption in ('', None) and
+                 duration_seconds is None and source_sha256 is None and source_display_name is None)
+        return _forward_document(validated), False
+    if topic_preview is not None:
+        from .draft_models import DraftPreview
+        validated = DraftPreview.model_validate(topic_preview)
+        _require((validated.topic is not None or validated.outgoing_entities) and kind == 'text' and
+                 validated.recipient == recipient and validated.recipient_title == recipient_title and
+                 validated.text == text and validated.sha256 == sha256 and validated.size_bytes == size_bytes)
+        if validated.outgoing_entities:
+            _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
+        return _topic_document(validated), False
+    if reply_artifact_preview is not None:
+        from .reply_artifact_drafts import ReplyArtifactDraftPreview
+        validated = ReplyArtifactDraftPreview.model_validate(reply_artifact_preview)
+        draft = validated.draft
+        _require(kind == draft.kind and draft.recipient == recipient and draft.recipient_title == recipient_title and
+                 draft.sha256 == sha256 and draft.size_bytes == size_bytes and draft.display_name == display_name and
+                 draft.caption == (caption or '') and text in ('', None))
+        return _reply_artifact_document(validated), False
+    if reply_preview is not None:
+        from .reply_drafts import ReplyDraftPreview
+        validated = ReplyDraftPreview.model_validate(reply_preview)
+        draft = validated.draft
+        _require(kind == 'text' and draft.recipient == recipient and draft.recipient_title == recipient_title and
+                 draft.text == text and draft.sha256 == sha256 and draft.size_bytes == size_bytes)
+        _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
+        return _reply_document(validated), False
+    from .draft_models import DraftPreview
+    validated = DraftPreview.model_validate(draft_preview)
+    _require(validated.topic is None and not validated.outgoing_entities and validated.kind == kind and
+             validated.recipient == recipient and validated.recipient_title == recipient_title and
+             validated.sha256 == sha256 and validated.size_bytes == size_bytes)
+    if kind == 'text':
+        _require(validated.text == text)
+        _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
+    else:
+        _require(validated.display_name == display_name and validated.caption == (caption or '') and
+                 text in ('', None) and validated.duration_seconds == duration_seconds and
+                 validated.source_sha256 == source_sha256 and validated.source_display_name == source_display_name)
+    return _plain_document(validated), False
+
+
+def render_approval(**arguments) -> tuple[str, bool] | None:
+    """The exact dialog document and whether it is a change, or None when no dialog may be shown."""
+    try:
+        return _render(**{**_DEFAULTS, **arguments})
+    except (_Refused, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+_DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
+                 reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
+                 video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None)
+
+
+def decide_approved_send(
     *, recipient_title: str, recipient: int, display_name: str,
     size_bytes: int, sha256: str, caption: str,
     kind: str = "document", text: str = "",
@@ -220,162 +583,24 @@ def confirm_approved_send(
     video_preview: dict | None = None,
     archive_preview: dict | None = None,
     text_edit_preview: dict | None = None,
-) -> bool:
-    """Ask the signed-in macOS user; failure or timeout means no send or change."""
-    if sum(value is not None for value in (topic_preview, reply_preview, reply_artifact_preview, forward_preview,
-                                           video_preview, archive_preview, text_edit_preview)) > 1:
-        return False
-    if ((kind == 'forward') != (forward_preview is not None) or (kind == 'video') != (video_preview is not None) or
-            (kind == 'archive') != (archive_preview is not None) or
-            (kind == 'text_edit') != (text_edit_preview is not None)):
-        return False
-    script = _dialog_script(_SCRIPT)
-    if archive_preview is not None or text_edit_preview is not None:
-        script = _dialog_script(_CHANGE_SCRIPT)
-        try:
-            if archive_preview is not None:
-                from .archive_drafts import ArchiveDraftPreview, archive_digest
-                validated = ArchiveDraftPreview.model_validate(archive_preview)
-                chat = validated.chat
-                expected_sha256 = archive_digest(chat.chat_id, chat.kind, validated.current_list,
-                                                 validated.target_list)
-            else:
-                from .edit_drafts import TextEditDraftPreview
-                validated = TextEditDraftPreview.model_validate(text_edit_preview)
-                chat = validated.chat
-                expected_sha256 = validated.source_sha256
-            if (chat.chat_id != recipient or chat.title != recipient_title or sha256 != expected_sha256 or
-                    text not in ('', None) or caption not in ('', None) or duration_seconds is not None or
-                    source_sha256 is not None or source_display_name is not None):
-                return False
-        except (ValueError, TypeError):
-            return False
-        preview = _archive_detail(validated) if archive_preview is not None else _text_edit_detail(validated)
-    elif video_preview is not None:
-        from .video_drafts import VideoDraftPreview
-        try:
-            validated = VideoDraftPreview.model_validate(video_preview)
-            if (validated.recipient.chat_id != recipient or validated.recipient.title != recipient_title or
-                    validated.sha256 != sha256 or validated.size_bytes != size_bytes or
-                    validated.raw_display_name != display_name or validated.raw_caption != (caption or '') or
-                    text not in ('', None) or duration_seconds is not None or source_sha256 is not None or
-                    source_display_name is not None):
-                return False
-        except (ValueError, TypeError):
-            return False
-        preview = _video_detail(validated)
-    elif forward_preview is not None:
-        from .forward_drafts import ForwardDraftPreview
-        try:
-            validated = ForwardDraftPreview.model_validate(forward_preview)
-            if (validated.recipient.chat_id != recipient or validated.recipient.title != recipient_title or
-                    validated.source.source_sha256 != sha256 or text not in ('', None) or caption not in ('', None) or
-                    duration_seconds is not None or source_sha256 is not None or source_display_name is not None):
-                return False
-        except (ValueError, TypeError):
-            return False
-        preview = _forward_detail(validated)
-    elif topic_preview is not None:
-        from .draft_models import DraftPreview
-        try:
-            validated = DraftPreview.model_validate(topic_preview)
-            if ((validated.topic is None and not validated.outgoing_entities) or kind != 'text' or reply_preview is not None or
-                    reply_artifact_preview is not None or validated.recipient != recipient or
-                    validated.recipient_title != recipient_title or validated.text != text or
-                    validated.sha256 != sha256 or validated.size_bytes != size_bytes):
-                return False
-        except (ValueError, TypeError):
-            return False
-        topic = validated.topic
-        if validated.outgoing_entities:
-            if (display_name not in ('Text message', 'text', '', None) or caption not in ('', None) or
-                    duration_seconds is not None or source_sha256 is not None or source_display_name is not None):
-                return False
-            topic_detail = (f"Topic: {topic.name}\nTopic ID: {topic.forum_topic_id}\n"
-                f"Topic type: {topic.chat_type}; peer: {topic.peer_id}\n"
-                f"Created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}\n"
-                f"General: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; hidden: {topic.is_hidden}\n"
-                f"Topic SHA-256: {topic.source_sha256}\n" if topic is not None else '')
-            preview = (f"Send this text to {validated.recipient_title} (chat {validated.recipient})?\n"
-                f"Account: {validated.account_id}\n{topic_detail}Draft: {validated.draft_id}\n"
-                f"Expires: {validated.expires_at.isoformat()}\n\n{validated.text}\n\n"
-                f"{_outgoing_style_detail(validated)}Bytes: {validated.size_bytes}\n"
-                f"Text SHA-256: {validated.sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
-                "Normal notifications; no reply, link preview, schedule or draft clearing.\n"
-                f"{identity.DISPLAY_NAME} will revalidate this account and recipient, including any selected topic, then make one send attempt.")
-        else:
-            preview = (f"Send this plain text to {validated.recipient_title} (chat {validated.recipient})?\n"
-                f"Account: {validated.account_id}\nTopic: {topic.name}\nTopic ID: {topic.forum_topic_id}\n"
-                f"Topic type: {topic.chat_type}; peer: {topic.peer_id}\n"
-                f"Created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}\n"
-                f"General: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; hidden: {topic.is_hidden}\n"
-                f"Draft: {validated.draft_id}\nExpires: {validated.expires_at.isoformat()}\n\n"
-                f"{validated.text}\n\nBytes: {validated.size_bytes}\nText SHA-256: {validated.sha256}\n"
-                f"Topic SHA-256: {topic.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
-                "Plain text; normal notifications; no reply, formatting, link preview, schedule or draft clearing.\n"
-                f"{identity.DISPLAY_NAME} will revalidate this account and topic, then make one send attempt.")
-    elif reply_artifact_preview is not None:
-        from .reply_artifact_drafts import ReplyArtifactDraftPreview
-        try:
-            validated=ReplyArtifactDraftPreview.model_validate(reply_artifact_preview)
-        except (ValueError,TypeError):return False
-        draft=validated.draft;target=validated.reply_target;anchor=target.anchor
-        voice=(f"Source: {draft.source_display_name}\nSource SHA-256: {draft.source_sha256}\n"
-            f"Converted: {draft.converted}\nDuration: {draft.duration_seconds} seconds\nWaveform (base64): {draft.waveform_base64}\n"
-            if draft.kind=='voice_note' else '')
-        preview=(f"Send this {draft.kind} reply to {draft.recipient_title} (chat {draft.recipient})?\n"
-            f"Account: {draft.account_id}\nReply anchor: chat {anchor.chat_id}, message {anchor.message_id}\n\n"
-            f"{target.text}\n\nTarget sanitized: {target.sanitized}; truncated: {target.truncated}\n"
-            f"Source SHA-256: {target.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
-            f"{voice}File: {draft.display_name}\nMIME: {draft.mime_type}\nBytes: {draft.size_bytes}\nSHA-256: {draft.sha256}\n"
-            f"Caption:\n{draft.caption}\n\n{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.")
-    elif reply_preview is not None:
-        from .reply_drafts import ReplyDraftPreview
-        try:
-            validated = ReplyDraftPreview.model_validate(reply_preview)
-            draft = validated.draft
-            if (kind != 'text' or draft.recipient != recipient or draft.recipient_title != recipient_title or
-                    draft.text != text or draft.sha256 != sha256 or draft.size_bytes != size_bytes or
-                    display_name not in ('Text message', 'text', '', None) or caption not in ('', None) or duration_seconds is not None or
-                    source_sha256 is not None or source_display_name is not None):
-                return False
-        except (ValueError, TypeError):
-            return False
-        target = validated.reply_target; anchor = target.anchor
-        topic = draft.topic
-        topic_detail = (f"Topic: {topic.name}\nTopic ID: {topic.forum_topic_id}\n"
-            f"Topic type: {topic.chat_type}; peer: {topic.peer_id}\n"
-            f"Created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}\n"
-            f"General: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; hidden: {topic.is_hidden}\n"
-            f"Topic SHA-256: {topic.source_sha256}\n" if topic is not None else '')
-        preview=(f"Send this reply to {draft.recipient_title} (chat {draft.recipient})?\n"
-            f"Account: {draft.account_id}\n{topic_detail}Reply anchor: chat {anchor.chat_id}, message {anchor.message_id}\n"
-            f"Draft: {draft.draft_id}\nExpires: {draft.expires_at.isoformat()}\n\n"
-            f"{target.text}\n\nTarget sanitized: {target.sanitized}; truncated: {target.truncated}\n"
-            f"Source SHA-256: {target.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
-            f"Reply text:\n{draft.text}\n\n{_outgoing_style_detail(draft)}Bytes: {draft.size_bytes}\nText SHA-256: {draft.sha256}\n\n"
-            f"{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.")
-    elif kind == "text":
-        preview = (f"Send this text to {recipient_title} (chat {recipient})?\n\n"
-                   f"{text}\n\nSHA-256: {sha256}\n\n"
-                   f"{identity.DISPLAY_NAME} will make one send attempt.")
-    else:
-        voice_detail = (f"Source: {source_display_name}\nSource SHA-256: {source_sha256}\n"
-                        f"Duration: {duration_seconds} seconds\nConverted to OGG/Opus mono\n"
-                        if kind == "voice_note" else "")
-        preview = (
-            f"Send this {kind} to {recipient_title} (chat {recipient})?\n\n"
-            f"{voice_detail}"
-            f"File: {display_name}\nBytes: {size_bytes}\nSHA-256: {sha256}\n"
-            f"Caption: {caption or '(none)'}\n\n"
-            f"{identity.DISPLAY_NAME} will make one upload/send attempt."
-        )
-    try:
-        result = subprocess.run(
-            ["/usr/bin/osascript", "-e", script, "--", preview],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=125, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and result.stdout.strip() == b"APPROVED"
+    draft_preview: dict | None = None,
+    timeout_seconds: int = DIALOG_SECONDS,
+) -> ApprovalDecision:
+    """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
+    timer, or any failure to render or show the dialog means no send or change."""
+    rendered = render_approval(
+        recipient_title=recipient_title, recipient=recipient, display_name=display_name, size_bytes=size_bytes,
+        sha256=sha256, caption=caption, kind=kind, text=text, duration_seconds=duration_seconds,
+        source_sha256=source_sha256, source_display_name=source_display_name, reply_preview=reply_preview,
+        reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
+        video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
+        draft_preview=draft_preview)
+    if rendered is None:
+        return UNAVAILABLE
+    document, change = rendered
+    return _dialog(document, change=change, seconds=timeout_seconds)
+
+
+def confirm_approved_send(**arguments) -> bool:
+    """Compatibility path: True only for an explicit approval in the local dialog."""
+    return decide_approved_send(**arguments).outcome == 'approved'

@@ -28,8 +28,8 @@ _MAX_POSITIONS = 64
 ChatList = Literal['main', 'archive']
 ChatKind = Literal['private', 'basic_group', 'supergroup', 'channel']
 Refusal = Literal['unsupported_chat']
-ApplyStatus = Literal['applied', 'already_in_target', 'failed', 'local_failed', 'not_approved', 'outcome_unknown',
-                      'expired', 'chat_changed', 'error']
+ApplyStatus = Literal['applied', 'already_in_target', 'failed', 'local_failed', 'declined', 'timeout',
+                      'dialog_unavailable', 'outcome_unknown', 'expired', 'chat_changed', 'error']
 StrictBool = Annotated[bool, Field(strict=True)]
 Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 

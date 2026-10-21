@@ -507,7 +507,7 @@ class IdentityMediaLifecycle:
 
     def test_denial_unknown_and_restored_capabilities_never_renew_attempt(self):
         self.broker._approval_prompt = lambda **facts: self.approvals.append(facts) or False
-        did = self.prepare()['draft']['draft_id']; self.assertEqual(self.send(did)['status'], 'not_approved')
+        did = self.prepare()['draft']['draft_id']; self.assertEqual(self.send(did)['status'], 'declined')
         self.assertEqual(len(self.sends()), 0)
         self.restore(); self.raw.mode = 'wrong'; did = self.prepare()['draft']['draft_id']
         self.assertEqual(self.send(did)['status'], 'outcome_unknown')

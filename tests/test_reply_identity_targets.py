@@ -419,11 +419,11 @@ class IdentityLifecycle:
 
     def test_owner_denial_false_approval_and_foreign_owner_have_no_transport(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
-        self.assertEqual(self.dispatch(self.send_operation, {'draft_id': did, 'approved': False})['status'], 'not_approved')
+        self.assertEqual(self.dispatch(self.send_operation, {'draft_id': did, 'approved': False})['status'], 'declined')
         for op, extra in ((self.operations[0], {}), (self.operations[1], self.revision), (self.operations[2], {})):
             self.assertEqual(self.dispatch(op, {'draft_id': did, **extra}, FOREIGN)['status'], 'unavailable')
         self.broker._approval_prompt = lambda **facts: False
-        self.assertEqual(self.send(did)['status'], 'not_approved')
+        self.assertEqual(self.send(did)['status'], 'declined')
         self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual(len(self.sends()), 0)
 

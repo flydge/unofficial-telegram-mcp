@@ -496,7 +496,8 @@ class SendPreparedArtifactRequest(BaseModel):
 
 
 class SendPreparedArtifactResponse(BaseModel):
-    status: Literal["sent", "failed", "outcome_unknown", "not_approved", "expired", "recipient_changed", "error"]
+    status: Literal["sent", "failed", "outcome_unknown", "declined", "timeout", "dialog_unavailable", "expired",
+                    "recipient_changed", "error"]
     draft_id: str | None = None
     recipient: int | None = None
     message_id: int | None = None

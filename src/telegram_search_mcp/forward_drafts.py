@@ -36,9 +36,9 @@ Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 StrictBool = Annotated[bool, Field(strict=True)]
 Refusal = Literal['unsupported_source_content', 'unsupported_source_state', 'source_not_forwardable',
                   'protected_content', 'hidden_source_content', 'source_is_forward', 'invalid_input']
-SendStatus = Literal['sent', 'pending', 'failed', 'local_failed', 'not_approved', 'outcome_unknown',
-                     'expired', 'recipient_changed', 'source_changed', 'source_not_forwardable',
-                     'protected_content', 'error']
+SendStatus = Literal['sent', 'pending', 'failed', 'local_failed', 'declined', 'timeout', 'dialog_unavailable',
+                     'outcome_unknown', 'expired', 'recipient_changed', 'source_changed',
+                     'source_not_forwardable', 'protected_content', 'error']
 
 
 def _utc(value: object) -> datetime:

@@ -91,7 +91,7 @@ class ArtifactSendFixture(ArtifactReplyFixture):
 class ArtifactSendTests(ArtifactSendFixture, unittest.TestCase):
     def test_document_reply_full_approval_and_exact_wire(self):
         preview=self.prepare();did=preview['draft']['draft_id']
-        self.assertEqual(self.dispatch('send_prepared_artifact',{'draft_id':did,'approved':False})['status'],'not_approved')
+        self.assertEqual(self.dispatch('send_prepared_artifact',{'draft_id':did,'approved':False})['status'],'declined')
         self.assertEqual(self.sends(),[])
         self.assertEqual(self.send(did)['status'],'sent')
         self.assertEqual(self.approvals[0]['reply_artifact_preview'],preview)

@@ -1,0 +1,8 @@
+{
+  "apply_prepared_archive": "output status not_approved split into declined, timeout and dialog_unavailable",
+  "apply_prepared_text_edit": "output status not_approved split into declined, timeout and dialog_unavailable",
+  "send_prepared_artifact": "output status not_approved split into declined, timeout and dialog_unavailable",
+  "send_prepared_forward": "output status not_approved split into declined, timeout and dialog_unavailable",
+  "send_prepared_text": "output status not_approved split into declined, timeout and dialog_unavailable",
+  "send_prepared_video": "output status not_approved split into declined, timeout and dialog_unavailable"
+}

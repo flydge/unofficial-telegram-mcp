@@ -26,8 +26,8 @@ _HASH = re.compile(r'[0-9a-f]{64}\Z')
 
 Codec = Literal['h264', 'hevc']
 Refusal = Literal['unsupported_video', 'video_too_large']
-SendStatus = Literal['sent', 'failed', 'local_failed', 'not_approved', 'outcome_unknown', 'expired',
-                     'recipient_changed', 'error']
+SendStatus = Literal['sent', 'failed', 'local_failed', 'declined', 'timeout', 'dialog_unavailable',
+                     'outcome_unknown', 'expired', 'recipient_changed', 'error']
 StrictBool = Annotated[bool, Field(strict=True)]
 Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 Seconds = Annotated[int, Field(strict=True, ge=1, le=MAX_SECONDS)]
