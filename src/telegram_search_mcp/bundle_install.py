@@ -208,12 +208,13 @@ def _remove_abandoned(parent, name, allowed, budget=64, *, empty=True):
     with open_owned_directory(parent) as fd:
         m=os.stat(name,dir_fd=fd,follow_symlinks=False)
         if not stat.S_ISDIR(m.st_mode) or m.st_uid!=os.getuid() or stat.S_IMODE(m.st_mode)&0o077:return False
-        child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+        try:child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+        except OSError:return False  # unreadable (mode 000/300): not provably ours, so it stays
         try:
             if (os.fstat(child).st_dev,os.fstat(child).st_ino)!=(m.st_dev,m.st_ino):return False
             if not empty and not os.listdir(child):return False
             _check_owned(child,allowed,[budget])
-        except _NotOurs:return False
+        except (_NotOurs,OSError):return False
         finally:os.close(child)
         shutil.rmtree(name,dir_fd=fd)
         os.fsync(fd)

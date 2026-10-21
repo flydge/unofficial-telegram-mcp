@@ -865,6 +865,37 @@ class UnfinishedActionTests(AdoptionHarness, unittest.TestCase):
                 self.assertEqual(self.change('uninstall')['installation'], 'removed')
                 self.assertEqual((self.beside(), kept()), ([staged.name], before))
 
+    def test_unreadable_lookalikes_never_stop_an_uninstall_or_the_next_install(self):
+        """A lookalike the installer cannot read (mode 000 or 300) is not provably ours: it stays, and neither the
+        uninstall nor the next install stops on it."""
+        def staged(home):
+            return Path(json.loads((home / '.runtime.install-intent.json').read_text())['staged_root'])
+        plants = {
+            'initial 000': lambda h: (h / '.runtime-initial-zzzzzzzz', 0o000, None),
+            'initial 300': lambda h: (h / '.runtime-initial-zzzzzzzz', 0o300, None),
+            'initial/transactions 000': lambda h: (h / '.runtime-initial-zzzzzzzz', 0o000, 'transactions'),
+            'recorded staged 000': lambda h: (staged(h), 0o000, None),
+            'removed 000': lambda h: (h / ('.runtime-removed-' + 'b' * 32), 0o000, None)}
+        for kind, plant in plants.items():
+            with self.subTest(kind=kind):
+                self.setUp()
+                self.full()
+                path, mode, inner = plant(self.home)
+                path.mkdir(mode=0o700)
+                locked = path / inner if inner else path
+                if inner:
+                    locked.mkdir(mode=0o700)
+                locked.chmod(mode)
+                self.addCleanup(os.chmod, locked, 0o700)
+                result = self.change('uninstall')
+                self.assertEqual(result['installation'], 'removed')
+                self.assertFalse(self.runtime.exists())
+                self.assertEqual(self.beside(), [path.name])
+                result = self.install(self.build('b', launcher=b'# second release\n'))
+                self.assertEqual((result['status'], result['installation']), ('activation_required', 'installed'))
+                self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                self.assertEqual(self.beside(), [path.name])
+
     def test_an_intent_the_closing_sweep_could_not_read_refuses_the_uninstall_before_any_removal(self):
         self.full()
         intent = self.home / '.runtime.install-intent.json'
