@@ -1,0 +1,19 @@
+{
+  "name": "unofficial-telegram-mcp",
+  "owner": {
+    "name": "Unofficial Telegram MCP Contributors"
+  },
+  "metadata": {
+    "description": "Claude Code plugin for the locally installed Unofficial Telegram MCP runtime."
+  },
+  "plugins": [
+    {
+      "name": "telegram-local",
+      "source": "./plugins/telegram-local",
+      "description": "Search, read and, with approval on this Mac, send in Telegram through the locally installed Unofficial Telegram MCP runtime.",
+      "category": "productivity",
+      "homepage": "https://github.com/flydge/unofficial-telegram-mcp#readme",
+      "license": "AGPL-3.0-only"
+    }
+  ]
+}
