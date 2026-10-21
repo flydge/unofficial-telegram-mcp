@@ -103,8 +103,7 @@ def validate_tree(root, index_path, index_sha256, *, installed=False):
         lock = read(root / 'tdlib-lock.json')
         if digest(lock) != manifest['native_lock_sha256']:
             raise BundleError('native_lock_mismatch')
-        if manifest['schema_version'] == 2:
-            check_publisher_lock(manifest['publisher'], lock)
+        check_publisher_lock(manifest, lock)
         skills = manifest['skills']
         if (type(skills) is not list or len(skills) != 2
                 or {s.get('id') for s in skills if isinstance(s, dict)} != {'telegram-search','telegram-setup'}):
@@ -167,13 +166,17 @@ def check_manifest(manifest, version):
         raise BundleError('manifest_mismatch')
 
 
-def check_publisher_lock(publisher, lock_data):
-    """A v2 manifest's publisher names exactly the native lock's signature kind and Team ID."""
+def check_publisher_lock(manifest, lock_data):
+    """A checked manifest's publisher names exactly the native lock's signature kind and Team ID.
+
+    A v1 manifest has no publisher and pairs only with an ad-hoc (or v1) lock.
+    """
     from .native_runtime import NativeRuntimeError, lock_signature, parse_native_manifest
     try:
         signature = lock_signature(parse_native_manifest(lock_data))
     except NativeRuntimeError:
         raise BundleError('native_lock_mismatch') from None
+    publisher = manifest['publisher'] if manifest['schema_version'] == 2 else {'kind': 'adhoc', 'team_id': None}
     if signature != (publisher['kind'], publisher['team_id']):
         raise BundleError('publisher_mismatch')
 

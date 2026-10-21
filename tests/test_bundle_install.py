@@ -9,6 +9,7 @@ import tempfile
 import shlex
 import unittest
 from unittest import mock
+from bundle_payload import inert_natives, v1_lock
 from claude_fake import FakeClaude
 
 
@@ -56,11 +57,11 @@ class InstallHarness:
             'native/libtdjson.dylib': b'inert-native',
             'skills/telegram-search/SKILL.md': b'search-skill',
             'skills/telegram-setup/SKILL.md': b'setup-skill',
-            'tdlib-lock.json': b'{}',
+            'tdlib-lock.json': json.dumps(v1_lock(inert_natives())).encode(),  # a v1 manifest pairs with an ad-hoc lock
         }
         manifest = dict(schema_version=1, package_version='0.53.0.dev0', target='macos-arm64',
             minimum_os='26.0', contract_version=1, schema_fingerprint='a' * 64,
-            tools=['_manifest', 'search_correspondence'], native_lock_sha256=hashlib.sha256(b'{}').hexdigest(),
+            tools=['_manifest', 'search_correspondence'], native_lock_sha256=hashlib.sha256(files['tdlib-lock.json']).hexdigest(),
             skills=[dict(id=n, sha256=hashlib.sha256(files['skills/' + n + '/SKILL.md']).hexdigest())
                     for n in ['telegram-search', 'telegram-setup']],
             source_completeness='incomplete', publication='unreleased')
