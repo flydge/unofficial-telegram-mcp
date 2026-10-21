@@ -234,10 +234,10 @@ class AbsoluteCaptionBrokerTests(unittest.TestCase):
                     self.assertNotEqual(refreshed.reply.preview_sha256, live.preview_sha256)
                     self.assertEqual(self.send(live.draft.draft_id, family).status, 'expired'); live = refreshed.reply
                 dialogs = len(self.dialogs)
-                self.assertEqual(self.send(live.draft.draft_id, family, False).status, 'not_approved')
+                self.assertEqual(self.send(live.draft.draft_id, family, False).status, 'declined')
                 self.assertEqual(len(self.dialogs), dialogs)
                 self.decision = lambda: False
-                self.assertEqual(self.send(live.draft.draft_id, family).status, 'not_approved')
+                self.assertEqual(self.send(live.draft.draft_id, family).status, 'declined')
                 self.assertEqual(self.inspect(live.draft.draft_id, family).reply, live)
         self.no_effects()
 

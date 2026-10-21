@@ -411,9 +411,9 @@ class BankCardLifecycleTests(unittest.TestCase):
             self.assertEqual(newest['reply_target'],original['reply_target'])
             self.assertNotEqual(newest['preview_sha256'],original['preview_sha256'])
             self.assertEqual(self.send(older['draft']['draft_id'],family)['status'],'expired')
-            self.assertEqual(self.send(newest['draft']['draft_id'],family,False)['status'],'not_approved')
+            self.assertEqual(self.send(newest['draft']['draft_id'],family,False)['status'],'declined')
             self.decision=lambda:False
-            self.assertEqual(self.send(newest['draft']['draft_id'],family)['status'],'not_approved')
+            self.assertEqual(self.send(newest['draft']['draft_id'],family)['status'],'declined')
         self.assertEqual(self.history,[]);self.no_effects()
 
     def test_exact_plain_wire_once_and_terminal_replay_needs_all_present_authority(self):

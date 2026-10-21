@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pydantic import ValidationError
+from approval_layout import logical, payload_under
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.config import RuntimePolicy
@@ -439,10 +440,10 @@ class TopicReplyTests(unittest.TestCase):
   def test_one_exact_native_send_and_one_combined_owner_preview(self):
     with Harness() as h:
       preview = h.prepare()
-      self.assertEqual(h.send(approved=False)['status'], 'not_approved')
+      self.assertEqual(h.send(approved=False)['status'], 'declined')
       self.assertEqual(h.approvals, [])
       h.decision = lambda: False
-      self.assertEqual(h.send()['status'], 'not_approved')
+      self.assertEqual(h.send()['status'], 'declined')
       self.assertEqual((h.sends(), h.register_count, h.claim_count), ([], 0, 0))
       h.decision = lambda: True; result = h.send()
       self.assertEqual((result['status'], result['message_id']), ('sent', 701))
@@ -536,23 +537,26 @@ class TopicReplyTests(unittest.TestCase):
     from telegram_search_mcp.approval_prompt import confirm_approved_send
     with Harness() as h:
       preview = h.prepare(); h.decision = lambda: False
-      self.assertEqual(h.send()['status'], 'not_approved'); kwargs = h.approvals[0]
+      self.assertEqual(h.send()['status'], 'declined'); kwargs = h.approvals[0]
       self.assertEqual(kwargs['reply_preview'], preview); self.assertNotIn('topic_preview', kwargs)
       completed = subprocess.CompletedProcess([], 0, b'APPROVED\n')
       with patch('telegram_search_mcp.approval_prompt.subprocess.run', return_value=completed) as run:
         self.assertTrue(confirm_approved_send(**kwargs))
-        shown = run.call_args.args[0][-1]
+        shown = logical(run.call_args.args[0][-1])
         expires = datetime.fromisoformat(preview['draft']['expires_at'].replace('Z', '+00:00')).isoformat()
         topic = preview['draft']['topic']
-        for evidence in (BODY, 'Account: 7', 'Topic ID: 41',
-            f'Reply anchor: chat {CHAT}, message 55', expires,
+        marker = '[untrusted Telegram evidence] '
+        for evidence in (f'\nReply text (exact):\n│ «{BODY}»\n', 'Account: 7',
+            f"\nTopic [untrusted Telegram evidence]: «{topic['name'].removeprefix(marker)}» (topic 41)\n",
+            f'\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n', expires,
             f"Topic type: {topic['chat_type']}; peer: {topic['peer_id']}",
-            f"Created: {topic['creation_date']}; creator: {topic['creator_kind']} {topic['creator_id']}",
-            f"General: {topic['is_general']}; outgoing: {topic['is_outgoing']}; closed: {topic['is_closed']}; hidden: {topic['is_hidden']}",
-            preview['draft']['topic']['name'], preview['draft']['topic']['source_sha256'],
-            preview['reply_target']['text'], preview['reply_target']['source_sha256'],
+            f"Topic created: {topic['creation_date']}; creator: {topic['creator_kind']} {topic['creator_id']}",
+            f"Topic general: {topic['is_general']}; outgoing: {topic['is_outgoing']}; closed: {topic['is_closed']}; hidden: {topic['is_hidden']}",
+            preview['draft']['topic']['source_sha256'], preview['reply_target']['source_sha256'],
             preview['preview_sha256'], preview['draft']['sha256'], h.current_id):
           self.assertIn(evidence, shown)
+        self.assertEqual(payload_under(shown, f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:'),
+                         preview['reply_target']['text'].removeprefix(marker))
         self.assertNotIn('no reply', shown.lower())
         self.assertEqual(shown.count('Preview SHA-256:'), 1)
       for key, value in [('recipient', CHAT-1), ('recipient_title', 'Other recipient'),
@@ -844,11 +848,11 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await consumer.call_tool('get_reply_draft', {'draft_id': old_id})).structured_content['status'], 'unavailable')
         h.decision = lambda: False
         owner_denied = (await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': True})).structured_content
-        self.assertEqual(owner_denied['status'], 'not_approved'); self.assertEqual(len(h.approvals), 1)
+        self.assertEqual(owner_denied['status'], 'declined'); self.assertEqual(len(h.approvals), 1)
         self.assertEqual((h.claim_count, h.register_count, h.sends()), (0, 0, [])); h.approvals.clear()
         h.decision = lambda: True
         denial = (await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': False})).structured_content
-        self.assertEqual(denial['status'], 'not_approved'); self.assertEqual(h.approvals, [])
+        self.assertEqual(denial['status'], 'declined'); self.assertEqual(h.approvals, [])
         sent = (await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': True})).structured_content
         self.assertEqual((sent['status'], sent['message_id']), ('sent', 701))
         replay = (await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': True})).structured_content

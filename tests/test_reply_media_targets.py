@@ -179,7 +179,7 @@ class MediaLifecycleTests(MediaReplyFixture, unittest.TestCase):
     def test_all_media_kinds_send_exact_text_with_volatile_mutations_and_no_retry(self):
         for kind in ('document','photo','voice_note'):
             self.raw.source=target(content=content_fixture(kind));did=self.prepare()['draft']['draft_id']
-            self.assertEqual(self.dispatch('send_prepared_text',{'draft_id':did,'approved':False})['status'],'not_approved')
+            self.assertEqual(self.dispatch('send_prepared_text',{'draft_id':did,'approved':False})['status'],'declined')
             self.assertEqual(len(self.sends()),('document','photo','voice_note').index(kind))
             if kind=='voice_note':self.raw.source['content']['is_listened']=True
             self.assertEqual(self.send(did)['status'],'sent');self.assertEqual(self.send(did)['status'],'sent')

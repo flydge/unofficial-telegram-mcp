@@ -332,7 +332,7 @@ class ApprovalBoundaryTests(unittest.TestCase):
             self.assertNotEqual(refreshed.reply.reply_target.source_sha256, prepared.reply.reply_target.source_sha256)
             self.assertNotEqual(refreshed.reply.preview_sha256, updated.reply.preview_sha256)
             self.assertEqual(self.send(live, family).status, "expired")
-            self.assertEqual(self.send(refreshed.reply.draft.draft_id, family, approved=False).status, "not_approved")
+            self.assertEqual(self.send(refreshed.reply.draft.draft_id, family, approved=False).status, "declined")
             self.assertEqual(self.inspect(refreshed.reply.draft.draft_id, family).reply, refreshed.reply)
         self.assertEqual(self.dialogs, [])
         self.assertFalse(any(r["@type"] == "sendMessage" for r in self.raw.requests))

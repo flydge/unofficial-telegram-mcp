@@ -11,6 +11,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from collections import deque
@@ -21,6 +22,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from approval_layout import logical, payload_under
 from telegram_search_mcp.approval_prompt import confirm_approved_send
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
@@ -555,9 +557,9 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(prepared.status, "prepared")
                 draft_id = prepared.reply.draft.draft_id
                 before = len(self.dialogs)
-                self.assertEqual(self.send(draft_id, family, approved=False).status, "not_approved")
+                self.assertEqual(self.send(draft_id, family, approved=False).status, "declined")
                 self.assertEqual(len(self.dialogs), before)
-                self.assertEqual(self.send(draft_id, family).status, "not_approved")
+                self.assertEqual(self.send(draft_id, family).status, "declined")
                 self.assertEqual(self.inspect(draft_id, family).reply, prepared.reply)
         self.assertEqual(self.effects(), [])
 
@@ -624,8 +626,12 @@ class LifecycleTests(unittest.TestCase):
             with patch("telegram_search_mcp.approval_prompt.subprocess.run", no_process):
                 self.assertTrue(confirm_approved_send(**kwargs))
             self.assertEqual(len(captured), 1)
-            rendered = captured[0][-1]
-            self.assertIn(prepared.reply.reply_target.text, rendered)
+            rendered = logical(captured[0][-1])
+            anchor = prepared.reply.reply_target.anchor
+            shown = payload_under(rendered, f"In reply to message {anchor.message_id} in chat {anchor.chat_id} "
+                                            "[untrusted Telegram evidence]:")
+            self.assertEqual(re.sub("⟦U\\+([0-9A-F]{4,6})⟧", lambda m: chr(int(m.group(1), 16)), shown),
+                             prepared.reply.reply_target.text.removeprefix("[untrusted Telegram evidence] "))
             self.assertIn(prepared.reply.reply_target.source_sha256, rendered)
             self.assertIn(prepared.reply.preview_sha256, rendered)
             self.assertIn('"formatting_type":null', rendered)

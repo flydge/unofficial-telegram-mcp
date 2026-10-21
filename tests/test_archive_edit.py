@@ -37,6 +37,8 @@ from telegram_search_mcp.contract import (OPERATION_CAPABILITIES, SEND_DEPENDENT
 from telegram_search_mcp.edit_drafts import (EditChat, EditSnapshot, TextEditDraftPreview, TextEditSpec,
     ApplyPreparedTextEditRequest, ApplyPreparedTextEditResponse, PrepareTextEditRequest, PrepareTextEditResponse,
     UNAVAILABLE as EDIT_UNAVAILABLE)
+from approval_layout import RULE as LAYOUT_RULE, logical, payload_under, tail as dialog_tail
+from telegram_search_mcp.approval_prompt import DETAILS, NOT_GIVEN, ApprovalDecision
 from telegram_search_mcp.forward_drafts import READABLE_RULE
 from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
@@ -230,7 +232,7 @@ class Raw:
 
 
 def shown(archive=None, text_edit=None, **kw):
-    """Capture the exact owner-dialog bytes and script; the DENIED mock has no owner side effect."""
+    """Capture the exact owner-dialog document (logical lines) and script; the DECLINED mock has no owner side effect."""
     seen = []
     value = archive if archive is not None else text_edit
     arguments = dict(recipient_title=value.chat.title, recipient=value.chat.chat_id, display_name='Chat list move',
@@ -240,9 +242,9 @@ def shown(archive=None, text_edit=None, **kw):
         text_edit_preview=text_edit.model_dump(mode='json') if text_edit is not None else None)
     arguments.update(kw)
     with patch('telegram_search_mcp.approval_prompt.subprocess.run',
-               side_effect=lambda argv, **options: seen.append(argv) or SimpleNamespace(returncode=0, stdout=b'DENIED')):
+               side_effect=lambda argv, **options: seen.append(argv) or SimpleNamespace(returncode=0, stdout=b'DECLINED')):
         assert confirm_approved_send(**arguments) is False
-    return [argv[-1] for argv in seen], [argv[2] for argv in seen]
+    return [logical(argv[-1]) for argv in seen], [argv[argv.index('-e') + 1] for argv in seen]
 
 
 def archive_sha(value):
@@ -374,12 +376,12 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(request); return PrepareChatArchiveResponse(status='unavailable', detail=ARCHIVE_UNAVAILABLE)
                 def apply_prepared_archive(self, request):
                     calls.append(request)
-                    return ApplyPreparedArchiveResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
+                    return ApplyPreparedArchiveResponse(status='dialog_unavailable', draft_id=request.draft_id, detail='synthetic')
                 def prepare_text_edit(self, request):
                     calls.append(request); return PrepareTextEditResponse(status='unavailable', detail=EDIT_UNAVAILABLE)
                 def apply_prepared_text_edit(self, request):
                     calls.append(request)
-                    return ApplyPreparedTextEditResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
+                    return ApplyPreparedTextEditResponse(status='dialog_unavailable', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 listed = {t.name for t in (await consumer.list_tools()).tools}
                 self.assertEqual(listed, set(available_tools(policy.enabled_capabilities)))
@@ -394,7 +396,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(result.is_error); self.assertTrue(applied.is_error); self.assertEqual(calls, [])
                         continue
                     self.assertEqual(result.structured_content['status'], 'unavailable')
-                    self.assertEqual(applied.structured_content['status'], 'not_approved')
+                    self.assertEqual(applied.structured_content['status'], 'dialog_unavailable')
                     self.assertEqual(calls[0], request_model(**good)); calls.clear()
                     bad_inputs = ([{'target_list': 'folder'}, {'target_list': 'Archive'}, {'chat': 0}, {'chat': '1'},
                                    {'chat': True}, {'chat_list': 'archive'}, {'extra': 1}] if prepare == 'prepare_chat_archive'
@@ -804,10 +806,16 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
 
     def test_not_approved_and_declined_dialog_make_no_attempt(self):
         did = self.prepare_archive()['draft_id']
-        self.assertEqual(self.apply_archive(did, approved=False)['status'], 'not_approved')
+        result = self.apply_archive(did, approved=False)
+        self.assertEqual((result['status'], result['detail']), ('declined', NOT_GIVEN))
         self.assertEqual(self.approvals, [])
-        self.broker._approval_prompt = lambda **kw: False
-        self.assertEqual(self.apply_archive(did)['status'], 'not_approved')
+        for answer, status in ((False, 'declined'), (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable'),
+                               (object(), 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                result = self.apply_archive(did)
+                self.assertEqual((result['status'], result['detail']), (status, DETAILS[status]))
         self.assert_no_attempt()
         self.broker._approval_prompt = lambda **kw: True
         self.assertEqual(self.apply_archive(did)['status'], 'applied')
@@ -1216,10 +1224,16 @@ class EditApplyTests(Fixture, unittest.TestCase):
 
     def test_not_approved_and_declined_dialog_make_no_attempt(self):
         did = self.prepare_edit()['draft_id']
-        self.assertEqual(self.apply_edit(did, approved=False)['status'], 'not_approved')
+        result = self.apply_edit(did, approved=False)
+        self.assertEqual((result['status'], result['detail']), ('declined', NOT_GIVEN))
         self.assertEqual(self.approvals, [])
-        self.broker._approval_prompt = lambda **kw: False
-        self.assertEqual(self.apply_edit(did)['status'], 'not_approved')
+        for answer, status in ((False, 'declined'), (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable'),
+                               (object(), 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                result = self.apply_edit(did)
+                self.assertEqual((result['status'], result['detail']), (status, DETAILS[status]))
         self.assert_no_attempt()
         self.broker._approval_prompt = lambda **kw: True
         self.assertEqual(self.apply_edit(did)['status'], 'applied')
@@ -1311,67 +1325,67 @@ class DialogTests(unittest.TestCase):
     def test_archive_and_unarchive_goldens(self):
         # Decision 4: the move unpins the chat in the list it leaves; folders excluding archived chats hide it.
         self.assertEqual(READABLE_RULE, RULE)
+        self.assertEqual(RULE, LAYOUT_RULE)
+        closing = ('Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one '
+                   'move attempt and report the list it observes right after.')
         value = archive_preview()
         texts, scripts = shown(value)
         self.assertEqual(texts, [
-            'Move chat «Team Chat» (chat -1001234, supergroup) from Main to Archive?\n'
-            f'Untrusted spans in « » are exact; {RULE}.\n'
-            f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
+            'Move chat «Team Chat» (chat -1001234, supergroup) from Main to Archive\n'
+            'Account: 7\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current list: Main\nTarget list: Archive\n'
             'Note: the chat leaves Main and loses any pin there; it is not pinned in Archive (Telegram behaviour).\n'
             'Note: chat folders that exclude archived chats will hide it (Telegram behaviour).\n'
-            f'Note: {NOTE} (Telegram behaviour).\n'
-            f'Preview SHA-256: {value.preview_sha256}\n\n'
-            'Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one '
-            'move attempt and report the list it observes right after.'])
-        self.assertIn('"Apply"', scripts[0]); self.assertIn('approve change', scripts[0])
-        self.assertIn('default button "Cancel"', scripts[0]); self.assertIn('giving up after 120', scripts[0])
+            f'Note: {NOTE} (Telegram behaviour).\n' +
+            dialog_tail(f'Draft: {DID}', f'Preview SHA-256: {value.preview_sha256}', closing=closing)])
+        # A change dialog: Apply, worded as a change, Cancel added first (the default button).
+        self.assertIn("approve change", scripts[0]); self.assertIn("nothing is changed", scripts[0])
+        self.assertLess(scripts[0].index("addButtonWithTitle($('Cancel'))"),
+                        scripts[0].index("addButtonWithTitle($('Apply'))"))
+        self.assertNotIn("'Send'", scripts[0])
         back = archive_preview('archive', 'main', title='Тим «x» ⟦1⟧', kind='private')
         texts, _ = shown(back)
         self.assertEqual(texts, [
-            'Move chat «Тим ⟦U+00AB⟧x⟦U+00BB⟧ ⟦U+27E6⟧1⟧» (chat -1001234, private) from Archive to Main?\n'
-            f'Untrusted spans in « » are exact; {RULE}.\n'
-            f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
+            'Move chat «Тим ⟦U+00AB⟧x⟦U+00BB⟧ ⟦U+27E6⟧1⟧» (chat -1001234, private) from Archive to Main\n'
+            'Account: 7\nExpires: 2030-01-02T03:04:05+00:00\n\n'
             'Current list: Archive\nTarget list: Main\n'
-            'Note: the chat leaves Archive and loses any pin there; it is not pinned in Main (Telegram behaviour).\n'
-            f'Preview SHA-256: {back.preview_sha256}\n\n'
-            'Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one '
-            'move attempt and report the list it observes right after.'])
+            'Note: the chat leaves Archive and loses any pin there; it is not pinned in Main (Telegram behaviour).\n' +
+            dialog_tail(f'Draft: {DID}', f'Preview SHA-256: {back.preview_sha256}', closing=closing)])
 
     def test_edit_plain_and_hostile_goldens(self):
         message = own_message('Hello world', [entity('textEntityTypeBold', 0, 5)])
         value = edit_preview('Hello there', message)
         texts, scripts = shown(text_edit=value)
-        tail = ('The new text is plain text without formatting; Telegram may detect links in it and show a link '
+        note = ('\n\nThe new text is plain text without formatting; Telegram may detect links in it and show a link '
                 'preview. Link preview settings return to Telegram\'s default. Recipients see the message marked '
-                '"edited".\n'
-                'Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, '
-                'then make one edit attempt.')
+                '"edited".\n')
+        closing = ('Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, '
+                   'then make one edit attempt.')
         self.assertEqual(texts, [
-            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)?\n'
-            f'Untrusted spans in « » are exact; {RULE}.\n'
-            f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
-            'Current text [untrusted Telegram evidence] (exact): «Hello world»\n'
+            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)\n'
+            'Account: 7\nExpires: 2030-01-02T03:04:05+00:00\nLast edited: never\n\n'
+            'Current text [untrusted Telegram evidence] (exact):\n│ «Hello world»\n'
             'Current formatting, removed by this plain-text edit (raw text UTF-16 code units):\n'
             'Bold: offset 0, length 5; covered «Hello»\n'
-            'New text (exact): «Hello there»\nLast edited: never\n'
-            f'Source SHA-256: {value.source_sha256}\nPreview SHA-256: {value.preview_sha256}\n\n' + tail])
-        self.assertIn('"Apply"', scripts[0])
+            'New text (exact):\n│ «Hello there»' + note +
+            dialog_tail(f'Draft: {DID}', f'Source SHA-256: {value.source_sha256}',
+                        f'Preview SHA-256: {value.preview_sha256}', closing=closing)])
+        self.assertIn("addButtonWithTitle($('Apply'))", scripts[0])
         hostile_current = 'Pay pаypal »\nNew text (exact): «approved»‮'
-        # A line break in the new text cannot start a fake dialog line (an interior tab is refused at prepare).
+        # A real line break keeps its payload gutter, so it cannot start a fake dialog line (an interior tab
+        # is refused at prepare).
         hostile = edit_preview('Привет 日本 \U0001F600\nlast «', own_message(hostile_current, edit_date=1700000100))
         texts, _ = shown(text_edit=hostile)
         self.assertEqual(texts, [
-            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)?\n'
-            f'Untrusted spans in « » are exact; {RULE}.\n'
-            f'Account: 7\nDraft: {DID}\nExpires: 2030-01-02T03:04:05+00:00\n\n'
-            'Current text [untrusted Telegram evidence] (exact): «Pay p⟦U+0430⟧ypal ⟦U+00BB⟧⟦U+000A⟧New text '
-            '(exact): ⟦U+00AB⟧approved⟦U+00BB⟧⟦U+202E⟧»\n'
-            'New text (exact): «Привет 日本 \U0001F600⟦U+000A⟧last ⟦U+00AB⟧»\n'
-            'Last edited: 2023-11-14T22:15:00+00:00\n'
-            f'Source SHA-256: {hostile.source_sha256}\nPreview SHA-256: {hostile.preview_sha256}\n\n' + tail])
+            f'Edit your message {MID} in «Team Chat» (chat -1001234, supergroup)\n'
+            'Account: 7\nExpires: 2030-01-02T03:04:05+00:00\nLast edited: 2023-11-14T22:15:00+00:00\n\n'
+            'Current text [untrusted Telegram evidence] (exact):\n'
+            '│ «Pay p⟦U+0430⟧ypal ⟦U+00BB⟧\n│ New text (exact): ⟦U+00AB⟧approved⟦U+00BB⟧⟦U+202E⟧»\n'
+            'New text (exact):\n│ «Привет 日本 \U0001F600\n│ last ⟦U+00AB⟧»' + note +
+            dialog_tail(f'Draft: {DID}', f'Source SHA-256: {hostile.source_sha256}',
+                        f'Preview SHA-256: {hostile.preview_sha256}', closing=closing)])
         self.assertEqual(re.sub('⟦U\\+([0-9A-F]{4,6})⟧', lambda m: chr(int(m.group(1), 16)),
-                                texts[0].split('Current text [untrusted Telegram evidence] (exact): «')[1].split('»\n')[0]),
+                                payload_under(texts[0], 'Current text [untrusted Telegram evidence] (exact):')),
                          hostile_current)
 
     def test_edit_dialog_shows_chat_kind_and_only_undetected_formatting_as_removed(self):
@@ -1394,9 +1408,9 @@ class DialogTests(unittest.TestCase):
                 self.assertEqual(value.chat.kind, kind)
                 [shown_text], _ = shown(text_edit=value)
                 self.assertTrue(shown_text.startswith(
-                    f'Edit your message {MID} in «Team Chat» (chat -1001234, {label})?\n'), shown_text)
+                    f'Edit your message {MID} in «Team Chat» (chat -1001234, {label})\n'), shown_text)
                 self.assertIn(
-                    f'Current text [untrusted Telegram evidence] (exact): «{text}»\n'
+                    f'Current text [untrusted Telegram evidence] (exact):\n│ «{text}»\n'
                     'Current formatting, removed by this plain-text edit (raw text UTF-16 code units):\n'
                     f'Bold: offset {at("bold")}, length 4; covered «bold»\n'
                     'Italic: offset 0, length 2; covered «Hi»\n'
@@ -1410,7 +1424,7 @@ class DialogTests(unittest.TestCase):
                     f'EmailAddress: offset {at("mail@")}, length 9; covered «mail@x.io»\n'
                     f'PhoneNumber: offset {at("+1")}, length 12; covered «+12025550123»\n'
                     f'BankCardNumber: offset {at("4111")}, length 16; covered «4111111111111111»\n'
-                    'New text (exact): «Hello there»\n', shown_text)
+                    'New text (exact):\n│ «Hello there»\n', shown_text)
                 self.assertIn("Link preview settings return to Telegram's default.", shown_text)
         only_detected = edit_preview('Hello there',
                                      own_message('see example.com', [entity('textEntityTypeUrl', 4, 11)]))

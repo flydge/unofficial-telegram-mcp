@@ -92,13 +92,13 @@ class BrokerOutgoingTests(unittest.TestCase):
             denied = broker._send_prepared_artifact(SendPreparedArtifactRequest(
                 draft_id=preview.draft_id, approved=False,
             ), client_id="client_" + "a" * 24)
-            self.assertEqual(denied.status, "not_approved")
+            self.assertEqual(denied.status, "declined")
             self.assertEqual(sender.sent, [])
             broker._approval_prompt = lambda **_: False
             locally_denied = broker._send_prepared_artifact(SendPreparedArtifactRequest(
                 draft_id=preview.draft_id, approved=True,
             ), client_id="client_" + "a" * 24)
-            self.assertEqual(locally_denied.status, "not_approved")
+            self.assertEqual(locally_denied.status, "declined")
             self.assertEqual(sender.sent, [])
             broker._approval_prompt = lambda **_: True
             with patch.object(broker_module, "stage_approved_document",

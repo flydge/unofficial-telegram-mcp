@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+import hashlib
 import importlib
 from pathlib import Path
 import re
@@ -162,8 +163,13 @@ class RenameImpactTests(unittest.TestCase):
 
 
 class DisplayNameFollowsIdentityTests(unittest.TestCase):
+    SHA = hashlib.sha256(b'synthetic file').hexdigest()
     ARGUMENTS = dict(recipient_title='Synthetic Recipient', recipient=123, display_name='report.txt',
-                     size_bytes=14, sha256='a' * 64, caption='Reviewed')
+                     size_bytes=14, sha256=SHA, caption='Reviewed', draft_preview=dict(
+                         draft_id='draft_' + '1' * 32, account_id=7, recipient=123,
+                         recipient_title='Synthetic Recipient', kind='document', expires_at='2030-01-02T03:04:05+00:00',
+                         sha256=SHA, size_bytes=14, artifact_id=f'artifact_{"c" * 32}_{SHA}_14',
+                         display_name='report.txt', mime_type='text/plain', caption='Reviewed'))
 
     def shown(self, **extra):
         done = subprocess.CompletedProcess([], 0, b'APPROVED\n')
@@ -174,15 +180,18 @@ class DisplayNameFollowsIdentityTests(unittest.TestCase):
 
     def test_approval_dialog_title_and_body_follow_the_display_name(self):
         script, body = self.shown()
-        self.assertIn('with title "Unofficial Telegram MCP — approve send"', script)
+        self.assertIn('alert.messageText = $("Unofficial Telegram MCP — approve send");', script)
         self.assertTrue(body.endswith('Unofficial Telegram MCP will make one upload/send attempt.'))
         with patch.object(product_identity, 'DISPLAY_NAME', RENAMED):
             script, body = self.shown()
-            self.assertIn(f'with title "{RENAMED} — approve send"', script)
+            self.assertIn(f'alert.messageText = $("{RENAMED} — approve send");', script)
             self.assertNotIn('Unofficial', script)
             self.assertTrue(body.endswith(f'{RENAMED} will make one upload/send attempt.'))
-            self.assertIn(f'with title "{RENAMED} — approve change"', _dialog_script(_CHANGE_SCRIPT))
+            self.assertIn(f'alert.messageText = $("{RENAMED} — approve change");', _dialog_script(_CHANGE_SCRIPT))
             self.assertNotIn('@@NAME@@', _dialog_script(_SCRIPT))
+        with patch.object(product_identity, 'DISPLAY_NAME', 'Quote " and \\ name'):
+            # The name enters the script as an escaped JS string literal, never as code.
+            self.assertIn('$("Quote \\" and \\\\ name — approve send")', _dialog_script(_SCRIPT))
 
     def test_connect_page_title_follows_the_display_name(self):
         self.addCleanup(importlib.reload, connect_page)  # Runs after the patch below is undone.

@@ -400,9 +400,9 @@ class PhoneMediaDocumentLifecycleTests(unittest.TestCase):
             self.assertEqual(newest['reply_target'],original['reply_target'])
             self.assertNotEqual(newest['preview_sha256'],original['preview_sha256'])
             self.assertEqual(self.send(older['draft']['draft_id'],family)['status'],'expired')
-            self.assertEqual(self.send(newest['draft']['draft_id'],family,False)['status'],'not_approved')
+            self.assertEqual(self.send(newest['draft']['draft_id'],family,False)['status'],'declined')
             self.decision=lambda:False
-            self.assertEqual(self.send(newest['draft']['draft_id'],family)['status'],'not_approved')
+            self.assertEqual(self.send(newest['draft']['draft_id'],family)['status'],'declined')
         self.assertEqual(self.history, [], 'caller false and owner denial must not claim or stage')
         self.no_effects()
 

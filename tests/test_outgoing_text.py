@@ -56,7 +56,7 @@ class OutgoingTextTests(unittest.TestCase):
                              ("prepared", 123, "Recipient", "Hello\nTelegram"))
             self.assertEqual(sender.calls, [])
             denied = broker._send_prepared_text(SendPreparedTextRequest(draft_id=preview.draft_id, approved=False), client_id="client_" + "a" * 24)
-            self.assertEqual(denied.status, "not_approved")
+            self.assertEqual(denied.status, "declined")
             self.assertEqual(sender.calls, [])
             sent = broker._send_prepared_text(SendPreparedTextRequest(draft_id=preview.draft_id, approved=True), client_id="client_" + "a" * 24)
             self.assertEqual((sent.status, sent.message_id), ("sent", 701))

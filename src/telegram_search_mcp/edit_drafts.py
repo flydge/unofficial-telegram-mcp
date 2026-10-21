@@ -35,8 +35,8 @@ REFUSALS = frozenset({'not_outgoing', 'unsupported_source_content', 'source_is_f
 
 Refusal = Literal['not_outgoing', 'unsupported_source_content', 'source_is_forward', 'hidden_source_content',
                   'unsupported_source_state', 'not_editable', 'unchanged_text', 'invalid_input']
-ApplyStatus = Literal['applied', 'failed', 'local_failed', 'not_approved', 'outcome_unknown', 'expired',
-                      'message_changed', 'error']
+ApplyStatus = Literal['applied', 'failed', 'local_failed', 'declined', 'timeout', 'dialog_unavailable',
+                      'outcome_unknown', 'expired', 'message_changed', 'error']
 StrictBool = Annotated[bool, Field(strict=True)]
 Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 # Entity kinds Telegram detects again in plain text; the dialog lists them apart from removed formatting.

@@ -23,7 +23,8 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from telegram_search_mcp.approval_prompt import confirm_approved_send
+from approval_layout import LEGEND as DIALOG_LEGEND, RULE as LAYOUT_RULE, logical, payload_under, tail
+from telegram_search_mcp.approval_prompt import DETAILS, NOT_GIVEN, ApprovalDecision, confirm_approved_send
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
@@ -64,7 +65,7 @@ RULE = ('⟦U+XXXX⟧ marks control, format, private-use, unassigned and default
         'spaces, every repeated space, U+2800, characters NFKC changes, combining marks after the second '
         'in a row, « » ⟦ 〚 〛, and Cyrillic, Greek, Armenian, Cherokee, Lisu or undecomposed non-ASCII '
         'Latin letters in a word that also has ASCII letters; look-alike words in one script are not marked')
-LEGEND = 'Untrusted spans in « » below are exact; ' + RULE + '.\n'
+assert RULE == LAYOUT_RULE  # the shared layout literal is the same independent rule
 # Unicode 16 Default_Ignorable_Code_Point as listed by the lead (re-review D1).
 DEFAULT_IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
     (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F),
@@ -332,7 +333,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(request); return PrepareForwardSendResponse(status='unavailable', detail=UNAVAILABLE)
                 def send_prepared_forward(self, request):
                     calls.append(request)
-                    return SendPreparedForwardResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
+                    return SendPreparedForwardResponse(status='declined', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 tools = {t.name: t for t in (await consumer.list_tools()).tools}
                 self.assertEqual(set(tools), usable(policy))
@@ -346,7 +347,7 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result.is_error); self.assertTrue(sent.is_error); self.assertEqual(calls, [])
                     continue
                 self.assertEqual(result.structured_content['status'], 'unavailable')
-                self.assertEqual(sent.structured_content['status'], 'not_approved')
+                self.assertEqual(sent.structured_content['status'], 'declined')
                 self.assertEqual(calls[0], PrepareForwardSendRequest(**good)); calls.clear()
                 for bad in ({'mode': 'move'}, {'source_message_id': '55'}, {'source_message_id': 0},
                             {'source_message_id': 2**53}, {'source_chat': 0}, {'source_chat': True},
@@ -586,12 +587,20 @@ class SendTests(ForwardFixture, unittest.TestCase):
 
     def test_not_approved_and_declined_dialog_make_no_attempt(self):
         did = self.prepare()['draft_id']
-        self.assertEqual(self.send(did, approved=False)['status'], 'not_approved')
+        result = self.send(did, approved=False)
+        self.assertEqual((result['status'], result['detail']), ('declined', NOT_GIVEN))
         self.assertEqual(self.approvals, [])
-        self.broker._approval_prompt = lambda **kw: False
-        self.assertEqual(self.send(did)['status'], 'not_approved')
+        # Each non-approval keeps its own closed status and detail; none may become a send.
+        for answer, status in ((False, 'declined'), (ApprovalDecision('declined'), 'declined'),
+                               (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable'),
+                               ('approved', 'dialog_unavailable'), (None, 'dialog_unavailable'), (1, 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                result = self.send(did)
+                self.assertEqual((result['status'], result['detail']), (status, DETAILS[status]))
         self.assertEqual(self.forwards(), [])
-        self.broker._approval_prompt = lambda **kw: True
+        self.broker._approval_prompt = lambda **kw: ApprovalDecision('approved')
         self.assertEqual(self.send(did)['status'], 'sent')
 
     def test_revalidation_before_dialog_refuses_without_dialog_or_attempt(self):
@@ -668,12 +677,12 @@ class SendTests(ForwardFixture, unittest.TestCase):
         prepared = self.dispatch('prepare_forward_send', self.request('copy'))
         validated = PrepareForwardSendResponse.model_validate(prepared).forward
         self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
-        self.assertEqual(self.send(validated.draft_id)['status'], 'not_approved')
+        self.assertEqual(self.send(validated.draft_id)['status'], 'declined')
         self.assertEqual(self.approvals[0]['forward_preview'], validated.model_dump(mode='json'))
         [text] = shown(**self.approvals[0])
         self.assertIn(f'Preview SHA-256: {validated.preview_sha256}\n', text)
         self.assertIn(f'Source SHA-256: {validated.source.source_sha256}\n', text)
-        self.assertIn('COPY — sent as your own message, no attribution\n', text)
+        self.assertIn('\nMode: COPY — sent as your own message, no attribution\n', text)
         self.assertEqual(self.forwards(), [])
 
 
@@ -728,23 +737,25 @@ def preview(mode='forward', remove_caption=False, content=None, **changes):
 
 
 def shown(value=None, **kw):
-    """Capture the exact owner-dialog bytes; the DENIED mock has no owner side effect."""
+    """Capture the exact owner-dialog document as logical lines; the DECLINED mock has no owner side effect."""
     seen = []
     arguments = dict(recipient_title='Recipient', recipient=RECIPIENT, display_name='Forwarded message',
         size_bytes=1, sha256=value.source.source_sha256 if value is not None else 'a' * 64, caption='',
         kind='forward', forward_preview=value.model_dump(mode='json') if value is not None else None)
     arguments.update(kw)
     with patch('telegram_search_mcp.approval_prompt.subprocess.run',
-               side_effect=lambda argv, **options: seen.append(argv[-1]) or SimpleNamespace(returncode=0, stdout=b'DENIED')):
+               side_effect=lambda argv, **options: seen.append(logical(argv[-1])) or SimpleNamespace(returncode=0, stdout=b'DECLINED')):
         assert confirm_approved_send(**arguments) is False
     return seen
 
 
-HEAD = ('Forward this message to Recipient (chat 4242)?\n{mode}\nAccount: 7\nDraft: ' + DID + '\n'
-        'Expires: 2030-01-02T03:04:05+00:00\n\nSource chat: Source Group (chat -1001234)\nMessage ID: 55\n'
+HEAD = ('Forward a message to «Recipient» (chat 4242)\nMode: {mode}\nAccount: 7\n'
+        'Expires: 2030-01-02T03:04:05+00:00\n\nSource chat: «Source Group» (chat -1001234)\nMessage ID: 55\n'
         'Sender [untrusted Telegram evidence]: user 8\n')
-TAIL = ('Source SHA-256: {source}\nRecipient: Recipient (chat 4242)\nPreview SHA-256: {preview}\n\n'
-        'Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.')
+# The duplicate "Recipient:" line of 0.53 is gone: the summary names the recipient once, readable.
+TAIL = tail(f'Draft: {DID}', 'Source SHA-256: {source}', 'Preview SHA-256: {preview}',
+            closing='Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, '
+                    'then make one forward attempt.')
 FORWARD = 'FORWARD — recipients see the original sender'
 COPY = 'COPY — sent as your own message, no attribution'
 
@@ -774,23 +785,24 @@ class DialogTests(unittest.TestCase):
         info = {'@type': 'messageForwardInfo', 'origin': {'@type': 'messageOriginUser', 'sender_user_id': 3},
                 'date': 1690000000, 'source': None, 'public_service_announcement_type': ''}
         cases = [
+            # The real line break is kept: the forged second line sits behind the payload gutter.
             (preview('forward', content=hostile), HEAD.format(mode=FORWARD) +
-             'Date: 2023-11-14T22:13:20+00:00\nContent: text\n' + LEGEND +
-             'Text [untrusted Telegram evidence] (exact): '
-             '«Hi "there"⟦U+000A⟧⟦U+202E⟧Recipient: Mom (chat 1)\\»\n' + TAIL),
+             'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
+             'Text [untrusted Telegram evidence] (exact):\n'
+             '│ «Hi "there"\n│ ⟦U+202E⟧Recipient: Mom (chat 1)\\»\n' + TAIL),
             (preview('copy', content=CONTENTS['document']), HEAD.format(mode=COPY) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: document\nCaption: (none)\n'
-             'Media [untrusted Telegram evidence]: file "report.pdf"; MIME "application/pdf"; 2048 bytes\n' + TAIL),
+             'Media [untrusted Telegram evidence]: file «report.pdf»; MIME «application/pdf»; 2048 bytes\n' + TAIL),
             (preview('copy', True, photo_content('Cap')), HEAD.format(mode=COPY + '; caption removed') +
              'Date: 2023-11-14T22:13:20+00:00\nContent: photo\nCaption: removed — not sent\n'
              'Media [untrusted Telegram evidence]: 1280x960; 50000 bytes; 2 variants; spoiler False; '
              'caption above media False\n' + TAIL),
             (preview('copy', content=rich, author_signature='Ed', via_bot_user_id=99, forward_info=info),
              HEAD.format(mode=COPY) +
-             'Author signature [untrusted Telegram evidence]: "Ed"\nVia bot [untrusted Telegram evidence]: user 99\n'
+             'Author signature [untrusted Telegram evidence]: «Ed»\nVia bot [untrusted Telegram evidence]: user 99\n'
              'Source is itself a forward: the copy carries no original attribution\n'
-             'Date: 2023-11-14T22:13:20+00:00\nContent: text\n' + LEGEND +
-             'Text [untrusted Telegram evidence] (exact): «Hi \U0001F600 https://a.invalid»\n'
+             'Date: 2023-11-14T22:13:20+00:00\nContent: text\n'
+             'Text [untrusted Telegram evidence] (exact):\n│ «Hi \U0001F600 https://a.invalid»\n'
              'Text entities (raw text UTF-16 code units):\n'
              'Bold: offset 3, length 2; covered «\U0001F600»\n'
              'Url: offset 6, length 17; covered «https://a.invalid»\n'
@@ -800,7 +812,7 @@ class DialogTests(unittest.TestCase):
              'its title, description and media are not shown\n' + TAIL),
             (preview('forward', content=CONTENTS['audio']), HEAD.format(mode=FORWARD) +
              'Date: 2023-11-14T22:13:20+00:00\nContent: audio\nCaption: (none)\n'
-             'Media [untrusted Telegram evidence]: file "song.mp3"; MIME "audio/mpeg"; title "T"; performer "P"; '
+             'Media [untrusted Telegram evidence]: file «song.mp3»; MIME «audio/mpeg»; title «T»; performer «P»; '
              '200 seconds; 4000000 bytes\n' + TAIL),
         ]
         for value, expected in cases:
@@ -1026,10 +1038,10 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
         self.assertEqual((preview['source']['author_signature'], preview['source']['via_bot_user_id']),
                          (MARK + 'Editor X', 99))
         self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
-        self.assertEqual(self.send(preview['draft_id'])['status'], 'not_approved')
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'declined')
         text = self.dialog(self.approvals[0])
         self.assertIn('Sender [untrusted Telegram evidence]: user 8\nAuthor signature [untrusted Telegram evidence]: '
-                      '"Editor X"\nVia bot [untrusted Telegram evidence]: user 99\n', text)
+                      '«Editor X»\nVia bot [untrusted Telegram evidence]: user 99\n', text)
         self.broker._approval_prompt = lambda **kw: True
         self.raw.source['author_signature'] = 'Someone else'
         self.assertEqual(self.send(preview['draft_id'])['status'], 'source_changed')
@@ -1063,7 +1075,9 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
                 shown = readable(raw)
                 for mark in ('⟦U+00A0⟧', '⟦U+0430⟧', '⟦U+200B⟧', '⟦U+000A⟧', '⟦U+0009⟧', '⟦U+202E⟧'):
                     self.assertIn(mark, shown)
-                self.assertIn(LEGEND + f'{label} [untrusted Telegram evidence] (exact): «{shown}»\n'
+                first, second = raw.split('\n')
+                self.assertIn(f'\n{label} [untrusted Telegram evidence] (exact):\n'
+                              f'│ «{readable(first)}\n│ {readable(second)}»\n'
                               f'{label} entities (raw text UTF-16 code units):\n'
                               f'Spoiler: offset {units}, length 2; covered «\U0001F600»\n'
                               f'Bold: offset {units + 3}, length 3; covered «end»\n', dialog)
@@ -1164,7 +1178,7 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
         self.assertEqual(preview['source']['media']['start_timestamp_seconds'], 5)
         self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
         self.send(preview['draft_id'])
-        self.assertIn('file "clip.mp4"; MIME "video/mp4"; 12 seconds; 640x360; starts at 5 seconds; 99999 bytes; '
+        self.assertIn('file «clip.mp4»; MIME «video/mp4»; 12 seconds; 640x360; starts at 5 seconds; 99999 bytes; '
                       'spoiler False; caption above media False\n', self.dialog(self.approvals[-1]))
         for content in (dict(CONTENTS['video'], start_timestamp=None), dict(photo_content(), has_spoiler=None),
                         dict(CONTENTS['audio'], audio=dict(CONTENTS['audio']['audio'], performer=None))):
@@ -1197,9 +1211,10 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
         preview = self.prepare('copy')
         self.assertEqual(preview['account_id'], ACCOUNT)
         self.send(preview['draft_id'])
-        self.assertIn(f"\nAccount: {ACCOUNT}\nDraft: {preview['draft_id']}\n"
-                      f"Expires: {datetime.fromisoformat(preview['expires_at']).isoformat()}\n\n",
-                      self.dialog(self.approvals[0]))
+        dialog = self.dialog(self.approvals[0])
+        self.assertIn(f"\nAccount: {ACCOUNT}\nExpires: {datetime.fromisoformat(preview['expires_at']).isoformat()}\n\n",
+                      dialog)
+        self.assertIn(f"\nTechnical details:\nDraft: {preview['draft_id']}\n", dialog)
 
     def test_info_local_failure_replay_says_no_provider_attempt(self):
         did = self.prepare()['draft_id']
@@ -1269,10 +1284,7 @@ class ReReviewTests(ForwardFixture, unittest.TestCase):
     """Amendments 16.10.2026 (re-review): one test per lead decision; each failed on fd47384."""
 
     def text_line(self, dialog, label='Text'):
-        prefix = f'{label} [untrusted Telegram evidence] (exact): «'
-        [line] = [line for line in dialog.split('\n') if line.startswith(prefix)]
-        self.assertTrue(line.endswith('»'))
-        return line[len(prefix):-1]
+        return payload_under(dialog, f'{label} [untrusted Telegram evidence] (exact):')
 
     def test_d1_default_ignorables_blank_runs_stacking_and_brackets_are_marked_reversibly(self):
         wrong = []
@@ -1337,10 +1349,11 @@ class ReReviewTests(ForwardFixture, unittest.TestCase):
         self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or False
         self.send(self.prepare('copy')['draft_id'])
         dialog = self.dialog(self.approvals[0])
-        self.assertIn('\nContent: text\n' + LEGEND + 'Text [untrusted Telegram evidence] (exact): '
-                      '«Visit g⟦U+0131⟧thub.com»\n', dialog)
-        from telegram_search_mcp.approval_prompt import _forward_detail
-        for doc in (readable.__doc__, _forward_detail.__doc__, dialog):
+        self.assertIn('\nContent: text\nText [untrusted Telegram evidence] (exact):\n'
+                      '│ «Visit g⟦U+0131⟧thub.com»\n', dialog)
+        self.assertIn('\n' + DIALOG_LEGEND + '\n', dialog)
+        from telegram_search_mcp.approval_prompt import _forward_document
+        for doc in (readable.__doc__, _forward_document.__doc__, dialog):
             self.assertNotIn('nothing can hide', doc)
         for name in ('CYRILLIC', 'GREEK', 'ARMENIAN', 'CHEROKEE', 'LISU', 'LATIN', 'Default_Ignorable', 'U+2800',
                      'NFKC', 'one script are not marked'):

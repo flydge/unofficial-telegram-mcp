@@ -706,7 +706,7 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.assertEqual(json.loads(revised['reply_target']['text'][len(PREFIX):])['text'], 'Read 😀 docs')
             self.assertEqual(self.send(preview['draft']['draft_id'], family)['status'], 'expired')
             self.decision = lambda: False
-            self.assertEqual(self.send(revised['draft']['draft_id'], family)['status'], 'not_approved')
+            self.assertEqual(self.send(revised['draft']['draft_id'], family)['status'], 'declined')
             self.assertEqual(self.dialogs[-1]['reply_preview' if family == 'text' else 'reply_artifact_preview'], revised)
         self.assertEqual(self.history, []); self.no_effects()
 
@@ -806,9 +806,9 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.assertEqual(fresh['reply_target'], original['reply_target'])
             self.assertNotEqual(fresh['preview_sha256'], original['preview_sha256'])
             self.assertEqual(self.send(legacy['draft']['draft_id'], family)['status'], 'expired')
-            self.assertEqual(self.send(fresh['draft']['draft_id'], family, False)['status'], 'not_approved')
+            self.assertEqual(self.send(fresh['draft']['draft_id'], family, False)['status'], 'declined')
             self.decision = lambda: False
-            self.assertEqual(self.send(fresh['draft']['draft_id'], family)['status'], 'not_approved')
+            self.assertEqual(self.send(fresh['draft']['draft_id'], family)['status'], 'declined')
         self.assertEqual(self.history, []); self.no_effects()
 
     def test_texturl_only_uses_its_minimum_authority_without_fieldless_url_or_media_optin(self):

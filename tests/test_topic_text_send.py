@@ -204,7 +204,7 @@ class TopicTextTests(unittest.TestCase):
             return False
         self.broker._approval_prompt = decline
         result = self.send(preview['draft_id'])
-        self.assertEqual(result['status'], 'not_approved')
+        self.assertEqual(result['status'], 'declined')
         self.assertIsNone(result['recipient'])
         self.assertEqual(self.sends(), [])
 
@@ -346,10 +346,15 @@ class TopicTextTests(unittest.TestCase):
 
     def test_both_approval_layers_are_required(self):
         preview = self.prepare()
-        self.assertEqual(self.send(preview['draft_id'], False)['status'], 'not_approved')
+        from telegram_search_mcp.approval_prompt import ApprovalDecision
+        self.assertEqual(self.send(preview['draft_id'], False)['status'], 'declined')
         self.assertEqual(self.approvals, [])
         self.broker._approval_prompt = lambda **kw: False
-        self.assertEqual(self.send(preview['draft_id'])['status'], 'not_approved')
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'declined')
+        for outcome in ('timeout', 'dialog_unavailable'):
+            self.broker._approval_prompt = lambda outcome=outcome, **kw: ApprovalDecision(outcome)
+            result = self.send(preview['draft_id'])
+            self.assertEqual((result['status'], result['recipient']), (outcome, None))
         self.assertEqual(self.sends(), [])
 
     def test_exact_wire_and_owner_evidence_and_receipt_replay(self):
@@ -640,14 +645,15 @@ class TopicTextTests(unittest.TestCase):
         preview = self.prepare()
         captured = []
         self.broker._approval_prompt = lambda **kwargs: captured.append(kwargs) or False
-        self.assertEqual(self.send(preview['draft_id'])['status'], 'not_approved')
+        self.assertEqual(self.send(preview['draft_id'])['status'], 'declined')
         kwargs = captured[0]
         completed = subprocess.CompletedProcess([], 0, b'APPROVED\n')
+        name = preview['topic']['name'].removeprefix('[untrusted Telegram evidence] ')
         with patch('telegram_search_mcp.approval_prompt.subprocess.run', return_value=completed) as run:
             self.assertTrue(confirm_approved_send(**kwargs))
             shown = run.call_args.args[0][-1]
-            for evidence in (BODY, 'Account: 7', 'Topic ID: 41', 'normal notifications',
-                    preview['topic']['name'], preview['topic']['source_sha256'],
+            for evidence in (f'\n│ «{BODY}»\n', 'Account: 7', 'normal notifications',
+                    f'\nTopic [untrusted Telegram evidence]: «{name}» (topic 41)\n', preview['topic']['source_sha256'],
                     preview['preview_sha256'], preview['draft_id'], preview['sha256']):
                 self.assertIn(evidence, shown)
         changed = copy.deepcopy(kwargs)
@@ -781,7 +787,7 @@ class PublicTopicTests(unittest.IsolatedAsyncioTestCase):
                     did = prepared['draft_id']
                     got = (await consumer.call_tool('get_draft', {'draft_id': did})).structured_content
                     self.assertEqual(got['draft']['preview_sha256'], prepared['preview_sha256'])
-                    self.assertEqual((await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': False})).structured_content['status'], 'not_approved')
+                    self.assertEqual((await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': False})).structured_content['status'], 'declined')
                     self.assertEqual(confirmations, [])
                     self.assertTrue((await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': True, 'topic': TOPIC})).is_error)
                     self.assertEqual((await consumer.call_tool('send_prepared_text', {'draft_id': did, 'approved': True})).structured_content['status'], 'sent')
