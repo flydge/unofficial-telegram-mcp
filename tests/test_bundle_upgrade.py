@@ -384,6 +384,18 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
                 self.assertNotIn('bootout', self.launchctl.verbs())
                 self.assertEqual(self.pointer()['release_root'], old['release_root'])
 
+    def test_entries_the_user_removed_are_added_back_like_a_first_install(self):
+        _, old = self.full()
+        self.codex_present()  # The user dropped our Codex subtree; the neighbours stay.
+        self.claude().entry = None
+        self.desktop_present()
+        new = self.build('b', launcher=b'# second release\n')
+        result = self.install(new)
+        self.assertEqual((result['claude_code'], result['claude_desktop']), ('registered', 'registered'))
+        self.assertUpgradedTo(self.runtime / 'releases' / new[3], old['release_root'])
+        self.assertEqual(self.claude().verbs(), ['add-json', 'add-json'])
+        self.selection_check()
+
     def test_a_pending_send_blocks_the_broker_restart(self):
         for answer in ('pending', 'unknown'):
             with self.subTest(answer=answer):

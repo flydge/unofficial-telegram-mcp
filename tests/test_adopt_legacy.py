@@ -16,7 +16,7 @@ from claude_fake import entry
 from test_bundle_upgrade import ChangeHarness, NEIGHBOUR_CODEX, NEIGHBOUR_DESKTOP, WRITE_AHEAD
 from telegram_search_mcp import claude_desktop_registration as desktop, codex_registration
 
-LEGACY_PYTHON = '/Users/example/telegram-mcp-052-runtime/venv/bin/python3'
+LEGACY_PYTHON = '/Users/example/legacy-runtime/venv/bin/python3'
 LEGACY_CODEX = b'\n[mcp_servers.telegram_search]\ncommand = "%s"\nargs = ["-m", "telegram_search_mcp.server"]\n' % LEGACY_PYTHON.encode()
 LEGACY_ENTRY = {'command': LEGACY_PYTHON, 'args': ['-m', 'telegram_search_mcp.server'], 'env': {'TELEGRAM_SEARCH_PROFILE': 'legacy'}}
 

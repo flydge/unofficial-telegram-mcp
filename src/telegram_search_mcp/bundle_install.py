@@ -610,6 +610,11 @@ def _desktop_ownership(root, receipt, command, arguments):
     return value if owned.client=='claude-desktop' and owned.post_subtree_hash==expected else None
 
 
+def _codex_change(source, registration, ownership):
+    """Our owned subtree replaced in place; an entry the user removed is added back like a first install."""
+    return merge_registration(source,registration,None if owned_subtree(source) is None else ownership)
+
+
 def _changes(root):
     """Sorted numbers of the existing change transactions (bounded)."""
     numbers=[]
@@ -1092,7 +1097,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 require_object_binding(to_root,target['publication_objects']['release']['object'])
             adopted={}
             source_bytes,existed=_config(config)
-            try:change=merge_registration(source_bytes,to_registration,ownership)
+            try:change=_codex_change(source_bytes,to_registration,ownership)
             except ConfigConflict as error:
                 if error.code!='ownership_conflict' or not adopt or kind!='upgrade':raise InstallError('registration_conflict')
                 adopted['codex']=owned_subtree(source_bytes);change=adopt_registration(source_bytes,to_registration)
@@ -1162,7 +1167,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         new_ownership=(Receipt.from_bytes(read(tx/'registration.json',mode=0o600)) if kind=='upgrade'
                        else _codex_ownership(root,target))
         fresh=(adopt_registration(before,to_registration) if 'codex' in adopted
-               else merge_registration(before,to_registration,ownership))
+               else _codex_change(before,to_registration,ownership))
         if candidate!=fresh.candidate or new_ownership.post_subtree_hash!=fresh.post_subtree_hash:raise InstallError('transaction_conflict')
         checkpoint('prepared')
         # Release: the new one is copied once; an existing exact tree (an earlier upgrade) is reused.
@@ -1180,6 +1185,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         # Codex: our owned subtree replaced in place (compare-before-replace over the exact preimage).
         if not j.reached('registration'):
             j.advance('registration_pending')
+            ensure_owned_private_directory(codex,private_leaf=False)
             j.write('registration',config,candidate,before,existed=j['config_existed'],maximum=MAX_CONFIG_BYTES)
             j.update('registration')
         if not merge_registration(read_config(config),to_registration,new_ownership).is_noop:raise InstallError('registration_conflict')

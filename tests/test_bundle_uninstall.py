@@ -180,7 +180,7 @@ class ChangeActionLauncherTests(unittest.TestCase):
         from telegram_search_mcp.bundle_install import InstallError
         for error, code in ((InstallError('pending_send_unresolved'), 'pending_send_unresolved'),
                             (InstallError('rollback_refused'), 'rollback_refused'),
-                            (InstallError('/Users/secret/path'), 'bundle_admission_or_install_failed'),
+                            (InstallError('secret-path-sentinel'), 'bundle_admission_or_install_failed'),
                             (RuntimeError('secret'), 'bundle_admission_or_install_failed')):
             with self.subTest(code=code):
                 result = self.launch(['uninstall'], error=error)
