@@ -310,7 +310,7 @@ statuses, with no send or change:
 | `approved` was not `true`; no dialog is opened | `declined` | `explicit approval was not given` |
 | The owner clicked `Cancel` | `declined` | `the owner declined in the local dialog; no attempt was made` |
 | 120 seconds passed without a choice | `timeout` | `the local dialog timed out without a choice; no attempt was made` |
-| No dialog could be shown: `osascript` missing or failing, a non-zero exit, output other than the three tokens, the outer 125-second limit, or arguments that do not describe exactly one validated preview | `dialog_unavailable` | `the local dialog could not be shown; no attempt was made` |
+| No dialog could be shown: `osascript` missing or failing, any error from starting it, a non-zero exit, output other than the three tokens, the outer 125-second limit, or arguments that do not describe exactly one validated preview | `dialog_unavailable` | `the local dialog could not be shown; no attempt was made` |
 
 The draft stays pending in all three cases, until it expires, is superseded or is cancelled. Ask the user
 again before another send call; a timeout or an unavailable dialog is never approval. These statuses

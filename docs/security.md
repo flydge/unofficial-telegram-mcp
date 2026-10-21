@@ -2159,7 +2159,8 @@ Everything else maps to a status that never sends or changes anything:
 - `timeout`: the dialog timer ended it.
 - `dialog_unavailable`: no dialog decision exists. That covers a missing or failing `osascript`, a
   non-zero exit, any other output (including a token in a different case or with extra text), the outer
-  125-second process limit, an exception inside the script, a timer value outside 1–120 seconds, or
+  125-second process limit, an exception inside the script, any exception from `subprocess.run` itself
+  (including a `ValueError` for a NUL byte or an unencodable argument), a timer value outside 1–120 seconds, or
   arguments that do not describe exactly one preview bound to the broker's own draft. Any other value an
   injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`.
 

@@ -141,7 +141,7 @@ def _dialog(document: str, *, change: bool, seconds: int) -> ApprovalDecision:
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=seconds + 5, check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except Exception:  # OSError, SubprocessError, ValueError (NUL or unencodable argv) or anything else: fail closed
         return UNAVAILABLE
     if result.returncode != 0 or type(result.stdout) is not bytes:
         return UNAVAILABLE

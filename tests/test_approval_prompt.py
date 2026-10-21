@@ -123,8 +123,11 @@ class DialogTests(unittest.TestCase):
         for code in (1, -9, 255):
             with patch(RUN, return_value=subprocess.CompletedProcess([], code, b'APPROVED\n')):
                 self.assertEqual(decide_approved_send(**arguments), ApprovalDecision('dialog_unavailable'))
+        # Fail closed on any error from subprocess.run, including ValueError (a NUL byte or an unencodable
+        # surrogate in argv) and anything unexpected.
         for error in (OSError('no osascript'), subprocess.TimeoutExpired(['osascript'], 125),
-                      subprocess.SubprocessError('synthetic')):
+                      subprocess.SubprocessError('synthetic'), ValueError('embedded null byte'),
+                      UnicodeEncodeError('utf-8', '\udc80', 0, 1, 'surrogates not allowed'), RuntimeError('synthetic')):
             with self.subTest(error=type(error).__name__), patch(RUN, side_effect=error):
                 self.assertEqual(decide_approved_send(**arguments), ApprovalDecision('dialog_unavailable'))
 
