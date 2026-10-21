@@ -5,9 +5,10 @@
 # --fail and no retry or resume (so assets of different uploads are never mixed), into a private
 # mktemp directory under the passwd home. Every asset must match its pinned size and sha256 before
 # anything runs; then the pinned bootstrap.sh installs with --claude-code plugin and --seed-team
-# <the pinned Team ID>, and the installer JSON is printed on stdout. A first install (activation_required),
-# an upgrade or a repeat (upgraded, or rolled_back with installation reused) is a success; any other result
-# refuses as result_invalid. The directory is removed on success and kept on failure. The reviewed plugin
+# <the pinned Team ID>, and the installer JSON is printed on stdout. Exactly the results the installer returns
+# for a kit are a success: a first install (activation_required with installation installed or reused), an
+# upgrade or its repeat (upgraded with installation upgraded or reused), or the repeat of the release a finished
+# rollback went back to (rolled_back with installation reused); any other result refuses as result_invalid. The directory is removed on success and kept on failure. The reviewed plugin
 # commit, pinned by the marketplace, is the trust input: no environment value, argument or downloaded
 # byte selects a URL, pin or path. Published pins must carry
 # a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
@@ -161,15 +162,11 @@ tg_field() {
     /usr/bin/env -i /usr/bin/plutil -extract "$1" raw -expect string -o - "$tg_work/result.json" 2>/dev/null
 }
 tg_status=$(tg_field status) || tg_refuse result_invalid
-case "$tg_status" in
-    activation_required) ;;
-    upgraded|rolled_back)
-        # An upgrade, or a repeat of the installed release: installation upgraded or reused.
-        tg_installation=$(tg_field installation) || tg_refuse result_invalid
-        case "$tg_status:$tg_installation" in
-            upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
-            *) tg_refuse result_invalid;;
-        esac;;
+tg_installation=$(tg_field installation) || tg_refuse result_invalid
+# Exactly the results the installer can return for a kit: a first install (installed, or reused on a repeat), an
+# upgrade or its repeat, or the repeat of the release a finished rollback went back to.
+case "$tg_status:$tg_installation" in
+    activation_required:installed|activation_required:reused|upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
     *) tg_refuse result_invalid;;
 esac
 tg_result=$(/usr/bin/env -i /bin/cat "$tg_work/result.json") || tg_refuse result_invalid

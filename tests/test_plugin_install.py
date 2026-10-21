@@ -108,7 +108,7 @@ name=${{url##*/}}
         text = text.replace(PASSWD_LINE, f"tg_home='{passwd}'\n").replace(CURL_LINE, f"tg_curl='{self.curl}'\n")
         (self.plugin / 'bin' / 'install').write_text(text)
 
-    def serve_stub_bootstrap(self, *, status='activation_required', installation=None):
+    def serve_stub_bootstrap(self, *, status='activation_required', installation='installed'):
         (self.served / 'bootstrap.sh').write_text(f'''#!/bin/sh
 for a in "$@"; do printf '%s\\n' "$a"; done > '{self.out}/bootstrap-argv'
 /usr/bin/env > '{self.out}/bootstrap-env'
@@ -179,7 +179,8 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
     def test_success_verifies_every_asset_runs_bootstrap_in_plugin_mode_and_removes_the_workspace(self):
         done = self.run_install()
         self.assertEqual((done.returncode, done.stderr), (0, ''))
-        self.assertEqual(json.loads(done.stdout), {'activation_command': 'synthetic', 'status': 'activation_required'})
+        self.assertEqual(json.loads(done.stdout), {'activation_command': 'synthetic', 'status': 'activation_required',
+                                                   'installation': 'installed'})
         self.assertEqual(self.workspaces(), [])
         workspace = Path((self.out / 'bootstrap-self').read_text().strip()).parent
         self.assertEqual(workspace.parent, self.home)
@@ -307,7 +308,9 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
         self.assertEqual(json.loads(done.stderr.splitlines()[0])['error_code'], 'integrity_failure')  # bootstrap's own line.
         self.assertTrue((workspace / 'release.tar.gz').is_file())
         for status, installation in (('refused', None), ('upgraded', None), ('upgraded', 'installed'),
-                                     ('rolled_back', 'rolled_back'), ('uninstalled', 'removed')):
+                                     ('rolled_back', 'rolled_back'), ('rolled_back', 'upgraded'), ('uninstalled', 'removed'),
+                                     ('activation_required', None), ('activation_required', 'upgraded'),
+                                     ('activation_required', 'rolled_back')):
             with self.subTest(status=status, installation=installation):
                 self.setUp()
                 self.serve_stub_bootstrap(status=status, installation=installation)

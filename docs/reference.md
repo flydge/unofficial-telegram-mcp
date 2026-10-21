@@ -355,7 +355,7 @@ Every result is one JSON object on stdout; every refusal is one line on stderr.
 
 | Action | Run as | `status` |
 | --- | --- | --- |
-| First install, or an upgrade over an installed release | `bootstrap.sh`, which runs the new release's `launcher.py bootstrap-install` | `activation_required` (first install), `upgraded` |
+| First install, or an upgrade over an installed release | `bootstrap.sh`, which runs the new release's `launcher.py bootstrap-install` | `activation_required` (first install), `upgraded`, or `rolled_back` with `installation: reused` (the kit of the release a finished rollback went back to, run again) |
 | `rollback` | the installed release's `launcher.py rollback` | `rolled_back` |
 | `uninstall` | the installed release's `launcher.py uninstall` | `uninstalled` |
 | `status` | the installed release's `launcher.py status` | the connect status, plus `clients` |
@@ -391,11 +391,16 @@ Upgrade and rollback results carry `status` `upgraded` or `rolled_back`; `instal
 (`restarted` when the broker ran before and was bootstrapped again, `not_loaded` otherwise),
 `next_action: restart_mcp_clients` and the extras above. A repeat changes nothing: repeating an upgrade to
 the release that is already current returns `status: upgraded` with `installation: reused` and without
-`previous_release_root` and `service`; repeating a rollback after it finished returns
-`status: rolled_back` with `installation: reused` and without `service`.
+`previous_release_root` and `service`; repeating a rollback after it finished, or running the kit of the
+release it went back to again, returns `status: rolled_back` with `installation: reused` and without
+`service`. A repeat is checked like an upgrade first: an explicitly given `--claude-code` mode, Codex home
+or skills root other than the installed receipt's refuses as `upgrade_conflict`. `Install.command` and the
+plugin's `bin/install` accept exactly these kit results: `activation_required` with `installation`
+`installed` or `reused`, `upgraded` with `upgraded` or `reused`, and `rolled_back` with `reused`.
 
 An uninstall result has `status: uninstalled`, `installation` `removed` (or `absent` when nothing was
-installed), `next_action: restart_mcp_clients`, one status for each of `service`, `codex`, `claude_code`,
+installed, including a repeat that finished removing the retired root an interruption after the retiring
+rename left), `next_action: restart_mcp_clients`, one status for each of `service`, `codex`, `claude_code`,
 `claude_desktop` (`removed`, `absent`, `kept`, `skipped`, `unavailable` or `not_found` as applicable)
 and `skills` (a status for each skill copy: `removed`, `absent` or `kept`), and `legacy_backups` (a path)
 when `--adopt-legacy` backups were kept.
@@ -427,7 +432,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
 | `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
-| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. |
+| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first. |
 | `rollback_unavailable` | There is no previous release to return to. |
 | `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |

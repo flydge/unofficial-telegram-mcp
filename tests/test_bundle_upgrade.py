@@ -496,6 +496,43 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         self.assertEqual((self.receipt()['claude_code_mode'], fake.calls), ('plugin', []))
         self.selection_check()
 
+    def test_an_explicit_other_mode_refuses_even_a_repeat_of_the_installed_release(self):
+        """The mode, Codex home and skills root are compared before a repeat's result: a repeat with an explicitly
+        different mode refuses like a new upgrade would, and changes nothing."""
+        self.codex_present()
+        self.desktop_present()
+        (self.home / '.claude').mkdir(mode=0o755)
+        self.session()
+        with mock.patch('telegram_search_mcp.__version__', OLD_VERSION):
+            self.install(self.build('a', version=OLD_VERSION), claude_code='user')
+        b = self.build('b', launcher=b'# second release\n')
+        result = self.install(b)
+        self.assertEqual((result['status'], result['installation'], self.receipt()['claude_code_mode']),
+                         ('upgraded', 'upgraded', 'user'))
+        receipt, transactions = self.receipt(), sorted(os.listdir(self.runtime / 'transactions'))
+        c = self.build('c', launcher=b'# third release\n')
+        for kit, mode, codex in ((b, 'plugin', self.codex), (b, 'skip', self.codex), (b, None, self.home / '.codex-other'),
+                                 (c, 'plugin', self.codex)):
+            with self.subTest(kit=kit[1].name, mode=mode, codex=codex.name), mock.patch.object(self, 'codex', codex):
+                with self.assertRaises(self.module().InstallError) as caught:
+                    self.install(kit, claude_code=mode)
+                self.assertEqual(str(caught.exception), 'upgrade_conflict')
+                self.assertEqual((self.receipt(), sorted(os.listdir(self.runtime / 'transactions'))), (receipt, transactions))
+        for mode in (None, 'user'):
+            result = self.install(b, claude_code=mode)
+            self.assertEqual((result['status'], result['installation'], result['claude_code']), ('upgraded', 'reused', 'registered'))
+
+    def test_a_first_install_repeat_with_an_explicit_other_mode_refuses(self):
+        self.codex_present()
+        (self.home / '.claude').mkdir(mode=0o755)
+        a = self.build('a')
+        self.install(a, claude_code='skip')
+        with self.assertRaises(self.module().InstallError) as caught:
+            self.install(a, claude_code='user')
+        self.assertEqual((str(caught.exception), caught.exception.pending_action), ('initialization_conflict', None))
+        result = self.install(a, claude_code=None)
+        self.assertEqual((result['status'], result['installation'], result['claude_code']), ('activation_required', 'reused', 'skipped'))
+
     def test_an_interrupted_upgrade_refuses_a_different_target_until_resumed(self):
         self.full()
         b = self.build('b', launcher=b'# second release\n')
@@ -621,6 +658,30 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                 self.assertEqual(sorted(p.name for p in (self.runtime / 'transactions').iterdir()), transactions)
                 self.assertEqual((len(self.claude().calls), self.launchctl.verbs(), self.receipt()), (calls, verbs, receipt))
                 self.assertEqual(self.pointer()['release_root'], target)
+
+    def test_the_kit_a_rollback_went_back_to_run_again_returns_that_rollback_without_another_step(self):
+        """A -> B -> rollback, then A's kit again (Install.command, the plugin): the rollback's result with
+        `installation: reused`, never `installation_refused` and never a step; an explicit other mode refuses; B's
+        kit upgrades again."""
+        packet, old, new, _ = self.upgraded()
+        first = self.change('rollback')
+        transactions = sorted(p.name for p in (self.runtime / 'transactions').iterdir())
+        calls, verbs, receipt = len(self.claude().calls), self.launchctl.verbs(), self.receipt()
+        expected = {**{k: v for k, v in first.items() if k != 'service'}, 'installation': 'reused'}
+        with mock.patch('telegram_search_mcp.__version__', OLD_VERSION):
+            with self.no_other_process():
+                for mode in (None, 'user'):
+                    self.assertEqual(self.install(packet, claude_code=mode), expected)
+            with self.assertRaises(self.module().InstallError) as caught:
+                self.install(packet, claude_code='plugin')
+            self.assertEqual(str(caught.exception), 'upgrade_conflict')
+        self.assertEqual((expected['status'], expected['release_root']), ('rolled_back', old['release_root']))
+        self.assertEqual(sorted(p.name for p in (self.runtime / 'transactions').iterdir()), transactions)
+        self.assertEqual((len(self.claude().calls), self.launchctl.verbs(), self.receipt()), (calls, verbs, receipt))
+        result = self.install(new)
+        self.assertEqual((result['status'], result['installation']), ('upgraded', 'upgraded'))
+        self.assertEqual(self.pointer()['release_root'], str(self.runtime / 'releases' / new[3]))
+        self.selection_check()
 
     def test_every_rollback_checkpoint_resumes_without_double_effects(self):
         seen = []
