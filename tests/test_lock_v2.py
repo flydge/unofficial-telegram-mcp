@@ -17,7 +17,6 @@ from telegram_search_mcp.native_runtime import (
 
 ROOT = Path(__file__).parents[1]
 COMMITTED = ROOT / 'packaging/tdlib-lock.json'
-SAMPLE = ROOT / 'tests/fixtures/tdlib-lock-v2-adhoc.json'
 TEAM, OTHER = 'ABCDE12345', 'ZYXWV98765'
 
 
@@ -54,11 +53,12 @@ class LockGrammarTests(unittest.TestCase):
                              ('schema_sha256', row.schema_sha256), ('minimum_os', row.minimum_os), ('abi', row.abi)):
             self.assertEqual(NativeManifest.model_fields[field].annotation.__args__, (value,))
 
-    def test_v2_sample_is_the_committed_pin_in_v2_form(self):
-        self.assertEqual(json.loads(SAMPLE.read_bytes()), v2_lock(json.loads(COMMITTED.read_bytes())))
-        lock = parse_native_manifest(SAMPLE.read_bytes())
+    def test_the_committed_pin_in_v2_form_parses_against_the_real_table(self):
+        sample = json.dumps(v2_lock(json.loads(COMMITTED.read_bytes())), indent=2).encode()
+        lock = parse_native_manifest(sample)
         self.assertIs(type(lock), NativeManifestV2)
         self.assertEqual(native_runtime.lock_signature(lock), ('adhoc', None))
+        self.assertEqual(native_runtime.approved_pin(lock), APPROVED_PINS[0])
 
     def test_v2_adhoc_and_developer_id_rows_parse(self):
         with self.table():
