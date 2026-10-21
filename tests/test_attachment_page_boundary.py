@@ -166,9 +166,10 @@ class SDKTests(unittest.IsolatedAsyncioTestCase):
         for policy,enabled in ((RuntimePolicy(),False),(POLICY,True)):
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
                 tools=(await consumer.list_tools()).tools
-                tool=next(t for t in tools if t.name=='read_attachment_page')
-                self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
+                self.assertEqual(any(t.name=='read_attachment_page' for t in tools),enabled)  # tools/list follows policy
+                for tool in (t for t in tools if t.name=='read_attachment_page'):
+                    self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
                 valid=await consumer.call_tool('read_attachment_page',{'artifact_id':ART,'pages':[6,2]})
                 self.assertEqual(valid.is_error,not enabled)
                 before=len(service.calls)

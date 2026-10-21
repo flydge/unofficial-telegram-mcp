@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.schemas import PrepareTextSendRequest
 from telegram_search_mcp.reply_drafts import PrepareReplyTextSendRequest,UpdateReplyDraftRequest
@@ -170,7 +171,7 @@ class SDKFormattingTests(unittest.IsolatedAsyncioTestCase):
    def update_reply_draft(self,r):self.calls.append(r.model_dump(mode='json'));return {'status':'unavailable','detail':'synthetic no broker'}
   s=Service();server=build_server(service_factory=lambda:s,policy=RuntimePolicy(enabled_capabilities=CAPS))
   async with Client(server) as client:
-   tools={t.name:t for t in (await client.list_tools()).tools};self.assertEqual(len(tools),55)
+   tools={t.name:t for t in (await client.list_tools()).tools};self.assertEqual(set(tools),usable(RuntimePolicy(enabled_capabilities=CAPS)))
    for name,base in [('prepare_text_send',{'recipient':CHAT,'text':TEXT}),('prepare_reply_text_send',{'recipient':CHAT,'text':TEXT,'reply_to':target()['anchor']}),('update_draft',{'draft_id':DID,'text':TEXT}),('update_reply_draft',{'draft_id':DID,'text':TEXT})]:
     with self.subTest(tool=name):
      self.assertIn('outgoing_entities',tools[name].input_schema['properties'],'FEATURE ABSENT: typed formatting SDK input')

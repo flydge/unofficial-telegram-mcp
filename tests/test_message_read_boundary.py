@@ -8,6 +8,7 @@ from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp.schemas import ReadMessagesRequest
@@ -27,11 +28,12 @@ class ReadBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     return read_messages(provider, request)
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 listing = await consumer.list_tools()
-                tool = next((t for t in listing.tools if t.name == 'read_messages'), None)
-                self.assertIsNotNone(tool, 'selected-read tool is missing')
-                self.assertTrue(tool.annotations.read_only_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
-                self.assertEqual(tool.input_schema['properties']['anchors']['anyOf'][0]['maxItems'],20)
+                self.assertEqual({t.name for t in listing.tools}, usable(policy))
+                self.assertEqual(any(t.name == 'read_messages' for t in listing.tools), enabled)
+                for tool in (t for t in listing.tools if t.name == 'read_messages'):
+                    self.assertTrue(tool.annotations.read_only_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
+                    self.assertEqual(tool.input_schema['properties']['anchors']['anyOf'][0]['maxItems'],20)
                 result = await consumer.call_tool('read_messages', {'anchors':[{'chat_id':7,'message_id':11}]})
                 if enabled:
                     self.assertEqual(result.structured_content['result']['status'],'complete')

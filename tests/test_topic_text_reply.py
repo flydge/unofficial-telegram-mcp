@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.outgoing_drafts import DraftOwner
 from telegram_search_mcp.reply_drafts import ReplyDraftPreview, ReplySource, source_from_message
 from telegram_search_mcp.tdjson import TDLibClient, _validate_bounded_request
@@ -820,7 +821,7 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
       proxy = h.start_ipc()
       async with Client(build_server(service_factory=lambda: proxy, policy=h.broker._policy)) as consumer:
         tools = {t.name: t for t in (await consumer.list_tools()).tools}
-        self.assertEqual(len(tools), 55)
+        self.assertEqual(set(tools), usable(h.broker._policy))
         self.assertIn('topic', tools['prepare_reply_text_send'].input_schema['properties'])
         payload = {'recipient': CHAT, 'text': BODY, 'reply_to': ANCHOR, 'topic': TOPIC}
         for bad in ({'id': True}, {'id': None}, {'id': 41, 'reply_to': ANCHOR}, {'id': '41'}, {'id': 0}, {'id': -1}, {'id': 2**31},

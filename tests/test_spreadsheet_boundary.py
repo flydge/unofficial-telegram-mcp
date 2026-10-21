@@ -13,6 +13,7 @@ from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_protocol import OPERATIONS
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import CompatibilityError, fingerprint, schema_document
 from telegram_search_mcp.server import build_server
 from test_attachment_page_broker import Provider
@@ -34,10 +35,12 @@ class SpreadsheetBoundaryTests(unittest.IsolatedAsyncioTestCase):
             policy = RuntimePolicy(enabled_capabilities=('spreadsheets',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda: service, policy=policy)) as consumer:
                 tools = (await consumer.list_tools()).tools
-                tool = next(tool for tool in tools if tool.name == 'read_spreadsheet')
-                self.assertTrue(tool.annotations.read_only_hint)
-                self.assertFalse(tool.annotations.idempotent_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
+                self.assertEqual({tool.name for tool in tools}, usable(policy))
+                self.assertEqual(any(tool.name == 'read_spreadsheet' for tool in tools), enabled)
+                for tool in (tool for tool in tools if tool.name == 'read_spreadsheet'):
+                    self.assertTrue(tool.annotations.read_only_hint)
+                    self.assertFalse(tool.annotations.idempotent_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
                 result = await consumer.call_tool('read_spreadsheet', {'artifact_id': ART})
                 self.assertEqual(bool(result.is_error), not enabled)
                 before = len(service.calls)

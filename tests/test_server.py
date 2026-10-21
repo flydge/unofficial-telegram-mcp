@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
 import os
 import tempfile
 import subprocess
@@ -35,6 +36,7 @@ from telegram_search_mcp.schemas import (
 )
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp import server as server_module
+from tool_listing import FULL_POLICY
 
 
 class StubService:
@@ -195,7 +197,8 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.server = build_server(service_factory=lambda: self.service)
 
     async def test_tools_list_exposes_strict_search_and_attachment_tools(self) -> None:
-        async with Client(self.server) as client:
+        # Every registered tool is listed only when the loaded policy enables every capability.
+        async with Client(build_server(service_factory=lambda: self.service, policy=FULL_POLICY)) as client:
             listing = await client.list_tools()
 
         self.assertEqual(
@@ -221,8 +224,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(discovery_tool.input_schema["additionalProperties"])
         description = discovery_tool.description.casefold()
+        self.assertNotIn("codex", description)
         for phrase in (
-            "codex",
+            "the mcp client's model",
             "lexical",
             "untrusted",
             "complete main/archive coverage",
@@ -311,7 +315,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manifest["read_only"])
         self.assertEqual(manifest["authorization_required"], "authorizationStateReady")
         self.assertIn("untrusted", manifest["trust_boundary"].casefold())
-        self.assertEqual(manifest["semantic_layer"], "Codex agent")
+        self.assertEqual(manifest["semantic_layer"], "the MCP client's model")
+        self.assertTrue(manifest["target_discovery"].startswith("the MCP client's model supplies"))
+        self.assertNotIn("Codex", json.dumps(manifest))
         provider_capabilities = manifest["provider_capabilities"]
         self.assertIn("searchMessages", provider_capabilities)
         self.assertIn("Main", provider_capabilities)

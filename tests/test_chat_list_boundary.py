@@ -17,6 +17,7 @@ from telegram_search_mcp.search_service import SearchService
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp.tdjson import TDLibClient
 from test_chat_list_reader import Provider, chat
+from tool_listing import usable
 from test_forum_tdjson import ready_client
 
 
@@ -74,9 +75,11 @@ class ChatListBoundaryTests(unittest.IsolatedAsyncioTestCase):
             p=Provider();service=SearchService(client=p,owns_client=False)
             policy=RuntimePolicy(enabled_capabilities=('list_chats',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
-                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),55)
-                tool=next(t for t in tools if t.name=='list_chats');self.assertFalse(tool.input_schema['additionalProperties'])
-                self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
+                tools=(await consumer.list_tools()).tools;self.assertEqual({t.name for t in tools},usable(policy))
+                self.assertEqual(any(t.name=='list_chats' for t in tools),enabled)
+                for tool in (t for t in tools if t.name=='list_chats'):
+                    self.assertFalse(tool.input_schema['additionalProperties'])
+                    self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 result=await consumer.call_tool('list_chats',{'scope':'main','limit':1})
                 if not enabled:
                     self.assertTrue(result.is_error);self.assertEqual(p.calls,[]);continue

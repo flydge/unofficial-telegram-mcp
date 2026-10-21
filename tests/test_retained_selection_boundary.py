@@ -10,6 +10,7 @@ from telegram_search_mcp.config import RuntimePolicy
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp.schemas import ReadMessagesRequest, ReadAttachmentRequest
 import test_retained_selections as retained_fixtures
+from tool_listing import usable
 
 
 class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -36,7 +37,7 @@ class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
                                       artifact_root=self.helper.store.cache_dir)) as consumer:
             tools={tool.name:tool for tool in (await consumer.list_tools()).tools}
             self.assertIn('retain_selection',list(tools),'retained-source issuer is missing from discovery')
-            self.assertEqual(len(tools),55)
+            self.assertEqual(set(tools),usable(self.broker._policy))
             self.assertFalse(tools['retain_selection'].input_schema['additionalProperties'])
             for name in ['read_messages','get_attachment','get_message_context','read_reply_chain',
                     'read_attachment','analyze_media','read_attachment_page','read_spreadsheet','read_presentation',

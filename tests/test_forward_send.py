@@ -29,6 +29,7 @@ from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.broker_protocol import OPERATIONS
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, LEGACY_CAPABILITIES, RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS, CompatibilityError
 from telegram_search_mcp.forward_drafts import (READABLE_RULE, readable, ForwardChat, ForwardDraftPreview, ForwardSourcePreview,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest,
@@ -334,8 +335,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     return SendPreparedForwardResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                self.assertEqual(len(tools), 55)
-                for name in ('prepare_forward_send', 'send_prepared_forward'):
+                self.assertEqual(set(tools), usable(policy))
+                self.assertEqual({'prepare_forward_send', 'send_prepared_forward'} <= set(tools), enabled)
+                for name in ('prepare_forward_send', 'send_prepared_forward')[:2 if enabled else 0]:
                     self.assertFalse(tools[name].input_schema['additionalProperties'])
                     self.assertFalse(tools[name].annotations.read_only_hint)
                 result = await consumer.call_tool('prepare_forward_send', good)

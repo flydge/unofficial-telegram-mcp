@@ -15,6 +15,7 @@ from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp.search_service import SearchService
 from telegram_search_mcp.server import build_server
@@ -203,10 +204,11 @@ class TopicHistoryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             provider=HistoryForumProvider();service=SearchService(client=provider,owns_client=False)
             policy=RuntimePolicy(enabled_capabilities=('read_topic_history',)) if enabled else RuntimePolicy(enabled_capabilities=('list_topics','read_history'))
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
-                tools=(await consumer.list_tools()).tools;self.assertEqual(len(tools),55)
-                tool=next(t for t in tools if t.name=='read_topic_history')
-                self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
+                tools=(await consumer.list_tools()).tools;self.assertEqual({t.name for t in tools},usable(policy))
+                self.assertEqual(any(t.name=='read_topic_history' for t in tools),enabled)
+                for tool in (t for t in tools if t.name=='read_topic_history'):
+                    self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
                 args={'target':7,'topic':{'kind':'forum','id':2},'mode':'latest','limit':1}
                 result=await consumer.call_tool('read_topic_history',args)
                 if not enabled:
