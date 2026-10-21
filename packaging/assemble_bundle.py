@@ -21,7 +21,7 @@ import tarfile
 from types import SimpleNamespace
 
 from telegram_search_mcp.app_identity import IDENTITY_FILE, parse_app_identity
-from telegram_search_mcp.bundle_runtime import unique_json, digest, BundleError
+from telegram_search_mcp.bundle_runtime import unique_json, digest, BundleError, check_manifest, check_publisher_lock
 from telegram_search_mcp.keychain import read_api_credentials
 from telegram_search_mcp.native_runtime import parse_native_manifest, NativeRuntimeError
 from telegram_search_mcp.release_archive import (
@@ -33,6 +33,8 @@ LARGE_OPERATION_BYTES = 10 * 1024 * 1024
 CHUNK_BYTES = 1024 * 1024
 NATIVE_NAMES = {'libtdjson.dylib', 'libssl.3.dylib', 'libcrypto.3.dylib'}
 SKILL_IDS = {'telegram-search', 'telegram-setup'}
+TDLIB_SOURCE = 'source/tdlib/'
+TDLIB_SCHEMA = TDLIB_SOURCE + 'td/generate/scheme/td_api.tl'
 
 
 class ReleasePackageError(ValueError):
@@ -294,9 +296,9 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
         from telegram_search_mcp.server import build_server
         from telegram_search_mcp.config import RuntimePolicy
         actual_tools=[t['name'] for t in schema_document(build_server(policy=RuntimePolicy()))['tools']]
-        if (manifest['package_version']!=__version__ or manifest['contract_version']!=CONTRACT_VERSION
-                or manifest['schema_fingerprint']!=schema_fingerprint() or manifest['tools']!=actual_tools
-                or manifest['publication']!='unreleased' or manifest['source_completeness']!='incomplete'):
+        check_manifest(manifest,__version__)  # v1, or v2 with publication/completeness/publisher
+        if (manifest['contract_version']!=CONTRACT_VERSION
+                or manifest['schema_fingerprint']!=schema_fingerprint() or manifest['tools']!=actual_tools):
             raise ValueError
         # The bundled package is exactly this checkout's: same .py set, same bytes; and the QR encoder ships.
         package=Path(__import__('telegram_search_mcp').__file__).parent;prefix='app/telegram_search_mcp/'
@@ -307,7 +309,13 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
             raise ReleasePackageError('payload_app_mismatch')
         lock_data=_bounded_input(payload/'tdlib-lock.json'); lock=parse_native_manifest(lock_data)
         if digest(lock_data)!=manifest['native_lock_sha256']:raise ValueError
+        if manifest['schema_version']==2:check_publisher_lock(manifest['publisher'],lock_data)
         inventory={f.name:f for f in files}
+        # Shipped TDLib source must be the pinned schema; a complete-source claim requires it.
+        schema=inventory.get(TDLIB_SCHEMA)
+        if schema is None and (manifest['source_completeness']=='complete' or any(n.startswith(TDLIB_SOURCE) for n in inventory)):
+            raise ReleasePackageError('native_schema_mismatch')
+        if schema is not None and schema.sha256!=lock.schema_sha256:raise ReleasePackageError('native_schema_mismatch')
         required={'python/bin/python3','launcher.py','manifest/release.json','tdlib-lock.json',
             'installer/tomlkit/__init__.py','notices/LICENSE','notices/NOTICE','provenance/source-completeness.json'}
         if not required<=set(inventory) or not inventory['python/bin/python3'].executable: raise ValueError
@@ -347,8 +355,10 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
             if file.data is None and _snapshot(_safe_path(file.source))!=_snapshot(file.metadata):raise ValueError
         final=_json_bytes(_index(files,manifest,am.st_size,ah));load_archive_index(final)
         index=output/'release-index.json';_write_private(index,final)
-        provenance=_json_bytes({'schema_version':1,'package_version':__version__,'publication':'unreleased',
-            'publisher_identity':False,'source_completeness':'incomplete','archive_sha256':ah,
+        publisher=manifest.get('publisher') or {'kind':'adhoc','team_id':None}
+        provenance=_json_bytes({'schema_version':1,'package_version':__version__,'publication':manifest['publication'],
+            'publisher_identity':publisher['kind']=='developer-id','team_id':publisher['team_id'],
+            'source_completeness':manifest['source_completeness'],'archive_sha256':ah,
             'index_sha256':digest(final),'manifest_sha256':digest(manifest_data),'native_lock_sha256':digest(lock_data),
             'files':len(files),'unpacked_bytes':unpacked})
         _write_private(output/'provenance.json',provenance)

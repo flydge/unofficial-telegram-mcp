@@ -24,6 +24,10 @@ APP_SUPPORT_ROOT, KEYCHAIN_SERVICE, LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST = (
 TDLIB_SESSION_DIRECTORY = APP_SUPPORT_ROOT / "tdlib"
 TDLIB_LIBRARY = Path("/opt/homebrew/opt/tdlib/lib/libtdjson.dylib")
 EXPECTED_TDLIB_KEG = "HEAD-d1085f9"
+# The Homebrew/source path answers the same synchronous getOption probe the bundle path runs.
+EXPECTED_TDLIB_VERSION = "1.8.67"
+EXPECTED_TDLIB_COMMIT = "d1085f9cebc5a62379991ae1652673954f229c1f"
+HOMEBREW_OPENSSL = Path("/opt/homebrew/opt/openssl@3")
 BROKER_RUNTIME_DIRECTORY = APP_SUPPORT_ROOT / "run"
 BROKER_SOCKET_PATH = BROKER_RUNTIME_DIRECTORY / "broker.sock"
 BROKER_LOCK_PATH = BROKER_RUNTIME_DIRECTORY / "broker.lock"
@@ -52,10 +56,37 @@ def ensure_private_directory(path: Path) -> Path:
 
 def validate_tdlib_runtime() -> Path:
     """Verify the approved Homebrew TDLib runtime without reading its contents."""
+    return tdlib_runtime()[0]
+
+
+def tdlib_runtime() -> tuple[Path, tuple[str, str] | None]:
+    """The approved library and, on the Homebrew path, the (version, commit) it must answer.
+
+    The bundled path returns None: validate_native already ran the synchronous probe.
+    """
     from .bundle_runtime import selected_native
     bundled = selected_native()
     if bundled is not None:
-        return bundled
+        return bundled, None
+    return _homebrew_tdlib(), (EXPECTED_TDLIB_VERSION, EXPECTED_TDLIB_COMMIT)
+
+
+def homebrew_openssl_keg() -> str:
+    """The OpenSSL keg the Homebrew TDLib loads (`brew upgrade` can move it); report only."""
+    try:
+        resolved = HOMEBREW_OPENSSL.resolve(strict=True)
+    except OSError:
+        return "unavailable"
+    parts = resolved.parts
+    if len(parts) < 3 or parts[-2] != "openssl@3" or parts[-3] != "Cellar":
+        return "unrecognized"
+    version = parts[-1]
+    if not 1 <= len(version) <= 32 or not all(c.isascii() and (c.isalnum() or c in "._-") for c in version):
+        return "unrecognized"
+    return "openssl@3 " + version
+
+
+def _homebrew_tdlib() -> Path:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise ConfigurationError("the approved TDLib runtime requires Apple ARM64 macOS")
     if not TDLIB_LIBRARY.is_file():

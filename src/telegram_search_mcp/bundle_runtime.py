@@ -96,21 +96,15 @@ def validate_tree(root, index_path, index_sha256, *, installed=False):
                 if stream.read(1) or h.hexdigest() != record.sha256 or file_metadata_identity(before) != file_metadata_identity(os.fstat(stream.fileno())):
                     raise BundleError('file_mismatch')
         manifest = unique_json(read(root / 'manifest/release.json'))
-        keys = {'schema_version','package_version','target','minimum_os','contract_version','schema_fingerprint',
-                'tools','native_lock_sha256','skills','source_completeness','publication'}
         from . import __version__
-        if (set(manifest) != keys or type(manifest['schema_version']) is not int or manifest['schema_version'] != 1
-                or manifest['package_version'] != __version__ or index.release_version != __version__
-                or manifest['target'] != index.target or manifest['minimum_os'] != '26.0'
-                or type(manifest['contract_version']) is not int or manifest['contract_version'] != 1
-                or manifest['publication'] != 'unreleased' or manifest['source_completeness'] != 'incomplete'
-                or not _hash(manifest['schema_fingerprint']) or not _hash(manifest['native_lock_sha256'])
-                or type(manifest['tools']) is not list or not 1 <= len(manifest['tools']) <= 128
-                or len(set(manifest['tools'])) != len(manifest['tools'])
-                or any(type(t) is not str or not t.replace('_','').isalnum() or not t.isascii() for t in manifest['tools'])):
+        check_manifest(manifest, __version__)
+        if index.release_version != __version__ or manifest['target'] != index.target:
             raise BundleError('manifest_mismatch')
-        if digest(read(root / 'tdlib-lock.json')) != manifest['native_lock_sha256']:
+        lock = read(root / 'tdlib-lock.json')
+        if digest(lock) != manifest['native_lock_sha256']:
             raise BundleError('native_lock_mismatch')
+        if manifest['schema_version'] == 2:
+            check_publisher_lock(manifest['publisher'], lock)
         skills = manifest['skills']
         if (type(skills) is not list or len(skills) != 2
                 or {s.get('id') for s in skills if isinstance(s, dict)} != {'telegram-search','telegram-setup'}):
@@ -126,6 +120,62 @@ def validate_tree(root, index_path, index_sha256, *, installed=False):
 
 def _hash(value):
     return type(value) is str and len(value) == 64 and all(c in '0123456789abcdef' for c in value)
+
+
+MANIFEST_V1_KEYS = frozenset({'schema_version','package_version','target','minimum_os','contract_version',
+                              'schema_fingerprint','tools','native_lock_sha256','skills','source_completeness',
+                              'publication'})
+MANIFEST_KEYS = {1: MANIFEST_V1_KEYS, 2: MANIFEST_V1_KEYS | {'publisher'}}
+PUBLICATIONS = ('unreleased', 'published')
+SOURCE_COMPLETENESS = ('incomplete', 'complete')
+PUBLISHER_KINDS = ('adhoc', 'developer-id')
+
+
+def _team_id(value):
+    return type(value) is str and len(value) == 10 and all(c in '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ' for c in value)
+
+
+def check_manifest(manifest, version):
+    """Closed release manifest grammar.
+
+    v1: unsigned and unreleased only. v2 adds `publisher {kind, team_id}`; `published` requires
+    `source_completeness: complete` and a Developer ID publisher. Anything else refuses.
+    """
+    keys = MANIFEST_KEYS.get(manifest.get('schema_version')) if type(manifest.get('schema_version')) is int else None
+    if (keys is None or set(manifest) != keys or manifest['package_version'] != version
+            or manifest['target'] != 'macos-arm64' or manifest['minimum_os'] != '26.0'
+            or type(manifest['contract_version']) is not int or manifest['contract_version'] != 1
+            or not _hash(manifest['schema_fingerprint']) or not _hash(manifest['native_lock_sha256'])
+            or type(manifest['tools']) is not list or not 1 <= len(manifest['tools']) <= 128
+            or len(set(manifest['tools'])) != len(manifest['tools'])
+            or any(type(t) is not str or not t.replace('_','').isalnum() or not t.isascii() for t in manifest['tools'])
+            or type(manifest['publication']) is not str or manifest['publication'] not in PUBLICATIONS
+            or type(manifest['source_completeness']) is not str
+            or manifest['source_completeness'] not in SOURCE_COMPLETENESS):
+        raise BundleError('manifest_mismatch')
+    if manifest['schema_version'] == 1:
+        if manifest['publication'] != 'unreleased' or manifest['source_completeness'] != 'incomplete':
+            raise BundleError('manifest_mismatch')
+        return
+    publisher = manifest['publisher']
+    if (type(publisher) is not dict or set(publisher) != {'kind','team_id'}
+            or type(publisher['kind']) is not str or publisher['kind'] not in PUBLISHER_KINDS
+            or (publisher['team_id'] is not None if publisher['kind'] == 'adhoc' else not _team_id(publisher['team_id']))):
+        raise BundleError('manifest_mismatch')
+    if manifest['publication'] == 'published' and (manifest['source_completeness'] != 'complete'
+                                                   or publisher['kind'] != 'developer-id'):
+        raise BundleError('manifest_mismatch')
+
+
+def check_publisher_lock(publisher, lock_data):
+    """A v2 manifest's publisher names exactly the native lock's signature kind and Team ID."""
+    from .native_runtime import NativeRuntimeError, lock_signature, parse_native_manifest
+    try:
+        signature = lock_signature(parse_native_manifest(lock_data))
+    except NativeRuntimeError:
+        raise BundleError('native_lock_mismatch') from None
+    if signature != (publisher['kind'], publisher['team_id']):
+        raise BundleError('publisher_mismatch')
 
 
 CLAUDE_STATUSES = ('registered', 'reused', 'failed', 'unavailable', 'not_found')

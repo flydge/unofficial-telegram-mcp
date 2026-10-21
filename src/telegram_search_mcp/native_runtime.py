@@ -25,6 +25,41 @@ NAMES = ('libtdjson.dylib','libssl.3.dylib','libcrypto.3.dylib')
 SYSTEM_LIBRARIES = frozenset(('/usr/lib/libz.1.dylib','/usr/lib/libc++.1.dylib','/usr/lib/libSystem.B.dylib'))
 MAX_MANIFEST_BYTES = 65536
 Hash = Annotated[str, Field(pattern=r'^[0-9a-f]{64}$', max_length=64)]
+TeamId = Annotated[str, Field(pattern=r'^[A-Z0-9]{10}$', max_length=10)]
+Text = Annotated[str, Field(max_length=256)]
+
+
+@dataclass(frozen=True)
+class ApprovedPin:
+    """One reviewed native pin. A pin change is one reviewed row here, never a free lock value.
+
+    `unsigned` holds the ad-hoc relocated artifacts exactly as the v1 lock pins them; a
+    Developer ID re-sign must name them as its inputs. `team_ids` lists the Developer ID teams
+    approved to re-sign this row (empty: no re-signed lock is admitted yet).
+    """
+    source_commit: str
+    tdlib_version: str
+    schema_sha256: str
+    minimum_os: str
+    abi: str
+    tdlib_license_source: str
+    openssl_version: str
+    build_method: str
+    unsigned: tuple[tuple[str, int, str], ...]
+    team_ids: frozenset[str] = frozenset()
+
+    def key(self) -> tuple:
+        return (self.source_commit, self.tdlib_version, self.schema_sha256, self.minimum_os, self.abi,
+                self.tdlib_license_source, self.openssl_version, self.build_method)
+
+
+APPROVED_PINS = (
+    ApprovedPin(COMMIT, '1.8.67', SCHEMA_SHA256, '26.0', 'legacy-td_json_client',
+                f'https://github.com/tdlib/td/blob/{COMMIT}/LICENSE_1_0.txt', '3.6.4', 'homebrew-receipt-relocated',
+                (('libtdjson.dylib', 17638336, '65ef0643b294659eeb3a151f4b496db1808d2535f646a3494a08fde4340ea12c'),
+                 ('libssl.3.dylib', 901744, '7e89651576fc4dfe9461f65de448fc99990dc5c32c06c413d86bdbbfc11e9774'),
+                 ('libcrypto.3.dylib', 4862416, 'f9563883fdbb4f2b367c708a6abd786119c935d3f9cd01fa8e11c34666775d1b'))),
+)
 
 
 class NativeRuntimeError(ValueError):
@@ -95,16 +130,99 @@ class NativeManifest(_Closed):
 
     @model_validator(mode='after')
     def exact_boundary(self) -> 'NativeManifest':
-        if tuple(self.required_symbols) != REQUIRED_SYMBOLS or tuple(a.name for a in self.artifacts) != NAMES:
-            raise ValueError('native pin set is invalid')
-        allowed = SYSTEM_LIBRARIES | {f'@loader_path/{name}' for name in NAMES}
-        for artifact in self.artifacts:
-            if len(set(artifact.dependencies)) != len(artifact.dependencies) or any(dep not in allowed for dep in artifact.dependencies):
-                raise ValueError('native dependency boundary is invalid')
+        _exact_boundary(self)
         return self
 
 
-def parse_native_manifest(data: bytes) -> NativeManifest:
+def _exact_boundary(manifest) -> None:
+    if tuple(manifest.required_symbols) != REQUIRED_SYMBOLS or tuple(a.name for a in manifest.artifacts) != NAMES:
+        raise ValueError('native pin set is invalid')
+    allowed = SYSTEM_LIBRARIES | {f'@loader_path/{name}' for name in NAMES}
+    for artifact in manifest.artifacts:
+        if len(set(artifact.dependencies)) != len(artifact.dependencies) or any(dep not in allowed for dep in artifact.dependencies):
+            raise ValueError('native dependency boundary is invalid')
+
+
+class NativeArtifactV2(_Closed):
+    name: Literal['libtdjson.dylib','libssl.3.dylib','libcrypto.3.dylib']
+    bytes: Annotated[int, Field(ge=32,le=32*1024*1024)]
+    sha256: Hash
+    unsigned_bytes: Annotated[int, Field(ge=32,le=32*1024*1024)]
+    unsigned_sha256: Hash
+    dependencies: Annotated[list[Annotated[str,Field(max_length=128)]],Field(max_length=16)]
+
+
+class BuildProvenanceV2(_Closed):
+    method: Annotated[str,Field(max_length=64)]
+    reproducibility: Literal['unverified']
+    compiler: Literal['clang']
+    build_os: Annotated[str,Field(max_length=64)]
+    xcode: Annotated[str,Field(max_length=64)]
+    clt: Annotated[str,Field(max_length=64)]
+    used_options: Annotated[list[Annotated[str,Field(max_length=128)]],Field(max_length=32)]
+    known_formula_flags: Annotated[list[Annotated[str,Field(max_length=128)]],Field(max_length=32)]
+    implicit_flags: Literal['homebrew-std_cmake_args-not-captured']
+    openssl_version: Annotated[str,Field(max_length=32)]
+
+
+class NativeNoticesV2(_Closed):
+    status: Literal['pending-public-distribution-review']
+    tdlib_license: Literal['BSL-1.0']
+    tdlib_source: Literal['https://github.com/tdlib/td']
+    tdlib_license_source: Text
+    openssl_license: Literal['Apache-2.0']
+    source_rebuild: Literal['pending']
+    publisher_signature: Literal['unavailable','developer-id']
+
+
+class NativeManifestV2(_Closed):
+    """Data-driven lock: every pin value must equal exactly one APPROVED_PINS row."""
+    manifest_version: Literal[2]
+    target: Literal['macos-arm64']
+    platform: Literal['Darwin']
+    architecture: Literal['arm64']
+    minimum_os: Annotated[str,Field(pattern=r'^[0-9]{2}\.[0-9]{1,2}$',max_length=5)]
+    source_commit: Annotated[str,Field(pattern=r'^[0-9a-f]{40}$',max_length=40)]
+    tdlib_version: Annotated[str,Field(pattern=r'^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}$',max_length=12)]
+    schema_sha256: Hash
+    abi: Literal['legacy-td_json_client']
+    required_symbols: Annotated[list[Annotated[str,Field(max_length=64)]],Field(min_length=5,max_length=5)]
+    signature: Literal['adhoc','developer-id']
+    team_id: TeamId | None
+    artifacts: Annotated[list[NativeArtifactV2],Field(min_length=3,max_length=3)]
+    build: BuildProvenanceV2
+    notices: NativeNoticesV2
+
+    @model_validator(mode='after')
+    def approved_row(self) -> 'NativeManifestV2':
+        _exact_boundary(self)
+        row = approved_pin(self)
+        if tuple((a.name,a.unsigned_bytes,a.unsigned_sha256) for a in self.artifacts) != row.unsigned:
+            raise ValueError('native unsigned inputs differ from the approved pin')
+        if self.signature == 'adhoc':
+            if (self.team_id is not None or self.notices.publisher_signature != 'unavailable'
+                    or any((a.bytes,a.sha256) != (a.unsigned_bytes,a.unsigned_sha256) for a in self.artifacts)):
+                raise ValueError('ad-hoc native pin is invalid')
+        elif (self.team_id not in row.team_ids or self.notices.publisher_signature != 'developer-id'
+                or any(a.sha256 == a.unsigned_sha256 for a in self.artifacts)):
+            raise ValueError('Developer ID native pin is not approved')
+        return self
+
+
+def approved_pin(manifest) -> ApprovedPin:
+    """The one reviewed row a lock names; any unlisted field value refuses."""
+    key = (manifest.source_commit, manifest.tdlib_version, manifest.schema_sha256, manifest.minimum_os, manifest.abi,
+           manifest.notices.tdlib_license_source, manifest.build.openssl_version, manifest.build.method)
+    rows = [row for row in APPROVED_PINS if row.key() == key]
+    if len(rows) != 1:
+        raise ValueError('native pin is not an approved row')
+    return rows[0]
+
+
+LOCK_MODELS = {1: NativeManifest, 2: NativeManifestV2}
+
+
+def parse_native_manifest(data: bytes) -> NativeManifest | NativeManifestV2:
     if type(data) is not bytes or len(data) > MAX_MANIFEST_BYTES:
         raise NativeRuntimeError('native manifest must be bounded JSON')
     def unique(pairs):
@@ -115,9 +233,20 @@ def parse_native_manifest(data: bytes) -> NativeManifest:
             result[key] = value
         return result
     try:
-        return NativeManifest.model_validate(json.loads(data,object_pairs_hook=unique))
-    except (ValueError,TypeError,UnicodeError,ValidationError):
+        value = json.loads(data,object_pairs_hook=unique)
+        version = value.get('manifest_version') if type(value) is dict else None
+        if type(version) is not int or version not in LOCK_MODELS:
+            raise ValueError('native manifest version is not admitted')
+        return LOCK_MODELS[version].model_validate(value)
+    except (ValueError,TypeError,UnicodeError,RecursionError,ValidationError):
         raise NativeRuntimeError('native manifest does not match the closed approved pin') from None
+
+
+def lock_signature(manifest) -> tuple[str, str | None]:
+    """(kind, team_id) of a parsed lock: v1 is always ad hoc."""
+    if type(manifest) is NativeManifest:
+        return 'adhoc', None
+    return manifest.signature, manifest.team_id
 
 
 @dataclass(frozen=True)
@@ -195,12 +324,24 @@ def _macho_metadata(stream, length: int) -> tuple[list[str], set[str], str]:
     return dependencies,symbols,minimum
 
 
-def _verify_signature(path: Path) -> None:
+def designated_requirement(team_id: str) -> str:
+    """Developer ID Application leaf under Apple's Developer ID CA, bound to one Team ID."""
+    if type(team_id) is not str or len(team_id) != 10 or not all(c in '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ' for c in team_id):
+        raise NativeRuntimeError('native Team ID is invalid')
+    return ('=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+            ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+            f' and certificate leaf[subject.OU] = "{team_id}"')
+
+
+def _verify_signature(path: Path, manifest=None) -> None:
+    kind, team = lock_signature(manifest) if manifest is not None else ('adhoc', None)
+    command = ['/usr/bin/codesign','--verify','--strict']
+    if kind == 'developer-id':
+        command += ['-R',designated_requirement(team)]
     try:
-        result = subprocess.run(['/usr/bin/codesign','--verify','--strict',str(path)],
-                                capture_output=True,check=False,timeout=10)
+        result = subprocess.run([*command,str(path)],capture_output=True,check=False,timeout=10)
         if result.returncode:
-            raise NativeRuntimeError('native ad-hoc integrity signature is invalid')
+            raise NativeRuntimeError('native integrity signature or designated requirement is invalid')
     except (OSError,subprocess.TimeoutExpired):
         raise NativeRuntimeError('native integrity signature verification is unavailable') from None
 
@@ -229,19 +370,15 @@ def _artifact_identity(metadata: os.stat_result, artifact: NativeArtifact) -> tu
     return file_metadata_identity(metadata)
 
 
-def _probe(path: Path, manifest: NativeManifest, *, assert_binding) -> None:
+def probe_identity(library, version: str, commit: str, *, assert_binding=lambda: None) -> None:
+    """Synchronous getOption version/commit_hash on a loaded legacy tdjson, before any client exists."""
     try:
-        # Descriptor/hash checks run before dlopen, then again before any execute.
-        # Darwin's pathname dlopen is not atomic against a malicious same-UID writer.
-        assert_binding()
-        library = ctypes.CDLL(str(path))
-        assert_binding()
         for symbol in REQUIRED_SYMBOLS:
             getattr(library,symbol)
         execute = library.td_json_client_execute
         execute.argtypes = [ctypes.c_void_p,ctypes.c_char_p]
         execute.restype = ctypes.c_char_p
-        for option,expected in (('version',manifest.tdlib_version),('commit_hash',manifest.source_commit)):
+        for option,expected in (('version',version),('commit_hash',commit)):
             assert_binding()
             response = execute(None,json.dumps({'@type':'getOption','name':option},separators=(',',':')).encode())
             if response is None or len(response) > 4096:
@@ -255,7 +392,21 @@ def _probe(path: Path, manifest: NativeManifest, *, assert_binding) -> None:
         raise NativeRuntimeError('native ABI or synchronous identity probe failed') from None
 
 
-def validate_native(manifest: NativeManifest, target: str, *, directory: Path,
+def _probe(path: Path, manifest, *, assert_binding) -> None:
+    try:
+        # Descriptor/hash checks run before dlopen, then again before any execute.
+        # Darwin's pathname dlopen is not atomic against a malicious same-UID writer.
+        assert_binding()
+        library = ctypes.CDLL(str(path))
+        assert_binding()
+    except NativeRuntimeError:
+        raise
+    except (OSError,AttributeError,ValueError,TypeError,UnicodeError):
+        raise NativeRuntimeError('native ABI or synchronous identity probe failed') from None
+    probe_identity(library,manifest.tdlib_version,manifest.source_commit,assert_binding=assert_binding)
+
+
+def validate_native(manifest: NativeManifest | NativeManifestV2, target: str, *, directory: Path,
                     probe: bool = True) -> NativeRuntime:
     """Verify one serialized held release binding before/after its path-based probe.
 
@@ -263,9 +414,12 @@ def validate_native(manifest: NativeManifest, target: str, *, directory: Path,
     and cooperative shared locks remain held throughout. Rechecks reject observed
     substitutions before loading/execution; they do not provide atomic dlopen or
     protection against a malicious process that already controls this OS UID.
+    A Developer ID lock also requires each artifact's designated requirement (Team ID).
     """
+    if type(manifest) not in LOCK_MODELS.values():
+        raise NativeRuntimeError('native manifest is invalid')
     try:
-        manifest = NativeManifest.model_validate(manifest.model_dump())
+        manifest = type(manifest).model_validate(manifest.model_dump())
     except (AttributeError,ValueError):
         raise NativeRuntimeError('native manifest is invalid') from None
     try:
@@ -297,7 +451,7 @@ def validate_native(manifest: NativeManifest, target: str, *, directory: Path,
                     raise NativeRuntimeError('native legacy ABI symbols are incomplete')
                 if _artifact_identity(os.fstat(stream.fileno()),artifact) != identity:
                     raise NativeRuntimeError('native artifact changed during validation')
-                _verify_signature(path)
+                _verify_signature(path,manifest)
 
             def assert_binding() -> None:
                 # Check pathname ancestry/binding and held objects with complete
