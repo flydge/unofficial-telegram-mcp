@@ -145,6 +145,9 @@ class SignPayloadTests(unittest.TestCase):
         self.assertEqual(sorted(order), sorted(f['path'] for f in inventory['files']))
         self.assertEqual((result['total'], result['signed'], result['kept_pinned']), (7, 4, 3))
         self.assertEqual(result['interpreter_entitlements'], [DLV])
+        # Provenance says why the natives carry no runtime flag here: they keep their pinned unsigned bytes.
+        self.assertEqual((result['native_policy'], record['native_policy']), ('pinned-unsigned-bytes-no-runtime',) * 2)
+        self.assertEqual({f['runtime'] for f in record['files'] if f['path'].startswith('native/')}, {False})
         for entry in record['files']:
             path = signed / entry['path']
             codesign('--verify', '--strict', str(path))
@@ -198,6 +201,7 @@ class SignPayloadTests(unittest.TestCase):
         record = json.loads((self.root / 'signed/provenance/signing.json').read_bytes())
         self.assertEqual({f['action'] for f in record['files']}, {'signed'})
         self.assertEqual(record['team_id'], TEAM)
+        self.assertEqual((result['native_policy'], record['native_policy']), ('developer-id-resigned-runtime',) * 2)
 
     def test_refusals_are_fixed_codes_and_echo_nothing(self):
         cases = []

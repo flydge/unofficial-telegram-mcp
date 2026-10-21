@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 import unittest
 
 from telegram_search_mcp import product_identity
+from telegram_search_mcp.native_runtime import designated_requirement
 
 ROOT = Path(__file__).parents[1]
 DLV = 'com.apple.security.cs.disable-library-validation'
@@ -68,11 +70,15 @@ class Fakes:
         self.test, self.calls, self.service = test, [], service
         self.minimal = None
         self.seed_commit = None
+        self.seed_adhoc = False
+        self.seed_call = None
+        self.signature_refusal = False
+        self.signature_call = None
         self.dmg_tamper = False
         self.notarized = None
 
     def steps(self):
-        names = ('prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'notarize')
+        names = ('prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'signatures', 'notarize')
         steps = {name: self.recorded(name, getattr(self, name)) for name in names}
         steps.update(git_export=RB._sibling('prepare_payload').git_export, check_matrix=SP.check_matrix,
                      identity_kind=SP.identity_kind, load_lock=lambda data: LOCK, fetch=self.fetch)
@@ -140,12 +146,21 @@ class Fakes:
         return SimpleNamespace(archive_sha256=sha(archive), index_sha256=sha(index), provenance_sha256='7' * 64,
                                files=len(files))
 
-    def seed(self, checkout, output):
+    def seed(self, checkout, output, identity, team_id):
+        self.seed_call = (identity, team_id)
         data = b'synthetic seed'
         self.write(output / 'bootstrap-verifier', data, 0o500)
-        self.write(output / 'provenance.json', json.dumps({
-            'source_commit': self.seed_commit or self.test.commit, 'binary_sha256': sha(data),
-            'binary_bytes': len(data)}).encode())
+        value = {'source_commit': self.seed_commit or self.test.commit, 'binary_sha256': sha(data),
+                 'binary_bytes': len(data), 'kind': 'developer-built-ad-hoc-seed', 'publisher_identity': False}
+        if identity is not None and not self.seed_adhoc:
+            value.update(kind='developer-id-seed', publisher_identity=True, team_id=team_id)
+        self.write(output / 'provenance.json', json.dumps(value).encode())
+
+    def signatures(self, kit, signed, index, kind, team_id):
+        self.signature_call = (kit, signed, kind, team_id, sorted(p.name for p in kit.iterdir()), index['files'])
+        if self.signature_refusal:
+            raise RB.BuildError('signature_refused')
+        return {'kind': kind, 'team_id': team_id, 'checked': 2, 'seed': 1, 'payload': 1, 'counted_by': 'magic'}
 
     def notarize(self, checkout, arguments, real):
         options = dict(zip(arguments[::2], arguments[1::2])) if not arguments[-1] == '--dry-run' else \
@@ -154,11 +169,12 @@ class Fakes:
         dmg = Path(options['--dmg'])
         self.test.assertEqual(oct(Path(options['--kit']).stat().st_mode & 0o777), oct(0o755))
         self.test.assertEqual(options['--volume-name'], product_identity.DMG_VOLUME_NAME)
+        self.test.assertEqual(Path(options['--payload']).name, 'signed')
         dmg.write_bytes(b'synthetic dmg')
         digest = sha(b'other' if self.dmg_tamper else dmg.read_bytes())
-        Path(options['--evidence']).write_text(json.dumps({
-            'mode': 'notarized' if real else 'dry-run', 'dmg': {'file': dmg.name, 'sha256': digest,
-                                                                'contents': 'matches SHA256SUMS'}}))
+        record = {'file': dmg.name, 'sha256': digest, 'contents': 'matches SHA256SUMS'}
+        record.update({'team_id': options['--team-id']} if real else {'signature': 'adhoc'})
+        Path(options['--evidence']).write_text(json.dumps({'mode': 'notarized' if real else 'dry-run', 'dmg': record}))
 
 
 class ReleaseBuildTests(unittest.TestCase):
@@ -192,7 +208,15 @@ class ReleaseBuildTests(unittest.TestCase):
 
     def test_dry_run_builds_every_asset_and_check_rederives_them(self):
         evidence, fakes = self.build(tag='v1.2.3')
-        self.assertEqual(fakes.calls, ['prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'notarize'])
+        self.assertEqual(fakes.calls, ['prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'signatures',
+                                       'notarize'])
+        self.assertEqual(fakes.seed_call, (None, None))  # The ad hoc seed.
+        kit_dir, signed, kind, team, listed, _ = fakes.signature_call
+        self.assertEqual((kit_dir, signed, kind, team), (self.root / 'out/kit', self.root / 'out/work/signed', 'adhoc',
+                                                         None))
+        self.assertEqual(listed, sorted([*RB.KIT_DATA, *RB.KIT_EXECUTABLE, 'SHA256SUMS']))  # The finished kit.
+        arguments, real = fakes.notarized
+        self.assertEqual((arguments[-3:], real), (['--payload', str(signed), '--dry-run'], False))
         out = self.root / 'out'
         dmg = f'unofficial-telegram-mcp-{VERSION}-macos-arm64.dmg'
         self.assertEqual(sorted(evidence['kit']), sorted([*RB.KIT_DATA, *RB.KIT_EXECUTABLE, 'SHA256SUMS']))
@@ -207,15 +231,21 @@ class ReleaseBuildTests(unittest.TestCase):
                                  (record['sha256'], record['bytes']))
         pins = json.loads((out / 'kit/release-pins.json').read_bytes())
         self.assertEqual(pins['seed'], {'file': 'bootstrap-verifier', 'sha256': sha(b'synthetic seed'), 'bytes': 14})
-        self.assertEqual((pins['publisher'], pins['team_id']), ('adhoc', None))
+        self.assertEqual((pins['publisher'], pins['team_id'], pins['publication']), ('adhoc', None, 'unreleased'))
+        self.assertEqual(set(pins), RB.PIN_KEYS)
         command = (out / 'kit/Install.command').read_text()
         self.assertIn(f"install_index_sha256={pins['index']['sha256']}\n", command)
+        self.assertIn("install_seed_team=''\n", command)
         self.assertEqual((out / 'kit/Install.command').stat().st_mode & 0o777, 0o555)
         self.assertEqual((out / 'kit/bootstrap.sh').read_bytes(), b'#!/bin/sh -p\n# synthetic\n')
         self.assertIn(b'Ad hoc test build', (out / 'kit/README.txt').read_bytes())
         provenance = json.loads((out / 'assets/release-provenance.json').read_bytes())
         self.assertEqual(provenance['bundle']['app_identity'], {'source': 'none', 'sha256': None})
         self.assertEqual(provenance['signing']['interpreter_entitlements'], [DLV])
+        self.assertEqual(provenance['native_signing'], RB.NATIVE_SIGNING['adhoc'])
+        self.assertEqual(provenance['native_signing']['policy'], SP.NATIVE_POLICY['adhoc'])
+        self.assertEqual(provenance['kit_signatures']['kind'], 'adhoc')
+        self.assertEqual(provenance['seed']['provenance']['kind'], 'developer-built-ad-hoc-seed')
         self.assertEqual(provenance['source_completeness'], 'incomplete')
         self.assertEqual(json.loads((out / 'work/signed/manifest/release.json').read_bytes())['publisher'],
                          {'kind': 'adhoc', 'team_id': None})
@@ -246,11 +276,20 @@ class ReleaseBuildTests(unittest.TestCase):
         evidence, fakes = self.build(dry_run=False, identity=IDENTITY, team_id=TEAM, notary_profile='release-notary')
         arguments, real = fakes.notarized
         self.assertTrue(real)
-        self.assertEqual(arguments[-6:], ['--payload', str(self.root / 'out/work/signed'), '--identity', IDENTITY,
-                                          '--profile', 'release-notary'])
+        self.assertEqual(arguments[-8:], ['--payload', str(self.root / 'out/work/signed'), '--identity', IDENTITY,
+                                          '--team-id', TEAM, '--profile', 'release-notary'])
+        self.assertEqual(fakes.seed_call, (IDENTITY, TEAM))  # The seed is signed with the payload's identity.
+        self.assertEqual(fakes.signature_call[2:4], ('developer-id', TEAM))
+        self.assertEqual(fakes.calls.index('signatures') + 1, fakes.calls.index('notarize'))
         self.assertEqual(evidence['mode'], 'developer-id')
         pins = json.loads((self.root / 'out/kit/release-pins.json').read_bytes())
         self.assertEqual((pins['publisher'], pins['team_id']), ('developer-id', TEAM))
+        self.assertIn(f"install_seed_team='{TEAM}'\n", (self.root / 'out/kit/Install.command').read_text())
+        provenance = json.loads((self.root / 'out/assets/release-provenance.json').read_bytes())
+        self.assertEqual(provenance['native_signing'], RB.NATIVE_SIGNING['developer-id'])
+        self.assertEqual(provenance['native_signing']['policy'], SP.NATIVE_POLICY['developer-id'])
+        self.assertEqual((provenance['seed']['provenance']['kind'], provenance['seed']['provenance']['team_id']),
+                         ('developer-id-seed', TEAM))
         self.assertEqual(json.loads((self.root / 'out/work/signed/manifest/release.json').read_bytes())['publisher'],
                          {'kind': 'developer-id', 'team_id': TEAM})
         self.assertEqual(RB.check(self.root / 'out', self.repo)['mode'], 'developer-id')
@@ -311,6 +350,22 @@ class ReleaseBuildTests(unittest.TestCase):
         fakes = Fakes(self)
         fakes.dmg_tamper = True
         refused('notarize_failed', 'i', fakes)
+        real = dict(dry_run=False, identity=IDENTITY, team_id=TEAM, notary_profile='release-notary')
+        fakes = Fakes(self)
+        fakes.seed_adhoc = True  # A real build whose seed came out ad hoc.
+        refused('seed_unsigned', 'm', fakes, **real)
+        self.assertIsNone(fakes.notarized)
+        fakes = Fakes(self)
+        fakes.signature_refusal = True
+        refused('signature_refused', 'n', fakes, **real)
+        self.assertIsNone(fakes.notarized)
+        fakes = Fakes(self)
+        fakes.signature_refusal = True
+        refused('signature_refused', 'o', fakes)
+        self.assertIsNone(fakes.notarized)
+        fakes = Fakes(self)
+        fakes.seed = lambda checkout, output, identity, team_id: Fakes.seed(fakes, checkout, output, IDENTITY, TEAM)
+        refused('seed_failed', 'p', fakes)  # A dry run whose seed claims a publisher.
         failing = Fakes(self)
 
         def payload_error(*args):
@@ -330,6 +385,67 @@ class ReleaseBuildTests(unittest.TestCase):
         (self.repo / 'NOTICE').write_text('dirty\n')
         refused('checkout_dirty', 'l')
 
+    def forge(self, out, pins=None, command=None):
+        """Rewrite the kit pins / Install.command with consistent sums and evidence, so check reaches them."""
+        for name, data in (('release-pins.json', pins), ('Install.command', command)):
+            if data is None:
+                continue
+            for group in ('kit', 'assets'):
+                path = out / group / name
+                if path.exists():
+                    path.chmod(0o600)
+                    path.write_bytes(data)
+        for group in ('kit', 'assets'):
+            (out / group / 'SHA256SUMS').chmod(0o600)
+            (out / group / 'SHA256SUMS').write_bytes(RB.sums(out / group))
+        value = json.loads((out / 'release-build.json').read_bytes())
+        evidence = RB.derive_evidence(out, commit=value['source_commit'], version=value['release_version'],
+                                      tag=value['tag'], mode=value['mode'])
+        (out / 'release-build.json').chmod(0o600)
+        (out / 'release-build.json').write_bytes(RB.canonical(evidence))
+
+    def test_check_maps_malformed_pins_and_kit_text_to_fixed_codes(self):
+        self.build()
+        out = self.root / 'out'
+        good = json.loads((out / 'kit/release-pins.json').read_bytes())
+        command = (out / 'kit/Install.command').read_bytes()
+        cases = {'not json': (b'\xff\xfe pins', 'evidence_invalid'),
+                 'not a dict': (b'[1, 2]\n', 'evidence_invalid'),
+                 'missing seed': (RB.json_bytes({k: v for k, v in good.items() if k != 'seed'}), 'evidence_invalid'),
+                 'seed not a dict': (RB.json_bytes({**good, 'seed': 'x'}), 'evidence_invalid'),
+                 'seed without sha': (RB.json_bytes({**good, 'seed': {'bytes': 1}}), 'evidence_invalid'),
+                 'ad hoc with a team': (RB.json_bytes({**good, 'team_id': TEAM}), 'evidence_mismatch'),
+                 'ad hoc published': (RB.json_bytes({**good, 'publication': 'published'}), 'evidence_mismatch'),
+                 'developer-id publisher': (RB.json_bytes({**good, 'publisher': 'developer-id'}), 'evidence_mismatch')}
+        for label, (data, code) in cases.items():
+            with self.subTest(label), self.assertRaises(RB.BuildError) as caught:
+                self.forge(out, pins=data)
+                RB.check(out, self.repo)
+            self.assertEqual(str(caught.exception), code)
+            self.assertIsNone(caught.exception.__cause__)
+        self.forge(out, pins=RB.json_bytes(good))
+        self.assertEqual(RB.check(out, self.repo)['status'], 'verified')
+        for label, data in (('not ascii', command.replace(b'#!/bin/sh -p', b'#!/bin/sh -p \xe2\x80\x94')),
+                            ('team literal', command.replace(b"install_seed_team=''", b"install_seed_team='X'"))):
+            with self.subTest(label), self.assertRaises(RB.BuildError) as caught:
+                self.forge(out, command=data)
+                RB.check(out, self.repo)
+            self.assertIn(str(caught.exception), ('evidence_invalid', 'evidence_mismatch'))
+        self.forge(out, command=command)
+        self.assertEqual(RB.check(out, self.repo)['status'], 'verified')
+        sums = out / 'kit/SHA256SUMS'
+        sums.chmod(0o600)
+        sums.write_bytes(b'\xff\n')  # Not UTF-8, yet consistent with a re-derived release-build.json.
+        value = RB.derive_evidence(out, commit=self.commit, version=VERSION, tag=None, mode='adhoc-dry-run')
+        (out / 'release-build.json').write_bytes(RB.canonical(value))
+        with self.assertRaises(RB.BuildError) as caught:
+            RB.check(out, self.repo)
+        self.assertEqual(str(caught.exception), 'evidence_invalid')
+        (out / 'release-build.json').write_bytes(RB.canonical({**value, 'kit': []}))
+        with self.assertRaises(RB.BuildError) as caught:
+            RB.check(out, self.repo)
+        self.assertEqual(str(caught.exception), 'evidence_invalid')
+
     def test_command_line_refusals_echo_nothing(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -340,6 +456,145 @@ class ReleaseBuildTests(unittest.TestCase):
 
 def stat_mode(path):
     return path.stat().st_mode & 0o777
+
+
+def thin_macho(filetype):
+    return b'\xcf\xfa\xed\xfe' + (0x0100000c).to_bytes(4, 'little') + bytes(4) + filetype.to_bytes(4, 'little') + bytes(48)
+
+
+DEVELOPER_ID_TEXT = f'''Executable=/synthetic
+Identifier=io.example.synthetic
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=100 flags=0x10000(runtime) hashes=1+7 location=embedded
+Signature size=9000
+Authority=Developer ID Application: Synthetic Example ({TEAM})
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Oct 21, 2026 at 12:00:00
+Info.plist=not bound
+TeamIdentifier={TEAM}
+Runtime Version=26.0.0
+'''
+AD_HOC_TEXT = '''Executable=/synthetic
+Identifier=synthetic
+CodeDirectory v=20400 size=100 flags=0x2(adhoc) hashes=1+7 location=embedded
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+'''
+
+
+class KitSignatureTests(unittest.TestCase):
+    """kit_signatures: every Mach-O by magic, bound to the index, then codesign's verdict and display."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.kit, self.signed = self.root / 'kit', self.root / 'signed'
+        self.kit.mkdir(mode=0o755)
+        for name, data, mode in (('bootstrap-verifier', thin_macho(2), 0o555), ('Install.command', b'#!/bin/sh\n', 0o555),
+                                 ('release-index.json', b'{}', 0o444)):
+            (self.kit / name).write_bytes(data)
+            (self.kit / name).chmod(mode)
+        files = {'python/bin/python3': (thin_macho(2), 0o500), 'native/libtdjson.dylib': (thin_macho(6), 0o400),
+                 'app/module.py': (b'import os\n', 0o400)}
+        for name, (data, mode) in files.items():
+            Fakes.write(self.signed / name, data, mode)
+        self.index = {'files': [{'path': n, 'sha256': sha(d)} for n, (d, _) in files.items()]}
+        self.calls, self.text, self.exit = [], {}, {}
+
+    def runner(self, argv, **options):
+        self.calls.append(argv)
+        self.assertEqual(options['env'], {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'})
+        path, verb = argv[-1], argv[1]
+        text = self.text.get(path, self.default)
+        return SimpleNamespace(returncode=self.exit.get((path, verb), 0), stdout=b'',
+                               stderr=text.encode() if verb == '-d' else b'')
+
+    def check(self, kind='developer-id', team=TEAM):
+        return RB.kit_signatures(self.kit, self.signed, self.index, kind, team, runner=self.runner)
+
+    def refused(self, kind='developer-id', team=TEAM):
+        with self.assertRaises(RB.BuildError) as caught:
+            self.check(kind, team)
+        self.assertEqual(str(caught.exception), 'signature_refused')
+
+    def test_developer_id_checks_the_seed_and_every_payload_macho_with_the_team_requirement(self):
+        self.default = DEVELOPER_ID_TEXT
+        summary = self.check()
+        self.assertEqual(summary, {'kind': 'developer-id', 'team_id': TEAM, 'checked': 3, 'seed': 1, 'payload': 2,
+                                   'counted_by': 'magic'})
+        paths = [str(self.kit / 'bootstrap-verifier'), str(self.signed / 'native/libtdjson.dylib'),
+                 str(self.signed / 'python/bin/python3')]
+        expected = []
+        for path in paths:
+            expected += [['/usr/bin/codesign', '--verify', '--strict', '-R', designated_requirement(TEAM), path],
+                         ['/usr/bin/codesign', '-d', '--verbose=4', path]]
+        self.assertEqual(self.calls, expected)
+
+    def test_any_weaker_signature_on_any_macho_refuses(self):
+        self.default = DEVELOPER_ID_TEXT
+        weaker = {'unauthenticated time': DEVELOPER_ID_TEXT.replace('Timestamp=', 'Signed Time='),
+                  'no time': DEVELOPER_ID_TEXT.replace('Timestamp=Oct 21, 2026 at 12:00:00\n', ''),
+                  'other team': DEVELOPER_ID_TEXT.replace(f'TeamIdentifier={TEAM}', 'TeamIdentifier=ZYXWV98765'),
+                  'other leaf team': DEVELOPER_ID_TEXT.replace(f'Synthetic Example ({TEAM})', 'Other (ZYXWV98765)'),
+                  'not developer id': DEVELOPER_ID_TEXT.replace('Developer ID Application:', 'Apple Development:'),
+                  'no runtime': DEVELOPER_ID_TEXT.replace('flags=0x10000(runtime)', 'flags=0x0(none)'),
+                  'ad hoc': AD_HOC_TEXT}
+        for target in (self.kit / 'bootstrap-verifier', self.signed / 'native/libtdjson.dylib'):
+            for label, text in weaker.items():
+                with self.subTest(target=target.name, label=label):
+                    self.text = {str(target): text}
+                    self.refused()
+            for verb in ('--verify', '-d'):
+                with self.subTest(target=target.name, failing=verb):
+                    self.text, self.exit = {}, {(str(target), verb): 1}
+                    self.refused()
+            self.exit = {}
+
+    def test_ad_hoc_mode_requires_ad_hoc_signatures_without_a_requirement(self):
+        self.default = AD_HOC_TEXT
+        self.assertEqual(self.check('adhoc', None)['checked'], 3)
+        self.assertFalse([argv for argv in self.calls if '-R' in argv])
+        self.default = DEVELOPER_ID_TEXT
+        self.refused('adhoc', None)
+
+    def test_the_inventory_is_bound_to_the_kit_and_the_index(self):
+        self.default = DEVELOPER_ID_TEXT
+        self.index['files'][1]['sha256'] = 'f' * 64  # native/libtdjson.dylib differs from what the archive holds
+        self.refused()
+        self.setUp()
+        self.default = DEVELOPER_ID_TEXT
+        (self.kit / 'Install.command').chmod(0o755)
+        (self.kit / 'Install.command').write_bytes(thin_macho(2))  # a second Mach-O at the kit's top level
+        self.refused()
+        self.setUp()
+        self.default = DEVELOPER_ID_TEXT
+        (self.kit / 'bootstrap-verifier').chmod(0o755)
+        (self.kit / 'bootstrap-verifier').write_bytes(b'#!/bin/sh\n')  # the seed is not a Mach-O
+        self.refused()
+        self.setUp()
+        self.default = DEVELOPER_ID_TEXT
+        (self.kit / 'link').symlink_to(self.kit / 'release-index.json')
+        self.refused()
+        self.assertEqual(self.calls, [])
+
+    def test_the_stock_codesign_accepts_ad_hoc_and_refuses_it_as_developer_id(self):
+        for path in (self.kit / 'bootstrap-verifier', self.signed / 'python/bin/python3',
+                     self.signed / 'native/libtdjson.dylib'):
+            path.chmod(0o700)
+            path.unlink()
+            shutil.copyfile('/usr/bin/true', path)
+            subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(path)], check=True, capture_output=True,
+                           timeout=60)
+            path.chmod(0o500)
+        self.index = {'files': [{'path': p, 'sha256': sha((self.signed / p).read_bytes())}
+                                for p in ('python/bin/python3', 'native/libtdjson.dylib', 'app/module.py')]}
+        self.assertEqual(RB.kit_signatures(self.kit, self.signed, self.index, 'adhoc', None)['checked'], 3)
+        with self.assertRaises(RB.BuildError) as caught:
+            RB.kit_signatures(self.kit, self.signed, self.index, 'developer-id', TEAM)
+        self.assertEqual(str(caught.exception), 'signature_refused')
 
 
 if __name__ == '__main__':

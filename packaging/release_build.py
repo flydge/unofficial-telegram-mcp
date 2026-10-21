@@ -2,18 +2,26 @@
 
 Development host only (the owner's Mac); stdlib plus this checkout's own package. In order:
 prepare_payload -> sign_payload and the entitlement matrix -> repin_native and the v2 manifest ->
-assemble_bundle (identity switch: none, or a named Keychain service) -> build_bootstrap_seed.sh ->
-the kit (Install.command with the pins embedded, bootstrap.sh, the seed, archive, index,
-release-pins.json, README, licences, SHA256SUMS) -> notarize_release.sh (payload zip, DMG, sign,
-notarize, staple) -> assets/ (the DMG, the curl-path files, release-pins.json, release-provenance.json,
-the corresponding-source archive and SHA256SUMS over all of them) -> release-build.json, every hash
+assemble_bundle (identity switch: none, or a named Keychain service) -> build_bootstrap_seed.sh (with
+--sign-identity and the same Developer ID identity, or ad hoc in a dry run) -> the kit (Install.command
+with the pins embedded, bootstrap.sh, the seed, archive, index, release-pins.json, README, licences,
+SHA256SUMS) -> the kit signature check -> notarize_release.sh (payload zip, DMG, sign, notarize,
+staple) -> assets/ (the DMG, the curl-path files, release-pins.json, release-provenance.json, the
+corresponding-source archive and SHA256SUMS over all of them) -> release-build.json, every hash
 re-derived from disk; `check` re-derives them and the commit again.
 
---dry-run runs every step except notarization, with the ad hoc identity `-` and an unsigned DMG; its
-output is a test artifact. Nothing is uploaded or published; publication stays `unreleased` and
-source completeness `incomplete` until the corresponding-source inventory covers every component.
-The output is a fresh owner-only directory outside the checkout and outside /tmp. Refusals are fixed
-codes; no path, input or tool output is echoed.
+The kit signature check runs before anything is notarized: every Mach-O the kit ships, found by magic
+(the seed, and each payload file that release.tar.gz holds, bound to its index sha256), must be
+Developer ID signed with the pinned Team ID's designated requirement, a secure timestamp and the
+hardened runtime; an ad hoc seed refuses the real build (`seed_unsigned`). In a dry run the same check
+requires ad hoc signatures. Natives: an ad hoc build keeps their pinned unsigned bytes (no
+hardened-runtime flag), a Developer ID build re-signs them (NATIVE_SIGNING, recorded in provenance).
+
+--dry-run runs every step except notarization and stapling, with the ad hoc identity `-`: the payload
+zip is built and the DMG is signed ad hoc and verified; its output is a test artifact. Nothing is
+uploaded or published; publication stays `unreleased` and source completeness `incomplete` until the
+corresponding-source inventory covers every component. The output is a fresh owner-only directory
+outside the checkout and outside /tmp. Refusals are fixed codes; no path, input or tool output is echoed.
 """
 from __future__ import annotations
 
@@ -37,13 +45,27 @@ SCHEMA = 'tgmcp-release-build/v1'
 CODES = frozenset({'usage', 'output_refused', 'checkout_dirty', 'tag_mismatch', 'prepare_failed', 'sign_failed',
                    'entitlements_unproven', 'repin_failed', 'assemble_failed', 'seed_failed', 'kit_failed',
                    'notarize_failed', 'source_archive_failed', 'evidence_invalid', 'evidence_mismatch',
-                   'release_build_refused'})
+                   'seed_unsigned', 'signature_refused', 'release_build_refused'})
 TOOL_ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'}
 GIT_ENV = {**TOOL_ENV, 'HOME': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
            'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
 TAG = re.compile(r'v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?')
 PROFILE = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}')
 HASH = re.compile(r'[0-9a-f]{64}')
+TEAM = re.compile(r'[0-9A-Z]{10}')
+PIN_KEYS = frozenset({'schema_version', 'release_version', 'publisher', 'team_id', 'publication', 'seed', 'index',
+                      'archive'})
+SEED_KINDS = {'adhoc': 'developer-built-ad-hoc-seed', 'developer-id': 'developer-id-seed'}
+# How native/ is signed, recorded in release-provenance.json (policy values: sign_payload.NATIVE_POLICY).
+NATIVE_SIGNING = {
+    'adhoc': {'policy': 'pinned-unsigned-bytes-no-runtime',
+              'note': 'native/ keeps its pinned unsigned bytes, so it has no hardened-runtime flag: the ad hoc '
+                      'v2 native lock admits only the v1 pins'},
+    'developer-id': {'policy': 'developer-id-resigned-runtime',
+                     'note': 'native/ is re-signed with Developer ID, the hardened runtime and a secure timestamp; '
+                             'the v2 native lock pins the signed bytes and the unsigned v1 pins'}}
+CS_RUNTIME = 0x10000
+CODESIGN_TIMEOUT = 120
 KIT_DATA = ('bootstrap.sh', 'release.tar.gz', 'release-index.json', 'release-pins.json', 'README.txt', 'LICENSE',
             'NOTICE', 'third-party-notices.md')
 KIT_EXECUTABLE = ('Install.command', 'bootstrap-verifier')
@@ -169,10 +191,15 @@ def _default_steps(runner=subprocess.run):
     payload, signer, repin, assembler = (_sibling(n) for n in ('prepare_payload', 'sign_payload', 'repin_native',
                                                                 'assemble_bundle'))
 
-    def seed(checkout, output):
+    def seed(checkout, output, identity, team_id):
+        argv = ['/bin/sh', str(Path(checkout) / 'packaging/build_bootstrap_seed.sh'), '--output-directory', str(output)]
+        env = dict(TOOL_ENV)
+        if identity is not None:  # Developer ID: codesign reads the login Keychain through HOME.
+            argv += ['--sign-identity', identity, '--team-id', team_id]
+            if os.environ.get('HOME', '').startswith('/'):
+                env['HOME'] = os.environ['HOME']
         try:
-            result = runner(['/bin/sh', str(Path(checkout) / 'packaging/build_bootstrap_seed.sh'), '--output-directory',
-                             str(output)], capture_output=True, check=False, timeout=SEED_TIMEOUT, env=dict(TOOL_ENV))
+            result = runner(argv, capture_output=True, check=False, timeout=SEED_TIMEOUT, env=env)
         except (OSError, subprocess.SubprocessError):
             raise BuildError('seed_failed') from None
         _need(result.returncode == 0, 'seed_failed')
@@ -205,8 +232,77 @@ def _default_steps(runner=subprocess.run):
         'assemble': lambda signed, output, service: assembler.assemble_bundle(signed, output,
                                                                                app_identity_service=service),
         'seed': seed,
+        'signatures': lambda kit, signed, index, kind, team_id: kit_signatures(kit, signed, index, kind, team_id,
+                                                                               runner=runner),
         'notarize': notarize,
     }
+
+
+# Kit signatures ----------------------------------------------------------------------------------
+
+def _codesign_fields(text):
+    """The first value of each `codesign -d --verbose=4` field this check reads; a closed parse."""
+    fields = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition('=')
+        if not separator:
+            continue
+        if key == 'CodeDirectory v' and 'flags' not in fields:
+            found = re.search(r' flags=0x([0-9a-f]{1,8})\(', value)
+            _need(found is not None, 'signature_refused')
+            fields['flags'] = int(found.group(1), 16)
+        elif key in ('Identifier', 'TeamIdentifier', 'Signature', 'Timestamp', 'Signed Time', 'Authority'):
+            fields.setdefault(key, value)
+    return fields
+
+
+def signature_check(path, kind, team_id, runner=subprocess.run):
+    """One Mach-O: `codesign --verify --strict` (with the Team ID's designated requirement for Developer ID),
+    then what `codesign -d` shows. Developer ID: the pinned Team ID, a Developer ID Application leaf, a
+    secure timestamp (never `Signed Time`) and the hardened runtime. Ad hoc: an ad hoc signature, no team."""
+    from telegram_search_mcp.native_runtime import designated_requirement
+    requirement = ['-R', designated_requirement(team_id)] if kind == 'developer-id' else []
+    for argv in (['/usr/bin/codesign', '--verify', '--strict', *requirement, str(path)],
+                 ['/usr/bin/codesign', '-d', '--verbose=4', str(path)]):
+        try:
+            result = runner(argv, capture_output=True, check=False, timeout=CODESIGN_TIMEOUT, env=dict(TOOL_ENV))
+        except (OSError, subprocess.SubprocessError):
+            raise BuildError('signature_refused') from None
+        _need(result.returncode == 0 and len(result.stdout or b'') <= MAX_OUTPUT
+              and len(result.stderr or b'') <= MAX_OUTPUT, 'signature_refused')
+    text = result.stderr.decode('utf-8', 'replace') if type(result.stderr) is bytes else (result.stderr or '')
+    fields = _codesign_fields(text)
+    if kind == 'developer-id':
+        leaf = re.fullmatch(r'Developer ID Application: .+ \(([0-9A-Z]{10})\)', fields.get('Authority', ''))
+        _need(fields.get('TeamIdentifier') == team_id and leaf is not None and leaf.group(1) == team_id
+              and bool(fields.get('Timestamp')) and 'Signed Time' not in fields
+              and bool(fields.get('flags', 0) & CS_RUNTIME), 'signature_refused')
+    else:
+        _need(kind == 'adhoc' and fields.get('Signature') == 'adhoc' and fields.get('TeamIdentifier') == 'not set',
+              'signature_refused')
+
+
+def kit_signatures(kit, signed, index, kind, team_id, runner=subprocess.run):
+    """Every Mach-O the kit ships, found by magic: the seed at its top level and the payload files that
+    release.tar.gz holds (each bound to its index sha256; the same tree is notarized as the payload zip).
+    Each must pass signature_check for `kind`; returns a nonsecret summary."""
+    kit, signed = Path(kit), Path(signed)
+    signer = _sibling('sign_payload')
+    try:
+        entries = sorted(kit.iterdir(), key=lambda p: p.name)
+        _need(all(p.is_file() and not p.is_symlink() for p in entries), 'signature_refused')
+        top = [p.name for p in entries if signer.macho(p) is not None]
+        payload = [entry['path'] for entry in signer.inventory(signed, signer._walk(signed))]
+    except signer.SigningError:
+        raise BuildError('signature_refused') from None
+    _need(top == ['bootstrap-verifier'] and payload, 'signature_refused')
+    listed = {f['path']: f['sha256'] for f in index['files']}
+    for relative in payload:
+        _need(listed.get(relative) == file_digest(signed / relative)[0], 'signature_refused')
+    for path in [kit / 'bootstrap-verifier', *(signed / relative for relative in payload)]:
+        signature_check(path, kind, team_id, runner)
+    return {'kind': kind, 'team_id': team_id, 'checked': len(payload) + 1, 'seed': 1, 'payload': len(payload),
+            'counted_by': 'magic'}
 
 
 # Build -------------------------------------------------------------------------------------------
@@ -287,24 +383,30 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
     identity_record = next((f for f in index['files'] if f['path'] == 'app-identity.json'), None)
     _need((identity_record is None) == (service is None), 'assemble_failed')
 
-    # 5. The seed, built from this commit.
-    steps['seed'](checkout, work / 'seed')
+    # 5. The seed, built from this commit: Developer ID with the payload's identity, ad hoc in a dry run.
+    pinned_team = None if kind == 'adhoc' else team_id
+    steps['seed'](checkout, work / 'seed', None if kind == 'adhoc' else identity, pinned_team)
     seed_sha, seed_bytes = file_digest(work / 'seed/bootstrap-verifier')
     seed_provenance = json.loads((work / 'seed/provenance.json').read_bytes())
-    _need(seed_provenance.get('source_commit') == commit and seed_provenance.get('binary_sha256') == seed_sha
-          and seed_provenance.get('binary_bytes') == seed_bytes, 'seed_failed')
+    _need(type(seed_provenance) is dict and seed_provenance.get('source_commit') == commit
+          and seed_provenance.get('binary_sha256') == seed_sha and seed_provenance.get('binary_bytes') == seed_bytes,
+          'seed_failed')
+    _need(seed_provenance.get('kind') == SEED_KINDS[kind]
+          and seed_provenance.get('publisher_identity') is (kind == 'developer-id')
+          and seed_provenance.get('team_id') == pinned_team, 'seed_failed' if kind == 'adhoc' else 'seed_unsigned')
 
     # 6. The kit: what the DMG holds.
     install = _sibling('install_command')
     archive_sha, archive_bytes = file_digest(work / 'bundle/release.tar.gz')
     _need(archive_sha == bundle.archive_sha256, 'assemble_failed')
-    pins = {'schema_version': 1, 'release_version': version, 'publisher': kind,
-            'team_id': None if kind == 'adhoc' else team_id,
+    pins = {'schema_version': 1, 'release_version': version, 'publisher': kind, 'team_id': pinned_team,
+            'publication': manifest['publication'],
             'seed': {'file': 'bootstrap-verifier', 'sha256': seed_sha, 'bytes': seed_bytes},
             'index': {'file': 'release-index.json', 'sha256': sha256(index_bytes)},
             'archive': {'file': 'release.tar.gz', 'sha256': archive_sha, 'bytes': archive_bytes}}
     _write(kit / 'Install.command', install.render(seed_sha256=seed_sha, seed_bytes=seed_bytes,
-                                                   index_sha256=sha256(index_bytes)), 0o555)
+                                                   index_sha256=sha256(index_bytes), team_id=pinned_team,
+                                                   published=manifest['publication'] == 'published'), 0o555)
     _write(kit / 'bootstrap.sh', files['packaging/bootstrap.sh'][0])
     _copy(work / 'seed/bootstrap-verifier', kit / 'bootstrap-verifier', 0o555)
     _copy(work / 'bundle/release.tar.gz', kit / 'release.tar.gz')
@@ -316,21 +418,28 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
     _write(kit / 'third-party-notices.md', files['docs/third-party-notices.md'][0])
     _write(kit / 'SHA256SUMS', sums(kit))
 
-    # 7. Notarization (skipped in a dry run) and the DMG.
+    # 7. Before anything is notarized: every Mach-O the kit ships carries the expected signature.
+    signatures = steps['signatures'](kit, work / 'signed', index, kind, pinned_team)
+    _need(type(signatures) is dict and signatures.get('kind') == kind and signatures.get('team_id') == pinned_team,
+          'signature_refused')
+
+    # 8. Notarization and stapling (skipped in a dry run) and the DMG, signed ad hoc in a dry run.
     dmg = f'{name}-{version}-macos-arm64.dmg'
     arguments = ['--kit', str(kit), '--dmg', str(assets / dmg), '--volume-name', product_identity.DMG_VOLUME_NAME,
-                 '--evidence', str(work / 'notary.json')]
-    arguments += ['--dry-run'] if dry_run else ['--payload', str(work / 'signed'), '--identity', identity,
+                 '--evidence', str(work / 'notary.json'), '--payload', str(work / 'signed')]
+    arguments += ['--dry-run'] if dry_run else ['--identity', identity, '--team-id', team_id,
                                                 '--profile', notary_profile]
     os.chmod(kit, 0o755)  # The volume root: readable by whoever mounts the image.
     steps['notarize'](checkout, arguments, not dry_run)
     notary = json.loads((work / 'notary.json').read_bytes())
     _need(type(notary) is dict and notary.get('mode') == ('dry-run' if dry_run else 'notarized')
           and type(notary.get('dmg')) is dict and notary['dmg'].get('contents') == 'matches SHA256SUMS'
-          and notary['dmg'].get('sha256') == file_digest(assets / dmg)[0], 'notarize_failed')
+          and notary['dmg'].get('sha256') == file_digest(assets / dmg)[0]
+          and (notary['dmg'].get('signature') == 'adhoc' if dry_run else notary['dmg'].get('team_id') == team_id),
+          'notarize_failed')
     os.chmod(assets / dmg, 0o444)
 
-    # 8. Assets: curl-path copies, the corresponding source, provenance, SHA256SUMS.
+    # 9. Assets: curl-path copies, the corresponding source, provenance, SHA256SUMS.
     for asset in CURL_PATH:
         _copy(kit / asset, assets / asset, 0o555 if asset in KIT_EXECUTABLE else 0o444)
     source_name = f'corresponding-source-{version}.tar.gz'
@@ -344,7 +453,7 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
         'mode': 'adhoc-dry-run' if dry_run else 'developer-id', 'publication': manifest['publication'],
         'source_completeness': manifest['source_completeness'],
         'payload': {k: prepared[k] for k in ('tree_sha256', 'files', 'macho', 'macho_total', 'manifest_sha256')},
-        'signing': signing, 'entitlement_matrix': matrix,
+        'signing': signing, 'native_signing': NATIVE_SIGNING[kind], 'entitlement_matrix': matrix,
         'native_lock': {'sha256': sha256(lock), 'publisher': repinned['publisher']},
         'manifest_sha256': sha256((work / 'signed/manifest/release.json').read_bytes()),
         'bundle': {'archive_sha256': archive_sha, 'archive_bytes': archive_bytes, 'index_sha256': sha256(index_bytes),
@@ -352,13 +461,14 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
                    'app_identity': {'source': 'none' if service is None else 'named-keychain-service',
                                     'sha256': None if identity_record is None else identity_record['sha256']}},
         'seed': {'sha256': seed_sha, 'bytes': seed_bytes, 'provenance': seed_provenance},
+        'kit_signatures': signatures,
         'notarization': notary,
         'source_archive': {'file': source_name, 'inventory_sha256': sha256(json_bytes(inventory)),
                            'source_completeness': inventory['source_completeness']}}
     _write(assets / 'release-provenance.json', json_bytes(provenance))
     _write(assets / 'SHA256SUMS', sums(assets))
 
-    # 9. The gate JSON, every hash re-derived from disk.
+    # 10. The gate JSON, every hash re-derived from disk.
     evidence = derive_evidence(output, commit=commit, version=version, tag=tag, mode=provenance['mode'])
     _write(output / 'release-build.json', canonical(evidence), 0o400)
     return evidence
@@ -387,7 +497,7 @@ def readme(display_name, version, dry_run):
             'finds. It then starts the Telegram login in the same window: a QR page opens in your browser;\n'
             'scan it with Telegram on your phone. The final result prints in Terminal.\n\n'
             'Without the DMG: run `/usr/bin/env -i /bin/sh -p bootstrap.sh` with the seed and index pins from\n'
-            'release-pins.json (see the install guide).\n\n'
+            'release-pins.json, and --seed-team with its team_id when it has one (see the install guide).\n\n'
             'SHA256SUMS lists every file here. Licences: LICENSE, NOTICE, third-party-notices.md.\n'
             + build).encode()
 
@@ -488,7 +598,30 @@ def _parse_sums(data):
 
 def check(output, checkout=ROOT):
     """Re-derive every recorded hash and the commit from disk; returns a nonsecret summary."""
-    output = Path(output)
+    try:
+        return _check(Path(output), Path(checkout))
+    except BuildError:
+        raise
+    except Exception:  # Malformed evidence, pins, sums or kit text (KeyError, UnicodeError, ...): one fixed code.
+        raise BuildError('evidence_invalid') from None
+
+
+def _pins_team(pins, mode):
+    """The kit pins' closed shape for this evidence mode; returns the pinned Team ID (None ad hoc)."""
+    _need(type(pins) is dict and set(pins) == PIN_KEYS and pins['schema_version'] == 1
+          and pins['publication'] in ('unreleased', 'published')
+          and all(type(pins[k]) is dict for k in ('seed', 'index', 'archive')), 'evidence_invalid')
+    team = pins['team_id']
+    if mode == 'developer-id':
+        _need(pins['publisher'] == 'developer-id' and type(team) is str and TEAM.fullmatch(team) is not None,
+              'evidence_mismatch')
+    else:
+        _need(mode == 'adhoc-dry-run' and pins['publisher'] == 'adhoc' and team is None
+              and pins['publication'] == 'unreleased', 'evidence_mismatch')
+    return team
+
+
+def _check(output, checkout):
     try:
         raw = (output / 'release-build.json').read_bytes()
         _need(len(raw) <= MAX_EVIDENCE, 'evidence_invalid')
@@ -496,8 +629,9 @@ def check(output, checkout=ROOT):
     except (OSError, ValueError):
         raise BuildError('evidence_invalid') from None
     _need(type(evidence) is dict and canonical(evidence) == raw and evidence.get('schema') == SCHEMA
-          and set(evidence) == {'schema', 'mode', 'source_commit', 'release_version', 'tag', 'assets', 'kit'},
-          'evidence_invalid')
+          and set(evidence) == {'schema', 'mode', 'source_commit', 'release_version', 'tag', 'assets', 'kit'}
+          and evidence['mode'] in ('adhoc-dry-run', 'developer-id')
+          and all(type(evidence[k]) is dict for k in ('assets', 'kit')), 'evidence_invalid')
     _need(head_commit(checkout) == evidence['source_commit'], 'evidence_mismatch')
     derived = derive_evidence(output, commit=evidence['source_commit'], version=evidence['release_version'],
                               tag=evidence['tag'], mode=evidence['mode'])
@@ -508,6 +642,7 @@ def check(output, checkout=ROOT):
         listed = _parse_sums((output / group / 'SHA256SUMS').read_bytes())
         _need(listed == {n: v['sha256'] for n, v in evidence[group].items() if n != 'SHA256SUMS'}, 'evidence_mismatch')
     pins = json.loads((output / 'kit/release-pins.json').read_bytes())
+    team = _pins_team(pins, evidence['mode'])
     _need(pins['seed']['sha256'] == evidence['kit']['bootstrap-verifier']['sha256']
           and pins['seed']['bytes'] == evidence['kit']['bootstrap-verifier']['bytes']
           and pins['index']['sha256'] == evidence['kit']['release-index.json']['sha256']
@@ -515,7 +650,8 @@ def check(output, checkout=ROOT):
     command = (output / 'kit/Install.command').read_bytes().decode('ascii')
     _need(f"install_seed_sha256={pins['seed']['sha256']}\n" in command
           and f"install_seed_bytes={pins['seed']['bytes']}\n" in command
-          and f"install_index_sha256={pins['index']['sha256']}\n" in command, 'evidence_mismatch')
+          and f"install_index_sha256={pins['index']['sha256']}\n" in command
+          and f"install_seed_team='{team or ''}'\n" in command, 'evidence_mismatch')
     for name in CURL_PATH:
         _need(evidence['assets'][name] == evidence['kit'][name], 'evidence_mismatch')
     return {'status': 'verified', 'source_commit': evidence['source_commit'], 'mode': evidence['mode'],

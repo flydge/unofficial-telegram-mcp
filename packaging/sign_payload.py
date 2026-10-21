@@ -14,7 +14,10 @@ passing set. allow-dyld-environment-variables, get-task-allow and disabled page 
 everywhere. With `-` there is no --timestamp, and native/ keeps its pinned bytes: an ad-hoc v2 native
 lock admits only the unsigned pins. Every result is verified (`codesign --verify --strict`, plus the
 Team ID requirement for Developer ID) and recorded in provenance/signing.json: path, pre- and post-sign
-sha256, cdhash, identifier, flags. Refusals are fixed codes; no path or tool output is echoed.
+sha256, cdhash, identifier, flags, and `native_policy` (NATIVE_POLICY): in an ad hoc build the three
+natives keep their pinned unsigned bytes, so they carry no hardened-runtime flag; a Developer ID build
+re-signs them with the runtime flag and a secure timestamp like every other Mach-O. Refusals are fixed
+codes; no path or tool output is echoed.
 """
 from __future__ import annotations
 
@@ -41,6 +44,9 @@ MACHO = {b'\xcf\xfa\xed\xfe': 'mach-o-64', b'\xce\xfa\xed\xfe': 'mach-o-32', b'\
 MH_EXECUTE, MH_DYLIB, MH_BUNDLE = 2, 6, 8
 RANK = {MH_DYLIB: 0, MH_BUNDLE: 1, MH_EXECUTE: 2}  # inside out; python3 is sorted last of all
 CS_RUNTIME = 0x10000
+# native/ in provenance: ad hoc keeps the v1-pinned unsigned bytes (the ad hoc v2 lock admits nothing
+# else), so no hardened-runtime flag; Developer ID re-signs them (runtime flag, secure timestamp).
+NATIVE_POLICY = {'adhoc': 'pinned-unsigned-bytes-no-runtime', 'developer-id': 'developer-id-resigned-runtime'}
 # Entitlements an interpreter may be granted after the matrix proves them; everything else refuses.
 ALLOWED = frozenset({'com.apple.security.cs.disable-library-validation',
                      'com.apple.security.cs.allow-unsigned-executable-memory',
@@ -419,7 +425,7 @@ def _sign_payload(payload, output, identity, team_id, prefix, entitlements, runn
                         'bytes': len(after)})
     document = {'schema_version': 1, 'identity_kind': kind, 'team_id': team_id, 'identifier_prefix': prefix,
                 'interpreter_entitlements': sorted(granted), 'entitlements_sha256': sha256(granted_path.read_bytes()),
-                'counted_by': 'magic', 'total': len(records),
+                'counted_by': 'magic', 'total': len(records), 'native_policy': NATIVE_POLICY[kind],
                 'signed': sum(r['action'] == 'signed' for r in records),
                 'kept_pinned': sum(r['action'] == 'kept_pinned' for r in records), 'files': records}
     data = json_bytes(document)
@@ -430,7 +436,7 @@ def _sign_payload(payload, output, identity, team_id, prefix, entitlements, runn
     _seal(output, files)
     _need(_walk(output) == files, 'signing_refused')
     return {'identity_kind': kind, 'team_id': team_id, 'total': len(records), 'signed': document['signed'],
-            'kept_pinned': document['kept_pinned'], 'signing_sha256': sha256(data),
+            'kept_pinned': document['kept_pinned'], 'native_policy': NATIVE_POLICY[kind], 'signing_sha256': sha256(data),
             'interpreter_entitlements': sorted(granted), 'tree_sha256': tree_digest(output, files)}
 
 

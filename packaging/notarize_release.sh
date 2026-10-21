@@ -2,13 +2,19 @@
 # Notarize the signed payload, build the release DMG from a kit folder, then sign, notarize and
 # staple the DMG (CLIENTS-8). Development host only: the owner's Mac. The only credential is a
 # notarytool keychain profile name; no password, API key or Apple ID ever appears in argv, the
-# environment or a log. --dry-run builds the DMG and touches no notary, signing or Gatekeeper tool.
+# environment or a log. --dry-run runs every step except notarization, stapling and Gatekeeper: it
+# builds the payload zip with ditto, builds and checks the DMG, signs it ad hoc and verifies that
+# signature. The real run signs the DMG with Developer ID and verifies it against the designated
+# requirement with the pinned Team ID (native_runtime.designated_requirement) before submitting it and
+# again after stapling, in addition to spctl.
 #
-#   notarize_release.sh --kit DIR --dmg NEW.dmg --volume-name NAME --evidence NEW.json --dry-run
 #   notarize_release.sh --kit DIR --dmg NEW.dmg --volume-name NAME --evidence NEW.json \
-#       --payload SIGNED_DIR --identity 'Developer ID Application: NAME (TEAMID)' --profile PROFILE
+#       --payload SIGNED_DIR --dry-run
+#   notarize_release.sh --kit DIR --dmg NEW.dmg --volume-name NAME --evidence NEW.json \
+#       --payload SIGNED_DIR --identity 'Developer ID Application: NAME (TEAMID)' --team-id TEAMID \
+#       --profile PROFILE
 #
-# Refusals print one fixed code and never echo an argument.
+# IDENTITY may also be the certificate's SHA-1. Refusals print one fixed code and never echo an argument.
 set -eu
 umask 077
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -44,13 +50,14 @@ notary_sha256() {
 }
 
 notary_kit='' notary_dmg='' notary_volume='' notary_evidence='' notary_payload='' notary_identity=''
-notary_profile='' notary_dry='' notary_seen=' '
+notary_profile='' notary_team='' notary_dry='' notary_seen=' '
 while [ "$#" -gt 0 ]; do
     case "$notary_seen" in *" $1 "*) notary_fail usage 2;; esac
     notary_seen="$notary_seen$1 "
     case "$1" in
         --dry-run) notary_dry=yes; shift; continue;;
-        --kit|--dmg|--volume-name|--evidence|--payload|--identity|--profile) [ "$#" -ge 2 ] || notary_fail usage 2;;
+        --kit|--dmg|--volume-name|--evidence|--payload|--identity|--profile|--team-id)
+            [ "$#" -ge 2 ] || notary_fail usage 2;;
         *) notary_fail usage 2;;
     esac
     case "$1" in
@@ -61,6 +68,7 @@ while [ "$#" -gt 0 ]; do
         --payload) notary_payload=$2;;
         --identity) notary_identity=$2;;
         --profile) notary_profile=$2;;
+        --team-id) notary_team=$2;;
     esac
     shift 2
 done
@@ -74,16 +82,18 @@ notary_parent=${notary_dmg%/*}
 [ -d "$notary_parent" ] && [ ! -L "$notary_parent" ] && [ -d "${notary_evidence%/*}" ] || notary_fail usage 2
 [ "${#notary_volume}" -ge 1 ] && [ "${#notary_volume}" -le 27 ] || notary_fail usage 2
 case "$notary_volume" in [!A-Za-z0-9]*|*[!A-Za-z0-9]|*[!A-Za-z0-9\ ._-]*) notary_fail usage 2;; esac
+notary_absolute "$notary_payload" && [ -d "$notary_payload" ] && [ ! -L "$notary_payload" ] || notary_fail usage 2
 if [ "$notary_dry" = yes ]; then
-    [ -z "$notary_payload$notary_identity$notary_profile" ] || notary_fail usage 2
+    [ -z "$notary_identity$notary_profile$notary_team" ] || notary_fail usage 2
 else
-    notary_absolute "$notary_payload" && [ -d "$notary_payload" ] && [ ! -L "$notary_payload" ] || notary_fail usage 2
     [ "${#notary_profile}" -ge 1 ] && [ "${#notary_profile}" -le 64 ] || notary_fail usage 2
     case "$notary_profile" in *[!A-Za-z0-9._-]*|-*) notary_fail usage 2;; esac
-    [ "${#notary_identity}" -le 200 ] || notary_fail usage 2
+    [ "${#notary_team}" -eq 10 ] || notary_fail usage 2
+    case "$notary_team" in *[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) notary_fail usage 2;; esac
+    [ "${#notary_identity}" -ge 1 ] && [ "${#notary_identity}" -le 200 ] || notary_fail usage 2
     case "$notary_identity" in *[!A-Za-z0-9\ .,:\'\(\)_-]*) notary_fail usage 2;; esac
     case "$notary_identity" in
-        'Developer ID Application: '?*' ('[A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]')') ;;
+        "Developer ID Application: "?*" ($notary_team)") ;;
         *) [ "${#notary_identity}" -eq 40 ] || notary_fail usage 2
            case "$notary_identity" in *[!0123456789ABCDEF]*) notary_fail usage 2;; esac;;
     esac
@@ -153,39 +163,55 @@ notary_submit() {
     esac
 }
 
+# The DMG's Developer ID designated requirement with the pinned Team ID.
+notary_team_verify() {
+    "$tool_codesign" --verify --strict -R "=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$notary_team\"" \
+        "$notary_dmg" >> "$notary_work/codesign.log" 2>&1 || notary_fail "$1" "$2"
+}
+
+# Registers every Mach-O cdhash; the notary service does not look inside release.tar.gz. Built in the
+# dry run too, so only the submission differs.
+"$tool_ditto" -c -k --keepParent "$notary_payload" "$notary_work/payload.zip" \
+    > "$notary_work/ditto.log" 2>&1 || notary_fail payload_zip_failed 4
+[ -f "$notary_work/payload.zip" ] && [ ! -L "$notary_work/payload.zip" ] && [ -s "$notary_work/payload.zip" ] \
+    || notary_fail payload_zip_failed 4
+notary_zip_hash=$(notary_sha256 "$notary_work/payload.zip") || notary_fail payload_zip_failed 4
+notary_zip_bytes=$(/usr/bin/env -i /usr/bin/stat -f '%z' "$notary_work/payload.zip")
 if [ "$notary_dry" != yes ]; then
-    # Registers every Mach-O cdhash; the notary service does not look inside release.tar.gz.
-    "$tool_ditto" -c -k --keepParent "$notary_payload" "$notary_work/payload.zip" \
-        > "$notary_work/ditto.log" 2>&1 || notary_fail payload_zip_failed 4
     notary_submit "$notary_work/payload.zip" payload
     notary_payload_id=$notary_id
-    /bin/rm -f "$notary_work/payload.zip"
 fi
+/bin/rm -f "$notary_work/payload.zip"
 "$tool_hdiutil" create -volname "$notary_volume" -srcfolder "$notary_kit" -fs HFS+ -format UDZO "$notary_dmg" \
     > "$notary_work/hdiutil.log" 2>&1 || notary_fail dmg_failed 4
 [ -f "$notary_dmg" ] && [ ! -L "$notary_dmg" ] || notary_fail dmg_failed 4
 notary_verify_dmg
 if [ "$notary_dry" = yes ]; then
+    "$tool_codesign" --force --sign - "$notary_dmg" > "$notary_work/codesign.log" 2>&1 || notary_fail dmg_sign_failed 5
+    "$tool_codesign" --verify --strict "$notary_dmg" >> "$notary_work/codesign.log" 2>&1 || notary_fail dmg_sign_failed 5
+    "$tool_codesign" -d --verbose=4 "$notary_dmg" > "$notary_work/signature.txt" 2>&1 || notary_fail dmg_sign_failed 5
+    [ "$(/usr/bin/grep -c -x 'Signature=adhoc' "$notary_work/signature.txt")" = 1 ] || notary_fail dmg_sign_failed 5
     notary_hash=$(notary_sha256 "$notary_dmg") || notary_fail dmg_failed 4
     notary_bytes=$(/usr/bin/env -i /usr/bin/stat -f '%z' "$notary_dmg")
-    /usr/bin/printf '{"schema_version":1,"mode":"dry-run","dmg":{"file":"%s","sha256":"%s","bytes":%s,"contents":"matches SHA256SUMS"},"notarization":"skipped"}\n' \
-        "$notary_name" "$notary_hash" "$notary_bytes" > "$notary_evidence"
+    /usr/bin/printf '{"schema_version":1,"mode":"dry-run","payload":{"zip_sha256":"%s","zip_bytes":%s,"notarization":"skipped"},"dmg":{"file":"%s","sha256":"%s","bytes":%s,"contents":"matches SHA256SUMS","signature":"adhoc","verified":true},"notarization":"skipped","stapling":"skipped"}\n' \
+        "$notary_zip_hash" "$notary_zip_bytes" "$notary_name" "$notary_hash" "$notary_bytes" > "$notary_evidence"
     /bin/cat "$notary_evidence"
     exit 0
 fi
 "$tool_codesign" --force --timestamp --sign "$notary_identity" "$notary_dmg" \
     > "$notary_work/codesign.log" 2>&1 || notary_fail dmg_sign_failed 5
-"$tool_codesign" --verify --strict "$notary_dmg" >> "$notary_work/codesign.log" 2>&1 || notary_fail dmg_sign_failed 5
+notary_team_verify dmg_sign_failed 5
 notary_submit "$notary_dmg" dmg
 notary_dmg_id=$notary_id
 "$tool_xcrun" stapler staple "$notary_dmg" > "$notary_work/staple.log" 2>&1 || notary_fail staple_failed 7
 "$tool_xcrun" stapler validate "$notary_dmg" > "$notary_work/validate.log" 2>&1 || notary_fail staple_failed 7
+notary_team_verify gatekeeper_refused 8
 "$tool_spctl" -a -vv -t open --context context:primary-signature "$notary_dmg" \
     > "$notary_work/spctl.log" 2>&1 || notary_fail gatekeeper_refused 8
 /usr/bin/grep -q ': accepted$' "$notary_work/spctl.log" || notary_fail gatekeeper_refused 8
 /usr/bin/grep -q '^source=Notarized Developer ID$' "$notary_work/spctl.log" || notary_fail gatekeeper_refused 8
 notary_hash=$(notary_sha256 "$notary_dmg") || notary_fail dmg_failed 4
 notary_bytes=$(/usr/bin/env -i /usr/bin/stat -f '%z' "$notary_dmg")
-/usr/bin/printf '{"schema_version":1,"mode":"notarized","payload":{"submission_id":"%s","status":"Accepted","issues":0},"dmg":{"file":"%s","sha256":"%s","bytes":%s,"contents":"matches SHA256SUMS","submission_id":"%s","status":"Accepted","issues":0},"stapler_validate":"ok","spctl":"accepted: Notarized Developer ID"}\n' \
-    "$notary_payload_id" "$notary_name" "$notary_hash" "$notary_bytes" "$notary_dmg_id" > "$notary_evidence"
+/usr/bin/printf '{"schema_version":1,"mode":"notarized","payload":{"zip_sha256":"%s","zip_bytes":%s,"submission_id":"%s","status":"Accepted","issues":0},"dmg":{"file":"%s","sha256":"%s","bytes":%s,"contents":"matches SHA256SUMS","team_id":"%s","requirement":"developer-id-team","submission_id":"%s","status":"Accepted","issues":0},"stapler_validate":"ok","spctl":"accepted: Notarized Developer ID"}\n' \
+    "$notary_zip_hash" "$notary_zip_bytes" "$notary_payload_id" "$notary_name" "$notary_hash" "$notary_bytes" "$notary_team" "$notary_dmg_id" > "$notary_evidence"
 /bin/cat "$notary_evidence"

@@ -8,13 +8,19 @@ the installer printed, `connect`, inline in the same Terminal, so the QR page op
 result prints there. The activation argv must be exactly the installed release's python3 with
 -I -S -B, its launcher.py and `connect`, under `.../releases/<index sha256>`. `--prepare-only` stops
 after verification. Every refusal prints one fixed code.
+
+When release-pins.json carries a Team ID (a Developer ID kit), it is a literal too and bootstrap.sh gets
+`--seed-team <TEAMID>`, so the staged seed must satisfy the Developer ID designated requirement before it
+runs. A published kit without a Team ID is refused at render time (`team_required`); only the
+unpublished ad hoc test kit runs without one.
 """
 from __future__ import annotations
 
 import re
 
-CODES = frozenset({'pins_invalid'})
+CODES = frozenset({'pins_invalid', 'team_required'})
 HASH = re.compile(r'[0-9a-f]{64}')
+TEAM = re.compile(r'[0-9A-Z]{10}')
 MAX_SEED = 2097152  # bootstrap.sh's --seed-bytes bound
 REFUSALS = ('usage', 'kit_unavailable', 'kit_incomplete', 'bootstrap_failed', 'activation_unexpected',
             'activation_failed')
@@ -30,6 +36,7 @@ unset CDPATH ENV BASH_ENV
 install_seed_sha256=@SEED_SHA256@
 install_seed_bytes=@SEED_BYTES@
 install_index_sha256=@INDEX_SHA256@
+install_seed_team='@SEED_TEAM@'
 install_fail() {
     /usr/bin/printf '%s\n' "Install.command stopped: $1. See the install guide." >&2
     /usr/bin/printf '{"schema_version":1,"error_code":"%s"}\n' "$1" >&2
@@ -52,17 +59,15 @@ fi
 for install_name in bootstrap.sh bootstrap-verifier release.tar.gz release-index.json; do
     [ -f "$install_kit/$install_name" ] && [ ! -L "$install_kit/$install_name" ] || install_fail kit_incomplete 3
 done
+set -- --seed "$install_kit/bootstrap-verifier" --seed-sha256 "$install_seed_sha256" \
+    --seed-bytes "$install_seed_bytes" --archive "$install_kit/release.tar.gz" \
+    --index "$install_kit/release-index.json" --trusted-index-sha256 "$install_index_sha256"
+if [ -n "$install_seed_team" ]; then set -- "$@" --seed-team "$install_seed_team"; fi
 if [ "$install_prepare" = yes ]; then
-    /usr/bin/env -i /bin/sh -p "$install_kit/bootstrap.sh" --prepare-only --seed "$install_kit/bootstrap-verifier" \
-        --seed-sha256 "$install_seed_sha256" --seed-bytes "$install_seed_bytes" \
-        --archive "$install_kit/release.tar.gz" --index "$install_kit/release-index.json" \
-        --trusted-index-sha256 "$install_index_sha256" || install_fail bootstrap_failed 4
+    /usr/bin/env -i /bin/sh -p "$install_kit/bootstrap.sh" --prepare-only "$@" || install_fail bootstrap_failed 4
     exit 0
 fi
-install_result=$(/usr/bin/env -i /bin/sh -p "$install_kit/bootstrap.sh" --seed "$install_kit/bootstrap-verifier" \
-    --seed-sha256 "$install_seed_sha256" --seed-bytes "$install_seed_bytes" \
-    --archive "$install_kit/release.tar.gz" --index "$install_kit/release-index.json" \
-    --trusted-index-sha256 "$install_index_sha256") || install_fail bootstrap_failed 4
+install_result=$(/usr/bin/env -i /bin/sh -p "$install_kit/bootstrap.sh" "$@") || install_fail bootstrap_failed 4
 [ "${#install_result}" -le 65536 ] || install_fail activation_unexpected 5
 /usr/bin/printf '%s\n' "$install_result"
 install_field() {
@@ -99,13 +104,16 @@ class InstallCommandError(ValueError):
         super().__init__(code if code in CODES else 'pins_invalid')
 
 
-def render(*, seed_sha256, seed_bytes, index_sha256):
-    """The Install.command bytes with these pins embedded."""
+def render(*, seed_sha256, seed_bytes, index_sha256, team_id=None, published=False):
+    """The Install.command bytes with these pins embedded; `team_id` (release-pins.json's) adds --seed-team."""
     if not (type(seed_sha256) is str and HASH.fullmatch(seed_sha256) and type(index_sha256) is str
-            and HASH.fullmatch(index_sha256) and type(seed_bytes) is int and 0 < seed_bytes <= MAX_SEED):
+            and HASH.fullmatch(index_sha256) and type(seed_bytes) is int and 0 < seed_bytes <= MAX_SEED
+            and type(published) is bool and (team_id is None or (type(team_id) is str and TEAM.fullmatch(team_id)))):
         raise InstallCommandError('pins_invalid')
+    if published and team_id is None:
+        raise InstallCommandError('team_required')
     text = (TEMPLATE.replace('@SEED_SHA256@', seed_sha256).replace('@SEED_BYTES@', str(seed_bytes))
-            .replace('@INDEX_SHA256@', index_sha256))
-    if '@' in text:
+            .replace('@INDEX_SHA256@', index_sha256).replace('@SEED_TEAM@', team_id or ''))
+    if re.search(r'@[A-Z0-9_]+@', text):  # every placeholder replaced; "$@" is the script's own
         raise InstallCommandError('pins_invalid')
     return text.encode('ascii')

@@ -2,22 +2,28 @@
 
 The tools are injected without PATH: a copy of the script has exactly its tool block rewritten to
 absolute mock paths. plutil and openssl stay the stock ones. No notary service, Keychain profile,
-signing identity or disk image is touched.
+signing identity or disk image is touched. The dry run builds the payload zip and signs the DMG ad
+hoc; only notarization and stapling are skipped.
 """
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
+
+from telegram_search_mcp.native_runtime import designated_requirement
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / 'packaging/notarize_release.sh'
 TOOL_BLOCK = ('tool_xcrun=/usr/bin/xcrun\ntool_hdiutil=/usr/bin/hdiutil\ntool_ditto=/usr/bin/ditto\n'
               'tool_codesign=/usr/bin/codesign\ntool_spctl=/usr/sbin/spctl\ntool_plutil=/usr/bin/plutil\n'
               'tool_openssl=/usr/bin/openssl\n')
-IDENTITY = 'Developer ID Application: Synthetic Example (ABCDE12345)'
+TEAM = 'ABCDE12345'
+IDENTITY = f'Developer ID Application: Synthetic Example ({TEAM})'
+REQUIREMENT = designated_requirement(TEAM)
 PAYLOAD_ID, DMG_ID = '11111111-2222-3333-4444-555555555555', '66666666-7777-8888-9999-aaaaaaaaaaaa'
 LOG = 'printf "%s" "$(basename "$0")" >> "$control/calls.log"; for a in "$@"; do printf " [%s]" "$a" >> "$control/calls.log"; done; echo >> "$control/calls.log"\n'
 MOCKS = {
@@ -29,7 +35,7 @@ case "$1 $2" in
     "notarytool log")
         for last in "$@"; do :; done
         printf '{"status":"Accepted","issues":%s,"jobId":"%s"}\n' "$(cat "$control/issues")" "$3" > "$last";;
-    "stapler staple") ;;
+    "stapler staple") : > "$control/stapled";;
     "stapler validate") exit "$(cat "$control/validate-exit")";;
     *) exit 64;;
 esac
@@ -49,8 +55,15 @@ case "$1" in
     *) exit 64;;
 esac
 ''',
-    'ditto': 'for last in "$@"; do :; done\nprintf zip > "$last"\n',
-    'codesign': '',
+    'ditto': 'for last in "$@"; do :; done\n[ -f "$control/ditto-fail" ] && exit 1\nprintf zip > "$last"\n',
+    'codesign': r'''
+case "$1" in
+    --verify)
+        [ -f "$control/verify-fail" ] && exit 1
+        if [ -f "$control/verify-fail-stapled" ] && [ -f "$control/stapled" ]; then exit 1; fi;;
+    -d) printf 'Executable=%s\nSignature=%s\nTeamIdentifier=not set\n' "$3" "$(cat "$control/signature")" >&2;;
+esac
+''',
     'spctl': '''
 if [ -f "$control/spctl-bad" ]; then printf '%s: rejected\\nsource=Unnotarized Developer ID\\n' "$7" >&2; exit 3; fi
 printf '%s: accepted\\nsource=Notarized Developer ID\\n' "$7" >&2
@@ -69,7 +82,8 @@ class NotarizeTests(unittest.TestCase):
         self.root = Path(tmp.name).resolve()
         self.control = self.root / 'control'
         self.control.mkdir()
-        for name, value in (('submit-status', 'Accepted'), ('issues', 'null'), ('validate-exit', '0')):
+        for name, value in (('submit-status', 'Accepted'), ('issues', 'null'), ('validate-exit', '0'),
+                            ('signature', 'adhoc')):
             (self.control / name).write_text(value)
         tools = self.root / 'tools'
         tools.mkdir()
@@ -108,9 +122,11 @@ class NotarizeTests(unittest.TestCase):
 
     def run_script(self, *extra, dry=True):
         base = ['--kit', str(self.kit), '--dmg', str(self.dmg), '--volume-name', 'Synthetic Product',
-                '--evidence', str(self.evidence)]
-        mode = ['--dry-run'] if dry else ['--payload', str(self.payload), '--identity', IDENTITY,
-                                          '--profile', 'release-notary']
+                '--evidence', str(self.evidence), '--payload', str(self.payload)]
+        if dry is None:  # Real mode with the caller's --identity.
+            mode = ['--team-id', TEAM, '--profile', 'release-notary']
+        else:
+            mode = ['--dry-run'] if dry else ['--identity', IDENTITY, '--team-id', TEAM, '--profile', 'release-notary']
         return subprocess.run(['/bin/sh', '-p', str(self.script), *base, *mode, *extra], capture_output=True, text=True,
                               timeout=60, env={'PATH': '/usr/bin:/bin', 'HOME': str(self.root)})
 
@@ -118,19 +134,51 @@ class NotarizeTests(unittest.TestCase):
         path = self.control / 'calls.log'
         return path.read_text().splitlines() if path.exists() else []
 
-    def test_dry_run_builds_and_checks_the_dmg_and_touches_no_notary_tool(self):
+    def test_dry_run_builds_the_zip_and_an_ad_hoc_signed_dmg_and_touches_no_notary_tool(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
+        work = self.root / 'notary-notary'
         evidence = json.loads(self.evidence.read_text())
         self.assertEqual(evidence, {'schema_version': 1, 'mode': 'dry-run', 'notarization': 'skipped',
+                                    'stapling': 'skipped',
+                                    'payload': {'zip_sha256': sha(b'zip'), 'zip_bytes': 3, 'notarization': 'skipped'},
                                     'dmg': {'file': self.dmg.name, 'sha256': sha(self.dmg.read_bytes()),
-                                            'bytes': self.dmg.stat().st_size, 'contents': 'matches SHA256SUMS'}})
+                                            'bytes': self.dmg.stat().st_size, 'contents': 'matches SHA256SUMS',
+                                            'signature': 'adhoc', 'verified': True}})
         self.assertEqual(json.loads(result.stdout), evidence)
-        self.assertEqual([c.split()[0] for c in self.calls()], ['hdiutil', 'hdiutil', 'hdiutil'])
-        self.assertEqual(self.calls()[0], f'hdiutil [create] [-volname] [Synthetic Product] [-srcfolder] [{self.kit}] '
-                                          f'[-fs] [HFS+] [-format] [UDZO] [{self.dmg}]')
-        self.assertIn('[attach] [-readonly] [-nobrowse] [-noautoopen] [-mountpoint]', self.calls()[1])
-        self.assertFalse((self.root / 'notary-notary/mount').exists())
+        self.assertEqual(self.calls(), [
+            f'ditto [-c] [-k] [--keepParent] [{self.payload}] [{work}/payload.zip]',
+            f'hdiutil [create] [-volname] [Synthetic Product] [-srcfolder] [{self.kit}] [-fs] [HFS+] [-format] [UDZO] '
+            f'[{self.dmg}]',
+            f'hdiutil [attach] [-readonly] [-nobrowse] [-noautoopen] [-mountpoint] [{work}/mount] [{self.dmg}]',
+            f'hdiutil [detach] [{work}/mount]',
+            f'codesign [--force] [--sign] [-] [{self.dmg}]',
+            f'codesign [--verify] [--strict] [{self.dmg}]',
+            f'codesign [-d] [--verbose=4] [{self.dmg}]'])
+        self.assertFalse((work / 'mount').exists())
+        self.assertFalse((work / 'payload.zip').exists())
+
+    def test_dry_run_refuses_a_failed_zip_or_a_dmg_that_is_not_ad_hoc(self):
+        def fresh():
+            self.dmg.unlink(missing_ok=True)
+            self.evidence.unlink(missing_ok=True)
+            shutil.rmtree(self.root / 'notary-notary', ignore_errors=True)
+            (self.control / 'calls.log').unlink(missing_ok=True)
+        (self.control / 'ditto-fail').write_text('')
+        self.refused('payload_zip_failed', 4)
+        self.assertFalse(any(c.startswith('hdiutil') for c in self.calls()))
+        (self.control / 'ditto-fail').unlink()
+        for name, value in (('verify-fail', ''), ('signature', 'size=9000')):
+            with self.subTest(name=name):
+                fresh()
+                previous = (self.control / name).read_text() if (self.control / name).exists() else None
+                (self.control / name).write_text(value)
+                self.refused('dmg_sign_failed', 5)
+                self.assertFalse(self.evidence.exists())
+                if previous is None:
+                    (self.control / name).unlink()
+                else:
+                    (self.control / name).write_text(previous)
 
     def test_real_run_notarizes_payload_and_dmg_staples_and_checks_gatekeeper(self):
         result = self.run_script(dry=False)
@@ -146,26 +194,34 @@ class NotarizeTests(unittest.TestCase):
             f'hdiutil [attach] [-readonly] [-nobrowse] [-noautoopen] [-mountpoint] [{work}/mount] [{self.dmg}]',
             f'hdiutil [detach] [{work}/mount]',
             f'codesign [--force] [--timestamp] [--sign] [{IDENTITY}] [{self.dmg}]',
-            f'codesign [--verify] [--strict] [{self.dmg}]',
+            f'codesign [--verify] [--strict] [-R] [{REQUIREMENT}] [{self.dmg}]',
             f'xcrun [notarytool] [submit] [{self.dmg}] [--keychain-profile] [release-notary] [--wait] '
             '[--output-format] [json]',
             f'xcrun [notarytool] [log] [{DMG_ID}] [--keychain-profile] [release-notary] [{work}/dmg-log.json]',
             f'xcrun [stapler] [staple] [{self.dmg}]',
             f'xcrun [stapler] [validate] [{self.dmg}]',
+            f'codesign [--verify] [--strict] [-R] [{REQUIREMENT}] [{self.dmg}]',
             f'spctl [-a] [-vv] [-t] [open] [--context] [context:primary-signature] [{self.dmg}]'])
         self.assertFalse((work / 'payload.zip').exists())
         evidence = json.loads(self.evidence.read_text())
-        self.assertEqual(evidence['payload'], {'submission_id': PAYLOAD_ID, 'status': 'Accepted', 'issues': 0})
+        self.assertEqual(evidence['payload'], {'zip_sha256': sha(b'zip'), 'zip_bytes': 3, 'submission_id': PAYLOAD_ID,
+                                               'status': 'Accepted', 'issues': 0})
         self.assertEqual(evidence['dmg']['submission_id'], DMG_ID)
+        self.assertEqual((evidence['dmg']['team_id'], evidence['dmg']['requirement']), (TEAM, 'developer-id-team'))
         self.assertEqual(evidence['dmg']['sha256'], sha(self.dmg.read_bytes()))
         self.assertEqual((evidence['mode'], evidence['stapler_validate'], evidence['spctl']),
                          ('notarized', 'ok', 'accepted: Notarized Developer ID'))
         (self.control / 'issues').write_text('[]')
         self.evidence.unlink()
         self.dmg.unlink()
-        import shutil
         shutil.rmtree(work)
         self.assertEqual(self.run_script(dry=False).returncode, 0)
+
+    def test_a_certificate_sha1_identity_is_accepted_with_its_team(self):
+        result = self.run_script('--identity', '0123456789ABCDEF0123456789ABCDEF01234567', dry=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'codesign [--force] [--timestamp] [--sign] [0123456789ABCDEF0123456789ABCDEF01234567] '
+                      f'[{self.dmg}]', self.calls())
 
     def test_only_a_keychain_profile_ever_reaches_notarytool(self):
         text = SCRIPT.read_text()
@@ -184,10 +240,20 @@ class NotarizeTests(unittest.TestCase):
 
     def test_notary_and_gatekeeper_refusals(self):
         def fresh():
-            import shutil
             self.dmg.unlink(missing_ok=True)
             shutil.rmtree(self.root / 'notary-notary', ignore_errors=True)
             (self.control / 'calls.log').unlink(missing_ok=True)
+            (self.control / 'stapled').unlink(missing_ok=True)
+        fresh()
+        (self.control / 'verify-fail').write_text('')  # Another team or no Developer ID: before any DMG submission.
+        self.refused('dmg_sign_failed', 5, dry=False)
+        self.assertFalse(any('notarytool] [submit] [' + str(self.dmg) in c for c in self.calls()))
+        (self.control / 'verify-fail').unlink()
+        fresh()
+        (self.control / 'verify-fail-stapled').write_text('')  # The stapled DMG is checked again before spctl.
+        self.refused('gatekeeper_refused', 8, dry=False)
+        self.assertFalse(any(c.startswith('spctl') for c in self.calls()))
+        (self.control / 'verify-fail-stapled').unlink()
         cases = [('submit-status', 'Invalid', 'notarization_rejected', 6),
                  ('issues', '[{"severity":"error","path":"x"}]', 'notarization_rejected', 6),
                  ('validate-exit', '65', 'staple_failed', 7)]
@@ -226,10 +292,13 @@ class NotarizeTests(unittest.TestCase):
         secretish = 'Hunter2-' + 'x' * 8
         real = {'--kit': str(self.kit), '--dmg': str(self.dmg), '--volume-name': 'Synthetic Product',
                 '--evidence': str(self.evidence), '--payload': str(self.payload), '--identity': IDENTITY,
-                '--profile': 'release-notary'}
+                '--team-id': TEAM, '--profile': 'release-notary'}
         cases = [({'--profile': secretish + ' y'}, []), ({'--profile': '-x'}, []),
                  ({'--identity': 'Apple Development: X (ABCDE12345)'}, []),
                  ({'--identity': 'Developer ID Application: X (abcde12345)'}, []),
+                 ({'--identity': 'Developer ID Application: X (ZYXWV98765)'}, []),  # not the --team-id
+                 ({'--team-id': None}, []), ({'--team-id': 'abcde12345'}, []), ({'--team-id': 'ABCDE1234'}, []),
+                 ({'--identity': '0123456789abcdef0123456789abcdef01234567'}, []),
                  ({'--identity': secretish + ' $(id)'}, []), ({'--dmg': 'relative.dmg'}, []),
                  ({'--dmg': str(self.assets / 'x.zip')}, []), ({'--volume-name': ' leading'}, []),
                  ({'--evidence': str(self.root / 'notary.txt')}, []), ({'--kit': '/tmp/kit'}, []),
@@ -247,6 +316,12 @@ class NotarizeTests(unittest.TestCase):
         self.refused('usage', 2)
         self.dmg.unlink()
         self.refused('usage', 2, '--profile', 'release-notary')  # --dry-run takes no notary input
+        self.refused('usage', 2, '--team-id', TEAM)
+        dry = ['--kit', str(self.kit), '--dmg', str(self.dmg), '--volume-name', 'Synthetic Product',
+               '--evidence', str(self.evidence), '--dry-run']  # The dry run needs the payload too.
+        result = subprocess.run(['/bin/sh', '-p', str(self.script), *dry], capture_output=True, text=True, timeout=60,
+                                env={'PATH': '/usr/bin:/bin'})
+        self.assertEqual((result.returncode, result.stderr.strip()), (2, '{"schema_version":1,"error_code":"usage"}'))
         self.assertEqual(self.calls(), [])
 
 
