@@ -76,11 +76,12 @@ fixed code (for example `claude_registration_conflict` or `recovery_limit`), or
 way, and other launcher actions refuse as `bundle_admission_failed`. Recovery retains one lease, journal, original config bytes and exact receipts;
 repeating the same admitted installation verifies/reuses it, without consulting the
 `claude` CLI again. Apart from those registration commands a first install performs no login,
-Keychain operation, service start or stop, or session mutation. An upgrade, a rollback and
-`--adopt-legacy` stop only the receipt-bound (or adopted) broker, start it again only if it was
-running, and rewrite only the `expected_package_version` line of `runtime.toml`; `uninstall` stops only
-the receipt-bound broker and writes nothing in the session directory. None of them logs in or touches
-the Keychain. A launch checks the release
+Keychain operation, service start or stop, or session mutation. The one exception is a first install
+with `--adopt-legacy`: it stops the adopted broker (after the pending-send gate), starts it again if it
+was running, and rewrites only the `expected_package_version` line of `runtime.toml`. An upgrade and a
+rollback likewise stop only the receipt-bound (or adopted) broker, start it again only if it was
+running, and rewrite only that line; `uninstall` stops only the receipt-bound broker and writes nothing
+in the session directory. None of them logs in or touches the Keychain. A launch checks the release
 tree, index, receipt, pointer, transaction journal and home binding, and only the shape of
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
@@ -339,11 +340,13 @@ Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
    and every archive member before extraction, and the installer from the extracted tree then does the
    [bundle installation](#private-bundle-0530dev0) and client registrations above. The stage directory
    is not removed by the scripts.
-5. `Install.command` prints the installer's JSON result. After a first install it continues only when
-   `status` is `activation_required` and the activation argv is exactly the installed release's
-   `python3 -I -S -B launcher.py connect`; it then prints `Installed. Starting the Telegram login
-   (connect) in this window.` After an [upgrade](#upgrade) or a repeat (`status: upgraded` with
-   `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`) whose
+5. `Install.command` prints the installer's JSON result and accepts exactly the results the installer
+   returns for a kit. After a first install it continues only when `status` is `activation_required`
+   with `installation` `installed` (or `reused` on a repeat) and the activation argv is exactly the
+   installed release's `python3 -I -S -B launcher.py connect`; it then prints `Installed. Starting the
+   Telegram login (connect) in this window.` After an [upgrade](#upgrade) or its repeat (`status:
+   upgraded` with `installation` `upgraded` or `reused`), or a repeat of the release a finished
+   [rollback](#rollback) went back to (`status: rolled_back` with `installation: reused`), whose
    `release_root` is this kit's release, it prints `Installation is up to date. Running connect in this
    window; a ready session reports already_connected.` Either way it runs that release's `connect` in
    the same Terminal, so the QR page opens and the final result prints there; scan it as under
@@ -368,7 +371,7 @@ Its refusals print a text line and `{"schema_version":1,"error_code":"<code>"}` 
 | `kit_unavailable` | 3 | Not started by an absolute path, or the folder cannot be resolved. |
 | `kit_incomplete` | 3 | A required kit file is missing or is a link. |
 | `bootstrap_failed` | 4 | `bootstrap.sh` or the installer refused; its own line is printed first. A `bootstrap.sh` refusal is `{"schema_version":1,"error_code":…,"retained_stage":…}`; an installer refusal is `{"status":"refused","code":…}`, with `pending_action` for `transaction_pending` ([codes](reference.md#installer-refusal-codes)). |
-| `activation_unexpected` | 5 | The installer result was neither `activation_required` with the exact activation argv nor an upgrade or repeat of this kit's release (`upgraded` with `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`). |
+| `activation_unexpected` | 5 | The installer result was neither a first install (`activation_required` with `installation` `installed` or `reused` and the exact activation argv) nor an upgrade or repeat of this kit's release (`upgraded` with `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`). |
 | `activation_failed` | 6 | `connect` ended unsuccessfully; its own result is printed above. |
 
 `bootstrap.sh` refuses with `{"schema_version":1,"error_code":…,"retained_stage":…}` on stderr:
@@ -477,12 +480,14 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
    before anything runs. Then the pinned `bootstrap.sh` installs with `--claude-code plugin` and
    `--seed-team <the pinned Team ID>`. The folder is removed on success and kept on failure, and a
    refusal names it as `retained`.
-4. The script prints the installer JSON on stdout and exits 0 for a first install
-   (`status: activation_required`) and for an [upgrade](#upgrade) or a repeat (`status: upgraded` with
-   `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`); any other
-   result refuses as `result_invalid`. After a first install run its `activation_command` (`connect`)
-   as for any install; the paired `telegram-setup` skill walks an assistant through it. Reconnect with
-   `/mcp` (restart Claude Code if `/mcp` does not list the server).
+4. The script prints the installer JSON on stdout and exits 0 for exactly the results the installer
+   returns for a kit: a first install (`status: activation_required` with `installation` `installed`, or
+   `reused` on a repeat), an [upgrade](#upgrade) or its repeat (`status: upgraded` with `installation`
+   `upgraded` or `reused`), or a repeat of the release a finished [rollback](#rollback) went back to
+   (`status: rolled_back` with `installation: reused`); any other result refuses as `result_invalid`.
+   After a first install run its `activation_command` (`connect`) as for any install; the paired
+   `telegram-setup` skill walks an assistant through it. Reconnect with `/mcp` (restart Claude Code if
+   `/mcp` does not list the server).
 5. If `claude_code_user_entry` is `present`, remove the older user-scope entry yourself with
    `claude mcp remove telegram_search -s user`, or the tool set appears twice.
 
@@ -534,7 +539,8 @@ retried by an upgrade.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
-or an explicitly given `--claude-code` mode other than the installed one, refuses as `upgrade_conflict`.
+or an explicitly given `--claude-code` mode other than the installed one, refuses as `upgrade_conflict`,
+also when the kit is the installed release's own (a repeat).
 Another install, upgrade, rollback or uninstall started while one is unfinished refuses as
 `transaction_pending`, and the refusal's `pending_action` (`install`, `upgrade`, `rollback` or
 `uninstall`) names the command to repeat first.
@@ -553,7 +559,11 @@ RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
 
 It re-registers the previous release's entries by the same owned-entry rules, rewrites the broker plist,
 passes the same pending-send gate, restores the `runtime.toml` version line and switches `current.json`
-back. The result is `status: rolled_back` with `next_action: restart_mcp_clients`.
+back. The result is `status: rolled_back` with `next_action: restart_mcp_clients`. Repeating the
+rollback, or running the kit of the release it went back to again (its `Install.command`, the same
+`bootstrap.sh` command, or for a `plugin`-mode installation that release's plugin `bin/install`), changes
+nothing and returns that result with `installation: reused` and without `service`; the newer kit
+upgrades again.
 
 It refuses as `rollback_unavailable` when there is no previous release, and as `rollback_refused` when
 newer state exists: `enrollment.json` differs from its state when the upgrade began (for example after
@@ -576,14 +586,20 @@ client `skipped`, `unavailable` or `not_found`, in the result fields `service`, 
 `claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
 present after its removal attempt; repeat the command. An unfinished first install refuses as
 `transaction_pending` with `pending_action: install` and is left as it is; repeat the install first.
+That check, and the read of the install intent the last step needs, come before anything is removed:
+an unreadable intent refuses as `initialization_conflict` with nothing changed, and only the exact
+staged folder the intent records counts as an unfinished first install, so something else that later
+appeared under that folder's name stays and does not stop the uninstall.
 
 Last, the root is renamed to `~/Library/Application Support/.TelegramSearch-removed-<random>`; that
 folder is removed, then `.TelegramSearch.install-intent.json`. Only the folder the intent binds (the
-root's own directory) is removed; a lookalike folder with a similar name stays. If uninstall is
-interrupted after that rename, an install refuses as `transaction_pending` with
-`pending_action: uninstall`, and the only launcher left is the one inside the renamed folder: repeat
-`uninstall` with `<that folder>/releases/<sha256>/launcher.py`, run the same way as above. If the
-interruption came after the folder was gone, the next install removes the leftover intent itself.
+root's own directory) is removed; a lookalike folder with a similar name stays. The rename is the
+uninstall's last journaled step: every entry and skill copy it removes is gone by then. If uninstall is
+interrupted after the rename, even partway through removing the folder (whose own launcher may then no
+longer start), the next install first finishes removing that folder and the intent, then installs.
+`uninstall` repeated with `<that folder>/releases/<sha256>/launcher.py`, while that launcher still
+starts, finishes the same way and reports `installation: absent`. If the interruption came after the
+folder was gone, the next install removes the leftover intent itself.
 
 It never touches the Telegram session, `enrollment.json`, `runtime.toml`, the managed key or any
 Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`. The Claude Code

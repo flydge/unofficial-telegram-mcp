@@ -2033,8 +2033,12 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   killed first install's staged root is removed only when every entry in it is one the installer creates
   (an empty one only under one of its fixed attempt names), an older intent temporary only when it parses
   as the intent, and the root an uninstall retired only while it is the exact directory the install
-  intent binds; the intent goes last. A lookalike stays. An unfinished first install or uninstall is
-  named by the next action (`transaction_pending` with `pending_action`), never half-removed.
+  intent binds; the intent goes last. A lookalike stays, also one under the intent's recorded staged name
+  after the root's publication. An unfinished first install (its exact bound staged root) or an uninstall
+  short of its retiring rename is named by the next action (`transaction_pending` with `pending_action`),
+  never half-removed; uninstall reads the intent and makes that check before it removes anything. After the
+  retiring rename, the uninstall's last journaled step, the next install or uninstall finishes removing
+  the retired root, also when an interruption left it partly removed.
 
 The release trees of earlier versions stay in `releases/` until an uninstall removes the root. The
 checks are cooperative: they detect drift and refuse; they do not make arbitrary editors take the lease.
