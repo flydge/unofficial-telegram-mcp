@@ -263,7 +263,7 @@ class PreparePayloadTests(unittest.TestCase):
                          (2, 'unreleased', 'incomplete', {'kind': 'adhoc', 'team_id': None}, __version__))
         self.assertEqual(manifest['native_lock_sha256'], hashlib.sha256(inputs.native_lock).hexdigest())
         launcher = (payload / 'launcher.py').read_text()
-        self.assertEqual(re.findall(r"^RELEASE_VERSION='(.*)'$", launcher, re.M), [__version__])
+        self.assertEqual(launcher_versions(launcher), [[__version__], [__version__]])
         self.assertEqual((payload / 'source/tdlib/td/generate/scheme/td_api.tl').read_bytes(), SCHEMA)
         self.assertEqual((payload / 'source/project/packaging/tdlib-lock.json').read_bytes(), inputs.native_lock)
         self.assertNotIn('app/share/man/man1/segno.1', files)
@@ -402,22 +402,30 @@ class PreparePayloadTests(unittest.TestCase):
             self.assertEqual(str(caught.exception), 'lock_invalid')
 
 
+def launcher_versions(text):
+    return [site.findall(text) for site in PP.LAUNCHER_SITES]
+
+
 class LauncherVersionTests(unittest.TestCase):
     def test_committed_launcher_admits_exactly_this_package_version(self):
         text = (ROOT / 'packaging/launcher.py').read_text()
-        self.assertEqual(re.findall(r"^RELEASE_VERSION='(.*)'$", text, re.M), [__version__])
-        self.assertEqual(text.count(__version__), 1)  # Every use goes through the generated line.
+        self.assertEqual(launcher_versions(text), [[__version__], [__version__]])
+        self.assertEqual(text.count(__version__), 2)  # Only the two generated sites name a version.
 
-    def test_generation_rewrites_the_one_line_and_refuses_anything_else(self):
+    def test_generation_rewrites_both_sites_and_refuses_anything_else(self):
         template = (ROOT / 'packaging/launcher.py').read_bytes()
         generated = PP.generate_launcher(template, '9.9.9.dev1').decode()
-        self.assertEqual(re.findall(r"^RELEASE_VERSION='(.*)'$", generated, re.M), ['9.9.9.dev1'])
-        self.assertEqual(generated.replace("'9.9.9.dev1'", f"'{__version__}'"), template.decode())
-        for label, (data, version) in {'no line': (b'print(1)\n', '1.0'),
-                                       'two lines': (b"RELEASE_VERSION='1'\nRELEASE_VERSION='2'\n", '1.0'),
-                                       'quote in version': (template, "1.0'"), 'empty version': (template, '')}.items():
+        self.assertEqual(launcher_versions(generated), [['9.9.9.dev1'], ['9.9.9.dev1']])
+        self.assertEqual(generated.replace('9.9.9.dev1', __version__), template.decode())
+        admitted, helper = b"value['release_version']!='1.0'\n", b"print('1.0: mcp |')\n"
+        for label, (data, version) in {
+                'no sites': (b'print(1)\n', '1.0'), 'help site missing': (admitted, '1.0'),
+                'admitted site missing': (helper, '1.0'), 'duplicate site': (admitted * 2 + helper, '1.0'),
+                'sites disagree': (admitted + helper.replace(b'1.0', b'2.0'), '1.0'),
+                'quote in version': (template, "1.0'"), 'empty version': (template, '')}.items():
             with self.subTest(label), self.assertRaises(PP.PayloadError):
                 PP.generate_launcher(data, version)
+        self.assertEqual(launcher_versions(PP.generate_launcher(admitted + helper, '3.0').decode()), [['3.0'], ['3.0']])
 
 
 class CommittedPayloadLockTests(unittest.TestCase):

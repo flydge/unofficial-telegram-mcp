@@ -49,7 +49,8 @@ FETCH_TIMEOUT = 120
 TOOL_TIMEOUT = 300
 CHUNK = 1024 * 1024
 TOOL_ENV = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
-VERSION_LINE = re.compile(r"^RELEASE_VERSION='([^'\n]*)'$", re.M)
+# The launcher's two version literals: the admitted index release_version and its --help line.
+LAUNCHER_SITES = (re.compile(r"value\['release_version'\]!='([^'\n]*)'"), re.compile(r"print\('([^'\n]*): mcp \|"))
 VERSION = re.compile(r'^[0-9A-Za-z.+-]{1,64}$')
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
 HASH = re.compile(r'^[0-9a-f]{64}$')
@@ -444,14 +445,17 @@ def manifest_facts(export_src, python=sys.executable):
 
 
 def generate_launcher(template, version):
-    """The launcher with its one admitted-version line regenerated from __version__."""
+    """The launcher with its admitted version regenerated from __version__ at both closed sites."""
     _need(type(version) is str and VERSION.match(version) is not None, 'manifest_failed')
     try:
         text = template.decode('utf-8')
     except UnicodeError:
         raise PayloadError('manifest_failed') from None
-    _need(len(VERSION_LINE.findall(text)) == 1, 'manifest_failed')
-    return VERSION_LINE.sub(lambda _: f"RELEASE_VERSION='{version}'", text).encode()
+    found = [site.findall(text) for site in LAUNCHER_SITES]
+    _need(all(len(f) == 1 for f in found) and found[0] == found[1], 'manifest_failed')
+    for site in LAUNCHER_SITES:
+        text = site.sub(lambda m: m.group(0)[:m.start(1) - m.start(0)] + version + m.group(0)[m.end(1) - m.start(0):], text)
+    return text.encode()
 
 
 def project_distribution(files, version, tree):
