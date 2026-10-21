@@ -26,10 +26,12 @@ step seems to need one, stop and use the Terminal fallback at the end.
      (it reads its configuration only at launch), then go to step 4.
    - **Claude Code plugin** (`telegram-local`, added with `/plugin marketplace add` and
      `/plugin install`): the plugin carries no runtime until it is installed, and its server stops with
-     `runtime_not_installed`. With the user's go-ahead, run
-     `/bin/sh -p "<plugin root>/bin/install"` with no arguments, where `<plugin root>` is the directory
-     the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`); if you cannot tell what it is, ask the user
-     to run the command instead of guessing a path. It prints the installer result with
+     `runtime_not_installed`. First read `<plugin root>/release-pins.json`, where `<plugin root>` is the
+     directory the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`), and show the user its `version` and
+     `team_id`; continue only when `team_id` is the publisher Team ID `256X5MUA6S` from the project
+     README. With the user's go-ahead, run `/bin/sh -p "<plugin root>/bin/install"` with no arguments;
+     if you cannot tell what the plugin root is, ask the user to run the command instead of guessing a
+     path. It prints the installer result with
      `claude_code: plugin`. Continue at step 2 (over an installed release it upgrades instead; see
      "Upgrade, rollback and uninstall").
    - **Shell route** (`/bin/sh -p bootstrap.sh …` from a kit folder, with `--claude-code user`, `plugin` or

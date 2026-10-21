@@ -86,10 +86,15 @@ Ask your assistant:
 
 # Private bundle (not distributed)
 
-Version 0.52.0 also has a private authenticated bundle (not distributed). It supplies
-standalone Python, the pinned dependencies and TDLib, and a recoverable first installation on
-Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed. See
-[installation](docs/install.md).
+Version 0.52.0 also has a private authenticated bundle (not distributed); its current development
+candidate is 0.53.0.dev0. It supplies standalone Python, the pinned dependencies and TDLib, and a
+recoverable first installation on Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed.
+See [installation](docs/install.md).
+
+**Publisher Team ID: `256X5MUA6S`.** Signed release assets (0.53 and later; none is published yet)
+carry this Developer ID Team ID. Before running anything you download, compare it with the `team_id`
+of `plugins/telegram-local/release-pins.json` at the release tag and with the DMG's signature, as the
+[install guide](docs/install.md#publisher-team-id-and-what-binds-what) shows.
 
 **QR-first login (0.52):**
 - **What the installer does.** It registers the MCP server in Codex and, when the `claude` CLI is
@@ -101,8 +106,8 @@ Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed. See
   Terminal phone/code setup remains as a fallback.
 - **Status.** It was accepted for real on the owner's Mac on 20.10.2026. Installing the bundle on a
   clean macOS user is deferred to the backlog.
-- **Open beyond 0.52.0:** public hosting, Developer ID signing and notarization, and complete
+- **Open beyond 0.52.0:** public hosting, the Developer ID signed and notarized build, and complete
   source/redistribution review.
 
-Details and the shared-API-identity risk:
+Details of the 0.53.0.dev0 candidate and the shared-API-identity risk:
 [the private bundle](docs/install.md#private-bundle-0530dev0).

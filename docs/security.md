@@ -1900,11 +1900,20 @@ The shim only chooses a candidate path. The launcher then re-admits the receipt,
 file of that release tree by hash before importing anything, and it admits only the release the
 receipt names, so a pointer to any other tree fails there.
 
-**The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's committed
-`release-pins.json`, reviewed with the plugin commit the marketplace pins: no environment value,
-argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the reviewed bytes
-(sorted keys, two-space indent, one newline) and its `version` must equal `plugin.json`'s. Unpublished
-pins refuse (`release_not_published`), and published pins must carry a Team ID. Each of the four
+**The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's own files,
+`bin/install` and `release-pins.json`, as the user's marketplace clone holds them. The marketplace entry
+names the plugin by a relative path in this repository with no ref or commit, so that is whatever commit
+the clone last added or updated to, and a marketplace update can change both the installer and its pins
+without a separate review. Nothing pins a plugin commit. In a release, `release-pins.json` is the
+release build's own file, copied byte for byte in the release commit, which carries the tag
+([releasing](releasing.md), section 4), so the plugin copy at the tag `v<version>` is the reference to
+compare with. Before running the installer, inspect `<plugin root>/release-pins.json`: `team_id` must be
+the publisher Team ID `256X5MUA6S` stated in the README and the install guide, and `version` the release
+you expect; compare the file with `plugins/telegram-local/release-pins.json` at that tag. No environment
+value, argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the
+canonical bytes (sorted keys, two-space indent, one newline) of the one schema
+(`packaging/release_pins.py`) and its `version` must equal `plugin.json`'s. Unreleased pins refuse
+(`release_not_published`), and published pins must carry a Team ID. Each of the four
 assets comes from the fixed GitHub Releases URL pattern through `/usr/bin/curl -q --proto =https
 --proto-redir =https --tlsv1.2 --fail --silent --location --max-redirs 5`, with a 30-second connect
 timeout, a per-asset time limit and `--max-filesize` set to the pinned size. There is one attempt per
@@ -1912,8 +1921,9 @@ asset, no retry and no resume, so assets of different uploads are never mixed. T
 folder created under your home, and each must match its pinned size and sha256 before anything runs.
 Then the pinned `bootstrap.sh` installs with `--claude-code plugin --seed-team <pinned Team ID>`.
 `curl` sets no quarantine, so Gatekeeper never evaluates that seed; the Team ID check of its Developer
-ID designated requirement, on top of the sha256 pins, is what binds it to the publisher. The plugin
-never passes `--adopt-legacy`.
+ID designated requirement, on top of the sha256 pins, binds it to the Team ID the pins name. Both come
+from the plugin's files, so they bind the seed to the publisher only as far as those files are the
+reviewed ones and their `team_id` is `256X5MUA6S`. The plugin never passes `--adopt-legacy`.
 
 In plugin mode the installer writes no Claude Code user-scope entry and no `~/.claude/skills` copy. An
 existing user-scope entry is only noted (`claude_code_user_entry: present`), never removed. Every
@@ -1922,14 +1932,34 @@ plugin tool name, `mcp__plugin_<plugin>_<server>__<tool>`, fits the client's 64-
 
 ## Signing and Team ID trust chain (0.53 candidate)
 
-This is the chain from a downloaded kit to the running interpreter, outermost first. The Developer ID
-steps cannot be exercised until the owner's certificate exists; the ad hoc dry run exercises the same
-code with the identity `-`.
+This is the chain from a downloaded kit to the running interpreter, outermost first. The owner
+provisioned the Developer ID Application identity and the notary profile on 21.10.2026 (the signing
+preflight returned `notary: ok` for Team ID `256X5MUA6S`). The Developer ID steps have still not run:
+the signed and notarized build, its Gatekeeper observation and publication are owner-session rows. The
+ad hoc dry run exercises the same code with the identity `-`.
 
-1. **Pins.** The seed's sha256 and byte count and the index's sha256 are literals in `Install.command`
-   (the plugin's committed pins, or the operator's, on the other paths). `bootstrap.sh` checks the seed
-   against them before running it. The seed then authenticates the archive and every member against the
-   index before extraction, and the launcher re-hashes the installed tree at every start.
+**What binds what.** The trust root of the curl path, and the reference the plugin path is compared
+with, is `release-pins.json` as committed in the repository at the release tag
+(`plugins/telegram-local/release-pins.json`), never the copy published next to the assets: whoever can
+replace the assets can replace that copy too. The plugin's `bin/install` reads its own copy, the one in
+the user's marketplace clone, which holds the same bytes only while the clone is at that tag (see the
+runtime installer above). The release build writes
+the file in one schema (`packaging/release_pins.py`) and the release commit copies it byte for byte
+([releasing](releasing.md), section 4). The pins name the Team ID and bind `bootstrap.sh`, the seed, the
+index and the archive by sha256 and size; a user checks all four and compares `team_id` with the
+publisher Team ID `256X5MUA6S` stated in the README and the install guide before running anything
+([curl path](install.md#curl-path)). The tag binds the pins only as far as the repository is trusted:
+anyone who can push to it can move a tag or change the file, which is why the Team ID is compared with
+a value published outside the release. On the DMG path the DMG's Developer ID signature and stapled
+ticket cover the kit, including `Install.command`, `bootstrap.sh` and the pins embedded in
+`Install.command`; spctl accepts any notarized team, so the DMG's `TeamIdentifier` is compared too.
+
+1. **Pins.** The seed's sha256 and byte count and the index's sha256 are literals in `Install.command`,
+   rendered from the kit's `release-pins.json`; on the curl path they come from the tagged repository
+   copy above and on the plugin path from the plugin's copy, and both also pin `bootstrap.sh` itself.
+   `bootstrap.sh` checks the seed against
+   them before running it. The seed then authenticates the archive and every member against the index
+   before extraction, and the launcher re-hashes the installed tree at every start.
 2. **Team ID, `--seed-team`.** With `--seed-team <TEAMID>`, after the pins and before the seed runs,
    `bootstrap.sh` runs `codesign --verify --strict -R` with the requirement
    `native_runtime.designated_requirement(TEAMID)`: Apple's anchor, a certificate chain through Apple's
@@ -1946,8 +1976,9 @@ code with the identity `-`.
    `native_runtime` (source commit, TDLib version, schema hash, minimum OS, ABI, license source, OpenSSL
    version, build method) and the unsigned artifacts must equal the v1 pins. An `adhoc` lock has no
    Team ID and ships the unsigned bytes. A `developer-id` lock ships different bytes and its Team ID
-   must be listed in the row. No row lists a Team ID yet, so no Developer ID lock is admitted until a
-   reviewed commit adds the owner's. At load each native passes `codesign --verify --strict`, plus the
+   must be listed in the row. The one row lists the publisher's team, `256X5MUA6S`; any other Team ID
+   needs a reviewed commit to the table before its lock is admitted. At load each native passes
+   `codesign --verify --strict`, plus the
    Team ID requirement for `developer-id`, and the manifest's publisher must equal the lock's kind and
    Team ID (`publisher_mismatch`).
 5. **Signing.** `packaging/sign_payload.py` signs every Mach-O found by its magic, matched against the
@@ -1977,12 +2008,17 @@ against the Team ID requirement before submission and again after stapling, and 
 notarized Developer ID. Separately, a zip of the signed payload tree is submitted so the notary service
 registers every Mach-O. The shipped `release.tar.gz` is not submitted: the service does not look inside
 it, so its members are not notary-inspected, and its integrity rests on the pinned index and the seed
-(step 1), not on Gatekeeper. The seed keeps the quarantine attribute `cp` copies, so Gatekeeper
-evaluates it and, because a bare Mach-O cannot be stapled, fetches its ticket online. The seed
-creates the extracted files with plain `openat` calls and copies no extended attribute, so they carry no
-quarantine and Gatekeeper does not evaluate them individually; this has not been confirmed by listing
-attributes on a real install. A file fetched with `curl` has no quarantine, so on that path only the
-pins and the Team ID check stand between the download and the seed.
+(step 1), not on Gatekeeper. `bootstrap.sh` keeps the quarantine attribute `cp` copies to the staged
+seed, so that Gatekeeper can evaluate it and, because a bare Mach-O cannot be stapled, fetch its ticket
+online. This is the design and has not been observed: no signed seed has run, and on the DMG path it
+also depends on the mounted volume's files carrying quarantine at all (an owner-session observation).
+The seed creates the extracted files with plain `openat` calls and copies no extended attribute, so they
+carry no quarantine and Gatekeeper does not evaluate them individually; this has not been confirmed by
+listing attributes on a real install. A file fetched with `curl` has no quarantine, so on that path only
+the pins from the tagged repository copy and the Team ID check stand between the download and the seed.
+`Install.command` itself is not code-signed, so no notarization ticket names it; the DMG's signature and
+ticket cover the image it ships in. How Gatekeeper treats the double-clicked script from a stapled,
+quarantined image is a known limit until the owner-session run observes it.
 
 **Keychain.** The managed database key's Keychain access is tied to the code identity of the runtime's
 interpreter. A different signing identity than the one that created the item can make macOS ask once;

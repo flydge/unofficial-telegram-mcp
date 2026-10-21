@@ -21,8 +21,9 @@ install for Apple Silicon macOS 26+. Its bundle supplies standalone Python,
 the exact runtime dependencies, pinned TDLib/OpenSSL and paired search/setup
 skills. It requires no consumer Python, Homebrew, Git or compiler. This is an
 unreleased private installation route; published 0.51 instructions below remain
-historical published support. Public hosting, publisher trust (Developer ID signing and
-notarization), source completeness and the clean-user install remain open.
+historical published support. Public hosting, the Developer ID signed and notarized build (the
+owner provisioned the identity and notary profile on 21.10.2026), source completeness and the
+clean-user install remain open.
 
 The 0.53 distribution path (a DMG with `Install.command`, the curl path, the Claude Code
 plugin, Claude Desktop registration, upgrade, rollback and uninstall) is described in
@@ -182,7 +183,8 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 ### Enabling more capabilities (candidate)
 
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
-a `0700` directory) with `expected_package_version = "0.52.0"`,
+a `0700` directory) with `expected_package_version` set to the running package version
+(`"0.53.0.dev0"` for this candidate),
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
 `forward_send`, `video_send`, `archive_chats`, `edit_own_text` and every extended reader are off. To enable more, edit that file
 yourself. Keep the pins as written and add only the capabilities you need from the
@@ -271,18 +273,21 @@ see [rollback](security.md#rollback).
 ## Install from the 0.53 kit: DMG, curl and plugin (development)
 
 **Nothing in this section is published.** The signed DMG, the GitHub release and every public
-release asset do not exist: Developer ID signing and notarization wait for the owner's signing setup
+release asset do not exist. The owner provisioned the Developer ID Application identity and the notary
+profile on 21.10.2026 (the signing preflight returned `notary: ok`); the signed and notarized build,
+its Gatekeeper observation and publication are owner-session rows
 ([owner checklist](plans/0.53-signing-owner-checklist.md)). The Claude Code plugin's
-`release-pins.json` is the unpublished placeholder (all-zero hashes, `"publication": "unpublished"`),
+`release-pins.json` is the unreleased placeholder (all-zero hashes, `"publication": "unreleased"`),
 so the plugin's `bin/install` refuses with `release_not_published` before any download, and the
 marketplace entry exists only in the repository.
 
 The text below describes what the committed scripts and installer do. Unit tests cover them with
 synthetic kits. On the build Mac an ad hoc dry run built a kit, and `bootstrap.sh --prepare-only`
-and `Install.command --prepare-only` from its mounted image both returned `verified: true`. A signed
-kit, a clean macOS user, Claude Desktop and the plugin on a real machine, and the owner's migration
-are owner-run rows that have not happened yet
-([spec, phase G](plans/0.53-client-distribution-spec.md)).
+and `Install.command --prepare-only` from its mounted image both returned `verified: true`; that run
+was recorded on 21.10.2026 (commits `c0f3cf3` and `a43985d`), before later changes to `bootstrap.sh`,
+`Install.command`, the launcher and the installer, and has not been repeated since. A signed kit, a
+clean macOS user, Claude Desktop and the plugin on a real machine, and the owner's migration are
+owner-run rows that have not happened yet ([spec, phase G](plans/0.53-client-distribution-spec.md)).
 
 ### The ad hoc dry run versus the signed build
 
@@ -291,8 +296,9 @@ kit with the ad hoc identity `-`. It differs from the signed build in these ways
 
 - Nothing is notarized or stapled and the DMG is signed ad hoc, so Gatekeeper refuses that DMG on any
   other Mac. It is a test artifact for the build Mac.
-- The kit's `release-pins.json` has `"publisher": "adhoc"` and `"team_id": null`. Its
-  `Install.command` therefore carries no Team ID and does not pass `--seed-team`.
+- The kit's `release-pins.json` has `"team_id": ""` and `"publication": "unreleased"`. Its
+  `Install.command` therefore carries no Team ID and does not pass `--seed-team`, and such pins never
+  become the plugin's (`release_build.py release-commit` refuses a dry-run output).
 - The seed and the payload's Mach-O files are signed ad hoc. The three TDLib/OpenSSL natives keep their
   pinned unsigned bytes. Passing `--seed-team` to `bootstrap.sh` with an ad hoc seed refuses as
   `seed_signature_invalid`.
@@ -307,11 +313,11 @@ product has its own name.
 
 | File | Purpose |
 | --- | --- |
-| `Install.command` | Generated for this kit. The seed and index pins, and a Developer ID kit's Team ID, are literals in the script. |
+| `Install.command` | Generated for this kit from its `release-pins.json`. The seed and index pins, and a Developer ID kit's Team ID, are literals in the script. Not code-signed (see [DMG path](#dmg-path)). |
 | `bootstrap.sh` | The reviewed entry script. |
 | `bootstrap-verifier` | The native seed that authenticates the index and archive. |
 | `release.tar.gz`, `release-index.json` | The bundle archive and the index it is checked against. |
-| `release-pins.json` | Release version, publisher, Team ID, publication and the seed, index and archive hashes and sizes. |
+| `release-pins.json` | The version, publication, Team ID, and the sha256 and size of `bootstrap.sh`, the seed, the index and the archive. The same schema, and in a release the same bytes, as the plugin's file (below). |
 | `README.txt`, `LICENSE`, `NOTICE`, `third-party-notices.md` | Short instructions and licences. |
 | `SHA256SUMS` | The sha256 of every other file. |
 
@@ -319,17 +325,47 @@ The release assets of the build would be the DMG, the five curl-path files (`boo
 `bootstrap-verifier`, `release.tar.gz`, `release-index.json`, `release-pins.json`),
 `release-provenance.json`, `corresponding-source-<version>.tar.gz` and a `SHA256SUMS` over them.
 
+### Publisher Team ID and what binds what
+
+The publisher's Developer ID Team ID is **`256X5MUA6S`** (also stated in the [README](../README.md)).
+A signed release carries it on the DMG, the seed and every Mach-O of the payload.
+
+- **The trust root** of the curl path is `release-pins.json` as committed in the repository at the
+  release tag: `plugins/telegram-local/release-pins.json` at `v<version>`. The release build writes that
+  file and the release commit copies it byte for byte ([releasing](releasing.md), section 4). The copy
+  published next to the assets, or inside a kit, holds the same bytes but proves nothing: whoever can
+  replace the assets can replace it too. The plugin path reads the plugin's own copy in your marketplace
+  clone, which holds the same bytes only while the clone is at that tag; compare the two before
+  installing ([Claude Code plugin](#claude-code-plugin), step 3).
+- **The pins** bind `bootstrap.sh`, the seed (`bootstrap-verifier`), `release-index.json` and
+  `release.tar.gz` by sha256 and size, and name the Team ID. Compare `team_id` with `256X5MUA6S` as
+  printed here, in a copy of this guide or the README you trust. The tag is only as trustworthy as the
+  repository: anyone who can push to it can move a tag or change the file, and the Team ID comparison
+  is the check that does not depend on where you downloaded from.
+- **`bootstrap.sh`** checks the seed's sha256 and size and, with `--seed-team`, its Developer ID
+  designated requirement for that Team ID before running it. The seed authenticates the index and every
+  archive member before extraction; the launcher re-hashes the installed tree at every start.
+- **On the DMG path** the DMG's own signature and stapled ticket cover the kit (`Install.command`,
+  `bootstrap.sh` and the pins embedded in `Install.command`); check them, Team ID included, before
+  opening it.
+
 ### DMG path
 
 Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
 
-1. Download the DMG. Optional checks before opening it: `/usr/bin/shasum -a 256 <dmg>` against the
-   `SHA256SUMS` asset, `xcrun stapler validate <dmg>`, and
+1. Download the DMG. Checks before opening it: `xcrun stapler validate <dmg>`;
    `spctl -a -vv -t open --context context:primary-signature <dmg>`, which should print `accepted`
-   and `source=Notarized Developer ID`. The release build runs the last two itself before it
-   accepts the image.
-2. Open the DMG and double-click `Install.command`. It runs in Terminal. How Gatekeeper treats a
-   double-clicked script from the stapled image has not been observed, because no signed image exists.
+   and `source=Notarized Developer ID`; and `codesign -dv <dmg> 2>&1 | grep TeamIdentifier`, which must
+   print `TeamIdentifier=256X5MUA6S`, because spctl accepts any notarized team. The release build runs
+   all three (the last as the Team ID's designated requirement) before it accepts the image. A
+   `shasum -a 256` match against the `SHA256SUMS` asset only shows the DMG is the uploaded one.
+2. Open the DMG and double-click `Install.command`. It runs in Terminal. **Known limit:**
+   `Install.command` is not code-signed, so no notarization ticket names it; the DMG's signature and
+   ticket cover the image it ships in. Whether Gatekeeper runs a double-clicked unsigned script from a
+   stapled, quarantined image, or asks for System Settings > Privacy & Security > Open Anyway, has not
+   been observed, because no signed image exists; the owner-session run records it
+   ([owner checklist](plans/0.53-signing-owner-checklist.md), section 7). The curl path below does not
+   depend on it.
 3. `Install.command` checks that it was started by an absolute path and that `bootstrap.sh`,
    `bootstrap-verifier`, `release.tar.gz` and `release-index.json` sit beside it as regular files
    (not links). It then runs `/usr/bin/env -i /bin/sh -p bootstrap.sh` with its embedded pins:
@@ -384,30 +420,54 @@ refused the index or archive) and `interrupted`. The installer's own refusals ar
 
 ### Curl path
 
-Without the DMG, fetch the five curl-path files into a folder you own and run the pinned
-`bootstrap.sh` yourself. The plugin's installer fetches four of them (it carries the pins itself) the
-same way from `https://github.com/flydge/unofficial-telegram-mcp/releases/download/v<version>/<file>`,
-which does not exist yet.
+Without the DMG, take the pins from the trust root (the tagged repository copy of `release-pins.json`,
+[above](#publisher-team-id-and-what-binds-what)), fetch the four assets into a fresh folder you own,
+and check every one of them, and the Team ID, before running anything. The plugin's installer fetches
+the same four assets from the same URL pattern and checks them against its own copy of the pins. No
+release exists yet, so these URLs do not resolve. Replace `<version>` with the release you install (for
+example `0.53.0`); `KIT` must be a new absolute folder you own, and `tg_check` compares one file with the
+size and sha256 its pin names.
 
 ```bash
-KIT="$HOME/tgmcp-kit"       # an absolute folder you own
-/bin/mkdir -m 700 "$KIT"
-for name in bootstrap.sh bootstrap-verifier release-index.json release.tar.gz release-pins.json; do
-  /usr/bin/curl -q --proto =https --proto-redir =https --tlsv1.2 --fail --silent --location \
-    --output "$KIT/$name" "https://github.com/flydge/unofficial-telegram-mcp/releases/download/v<version>/$name"
+VERSION=<version>
+KIT="$HOME/tgmcp-kit"
+REPO=https://github.com/flydge/unofficial-telegram-mcp
+PINS=https://raw.githubusercontent.com/flydge/unofficial-telegram-mcp/v$VERSION/plugins/telegram-local/release-pins.json
+tg_ready=no
+/bin/mkdir -m 700 "$KIT" && /usr/bin/curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 --fail \
+  --silent --location --output "$KIT/release-pins.json" "$PINS" && tg_ready=yes
+for name in bootstrap.sh bootstrap-verifier release-index.json release.tar.gz; do
+  [ "$tg_ready" = yes ] && /usr/bin/curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 --fail \
+    --silent --location --output "$KIT/$name" "$REPO/releases/download/v$VERSION/$name" || tg_ready=no
 done
-/usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh" \
-  --seed "$KIT/bootstrap-verifier" --seed-sha256 <seed.sha256> --seed-bytes <seed.bytes> \
-  --archive "$KIT/release.tar.gz" --index "$KIT/release-index.json" \
-  --trusted-index-sha256 <index.sha256> --seed-team <team_id> --claude-code user
+tg_pin() { /usr/bin/plutil -extract "$1" raw -o - "$KIT/release-pins.json"; }
+tg_check() {
+  [ "$(/usr/bin/stat -f %z "$KIT/$2")" = "$(tg_pin "${1}_bytes")" ] &&
+  [ "$(/usr/bin/shasum -a 256 "$KIT/$2" | /usr/bin/cut -d ' ' -f 1)" = "$(tg_pin "${1}_sha256")" ]
+}
+if [ "$tg_ready" = yes ] && [ "$(tg_pin team_id)" = 256X5MUA6S ] && [ "$(tg_pin publication)" = published ] &&
+   [ "$(tg_pin version)" = "$VERSION" ] && tg_check bootstrap bootstrap.sh &&
+   tg_check seed bootstrap-verifier && tg_check index release-index.json && tg_check archive release.tar.gz
+then
+  /usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh" \
+    --seed "$KIT/bootstrap-verifier" --seed-sha256 "$(tg_pin seed_sha256)" --seed-bytes "$(tg_pin seed_bytes)" \
+    --archive "$KIT/release.tar.gz" --index "$KIT/release-index.json" \
+    --trusted-index-sha256 "$(tg_pin index_sha256)" --seed-team "$(tg_pin team_id)" --claude-code user
+else
+  echo 'Stopped: the pins, the Team ID or a file does not match. Run nothing from this folder.'
+fi
 ```
 
-The values come from `release-pins.json`: `seed.sha256`, `seed.bytes`, `index.sha256` and `team_id`.
-Omit `--seed-team` only for an ad hoc dry-run kit, whose `team_id` is `null`. Each input must be a
-regular file you own, with one link and no group or world write bit; the seed is at most 2 MiB and the
-archive at most 1 GiB. The pins must come from a reviewed release input, not only from files fetched in
-the same download: a `release-pins.json` fetched next to the archive guards against corruption, not
-against a compromised download location. The Team ID check is what binds the seed to the publisher.
+Paste it into zsh, bash or sh as it is: it has no comments, which an interactive zsh would run as
+commands, and the quotes around `=https` keep zsh from expanding it. Nothing runs before every check
+passes: the folder is new and every download succeeded, the Team ID is the publisher's `256X5MUA6S`,
+the pins say `published` and name this version, and `bootstrap.sh`, the seed, the index and the archive
+each match their pinned size and sha256. Never take the pins from the `release-pins.json` uploaded
+next to the assets: it would come from the same place as the files it is meant to check. Each input
+must be a regular file you own, with one link and no group or world write bit; the seed is at most
+2 MiB and the archive at most 1 GiB. For an ad hoc dry-run kit on the build Mac (`team_id` empty,
+`unreleased`), run `bootstrap.sh` from that kit with its own pins and without `--seed-team`; it is a
+test artifact.
 
 The result is the installer's JSON with `activation_command`. Run that command from native Terminal
 (`connect` then runs inline), or let an assistant run it and `wait` as under
@@ -467,11 +527,25 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
 1. In Claude Code, add the marketplace and install the plugin:
    `/plugin marketplace add flydge/unofficial-telegram-mcp`, then
    `/plugin install telegram-local@unofficial-telegram-mcp`. The repository is not published yet, and
-   this guide does not verify Claude Code's own command syntax.
+   this guide does not verify Claude Code's own command syntax. The plugin's files, `bin/install` and
+   its `release-pins.json` included, are whatever commit your marketplace clone holds: the marketplace
+   names the plugin by a relative path with no ref, and a marketplace update can change both. Nothing
+   pins a plugin commit.
 2. Until the runtime is installed, the plugin's server `tg` stops at once with
    `{"schema_version":1,"error_code":"runtime_not_installed"}` on stderr.
-3. Install the runtime with `/bin/sh -p "<plugin root>/bin/install"` and no arguments, where
-   `<plugin root>` is the directory the plugin is installed in (Claude Code's `${CLAUDE_PLUGIN_ROOT}`).
+3. Before installing the runtime, inspect `<plugin root>/release-pins.json`, where `<plugin root>` is
+   the directory the plugin is installed in (Claude Code's `${CLAUDE_PLUGIN_ROOT}`): its `team_id` must
+   be the publisher Team ID `256X5MUA6S` and its `version` the release you expect, and it should equal
+   `plugins/telegram-local/release-pins.json` at the tag `v<version>` in the repository
+   ([trust root](#publisher-team-id-and-what-binds-what)), which this prints `same` for:
+
+   ```bash
+   /usr/bin/curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --location \
+     "https://raw.githubusercontent.com/flydge/unofficial-telegram-mcp/v<version>/plugins/telegram-local/release-pins.json" |
+     /usr/bin/cmp - "<plugin root>/release-pins.json" && echo same
+   ```
+
+   Then install the runtime with `/bin/sh -p "<plugin root>/bin/install"` and no arguments.
    The script refuses `plugin_invalid` unless it is started by an absolute path ending in
    `/bin/install`. It reads the plugin's committed `release-pins.json` and downloads the four assets
    `bootstrap.sh`, `bootstrap-verifier`, `release-index.json` and `release.tar.gz` from the fixed
@@ -491,7 +565,7 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
 5. If `claude_code_user_entry` is `present`, remove the older user-scope entry yourself with
    `claude mcp remove telegram_search -s user`, or the tool set appears twice.
 
-`bin/install` refuses with `release_not_published` (unpublished pins), `pins_invalid`,
+`bin/install` refuses with `release_not_published` (unreleased pins), `pins_invalid`,
 `plugin_invalid`, `download_failed`, `pin_mismatch`, `bootstrap_failed`, `result_invalid`,
 `dependency_unavailable`, `home_invalid`, `workspace_failed`, `cleanup_failed`, `invalid_arguments` or
 `interrupted`, each as one JSON line on stderr. Published pins must carry a Team ID.
@@ -612,12 +686,14 @@ By default the installer refuses foreign entries: a different `telegram_search` 
 user scope or Claude Desktop, and a broker plist it did not write (for example a source-venv broker). To
 migrate a 0.51 or 0.52 installation, pass `--adopt-legacy` as the **last** token of the `bootstrap.sh`
 command (any other position is `selection_invalid`). `Install.command` and the plugin never pass it. For
-the owner's migration, with `KIT` the kit folder and the pins from its `release-pins.json`:
+the owner's migration, with `KIT` the kit folder and the pins from the trust root (the tagged repository
+copy of `release-pins.json`, or for a kit from a checked DMG its own copy), all four files checked as in
+the [curl path](#curl-path):
 
 ```bash
 /usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh" --seed "$KIT/bootstrap-verifier" \
-  --seed-sha256 <seed.sha256> --seed-bytes <seed.bytes> --archive "$KIT/release.tar.gz" \
-  --index "$KIT/release-index.json" --trusted-index-sha256 <index.sha256> --seed-team <team_id> --adopt-legacy
+  --seed-sha256 <seed_sha256> --seed-bytes <seed_bytes> --archive "$KIT/release.tar.gz" \
+  --index "$KIT/release-index.json" --trusted-index-sha256 <index_sha256> --seed-team <team_id> --adopt-legacy
 ```
 
 then the printed activation command. It applies to a first install and to an upgrade, not to `rollback`.
@@ -634,11 +710,13 @@ then the printed activation command. It applies to a first install and to an upg
 ### Quarantine, notarization tickets and the Keychain
 
 - `bootstrap.sh` copies the seed with `cp`, which keeps `com.apple.quarantine` where the file has it (a
-  browser download does). Gatekeeper then evaluates the notarized seed when it runs. A bare Mach-O cannot
-  carry a stapled ticket, so its notarization ticket is fetched online on that first run; an offline first
-  run of a quarantined seed can be refused. The DMG itself is stapled.
+  browser download does), so that Gatekeeper can evaluate the notarized seed when it runs. A bare Mach-O
+  cannot carry a stapled ticket, so its notarization ticket would be fetched online on that first run, and
+  an offline first run of a quarantined seed could be refused. **Not yet observed:** no signed seed has
+  run, and on the DMG path it also depends on whether files on the mounted image carry quarantine; the
+  owner-session run records it. The DMG itself is stapled.
 - A file fetched with `curl` has no quarantine attribute, so Gatekeeper does not evaluate the seed. For
-  that path, and for the plugin, the sha256 pins and the Team ID check bind the seed.
+  that path, and for the plugin, the sha256 pins from the trust root and the Team ID check bind the seed.
 - The seed writes the extracted files itself and copies no extended attributes, so they carry no
   quarantine. The archive `release.tar.gz` is not a notarization subject; see
   [the notarization scope](security.md#signing-and-team-id-trust-chain-053-candidate).
