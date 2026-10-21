@@ -323,9 +323,9 @@ for every path.
 
 A row is at most 96 columns; wide characters count as two. A longer line continues on rows that start
 with `┆ `, and it breaks before a space, so a space at the break is visible right after `┆ `. Removing
-every line break followed by `┆ ` restores the logical lines exactly. A payload line can never start a
-row of its own: every payload row starts with `│ ` or `┆ `, and every other line break is marked
-`⟦U+XXXX⟧`.
+every line break followed by `┆ ` restores the logical lines exactly. No payload line can pass for a
+dialog line: every payload row starts with `│ ` or `┆ `, and every other line break in untrusted text
+is marked `⟦U+XXXX⟧`.
 
 The templates below show logical lines. `[...]` marks optional lines; `<...>` marks values.
 
