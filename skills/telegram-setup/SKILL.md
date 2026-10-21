@@ -30,7 +30,8 @@ step seems to need one, stop and use the Terminal fallback at the end.
      `/bin/sh -p "<plugin root>/bin/install"` with no arguments, where `<plugin root>` is the directory
      the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`); if you cannot tell what it is, ask the user
      to run the command instead of guessing a path. It prints the installer result with
-     `claude_code: plugin`. Continue at step 2.
+     `claude_code: plugin`. Continue at step 2 (over an installed release it upgrades instead; see
+     "Upgrade, rollback and uninstall").
    - **Shell route** (`/bin/sh -p bootstrap.sh …` from a kit folder, with `--claude-code user`, `plugin` or
      `skip`): the installer prints its JSON result. Continue at step 2.
 
@@ -112,10 +113,11 @@ It then refuses with `pending_send_unresolved` and nothing has changed. Ask the 
 MCP client (or leave the Telegram tools unused for about five minutes) and run it again; stop after
 two refusals.
 
-- **Upgrade:** the user runs the newer kit's `Install.command`, or the same `bootstrap.sh` command with
-  the newer pins and the installed `--claude-code` mode. The result is `status: upgraded`, and
-  `Install.command` then stops with `activation_unexpected`: that is how it ends an upgrade, not a
-  failure. Every client then reconnects.
+- **Upgrade:** the user runs the newer kit's `Install.command`, the same `bootstrap.sh` command with the
+  newer pins (without `--claude-code`, or with the installed mode), or in plugin mode a newer plugin's
+  `bin/install`. Each keeps the installed mode and prints `status: upgraded` (`installation: reused` on a
+  repeat), which is a success. `Install.command` then runs `connect` in the same window; with a ready
+  session it reports `already_connected`. Every client then reconnects.
 - **Rollback or uninstall:** the installed release's launcher with `rollback` or `uninstall` in place of
   `connect`. `RELEASE` is the `release_root` in
   `~/Library/Application Support/TelegramSearch/current.json`, for example
@@ -125,7 +127,10 @@ two refusals.
   Uninstall removes only what the installer owns; the Telegram session, enrollment and Keychain stay.
 - `downgrade_refused`, `upgrade_conflict`, `policy_conflict`, `rollback_unavailable`, `service_conflict`,
   `service_restart_failed`, `uninstall_incomplete`, `installation_refused`: stop and report the code.
-  `transaction_pending`: an earlier change is unfinished, so repeat that command first. Never edit
+  `transaction_pending`: an earlier install, upgrade, rollback or uninstall is unfinished, and
+  `pending_action` names it; repeat that command first. An uninstall interrupted after it renamed the
+  installation folder is repeated with the launcher inside
+  `~/Library/Application Support/.TelegramSearch-removed-<random>/releases/<sha256>/`. Never edit
   `runtime.toml`, the broker plist or a registration to get past a refusal.
 
 ## Terminal fallback

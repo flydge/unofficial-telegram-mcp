@@ -469,6 +469,33 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
             self.install(self.build('c', launcher=b'# third release\n'), claude_code='user')
         self.assertEqual(str(caught.exception), 'upgrade_conflict')
 
+    def test_a_kit_run_without_a_mode_keeps_the_installed_one(self):
+        """No --claude-code (Install.command, or bootstrap.sh without it): an upgrade, its resume and a repeat keep
+        the installed mode; only an explicitly different mode refuses."""
+        self.codex_present()
+        fake = self.claude()
+        with mock.patch('telegram_search_mcp.__version__', OLD_VERSION):
+            self.install(self.build('a', version=OLD_VERSION), claude_code='plugin')
+        b = self.build('b', launcher=b'# second release\n')
+        result = self.install(b)
+        self.assertEqual((result['status'], result['installation'], result['claude_code'], result['claude_skills']),
+                         ('upgraded', 'upgraded', 'plugin', 'skipped'))
+        self.assertEqual((self.receipt()['claude_code_mode'], fake.calls), ('plugin', []))
+        self.assertEqual(self.install(b, claude_code=None)['installation'], 'reused')
+        c = self.build('c', launcher=b'# third release\n')
+        for other in ('user', 'skip'):
+            with self.assertRaises(self.module().InstallError) as caught:
+                self.install(c, claude_code=other)
+            self.assertEqual(str(caught.exception), 'upgrade_conflict')
+        def crash(value):
+            if value == 'registration': raise RuntimeError('simulated crash')
+        with self.assertRaises(RuntimeError):
+            self.install(c, checkpoint=crash, claude_code='plugin')
+        result = self.install(c)  # The resume keeps the unfinished upgrade's mode.
+        self.assertEqual((result['status'], result['claude_code']), ('upgraded', 'plugin'))
+        self.assertEqual((self.receipt()['claude_code_mode'], fake.calls), ('plugin', []))
+        self.selection_check()
+
     def test_an_interrupted_upgrade_refuses_a_different_target_until_resumed(self):
         self.full()
         b = self.build('b', launcher=b'# second release\n')

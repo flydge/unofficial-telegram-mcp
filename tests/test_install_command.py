@@ -46,6 +46,16 @@ case "$mode" in
     other-verb) verb=setup;;
     other-status) status=installed;;
     seven) extra=',"--json"';;
+    upgraded:*|rolled_back:*|upgraded-other-root:*|upgraded-bare)
+        # An upgrade or repeat result: no activation argv, installation as the mode names it.
+        status=${mode%%:*}
+        case "$status" in upgraded-other-root) status=upgraded; root="$root-other";; esac
+        case "$mode" in
+            upgraded-bare) /usr/bin/printf '{"status":"upgraded","release_root":"%s"}\n' "$root";;
+            *) /usr/bin/printf '{"status":"%s","installation":"%s","release_root":"%s","previous_release_root":"/old","next_action":"restart_mcp_clients"}\n' \
+                   "$status" "${mode#*:}" "$root";;
+        esac
+        exit 0;;
 esac
 /usr/bin/printf '{"status":"%s","release_root":"%s","activation_arguments":["%s","-I","-S","-B","%s","%s"%s]}\n' \
     "$status" "$root" "$python" "$launcher" "$verb" "$extra"
@@ -106,6 +116,24 @@ class InstallCommandTests(unittest.TestCase):
         self.assertEqual(json.loads(lines[0])['status'], 'activation_required')
         self.assertEqual(lines[-2:], ['{"status":"connected"}', 'Install.command finished.'])
 
+    def test_an_upgrade_or_a_repeat_prints_its_result_then_runs_connect_inline(self):
+        for mode in ('upgraded:upgraded', 'upgraded:reused', 'rolled_back:reused'):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                (self.release / 'activation.argv').unlink(missing_ok=True)
+                result = self.run_command()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('--claude-code', self.bootstrap_argv())  # The installed mode is kept.
+                self.assertEqual((self.release / 'activation.argv').read_text().splitlines(),
+                                 ['-I', '-S', '-B', f'{self.release}/launcher.py', 'connect'])
+                env = dict(line.split('=', 1) for line in (self.release / 'activation.env').read_text().splitlines())
+                self.assertEqual(env['PATH'], '/usr/bin:/bin:/usr/sbin:/sbin')
+                lines = result.stdout.splitlines()
+                self.assertEqual((json.loads(lines[0])['status'], json.loads(lines[0])['installation']), tuple(mode.split(':')))
+                self.assertEqual(lines[1], 'Installation is up to date. Running connect in this window; '
+                                           'a ready session reports already_connected.')
+                self.assertEqual(lines[-2:], ['{"status":"connected"}', 'Install.command finished.'])
+
     def test_prepare_only_verifies_and_activates_nothing(self):
         self.mode('prepared')
         result = self.run_command('--prepare-only')
@@ -121,6 +149,9 @@ class InstallCommandTests(unittest.TestCase):
         cases = [('fail', (), 'bootstrap_failed', 4), ('other-root', (), 'activation_unexpected', 5),
                  ('other-python', (), 'activation_unexpected', 5), ('other-verb', (), 'activation_unexpected', 5),
                  ('other-status', (), 'activation_unexpected', 5), ('seven', (), 'activation_unexpected', 5),
+                 ('rolled_back:rolled_back', (), 'activation_unexpected', 5),
+                 ('upgraded:installed', (), 'activation_unexpected', 5), ('upgraded-bare', (), 'activation_unexpected', 5),
+                 ('upgraded-other-root:upgraded', (), 'activation_unexpected', 5),
                  ('ok', ('--json',), 'usage', 2), ('ok', ('--prepare-only', '--prepare-only'), 'usage', 2)]
         for mode, args, code, status in cases:
             with self.subTest(mode=mode, args=args):

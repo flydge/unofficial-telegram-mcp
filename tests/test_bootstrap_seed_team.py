@@ -92,7 +92,7 @@ exit "$(/bin/cat '{self.out}/codesign-exit')"
         done = self.bootstrap(script=self.stubbed)
         self.assertEqual((done.returncode, done.stderr), (0, ''))
         self.assertFalse((self.out / 'codesign-argv').exists())
-        self.assertEqual(self.launcher_argv()[-2:], ['--claude-code', 'user'])
+        self.assertEqual(self.launcher_argv()[-2:], ['--trusted-index-sha256', self.index_sha])  # No mode given.
 
     def test_a_wrong_pin_refuses_before_codesign(self):
         self.seed_sha = 'f' * 64

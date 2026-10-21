@@ -33,8 +33,8 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'service_restart_failed','downgrade_refused','uninstall_incomplete'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
                              'claude-telegram-search','claude-telegram-setup')})
-# A `transaction_pending` refusal also names the unfinished change to retry, from this closed set only.
-PENDING_ACTIONS=('upgrade','rollback','uninstall')
+# A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only.
+PENDING_ACTIONS=('install','upgrade','rollback','uninstall')
 
 
 def _acl(fd):
@@ -227,14 +227,15 @@ def main(argv=None):
             # --adopt-legacy is an explicit flag, only ever the last token; never a default.
             adopt=options[-1:]==['--adopt-legacy']
             if adopt: options=options[:-1]
-            # Five required options, each once, plus an optional --claude-code user|plugin|skip (default user).
+            # Five required options, each once, plus an optional --claude-code user|plugin|skip. Not given, the
+            # installer keeps the installed mode on an upgrade and uses user for a first install.
             required={'--installation-root','--codex-home','--skills-root','--index','--trusted-index-sha256'}
             keys=options[::2]
             if (len(options) not in (10,12) or len(set(keys))!=len(keys) or not required<=set(keys)
                     or set(keys)-required-{'--claude-code'}): raise AdmissionError()
             values=dict(zip(keys,options[1::2])); pin=values['--trusted-index-sha256']
-            claude_code=values.get('--claude-code','user')
-            if claude_code not in ('user','plugin','skip'): raise AdmissionError()
+            claude_code=values.get('--claude-code')
+            if claude_code is not None and claude_code not in ('user','plugin','skip'): raise AdmissionError()
             admit(root,Path(values['--index']),pin,False)
             sys.path[:]=[str(root/'app'),str(root/'installer')]+[p for p in sys.path if Path(p).is_relative_to(root/'python')]
             from telegram_search_mcp import bundle_install

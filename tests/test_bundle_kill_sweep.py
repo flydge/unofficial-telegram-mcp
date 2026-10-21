@@ -581,21 +581,32 @@ class LeftoverOwnershipTests(AdoptionHarness, unittest.TestCase):
         self.file(tx / ('.telegram-search-' + 'a' * 32 + '.tmp'))
         self.directory(ours / 'releases')
         self.file(ours / 'install-intent.json', b'{}')
-        legacy = self.file(parent / ('.runtime-intent-' + 'b' * 32 + '.tmp'), b'{"partial"')
+        # An empty staged root is ours only under one of the installer's derived attempt names.
+        empty_ours = self.directory(parent / bundle_install._staged_names(self.runtime)[5])
+        # An earlier release's intent temporary is ours only when its bytes parse as an intent for this root.
+        intent = {'identity': {'installation_root': str(self.runtime)}, 'staged_root': str(ours), 'object': {'kind': 'directory'}}
+        legacy = self.file(parent / ('.runtime-intent-' + 'c' * 32 + '.tmp'), json.dumps(intent).encode())
         kept = [self.file(self.directory(parent / '.runtime-initial-foreign1') / 'notes.txt'),
                 self.directory(parent / '.runtime-initial-shared12', 0o750),
                 self.directory(parent / '.runtime-initial-release1' / 'releases' / 'x'),
                 self.file(self.directory(parent / '.runtime-initial-hardlnk1') / '.install.lock', b''),
-                self.directory(parent / '.runtime-initial-linked12') / '.install.lock']
+                self.directory(parent / '.runtime-initial-linked12') / '.install.lock',
+                self.directory(parent / '.runtime-initial-emptydir'),
+                self.file(parent / ('.runtime-intent-' + 'b' * 32 + '.tmp'), b'{"partial"'),
+                self.file(parent / ('.runtime-intent-' + 'd' * 32 + '.tmp'),
+                          json.dumps({**intent, 'identity': {'installation_root': '/elsewhere'}}).encode()),
+                self.file(parent / ('.runtime-intent-' + 'e' * 32 + '.tmp'), json.dumps({**intent, 'extra': 1}).encode())]
         os.link(kept[3], self.base / 'second-link')
         kept[4].symlink_to(self.base / 'elsewhere')
         self.assertEqual(self.install(packet)['status'], 'activation_required')
-        self.assertFalse(ours.exists() or legacy.exists())
+        self.assertFalse(ours.exists() or empty_ours.exists() or legacy.exists())
         for path in kept:
             self.assertTrue(os.path.lexists(path), path)
         self.assertEqual(sorted(p.name for p in parent.glob('.runtime-initial-*')),
-                         ['.runtime-initial-foreign1', '.runtime-initial-hardlnk1', '.runtime-initial-linked12',
-                          '.runtime-initial-release1', '.runtime-initial-shared12'])
+                         ['.runtime-initial-emptydir', '.runtime-initial-foreign1', '.runtime-initial-hardlnk1',
+                          '.runtime-initial-linked12', '.runtime-initial-release1', '.runtime-initial-shared12'])
+        self.assertEqual(sorted(p.name for p in parent.glob('.runtime-intent-*')),
+                         ['.runtime-intent-' + c * 32 + '.tmp' for c in 'bde'])
 
     def test_a_resumed_change_removes_only_staging_and_unbound_packets_provably_its_own(self):
         self.full()
@@ -628,6 +639,151 @@ class LeftoverOwnershipTests(AdoptionHarness, unittest.TestCase):
         # A packet that is not provably ours is never reused: the pointer was staged in the next free one.
         pointer = json.loads((tx / 'journal.json').read_text())['publications']['pointer'][-1]
         self.assertEqual(Path(pointer['staged']).parent.name, 'metadata-packet-pointer-1')
+
+
+class UnfinishedActionTests(AdoptionHarness, unittest.TestCase):
+    """Uninstall's sweep removes only the retired root it can prove (the directory the install intent binds), and an
+    unfinished first install or uninstall is named by the next action, never half-removed. Real kills only."""
+
+    ABSENT = {'status': 'uninstalled', 'installation': 'absent'}
+
+    def beside(self):
+        """Every name beside the root that starts like the installer's (intent, staged, retired or kept root)."""
+        return sorted(p.name for p in self.home.iterdir() if p.name.startswith('.' + self.runtime.name))
+
+    def lookalikes(self):
+        """Directories beside the root under the installer's prefixes that are not its own."""
+        made = []
+        for name in ('.runtime-removed-notmine', '.runtime-removed-' + 'a' * 32, '.runtime-initial-emptydir'):
+            directory = self.home / name
+            directory.mkdir(mode=0o700)
+            if 'emptydir' not in name:
+                (directory / 'notes.txt').write_bytes(b'not the installer\'s')
+            made.append(directory)
+        return made
+
+    def assertKept(self, lookalikes):
+        self.assertEqual([p for p in lookalikes if not p.is_dir()], [])
+        for directory in lookalikes:
+            self.assertEqual(sorted(p.name for p in directory.iterdir()), [] if 'emptydir' in directory.name else ['notes.txt'])
+
+    def perform(self, action, effects):
+        """`action(launchctl, claude_runner)` with both fakes counted as single effects, like the sweep's."""
+        with effects.patched():
+            return action(effects.runner(self.launchctl, 'launchctl'), effects.runner(self.claude(), 'claude'))
+
+    def killed(self, action, predicate):
+        """Run `action` in a forked child that exits right after the first effect `predicate` selects."""
+        pid = os.fork()
+        if pid == 0:
+            code = 3
+            try:
+                def hook(count, kind, where):
+                    if predicate(count, kind, where):
+                        os._exit(9)
+                self.perform(action, Effects(self.base, hook))
+            except BaseException:
+                code = 4
+            os._exit(code)
+        _, status = os.waitpid(pid, 0)
+        return os.waitstatus_to_exitcode(status)
+
+    def assertPending(self, action, pending):
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            action()
+        self.assertEqual((str(caught.exception), caught.exception.pending_action), ('transaction_pending', pending))
+
+    def test_uninstall_removes_only_the_retired_root_the_intent_binds(self):
+        lookalikes = self.lookalikes()
+        self.full()
+        self.assertEqual(self.change('uninstall')['installation'], 'removed')
+        self.assertEqual(self.beside(), sorted(p.name for p in lookalikes))
+        self.assertKept(lookalikes)
+        self.assertEqual(self.change('uninstall'), self.ABSENT)  # Nothing installed: the lookalikes still stay.
+        self.assertKept(lookalikes)
+
+    def test_a_kill_after_the_retiring_rename_is_named_by_install_and_finished_by_uninstall(self):
+        lookalikes = self.lookalikes()
+        packet, _ = self.full()
+        code = self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl),
+                           lambda count, kind, where: kind == 'renameatx' and re.search(r'/\.runtime-removed-[0-9a-f]{32}\Z', where))
+        self.assertEqual(code, 9)
+        left = [n for n in self.beside() if n not in {p.name for p in lookalikes}]
+        self.assertEqual(sorted(re.sub('[0-9a-f]{32}', '*', n) for n in left), ['.runtime-removed-*', '.runtime.install-intent.json'])
+        self.assertFalse(self.runtime.exists())
+        with mock.patch('telegram_search_mcp.__version__', '0.52.9'):
+            self.assertPending(lambda: self.install(packet), 'uninstall')
+        self.assertPending(lambda: self.install(self.build('b', launcher=b'# second release\n')), 'uninstall')
+        self.assertPending(lambda: self.change('rollback'), 'uninstall')
+        # The retry: the only launcher left is the retired root's own, which passes that root's path.
+        [retired] = [n for n in left if '-removed-' in n]
+        with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
+            result = bundle_install.uninstall(self.home / retired, user_home=self.home, launchctl=self.launchctl,
+                                              pending_sends=self.probe, claude_candidates=(self.claude_cli,),
+                                              claude_runner=self.claude())
+        self.assertEqual(result, self.ABSENT)
+        self.assertEqual(self.beside(), sorted(p.name for p in lookalikes))
+        self.assertKept(lookalikes)
+        self.assertEqual(self.change('uninstall'), self.ABSENT)
+        self.assertEqual(self.install(self.build('c', launcher=b'# third release\n'))['installation'], 'installed')
+
+    def test_an_intent_left_after_the_retired_root_is_gone_is_removed_by_the_next_install(self):
+        """Killed after the retired root's removal, before the intent's: no launcher is left, so the next install
+        (or an uninstall) removes the intent, which binds nothing any more, and a first install follows."""
+        lookalikes = self.lookalikes()
+        _, old = self.full()
+        code = self.killed(lambda lc, cl: self.change('uninstall', launchctl=lc, claude_runner=cl),
+                           lambda count, kind, where: kind == 'rmdir' and re.search(r'/\.runtime-removed-[0-9a-f]{32}\Z', where))
+        self.assertEqual(code, 9)
+        self.assertEqual([n for n in self.beside() if n not in {p.name for p in lookalikes}], ['.runtime.install-intent.json'])
+        result = self.install(self.build('b', launcher=b'# second release\n'), claude_code=None)
+        self.assertEqual((result['installation'], result['claude_code']), ('installed', 'registered'))
+        self.assertEqual(json.loads((self.home / '.runtime.install-intent.json').read_text())['identity']['index_sha256'],
+                         self.pointer()['index_sha256'])
+        self.assertNotEqual(self.pointer()['release_root'], old['release_root'])
+        self.assertKept(lookalikes)
+
+    def test_a_killed_first_install_is_named_by_every_other_action_or_its_unbound_staging_removed(self):
+        """A kill after every effect up to the root's publication, then at a stride. Once the intent is recorded,
+        uninstall, rollback and another kit refuse as an unfinished `install` and remove nothing (intent, staged root
+        or root stay); before it, uninstall removes the killed attempt's unbound staged root. The install then
+        completes and uninstalls without a leftover."""
+        def prepare():
+            self.codex_present()
+            self.desktop_present()
+            (self.home / '.claude').mkdir(mode=0o755)
+            self.claude()  # Built in this process, so a killed child's resume finds the same fake.
+            self.packet = self.build('a')
+        def first(lc, cl):
+            return self.install(self.packet, launchctl=lc, claude_runner=cl)
+        trace = []
+        prepare()
+        self.perform(first, Effects(self.base, lambda count, kind, where: trace.append((kind, where))))
+        published = trace.index(('renameatx', 'user/runtime')) + 1
+        points = sorted({*range(1, published + 1), *range(published + 1, len(trace) + 1, 4), len(trace)})
+        outcomes = set()
+        for n in points:
+            with self.subTest(kill=n, after=trace[n - 1]):
+                self.setUp()
+                prepare()
+                self.assertEqual(self.killed(first, lambda count, *_: count == n), 9)
+                before, root = self.beside(), self.runtime.exists()
+                if root and not bundle_install._install_pending(self.runtime):
+                    outcomes.add('complete')  # Killed after its last journal write: an ordinary uninstall follows.
+                elif (self.home / '.runtime.install-intent.json').exists():
+                    self.assertPending(lambda: self.change('uninstall'), 'install')
+                    self.assertPending(lambda: self.change('rollback'), 'install')
+                    self.assertPending(lambda: self.install(self.build('b', launcher=b'# second release\n')), 'install')
+                    self.assertEqual((self.beside(), self.runtime.exists()), (before, root))
+                    outcomes.add('install pending')
+                else:
+                    self.assertEqual(self.change('uninstall'), self.ABSENT)
+                    self.assertEqual(self.beside(), [])
+                    outcomes.add('staging removed')
+                self.assertEqual(self.install(self.packet)['status'], 'activation_required')
+                self.assertEqual(self.change('uninstall')['installation'], 'removed')
+                self.assertEqual(self.beside(), [])
+        self.assertEqual(outcomes, {'complete', 'install pending', 'staging removed'})
 
 
 if __name__ == '__main__':

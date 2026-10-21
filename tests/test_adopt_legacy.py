@@ -238,7 +238,8 @@ class AdoptBootstrapTests(unittest.TestCase):
         return subprocess.run(argv, capture_output=True, text=True, timeout=120, env={'PATH': '/usr/bin:/bin'})
 
     def test_the_flag_reaches_the_launcher_last_and_only_when_given(self):
-        for extra, mode, adopt in (((), 'user', False), (('--adopt-legacy',), 'user', True),
+        # --claude-code reaches the launcher only when given (the installer then keeps or defaults the mode).
+        for extra, mode, adopt in (((), None, False), (('--adopt-legacy',), None, True),
                                    (('--claude-code', 'plugin', '--adopt-legacy'), 'plugin', True),
                                    (('--json', '--claude-code', 'skip', '--adopt-legacy'), 'skip', True)):
             with self.subTest(extra=extra):
@@ -251,8 +252,8 @@ class AdoptBootstrapTests(unittest.TestCase):
                                         '--codex-home', str(self.home / '.codex'),
                                         '--skills-root', str(self.home / '.agents/skills'),
                                         '--index', stage + '/verified-index.json',
-                                        '--trusted-index-sha256', self.index_sha, '--claude-code', mode]
-                                 + (['--adopt-legacy'] if adopt else []))
+                                        '--trusted-index-sha256', self.index_sha]
+                                 + (['--claude-code', mode] if mode else []) + (['--adopt-legacy'] if adopt else []))
                 (self.out / 'launcher-argv').unlink()
 
     def test_anywhere_but_last_or_twice_refuses_before_the_seed_runs(self):

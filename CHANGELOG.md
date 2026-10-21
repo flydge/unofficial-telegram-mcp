@@ -61,8 +61,11 @@ owner; no signed DMG or public release asset exists yet.
   - `--adopt-legacy`, as the last token of `bootstrap.sh`, replaces a foreign Codex, Claude Code or
     Claude Desktop entry or broker plist only after an exact backup is recorded. `Install.command` and
     the plugin never pass it.
-  - Known limit: `Install.command` continues only after a first install, so on an upgrade it prints the
-    result (`status: upgraded`) and then stops with `activation_unexpected`.
+  - `Install.command` and the plugin's `bin/install` accept an upgrade or a repeat as a success, and
+    `Install.command` then runs `connect` (`already_connected` with a ready session). Without
+    `--claude-code` an upgrade keeps the installed mode. A `transaction_pending` refusal names the
+    unfinished action (`install`, `upgrade`, `rollback` or `uninstall`), and uninstall removes only the
+    retired root its install intent binds.
   - Owner-pending: the real upgrade and migration of the owner's installation.
 - Documentation (phase F): the [install guide](docs/install.md#install-from-the-053-kit-dmg-curl-and-plugin-development)
   covers the DMG, curl and plugin paths, Claude Desktop, upgrade, rollback, uninstall and `--adopt-legacy`;

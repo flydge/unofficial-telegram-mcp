@@ -68,14 +68,19 @@ The installer registers, with ownership receipts:
   under `~/.claude/skills` only when `~/.claude` already exists or the CLI was found
   (otherwise the receipt records `claude_skills: skipped`).
 
-It refuses foreign registrations, skills, runtime roots and existing services.
-A refused install prints only `{"status":"refused","code":...}` on stderr: the installer's
+A first install refuses foreign registrations, skills and runtime roots, and an existing broker plist
+(`service_conflict`) unless [--adopt-legacy](#adopting-entries-the-installer-does-not-own---adopt-legacy)
+is given. A refused install prints only `{"status":"refused","code":...}` on stderr: the installer's
 fixed code (for example `claude_registration_conflict` or `recovery_limit`), or
 `bundle_admission_or_install_failed` for anything else; `rollback` and `uninstall` refuse the same
 way, and other launcher actions refuse as `bundle_admission_failed`. Recovery retains one lease, journal, original config bytes and exact receipts;
 repeating the same admitted installation verifies/reuses it, without consulting the
-`claude` CLI again. Apart from those registration commands it performs no login,
-Keychain operation, service start/stop or session mutation. A launch checks the release
+`claude` CLI again. Apart from those registration commands a first install performs no login,
+Keychain operation, service start or stop, or session mutation. An upgrade, a rollback and
+`--adopt-legacy` stop only the receipt-bound (or adopted) broker, start it again only if it was
+running, and rewrite only the `expected_package_version` line of `runtime.toml`; `uninstall` stops only
+the receipt-bound broker and writes nothing in the session directory. None of them logs in or touches
+the Keychain. A launch checks the release
 tree, index, receipt, pointer, transaction journal and home binding, and only the shape of
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
@@ -84,8 +89,9 @@ registration and the `~/.agents/skills` copies and refuses drift there.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
-runtime root. Earlier interrupted packets remain preserved for recovery; their
-bytes alone never authorize adoption. Later publications bind exact staged
+runtime root. A retry removes a killed attempt's packet only when every entry in it
+is one the installer creates (an empty one only under one of its fixed attempt names);
+anything else beside the root stays and is never adopted. Later publications bind exact staged
 filesystem objects before rename or replacement. The runtime's parent directory
 must already exist safely; the default macOS Application Support parent is used.
 
@@ -333,20 +339,26 @@ Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
    and every archive member before extraction, and the installer from the extracted tree then does the
    [bundle installation](#private-bundle-0530dev0) and client registrations above. The stage directory
    is not removed by the scripts.
-5. `Install.command` prints the installer's JSON result and continues only when `status` is
-   `activation_required` and the activation argv is exactly the installed release's `python3 -I -S -B
-   launcher.py connect`. It then prints `Installed. Starting the Telegram login (connect) in this
-   window.` and runs `connect` in the same Terminal, so the QR page opens and the final result prints
-   there; scan it as under [Connect with a QR code](#connect-with-a-qr-code-primary-path). No assistant
-   and no separate `wait` are needed. `Install.command finished.` follows a successful `connect`.
+5. `Install.command` prints the installer's JSON result. After a first install it continues only when
+   `status` is `activation_required` and the activation argv is exactly the installed release's
+   `python3 -I -S -B launcher.py connect`; it then prints `Installed. Starting the Telegram login
+   (connect) in this window.` After an [upgrade](#upgrade) or a repeat (`status: upgraded` with
+   `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`) whose
+   `release_root` is this kit's release, it prints `Installation is up to date. Running connect in this
+   window; a ready session reports already_connected.` Either way it runs that release's `connect` in
+   the same Terminal, so the QR page opens and the final result prints there; scan it as under
+   [Connect with a QR code](#connect-with-a-qr-code-primary-path). With a ready session `connect`
+   reports `already_connected` and asks for nothing. No assistant and no separate `wait` are needed.
+   `Install.command finished.` follows a successful `connect`.
 6. Restart Claude Desktop if the result says so (below), reconnect the other clients, and have an
    assistant call `_manifest` with `check_broker=true` and make one bounded own-chat read or search.
 
 `Install.command --prepare-only` authenticates and extracts without installing and prints the
 verification result. It accepts no other argument.
 
-`Install.command` always uses the default `--claude-code user`. To choose another mode, or to pass
-`--adopt-legacy`, run `bootstrap.sh` directly as in the next section.
+`Install.command` passes no `--claude-code`: a first install uses `user`, and an upgrade keeps the
+installed mode. To choose another mode for a first install, or to pass `--adopt-legacy`, run
+`bootstrap.sh` directly as in the next section.
 
 Its refusals print a text line and `{"schema_version":1,"error_code":"<code>"}` on stderr:
 
@@ -355,8 +367,8 @@ Its refusals print a text line and `{"schema_version":1,"error_code":"<code>"}` 
 | `usage` | 2 | An argument other than `--prepare-only`. |
 | `kit_unavailable` | 3 | Not started by an absolute path, or the folder cannot be resolved. |
 | `kit_incomplete` | 3 | A required kit file is missing or is a link. |
-| `bootstrap_failed` | 4 | `bootstrap.sh` refused; its own JSON line with `error_code` and `retained_stage` is printed first. |
-| `activation_unexpected` | 5 | The installer result was not `activation_required` with the exact activation argv. An upgrade ends here; see [Upgrade](#upgrade). |
+| `bootstrap_failed` | 4 | `bootstrap.sh` or the installer refused; its own line is printed first. A `bootstrap.sh` refusal is `{"schema_version":1,"error_code":…,"retained_stage":…}`; an installer refusal is `{"status":"refused","code":…}`, with `pending_action` for `transaction_pending` ([codes](reference.md#installer-refusal-codes)). |
+| `activation_unexpected` | 5 | The installer result was neither `activation_required` with the exact activation argv nor an upgrade or repeat of this kit's release (`upgraded` with `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`). |
 | `activation_failed` | 6 | `connect` ended unsuccessfully; its own result is printed above. |
 
 `bootstrap.sh` refuses with `{"schema_version":1,"error_code":…,"retained_stage":…}` on stderr:
@@ -401,8 +413,10 @@ The result is the installer's JSON with `activation_command`. Run that command f
 
 ### Claude Code: user scope, plugin or skip
 
-`bootstrap.sh` takes `--claude-code user|plugin|skip` (default `user`). The mode is recorded in the
-installation: an upgrade must repeat it, or it refuses as `upgrade_conflict`.
+`bootstrap.sh` takes `--claude-code user|plugin|skip` and passes it on only when it is given. The mode
+is recorded in the installation. Without the option a first install uses `user`, and an upgrade, a
+repeat or a resumed install keeps the recorded mode; an explicitly different mode refuses
+(`upgrade_conflict` on an upgrade).
 
 | Mode | Claude Code state | Result fields |
 | --- | --- | --- |
@@ -463,24 +477,31 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
    before anything runs. Then the pinned `bootstrap.sh` installs with `--claude-code plugin` and
    `--seed-team <the pinned Team ID>`. The folder is removed on success and kept on failure, and a
    refusal names it as `retained`.
-4. The script prints the installer JSON on stdout. Run its `activation_command` (`connect`) as for any
-   install; the paired `telegram-setup` skill walks an assistant through it. Reconnect with `/mcp`
-   (restart Claude Code if `/mcp` does not list the server).
+4. The script prints the installer JSON on stdout and exits 0 for a first install
+   (`status: activation_required`) and for an [upgrade](#upgrade) or a repeat (`status: upgraded` with
+   `installation` `upgraded` or `reused`, or `rolled_back` with `installation: reused`); any other
+   result refuses as `result_invalid`. After a first install run its `activation_command` (`connect`)
+   as for any install; the paired `telegram-setup` skill walks an assistant through it. Reconnect with
+   `/mcp` (restart Claude Code if `/mcp` does not list the server).
 5. If `claude_code_user_entry` is `present`, remove the older user-scope entry yourself with
    `claude mcp remove telegram_search -s user`, or the tool set appears twice.
 
 `bin/install` refuses with `release_not_published` (unpublished pins), `pins_invalid`,
-`download_failed`, `pin_mismatch`, `bootstrap_failed`, `result_invalid`, `dependency_unavailable`,
-`home_invalid`, `workspace_failed`, `cleanup_failed`, `invalid_arguments` or `interrupted`, each as
-one JSON line on stderr. Published pins must carry a Team ID.
+`plugin_invalid`, `download_failed`, `pin_mismatch`, `bootstrap_failed`, `result_invalid`,
+`dependency_unavailable`, `home_invalid`, `workspace_failed`, `cleanup_failed`, `invalid_arguments` or
+`interrupted`, each as one JSON line on stderr. Published pins must carry a Team ID.
 
 How a Claude Code session exposes `${CLAUDE_PLUGIN_ROOT}` to a shell command is Claude Code's
 behaviour and is not verified here; if the directory is unknown, ask the user to run the command.
 
 ### Upgrade
 
-Run the newer kit's `Install.command`, or the same `bootstrap.sh` command with the newer kit's pins
-and the installed `--claude-code` mode (the plugin's `bin/install` from a newer plugin does the same).
+Run the newer kit's `Install.command`, or the same `bootstrap.sh` command with the newer kit's pins and
+either no `--claude-code` or the installed mode. `Install.command` keeps the installed mode and then
+runs `connect` in the same window (see [DMG path](#dmg-path)). A newer plugin's `bin/install` upgrades
+a `plugin`-mode installation: it passes `--claude-code plugin`, prints the `status: upgraded` result (or
+the repeat's) and exits 0; over a `user` or `skip` installation it refuses as `bootstrap_failed`, after
+the installer's own refusal line.
 Over a receipt-bound installation of another release, `bootstrap-install` runs an upgrade transaction
 instead of a first install. Refusals for a downgrade, a foreign or changed object or a pending send come
 before the transaction exists, so they change nothing. The steps, each journaled so that an interruption
@@ -512,14 +533,11 @@ wait for their contexts to idle out (300 seconds by default), and repeat. An unc
 retried by an upgrade.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
-(going back is only `rollback`). Different Codex home, skills root, home or `--claude-code` mode than the
-installed receipt refuse as `upgrade_conflict`. Another upgrade, a rollback or an uninstall started while a
-change is unfinished refuses as `transaction_pending`; repeat the interrupted command first.
-
-**`Install.command` and upgrades.** `Install.command` continues only after a first install. On an
-upgrade it prints the installer result (`status: upgraded`), then stops with `activation_unexpected`
-(exit 5). The upgrade is complete when the result prints; the stop is how the current script ends it.
-Running the `bootstrap.sh` command directly ends without that message.
+(going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
+or an explicitly given `--claude-code` mode other than the installed one, refuses as `upgrade_conflict`.
+Another install, upgrade, rollback or uninstall started while one is unfinished refuses as
+`transaction_pending`, and the refusal's `pending_action` (`install`, `upgrade`, `rollback` or
+`uninstall`) names the command to repeat first.
 
 ### Rollback
 
@@ -556,7 +574,16 @@ finally the installation root with all releases.
 Each part reports `removed`, `absent`, `kept` (changed since the install, so left alone), or for a
 client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
 `claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
-present after its removal attempt; repeat the command.
+present after its removal attempt; repeat the command. An unfinished first install refuses as
+`transaction_pending` with `pending_action: install` and is left as it is; repeat the install first.
+
+Last, the root is renamed to `~/Library/Application Support/.TelegramSearch-removed-<random>`; that
+folder is removed, then `.TelegramSearch.install-intent.json`. Only the folder the intent binds (the
+root's own directory) is removed; a lookalike folder with a similar name stays. If uninstall is
+interrupted after that rename, an install refuses as `transaction_pending` with
+`pending_action: uninstall`, and the only launcher left is the one inside the renamed folder: repeat
+`uninstall` with `<that folder>/releases/<sha256>/launcher.py`, run the same way as above. If the
+interruption came after the folder was gone, the next install removes the leftover intent itself.
 
 It never touches the Telegram session, `enrollment.json`, `runtime.toml`, the managed key or any
 Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`. The Claude Code

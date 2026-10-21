@@ -37,8 +37,9 @@ from .codex_registration import (Registration, Receipt, ConfigConflict, read_con
     commit_transaction, new_temporary, is_temporary, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
 
 
-# The closed set of unfinished change kinds a `transaction_pending` refusal names.
-PENDING_ACTIONS = ('upgrade', 'rollback', 'uninstall')
+# The closed set of unfinished actions a `transaction_pending` refusal names: an unfinished first install, or an
+# unfinished change.
+PENDING_ACTIONS = ('install', 'upgrade', 'rollback', 'uninstall')
 
 
 class InstallError(ValueError):
@@ -199,16 +200,18 @@ def _check_owned(fd, allowed, budget, prefix=()):
             finally:os.close(child)
 
 
-def _remove_abandoned(parent, name, allowed, budget=64):
+def _remove_abandoned(parent, name, allowed, budget=64, *, empty=True):
     """Remove `parent/name`, an abandoned unpublished directory of ours, only when it and everything in it is
     provably ours (owner-only, single-link files, every path one we create; see `_check_owned`); True when
-    removed. The caller holds the lock that excludes its writer, so it never races the creation."""
+    removed. With `empty` False an empty directory proves nothing and stays. The caller holds the lock that
+    excludes its writer, so it never races the creation."""
     with open_owned_directory(parent) as fd:
         m=os.stat(name,dir_fd=fd,follow_symlinks=False)
         if not stat.S_ISDIR(m.st_mode) or m.st_uid!=os.getuid() or stat.S_IMODE(m.st_mode)&0o077:return False
         child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
         try:
             if (os.fstat(child).st_dev,os.fstat(child).st_ino)!=(m.st_dev,m.st_ino):return False
+            if not empty and not os.listdir(child):return False
             _check_owned(child,allowed,[budget])
         except _NotOurs:return False
         finally:os.close(child)
@@ -243,20 +246,107 @@ def _parent_lock(parent):
         yield
 
 
+def _intent_path(root):
+    return root.parent/('.'+root.name+'.install-intent.json')
+
+
+def _staged_names(root):
+    """The eight attempt names of a first install's staged root beside `root`, derived from the root's path: an
+    empty one a killed attempt left (right after its mkdir) is provably ours by its name, a random name is not."""
+    return tuple('.'+root.name+'-initial-'+hashlib.sha256(('%s\0%d'%(root,n)).encode()).hexdigest()[:8] for n in range(8))
+
+
+def _intent_shape(value, root):
+    """Whether `value` is the closed shape `_initialize` writes as the intent for `root`."""
+    staged=value.get('staged_root') if type(value) is dict else None
+    return (type(value) is dict and set(value)=={'identity','staged_root','object'} and type(value['identity']) is dict
+            and value['identity'].get('installation_root')==str(root) and type(staged) is str
+            and Path(staged).parent==root.parent
+            and re.fullmatch(re.escape('.'+root.name+'-initial-')+r'[a-z0-9_]{8}',Path(staged).name) is not None
+            and type(value['object']) is dict and value['object'].get('kind')=='directory')
+
+
+def _read_intent(root):
+    """The install intent beside `root`, or None when there is none; any other shape refuses."""
+    path=_intent_path(root)
+    if not os.path.lexists(path):return None
+    intent=unique_json(read(path,mode=0o600))
+    if not _intent_shape(intent,root):raise InstallError('initialization_conflict')
+    return intent
+
+
+def _intent_temporary(root, name):
+    """Whether the parent's `name` is an earlier release's intent temporary for `root`: its bytes parse as that intent."""
+    try:return _intent_shape(unique_json(read(root.parent/name)),root)
+    except (BundleError,ValueError,TypeError,UnicodeError):return False
+
+
+def _retired_names(root, intent):
+    """Names beside `root` of the root an uninstall retired: our closed name holding the exact directory the intent
+    binds (a directory's inode, and so its binding, survives the retiring rename). At most one."""
+    retired=re.compile(re.escape('.'+root.name+'-removed-')+r'[0-9a-f]{32}\Z')
+    with open_owned_directory(root.parent) as fd:names=[n for n in os.listdir(fd) if retired.fullmatch(n)]
+    out=[]
+    for name in names:
+        try:require_object_binding(root.parent/name,intent['object'])
+        except RuntimePathError:continue
+        out.append(name)
+    return out
+
+
+def _absent_root(root, intent):
+    """With `root` absent beside its intent: `install` (the staged root exists: a first install not yet published),
+    `uninstall` (the retired root exists: an uninstall not yet finished) or None (all gone: the intent is the last
+    leftover of a finished uninstall)."""
+    if os.path.lexists(intent['staged_root']):return 'install'
+    return 'uninstall' if _retired_names(root,intent) else None
+
+
+def _unlink_intent(root):
+    with open_owned_directory(root.parent) as fd:
+        os.unlink(_intent_path(root).name,dir_fd=fd);os.fsync(fd)
+
+
+def _stale_intent(root):
+    """Before a first install over an absent `root`, under the parent lock: an unfinished uninstall refuses as
+    `transaction_pending` (`uninstall`); an intent whose staged, published and retired roots are all gone is removed
+    (the finished uninstall's last step); a staged root keeps it for the resume."""
+    with _parent_lock(root.parent):
+        if os.path.lexists(root):return
+        intent=_read_intent(root)
+        state=None if intent is None else _absent_root(root,intent)
+        if state=='uninstall':raise InstallError('transaction_pending',pending_action='uninstall')
+        if intent is not None and state is None:_unlink_intent(root)
+
+
 def _sweep_initial(root, keep):
-    """Under the parent lock: remove what killed first-install attempts left beside `root` (an unpublished staged
-    root other than `keep`, provably ours by its exact contents, or an earlier release's intent temporary)."""
+    """Under the parent lock: remove what killed first-install attempts left beside `root`, only what is provably
+    ours. An unpublished staged root other than `keep` goes when every entry in it is one `_initialize` creates;
+    an empty one only under one of our derived names. An earlier release's intent temporary goes only when its
+    bytes parse as an intent for this root. Lookalikes stay."""
     staged=re.compile(re.escape('.'+root.name+'-initial-')+r'[a-z0-9_]{8}\Z')
     temporary=re.compile(re.escape('.'+root.name+'-intent-')+r'[0-9a-f]{32}\.tmp\Z')
+    names=_staged_names(root)
     with open_owned_directory(root.parent) as fd:
         for name in os.listdir(fd):
             if staged.fullmatch(name) and root.parent/name!=keep:
-                _remove_abandoned(root.parent,name,_initial_entry)
+                _remove_abandoned(root.parent,name,_initial_entry,empty=name in names)
             elif temporary.fullmatch(name):
                 m=os.stat(name,dir_fd=fd,follow_symlinks=False)
                 if (stat.S_ISREG(m.st_mode) and m.st_uid==os.getuid() and m.st_nlink==1
-                        and not stat.S_IMODE(m.st_mode)&0o077 and m.st_size<=65536):
+                        and not stat.S_IMODE(m.st_mode)&0o077 and m.st_size<=65536 and _intent_temporary(root,name)):
                     os.unlink(name,dir_fd=fd);os.fsync(fd)
+
+
+def _install_pending(root):
+    """Whether the first install of the published `root` is unfinished: its journal short of `complete`."""
+    found=[]
+    with open_owned_directory(root/'transactions',private=True):pass
+    for count,path in enumerate((root/'transactions').iterdir()):
+        if count>4*MAX_CHANGES:raise InstallError('recovery_limit')
+        if path.name.startswith('install_') and transaction_name(path.name):found.append(path)
+    if len(found)!=1:return False  # Not one first install of ours: the transaction's own checks refuse.
+    return unique_json(read(found[0]/'journal.json',mode=0o600)).get('stage')!='complete'
 
 
 def _initialize(root, identity, change, existed, checkpoint, adopted=None):
@@ -266,18 +356,24 @@ def _initialize(root, identity, change, existed, checkpoint, adopted=None):
     exact staged inode. A retry removes the unbound staged roots of killed
     attempts (only exactly what this function creates) and makes a fresh one
     instead of repairing foreign or ambiguous metadata; the recorded one is kept.
+    An intent whose root and staged root are both gone belongs to an uninstall
+    (`install` removed a stale one before); another identity over an unfinished first
+    install refuses too (`transaction_pending`, naming the action to retry).
     The supported root's parent must already exist safely.
     `adopted` maps a client to its exact `--adopt-legacy` backup bytes, kept in the transaction.
     """
     with open_owned_directory(root.parent):pass
-    intent_path=root.parent/('.'+root.name+'.install-intent.json')
+    intent_path=_intent_path(root)
     with _parent_lock(root.parent):
-        if intent_path.exists() or intent_path.is_symlink():
-            intent=unique_json(read(intent_path,mode=0o600))
-            if (set(intent)!={'identity','staged_root','object'} or intent['identity']!=identity):
-                raise InstallError('initialization_conflict')
+        intent=_read_intent(root)
+        if intent is not None:
             staged=Path(intent['staged_root'])
-            if staged.parent!=root.parent or not staged.name.startswith('.'+root.name+'-initial-'):
+            if not os.path.lexists(root) and not os.path.lexists(staged):
+                # An uninstall retired the root and has not removed this intent yet.
+                raise InstallError('transaction_pending',pending_action='uninstall')
+            if intent['identity']!=identity:
+                if not os.path.lexists(root) or _install_pending(root):
+                    raise InstallError('transaction_pending',pending_action='install')
                 raise InstallError('initialization_conflict')
             _sweep_initial(root,None if root.exists() else staged)
             if root.exists():
@@ -287,9 +383,11 @@ def _initialize(root, identity, change, existed, checkpoint, adopted=None):
             _rename(staged,root);checkpoint('published:root');return
         if root.exists() or root.is_symlink():raise InstallError('runtime_conflict')
         _sweep_initial(root,None)
-        prefix='.'+root.name+'-initial-'
-        if sum(p.name.startswith(prefix) for p in root.parent.iterdir())>=8:raise InstallError('recovery_limit')
-        staged=Path(tempfile.mkdtemp(prefix=prefix,dir=root.parent))
+        # A name the sweep kept is not ours: the next one is used, within the bounded attempts.
+        name=next((n for n in _staged_names(root) if not os.path.lexists(root.parent/n)),None)
+        if name is None:raise InstallError('recovery_limit')
+        with open_owned_directory(root.parent) as fd:os.mkdir(name,0o700,dir_fd=fd)
+        staged=root.parent/name
         checkpoint('created:initial_root')
         transactions=staged/'transactions';ensure_owned_private_directory(transactions)
         ensure_owned_private_directory(staged/'releases')
@@ -929,13 +1027,31 @@ def _check_adopted(record):
     return record
 
 
+def _installed_mode(root):
+    """The `--claude-code` mode recorded for `root` (an unfinished change's, else the receipt's, else an unfinished
+    first install's intent), None when nothing is installed. A read before the lease that only picks the default
+    when no mode is given: every transaction compares it again under its lock."""
+    intent=_read_intent(root)
+    if intent is None:return None
+    mode=intent['identity'].get('claude_code_mode')
+    if os.path.lexists(root):
+        _,journal=_latest_change(root)
+        if journal is not None and journal.get('stage')!='finished' and 'claude_code_mode' in journal:
+            mode=journal['claude_code_mode']
+        elif os.path.lexists(root/'current.json'):mode=_installation(root)[0]['claude_code_mode']
+    elif not os.path.lexists(intent['staged_root']):return None  # A retired or stale intent records nothing current.
+    return mode if type(mode) is str and mode in CLAUDE_CODE_MODES else None
+
+
 def install(release, index_path, index_sha256, *, installation_root, codex_home,
             skills_root, user_home, checkpoint=lambda _: None, claude_candidates=None,
-            claude_runner=subprocess.run, claude_code='user', adopt_legacy=False,
+            claude_runner=subprocess.run, claude_code=None, adopt_legacy=False,
             launchctl=subprocess.run, pending_sends=None):
     """First install, its recovery, or (over a receipt-bound installation of another index) an upgrade.
 
-    `claude_code` is `user` (default), `plugin` or `skip`, and is part of the transaction identity.
+    `claude_code` is `user`, `plugin` or `skip`, and is part of the transaction identity. None (the option not
+    given) keeps the mode the installation recorded (an upgrade, a repeat or a resumed first install) and is
+    `user` for a new first install; only an explicitly different mode refuses (`upgrade_conflict` on an upgrade).
     `user`: Claude Code state is read from `<user_home>/.claude.json`; the `claude` CLI, looked up only
     at `claude_candidates` (default: the fixed user/system list) and driven through `claude_runner`,
     is used only to add the entry. Claude registration never blocks the install except for a
@@ -956,10 +1072,11 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
     """
     try:
         require_platform()
-        if (type(claude_code) is not str or claude_code not in CLAUDE_CODE_MODES
+        if (claude_code is not None and (type(claude_code) is not str or claude_code not in CLAUDE_CODE_MODES)
                 or type(adopt_legacy) is not bool):raise InstallError('installation_refused')
         probe=default_pending_sends if pending_sends is None else pending_sends
         release,index_path,root,codex,skills,home=map(Path,(release,index_path,installation_root,codex_home,skills_root,user_home))
+        if claude_code is None:claude_code=_installed_mode(root) or 'user'
         claude_skills=home/'.claude'/'skills'
         desktop=claude_desktop_registration.directory(home)
         cli=None
@@ -977,7 +1094,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         for path in (root,codex,skills,home)+((claude_skills,) if claude_code=='user' else ()):
             validate_owned_path(path,private=path==root)
         validate_owned_path(plist,regular=True)
-        intent_path=root.parent/('.'+root.name+'.install-intent.json')
+        intent_path=_intent_path(root)
+        if not os.path.lexists(root) and os.path.lexists(intent_path):_stale_intent(root)
         if intent_path.exists() and root.exists() and _changing(root,index_sha256):
             source=dict(release=release,index=index,index_bytes=index_bytes,index_sha256=index_sha256,manifest=manifest)
             return _change('upgrade',root,home,codex=codex,skills=skills,claude_code=claude_code,source=source,
@@ -1286,9 +1404,13 @@ def rollback(installation_root, *, user_home, checkpoint=lambda _: None, claude_
         require_platform()
         root,home=Path(installation_root),Path(user_home)
         validate_owned_path(root,private=True)
+        intent=None if os.path.lexists(root) else _read_intent(root)
+        state=None if intent is None else _absent_root(root,intent)
+        if state is not None:raise InstallError('transaction_pending',pending_action=state)
         _,journal=_latest_change(root)
-        mode=(journal.get('claude_code_mode') if journal is not None and journal.get('stage')!='finished'
-              else _installation(root)[0]['claude_code_mode'])
+        unfinished=journal is not None and journal.get('stage')!='finished'
+        if not unfinished and _install_pending(root):raise InstallError('transaction_pending',pending_action='install')
+        mode=journal.get('claude_code_mode') if unfinished else _installation(root)[0]['claude_code_mode']
         cli=None
         if mode=='user':
             cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
@@ -1325,6 +1447,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             previous_bytes=read(tx/'receipt.previous',mode=0o600)
             current=_receipt_shape(unique_json(previous_bytes),root)
         else:
+            # A first install killed after its pointer but short of `complete` is finished by repeating it.
+            if _install_pending(root):raise InstallError('transaction_pending',pending_action='install')
             current,previous_bytes=_installation(root)
             if kind=='upgrade' and current['index_sha256']==source['index_sha256']:
                 return _reused(root,current,name,journal)
@@ -1680,17 +1804,34 @@ def _unlink_exact(path, expected):
 
 
 def _sweep(root):
-    """Remove leftover retired roots of an interrupted uninstall (bounded) and the stale intent."""
-    prefix='.'+root.name+'-removed-'
-    if not root.parent.exists():return
-    for count,path in enumerate(sorted(root.parent.iterdir())):
-        if count>4096:break
-        if path.name.startswith(prefix) and not path.is_symlink() and path.is_dir():
-            with open_owned_directory(path,private=True):pass
-            shutil.rmtree(path)
-    intent=root.parent/('.'+root.name+'.install-intent.json')
-    if intent.exists() and not intent.is_symlink() and not root.exists():
-        read(intent,mode=0o600);intent.unlink()
+    """Under the parent lock, with `root` absent: finish what an uninstall left beside it, only what is provably ours.
+
+    The retired root is removed only under our closed name and only while it is the exact directory the install
+    intent binds (the root's inode keeps its binding through the retiring rename); the intent goes last, so a kill
+    anywhere leaves the proof for the retry. An intent whose staged root still exists is an unfinished first
+    install: nothing is removed and it refuses as `transaction_pending` (`install`). A killed first install's
+    unbound staged roots go by `_sweep_initial`'s rules. Anything else, a lookalike included, stays.
+    """
+    if not os.path.lexists(root.parent):return
+    with _parent_lock(root.parent):
+        if os.path.lexists(root):return
+        intent=_read_intent(root)
+        if intent is not None and _absent_root(root,intent)=='install':
+            raise InstallError('transaction_pending',pending_action='install')
+        for name in _retired_names(root,intent) if intent is not None else ():
+            with open_owned_directory(root.parent) as fd:shutil.rmtree(name,dir_fd=fd);os.fsync(fd)
+        _sweep_initial(root,None)
+        if intent is not None:_unlink_intent(root)
+
+
+def _retired_origin(path):
+    """The installation root an uninstall retired as `path`, or None: a retired root's own launcher passes `path`,
+    so a retry from there finishes that uninstall. Only our closed name holding the directory the intent binds."""
+    match=re.fullmatch(r'\.(.+)-removed-[0-9a-f]{32}',path.name)
+    if match is None:return None
+    origin=path.parent/match.group(1)
+    intent=None if os.path.lexists(origin) else _read_intent(origin)
+    return origin if intent is not None and path.name in _retired_names(origin,intent) else None
 
 
 def _codex_removal(config, owner):
@@ -1735,13 +1876,19 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     Every refusal, the pending-send gate included, comes before the transaction exists. After a write-ahead
     removal attempt of a Claude Code or Claude Desktop entry the receipt and root stay until the entry is
     confirmed gone (or no longer ours): a still exact entry is removed again, otherwise `uninstall_incomplete`.
+    An unfinished first install (published or not) refuses as `transaction_pending` (`install`) and is kept.
     """
     try:
         require_platform()
         root,home=Path(installation_root),Path(user_home)
         probe=default_pending_sends if pending_sends is None else pending_sends
-        if not root.exists():
+        if not os.path.lexists(root):
             _sweep(root)
+            return {'status':'uninstalled','installation':'absent'}
+        origin=_retired_origin(root)
+        if origin is not None:
+            # Repeated by the retired root's own launcher (the only one left): finish that uninstall.
+            _sweep(origin)
             return {'status':'uninstalled','installation':'absent'}
         validate_owned_path(root,private=True)
         from .config import _owner_paths
@@ -1750,6 +1897,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             name,journal=_latest_change(root)
             if journal is not None and journal.get('stage') not in ('finished',) and journal.get('kind')!='uninstall':
                 raise InstallError('transaction_pending',pending_action=journal.get('kind'))
+            if (journal is None or journal.get('kind')!='uninstall') and _install_pending(root):
+                raise InstallError('transaction_pending',pending_action='install')
             receipt,_=_installation(root)
             if str(home)!=receipt['user_home']:raise InstallError('upgrade_conflict')
             installed=Path(receipt['release_root'])
