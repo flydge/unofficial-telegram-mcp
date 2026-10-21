@@ -17,8 +17,9 @@ from telegram_search_mcp.server import _TOOL_NAMES, available_tools, build_serve
 from test_guard_refusals import CONNECT_DEFAULT
 from tool_listing import FULL_POLICY, full_listing
 
-ANCHORS = ('_manifest(check_broker=true)', 'discover_targets', 'get_send_status', 'not_approved', 'untrusted',
-           'capability_disabled', 'available_tools', 'tool_capabilities')
+ANCHORS = ('_manifest(check_broker=true)', 'discover_targets', 'get_send_status', 'declined', 'timeout',
+           'dialog_unavailable', 'next_action', 'untrusted', 'capability_disabled', 'available_tools',
+           'tool_capabilities')
 CONNECT_TOOLS = ['_manifest', 'resolve_target', 'discover_targets', 'search_correspondence', 'get_attachment',
                  'get_message_context', 'read_attachment', 'analyze_media', 'create_local_artifact', 'begin_local_upload',
                  'append_local_upload', 'finish_local_upload', 'issue_local_upload_authority',

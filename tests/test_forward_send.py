@@ -339,7 +339,8 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual({'prepare_forward_send', 'send_prepared_forward'} <= set(tools), enabled)
                 for name in ('prepare_forward_send', 'send_prepared_forward')[:2 if enabled else 0]:
                     self.assertFalse(tools[name].input_schema['additionalProperties'])
-                    self.assertFalse(tools[name].annotations.read_only_hint)
+                    # 0.54: preparation creates local draft state only, so it is read-only.
+                    self.assertEqual(tools[name].annotations.read_only_hint, name.startswith('prepare_'))
                 result = await consumer.call_tool('prepare_forward_send', good)
                 sent = await consumer.call_tool('send_prepared_forward', {'draft_id': DID, 'approved': True})
                 if not enabled:

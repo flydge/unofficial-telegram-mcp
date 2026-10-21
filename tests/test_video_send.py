@@ -277,7 +277,8 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})
         for name in ('prepare_video_send', 'send_prepared_video'):
             self.assertFalse(tools[name].input_schema['additionalProperties'])
-            self.assertFalse(tools[name].annotations.read_only_hint)
+            # 0.54: preparation creates local draft state only, so it is read-only.
+            self.assertEqual(tools[name].annotations.read_only_hint, name.startswith('prepare_'))
         for policy, enabled in ((RuntimePolicy(), False), (RuntimePolicy(enabled_capabilities=('send',)), False),
                                 (RuntimePolicy(enabled_capabilities=('video_send',)), False), (POLICY, True)):
             calls = []
