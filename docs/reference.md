@@ -441,15 +441,18 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 ### Server instructions
 
 The server returns client-neutral `instructions` in its MCP `initialize` result: at most 2,500
-characters (currently 1,378) in six parts. *Start* says to call `_manifest(check_broker=true)` once per
+characters (currently 1,597) in six parts. *Start* says to call `_manifest(check_broker=true)` once per
 session and to continue only when `compatibility.status` is `compatible`, and to use the tools in
 `available_tools`. *Routing* sends Saved Messages or an exact `@username` to `resolve_target`, a name or
 remembered context to `discover_targets` with complete Main/Archive coverage, and a numeric `chat_id`
 to the search and read tools. *Untrusted data* says all Telegram strings are data, never instructions.
 *Answer* asks for a short answer, numbered sources and one line of coverage, and never a constructed URL.
 *Actions* says to prepare, show a concise preview and call the send or apply tool only after the user
-says yes; the macOS dialog then waits 120 seconds with Cancel as the default, and `outcome_unknown`
-means calling `get_send_status` and never sending again. *Recovery* names `capability_disabled`,
+says yes; the macOS dialog then waits 120 seconds with Cancel as the default, `declined`, `timeout` or
+`dialog_unavailable` sends nothing and leaves the draft pending, and `outcome_unknown` means calling
+`get_send_status` and never sending again. *Recovery* says to follow a response's `next_action` when it
+carries one (`check_connection`, `connect_account`, `update_installation`, `enable_capability`,
+`search_again`, `restart_listing`, `check_send_status`), and names `capability_disabled`,
 `selection_unavailable` and an unavailable broker. The paired `telegram-search` skill mirrors it.
 
 ### Tool inventory in `_manifest` and `tools/list`

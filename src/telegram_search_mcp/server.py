@@ -193,11 +193,13 @@ _INSTRUCTIONS = (
     "when coverage is incomplete or the user asks.\n"
     "Actions: prepare, then show a concise preview (recipient, exact text or file, expiry). Only "
     "after the user says yes, call the send or apply tool. A macOS dialog then appears on this Mac "
-    "for 120 s with Cancel as the default. not_approved leaves the draft pending. outcome_unknown → "
-    "call get_send_status; never send again.\n"
-    "Recovery: capability_disabled → tell the owner which capability to enable. "
-    "selection_unavailable → retain the same sources again. Broker or authorization unavailable → "
-    "the owner runs the telegram-setup connect flow, then reconnects this MCP client."
+    "for 120 s with Cancel as the default. declined, timeout or dialog_unavailable sends nothing and "
+    "leaves the draft pending. outcome_unknown → call get_send_status; never send again.\n"
+    "Recovery: when a response carries next_action, follow it (check_connection, connect_account, "
+    "update_installation, enable_capability, search_again, restart_listing, check_send_status). "
+    "capability_disabled → tell the owner which capability to enable. selection_unavailable → retain "
+    "the same sources again. Broker or authorization unavailable → the owner runs the telegram-setup "
+    "connect flow, then reconnects this MCP client."
 )
 
 
