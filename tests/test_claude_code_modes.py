@@ -61,6 +61,8 @@ class ModeInstallTests(InstallHarness, unittest.TestCase):
                     result = self.install(self.packet, claude_code=mode)
                 self.assertEqual((result['claude_code'], result['claude_skills']), (status, 'skipped'))
                 self.assertNotIn('claude_registration_command', result)
+                # Plugin mode notes the existing user-scope entry, read-only (it would duplicate the tools).
+                self.assertEqual(result.get('claude_code_user_entry'), 'present' if mode == 'plugin' else None)
                 receipt = self.receipt()
                 self.assertEqual((receipt['claude_code_mode'], receipt['claude_code'], receipt['claude_skills']),
                                  (mode, status, 'skipped'))
@@ -75,6 +77,17 @@ class ModeInstallTests(InstallHarness, unittest.TestCase):
                 self.selection_check()
                 again = self.install(self.packet, claude_code=mode)
                 self.assertEqual((again['installation'], again['claude_code']), ('reused', status))
+
+    def test_plugin_mode_without_a_user_scope_entry_adds_no_note(self):
+        fake = self.claude()
+        for document in (None, {'mcpServers': {'other': {'type': 'stdio', 'command': '/o', 'args': []}}}):
+            with self.subTest(document=document):
+                self.setUp()
+                fake = self.claude()
+                if document is not None: fake.write_document(document)
+                result = self.install(self.packet, claude_code='plugin')
+                self.assertNotIn('claude_code_user_entry', result)
+                self.assertEqual(fake.calls, [])
 
     def test_plugin_mode_never_inspects_the_claude_skills_root(self):
         self.claude_skills.mkdir(parents=True)

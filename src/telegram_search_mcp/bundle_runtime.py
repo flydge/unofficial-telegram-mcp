@@ -203,6 +203,67 @@ def _skill_binding(value):
             and _binding(value['object'], 'directory') and _binding(value['child'], 'file'))
 
 
+# Receipt v1 (0.53 wave 2) stays admitted. v2 names its transaction, carries the Claude Desktop ownership,
+# the previous release (rollback) and `--adopt-legacy` backup records. Launch checks only their shape.
+RECEIPT_V1_KEYS = frozenset({'schema_version','index_sha256','release_root','installation_root','codex_home',
+                             'skills_root','claude_skills_root','user_home','package_version','claude_code_mode',
+                             'registration_sha256','skills','publication_objects','claude_code','claude_skills',
+                             'claude_desktop','status'})
+RECEIPT_KEYS = {1: RECEIPT_V1_KEYS, 2: RECEIPT_V1_KEYS | {'transaction','claude_desktop_ownership','previous','adopted'}}
+ADOPTION_CLIENTS = ('codex', 'claude_code', 'claude_desktop', 'service')
+MAX_BACKUP_BYTES = 1024 * 1024
+_RECEIPT_ID = frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')
+
+
+def transaction_name(value):
+    """Closed transaction directory grammar: `install_<24 hex>` or `change_<1..999>`."""
+    if type(value) is not str: return False
+    if value.startswith('install_'): return len(value) == 32 and all(c in '0123456789abcdef' for c in value[8:])
+    number = value[7:] if value.startswith('change_') else ''
+    return number.isascii() and number.isdigit() and 1 <= len(number) <= 3 and number[0] != '0'
+
+
+def receipt_transaction(receipt):
+    """The transaction directory a shape-checked receipt is bound to."""
+    return receipt['transaction'] if receipt['schema_version'] == 2 else 'install_' + receipt['index_sha256'][:24]
+
+
+def _identifier(value):
+    return (type(value) is str and 1 <= len(value) <= 64 and value[0].isalpha() and value.isascii()
+            and set(value) <= _RECEIPT_ID)
+
+
+def desktop_ownership(value):
+    """Shape of a Claude Desktop ownership receipt (codex_registration.Receipt, client claude-desktop)."""
+    return (type(value) is dict and set(value) == {'schema_version','client','scope','installation_id','transaction_id',
+                                                   'pre_subtree_hash','post_subtree_hash','pre_subtree'}
+            and type(value['schema_version']) is int and value['schema_version'] == 1
+            and value['client'] == 'claude-desktop' and value['scope'] == 'user'
+            and _identifier(value['installation_id']) and _identifier(value['transaction_id'])
+            and value['pre_subtree_hash'] is None and value['pre_subtree'] is None and _hash(value['post_subtree_hash']))
+
+
+def check_receipt_v2(receipt, installation):
+    """The v2 keys' closed shapes; raises BundleError('receipt_mismatch')."""
+    transaction, previous, adopted = receipt['transaction'], receipt['previous'], receipt['adopted']
+    ownership = receipt['claude_desktop_ownership']
+    if (not transaction_name(transaction)
+            or transaction.startswith('install_') and transaction != 'install_' + str(receipt['index_sha256'])[:24]
+            or ownership is not None and not desktop_ownership(ownership)
+            or previous is not None and (type(previous) is not dict
+                                         or set(previous) != {'index_sha256','release_root','package_version','transaction'}
+                                         or not _hash(previous['index_sha256']) or previous['index_sha256'] == receipt['index_sha256']
+                                         or previous['release_root'] != str(installation / 'releases' / previous['index_sha256'])
+                                         or type(previous['package_version']) is not str
+                                         or not 1 <= len(previous['package_version']) <= 64
+                                         or not transaction_name(previous['transaction']))
+            or type(adopted) is not dict or set(adopted) - set(ADOPTION_CLIENTS)
+            or any(type(v) is not dict or set(v) != {'sha256','bytes','transaction'} or not _hash(v['sha256'])
+                   or type(v['bytes']) is not int or not 0 < v['bytes'] <= MAX_BACKUP_BYTES
+                   or not transaction_name(v['transaction']) for v in adopted.values())):
+        raise BundleError('receipt_mismatch')
+
+
 @dataclass(frozen=True)
 class Selection:
     root: Path
@@ -217,10 +278,9 @@ class Selection:
                 or self.root != installation / 'releases' / self.index_sha256):
             raise BundleError('receipt_mismatch')
         index,manifest=validate_tree(self.root, self.root / 'bundle-index.json', self.index_sha256, installed=True)
-        keys={'schema_version','index_sha256','release_root','installation_root','codex_home','skills_root',
-              'claude_skills_root','user_home','package_version','claude_code_mode','registration_sha256','skills',
-              'publication_objects','claude_code','claude_skills','claude_desktop','status'}
-        if (set(receipt)!=keys or type(receipt['schema_version']) is not int or receipt['schema_version']!=1
+        version=receipt.get('schema_version')
+        keys=RECEIPT_KEYS.get(version) if type(version) is int else None
+        if (keys is None or set(receipt)!=keys
                 or receipt['installation_root']!=str(installation) or receipt['package_version']!=manifest['package_version']
                 or receipt['status']!='activation_required' or receipt['skills']!=manifest['skills']
                 or not _hash(receipt['registration_sha256'])
@@ -236,6 +296,7 @@ class Selection:
                 # Claude Desktop's config, like the others, is never read at launch: the status only.
                 or type(receipt['claude_desktop']) is not str or receipt['claude_desktop'] not in CLAUDE_DESKTOP_STATUSES):
             raise BundleError('receipt_mismatch')
+        if version==2:check_receipt_v2(receipt,installation)
         try:
             objects=receipt['publication_objects']
             skill_names={'telegram-search','telegram-setup'}
@@ -249,11 +310,12 @@ class Selection:
             # Installation stores only nonsecret local registration authority.
             # B1A session/Keychain/service identity is still derived from the OS
             # user's home; no receipt field changes that session selection.
-            owned=read(installation/'transactions'/('install_'+self.index_sha256[:24])/'registration.json',mode=0o600)
+            transaction=installation/'transactions'/receipt_transaction(receipt)
+            owned=read(transaction/'registration.json',mode=0o600)
             if digest(owned)!=receipt['registration_sha256']:raise BundleError('registration_mismatch')
             # Bind receipt's home to the transaction's immutable declaration,
             # without using it as an environment or MCP-driven home override.
-            journal=unique_json(read(installation/'transactions'/('install_'+self.index_sha256[:24])/'journal.json',mode=0o600))
+            journal=unique_json(read(transaction/'journal.json',mode=0o600))
             if any(journal.get(k)!=receipt[k] for k in ('installation_root','codex_home','skills_root','claude_skills_root','user_home','index_sha256','release_root','package_version','claude_code_mode')):
                 raise BundleError('receipt_mismatch')
         except BundleError:raise

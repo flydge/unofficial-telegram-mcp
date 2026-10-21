@@ -37,6 +37,8 @@ ENV_KEYS = frozenset(('TELEGRAM_SEARCH_INSTALLATION_ROOT', 'TELEGRAM_SEARCH_PROF
 _ID = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,63}\Z')
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
 _TOOL = re.compile(r'_?[a-z][a-z0-9_]{0,63}\Z')
+TEMPORARY_PREFIX = '.telegram-search-'
+_TEMPORARY = re.compile(r'\.telegram-search-[0-9a-f]{32}\.tmp\Z')
 _SECRET_ARG = re.compile(r'(?i)(api[_-]?hash|api[_-]?id|password|passwd|phone|token|secret|credential|auth[_-]?code|qr)')
 
 
@@ -390,6 +392,11 @@ def _read_at(directory_fd: int, name: str, maximum: int, max_mode: int = PRIVATE
     The default admits exactly 0600. Claude Desktop (Electron) writes 0644, so its caller passes
     0o644: never group or world writable, never executable or set-id.
     """
+    return _read_at_mode(directory_fd, name, maximum, max_mode)[:2]
+
+
+def _read_at_mode(directory_fd: int, name: str, maximum: int, max_mode: int = PRIVATE_MODE) -> tuple[bytes, bool, int | None]:
+    """`_read_at` plus the admitted file mode (None when absent)."""
     if max_mode not in (PRIVATE_MODE, 0o644):
         raise ConfigConflict('unsafe_path')
     fd = None
@@ -408,9 +415,9 @@ def _read_at(directory_fd: int, name: str, maximum: int, max_mode: int = PRIVATE
             source = stream.read(maximum + 1)
             if len(source) != metadata.st_size or file_metadata_identity(metadata) != file_metadata_identity(os.fstat(stream.fileno())):
                 raise ConfigConflict('concurrent_change')
-        return source, True
+        return source, True, mode
     except FileNotFoundError:
-        return b'', False
+        return b'', False, None
     except (OSError, RuntimePathError):
         raise ConfigConflict('unsafe_path') from None
     finally:
@@ -427,27 +434,30 @@ def read_config(config_path: Path) -> bytes:
 
 
 def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | None = None,
-                  require_existing: bool | None = None, before_replace=None, max_mode: int = PRIVATE_MODE):
+                  require_existing: bool | None = None, before_replace=None, max_mode: int = PRIVATE_MODE,
+                  preserve_mode: bool = False):
     """Owner-safe atomic replacement, optionally guarding exact source bytes.
 
-    `max_mode` only widens which existing file modes are read (see `_read_at`); the replacement is 0600.
+    `max_mode` only widens which existing file modes are read (see `_read_at`). The replacement is
+    0600, or with `preserve_mode` the admitted mode of the file it replaces (a new file is 0600).
     """
     if type(candidate) is not bytes or len(candidate) > maximum:
         raise ConfigConflict('invalid_change')
     directory_fd = _open_parent(path)
     name = Path(path).name
-    temporary = '.telegram-search-' + uuid.uuid4().hex + '.tmp'
+    temporary = TEMPORARY_PREFIX + uuid.uuid4().hex + '.tmp'
     temporary_created = False
     try:
-        original, existed = _read_at(directory_fd, name, maximum, max_mode)
+        original, existed, mode = _read_at_mode(directory_fd, name, maximum, max_mode)
         if expected is not None and original != expected:
             raise ConfigConflict('concurrent_change')
         if require_existing is not None and existed != require_existing:
             raise ConfigConflict('concurrent_change')
+        mode = mode if preserve_mode and existed else PRIVATE_MODE
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
         temporary_created = True
         with os.fdopen(fd, 'wb') as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            os.fchmod(stream.fileno(), mode)
             stream.write(candidate)
             stream.flush()
             os.fsync(stream.fileno())
@@ -479,6 +489,58 @@ def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | 
             except OSError:
                 pass
         os.close(directory_fd)
+
+
+def discard_temporary(path: Path, record: object) -> bool:
+    """Unlink a journaled temporary left by a killed `_atomic_write`, only while it is that exact inode.
+
+    `record` is the journaled `{'object': binding, 'temporary': name}`; True when it was removed.
+    """
+    if (type(record) is not dict or type(record.get('temporary')) is not str
+            or _TEMPORARY.fullmatch(record['temporary']) is None or type(record.get('object')) is not dict):
+        return False
+    binding = record['object']
+    directory_fd = _open_parent(path)
+    try:
+        try:
+            metadata = os.stat(record['temporary'], dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        observed = {'kind': 'file', 'dev': metadata.st_dev, 'ino': metadata.st_ino, 'uid': metadata.st_uid,
+                    'mode': stat.S_IMODE(metadata.st_mode), 'bytes': metadata.st_size, 'nlink': metadata.st_nlink}
+        if not stat.S_ISREG(metadata.st_mode) or observed != binding:
+            return False
+        os.unlink(record['temporary'], dir_fd=directory_fd)
+        os.fsync(directory_fd)
+        return True
+    except OSError:
+        raise ConfigConflict('io_failure') from None
+    finally:
+        os.close(directory_fd)
+
+
+def adopt_registration(source: bytes, desired: Registration) -> ConfigChange:
+    """`--adopt-legacy` only: replace a foreign entry the caller has recorded and backed up.
+
+    The change's `pre_subtree` is the foreign subtree (never persisted in a Receipt); its ownership
+    receipt carries no preimage, so a later rollback removes ours instead of restoring theirs.
+    """
+    document = _parse(source)
+    current = _subtree(_owned(document))
+    if current is None:
+        raise ConfigConflict('ownership_conflict')
+    replacement = _entry(desired, inline=isinstance(document.get('mcp_servers'), InlineTable))
+    document['mcp_servers'][SERVER_NAME] = replacement
+    candidate = tomlkit.dumps(document).encode('utf-8')
+    after = _subtree(_owned(_parse(candidate)))
+    if after != _subtree(replacement) or _neighbors(source) != _neighbors(candidate):
+        raise ConfigConflict('invalid_change')
+    return ConfigChange(source, candidate, current, after, None)
+
+
+def owned_subtree(source: bytes) -> bytes | None:
+    """The exact bytes of the current `telegram_search` subtree (for an adoption backup), or None."""
+    return _subtree(_owned(_parse(source)))
 
 
 def _neighbors(source: bytes) -> bytes:

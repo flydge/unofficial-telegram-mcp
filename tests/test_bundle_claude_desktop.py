@@ -319,7 +319,7 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
                 self.assertEqual([p.name for p in (self.base / 'real-claude').iterdir()] if label == 'symlinked directory' else
                                  [p.name for p in self.desktop_dir.iterdir()], [])
 
-    def test_owner_or_modes_electron_writes_are_accepted(self):
+    def test_owner_or_modes_electron_writes_are_accepted_and_kept(self):
         for mode in (0o600, 0o604, 0o640, 0o644):
             with self.subTest(mode=oct(mode)):
                 self.setUp()
@@ -327,6 +327,7 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
                 self.write_config('{}', mode=mode)
                 self.assertCompletedWith(self.install(self.packet), 'registered')
                 self.assertEqual(self.document(), {'mcpServers': {'telegram_search': self.ours()}})
+                self.assertEqual(oct(self.config.stat().st_mode & 0o777), oct(mode))  # Electron's 0644 survives.
 
     # --- changes during the transaction ----------------------------------------------------
 
@@ -430,7 +431,9 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
                 with self.assertRaises(self.bundle.InstallError) as caught:
                     self.install(self.packet, checkpoint=fail)
                 self.assertEqual(str(caught.exception), 'installation_refused')
-                if existed: self.assertEqual(self.config.read_bytes(), before)
+                if existed:
+                    self.assertEqual(self.config.read_bytes(), before)
+                    self.assertEqual(oct(self.config.stat().st_mode & 0o777), '0o644')  # Restore keeps the mode too.
                 else: self.assertFalse(self.config.exists())
                 with self.replacements() as replaced:
                     self.assertCompletedWith(self.install(self.packet), 'failed')
@@ -477,6 +480,132 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
         with mock.patch.object(desktop, 'observe', side_effect=AssertionError('repeat must not read')):
             again = self.install(self.packet)
         self.assertEqual((again['installation'], again['claude_desktop']), ('reused', 'registered'))
+
+    def killed_at_our_temporary(self):
+        """A real kill (no exception, no `finally`): a child process exits at the journaled temporary."""
+        self.claude()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                def kill(stage):
+                    if stage == 'recorded:claude_desktop_write': os._exit(9)
+                self.install(self.packet, checkpoint=kill)
+            finally:
+                os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 9)
+        [temporary] = [p for p in self.desktop_dir.iterdir() if p.name != desktop.CONFIG_NAME]
+        return temporary
+
+    def test_a_kill_after_our_temporary_is_journaled_leaves_it_and_resume_unlinks_it(self):
+        self.present()
+        before = self.write_config(NEIGHBOUR_TEXT)
+        temporary = self.killed_at_our_temporary()
+        self.assertEqual(temporary.name, self.journal()['publications']['claude_desktop_write'][0]['temporary'])
+        self.assertEqual(self.config.read_bytes(), before)
+        with self.replacements() as replaced:
+            result = self.install(self.packet)
+        self.assertCompletedWith(result, 'failed')  # Never written again on resume.
+        self.assertEqual((replaced, self.config.read_bytes()), ([], before))
+        self.assertEqual(sorted(p.name for p in self.desktop_dir.iterdir()), [desktop.CONFIG_NAME])
+
+    def test_a_temporary_that_is_no_longer_our_exact_inode_is_never_unlinked(self):
+        self.present()
+        self.write_config(NEIGHBOUR_TEXT)
+        temporary = self.killed_at_our_temporary()
+        temporary.unlink()
+        temporary.write_bytes(b'someone else wrote this name')
+        temporary.chmod(0o600)
+        self.assertCompletedWith(self.install(self.packet), 'failed')
+        self.assertEqual(temporary.read_bytes(), b'someone else wrote this name')
+
+    # --- receipt v2 and read-only drift --------------------------------------------------------
+
+    def test_the_receipt_carries_the_desktop_ownership_binding(self):
+        self.present()
+        self.install(self.packet)
+        receipt = self.receipt()
+        [add] = self.journal()['publications']['claude_desktop_add']
+        self.assertEqual((receipt['schema_version'], receipt['transaction'], receipt['previous'], receipt['adopted']),
+                         (2, 'install_' + self.packet[3][:24], None, {}))
+        self.assertEqual(receipt['claude_desktop_ownership'], add['ownership'])
+        # Not ours (reused or skipped): no ownership.
+        for arrange in ('reused', 'skipped'):
+            with self.subTest(arrange):
+                self.setUp()
+                if arrange == 'reused':
+                    self.present()
+                    self.write_config(json.dumps({'mcpServers': {'telegram_search': self.ours()}}))
+                self.install(self.packet)
+                self.assertIsNone(self.receipt()['claude_desktop_ownership'])
+
+    def test_v1_receipts_stay_admitted_and_v2_shapes_are_closed(self):
+        from telegram_search_mcp import bundle_runtime
+        self.present()
+        selection = self.selected()
+        path = self.runtime / 'receipt.json'
+        original = json.loads(path.read_text())
+        v1 = {k: v for k, v in original.items() if k not in ('transaction', 'claude_desktop_ownership', 'previous', 'adopted')}
+        path.write_text(json.dumps({**v1, 'schema_version': 1}))
+        selection.check()
+        cases = {'v1 with a v2 key': {**v1, 'schema_version': 1, 'previous': None},
+                 'v2 missing a key': {**v1, 'schema_version': 2},
+                 'schema 3': {**original, 'schema_version': 3},
+                 'transaction grammar': {**original, 'transaction': 'change_0'},
+                 'other install transaction': {**original, 'transaction': 'install_' + 'f' * 24},
+                 'ownership client': {**original, 'claude_desktop_ownership': {
+                     **original['claude_desktop_ownership'], 'client': 'codex'}},
+                 'adopted client': {**original, 'adopted': {'other': {'sha256': 'a' * 64, 'bytes': 1, 'transaction': 'change_1'}}},
+                 'previous root': {**original, 'previous': {'index_sha256': 'c' * 64, 'release_root': '/elsewhere',
+                                                            'package_version': '0.52.9', 'transaction': 'change_1'}}}
+        for label, change in cases.items():
+            with self.subTest(label):
+                path.write_text(json.dumps(change))
+                with self.assertRaises(bundle_runtime.BundleError): selection.check()
+
+    def test_status_reports_desktop_drift_read_only(self):
+        self.present()
+        self.install(self.packet)
+        status = lambda: self.bundle.client_status(self.runtime, self.home)
+        with mock.patch.object(codex_registration, '_atomic_write', side_effect=AssertionError('status never writes')):
+            self.assertEqual(status(), {'claude_desktop': 'ok'})
+            # Claude Desktop rewrote its config from memory: our entry is gone, a neighbour arrived.
+            self.write_config(json.dumps({'mcpServers': {'other': {'command': '/o'}}}), mode=0o644)
+            before = (self.config.read_bytes(), self.config.stat().st_ino)
+            self.assertEqual(status(), {'claude_desktop': 'drift',
+                                        'claude_desktop_manual_entry': {'mcpServers': {'telegram_search': self.ours()}}})
+            self.assertEqual((self.config.read_bytes(), self.config.stat().st_ino), before)
+            self.write_config(json.dumps({'mcpServers': {'telegram_search': {'command': '/foreign'}}}), mode=0o644)
+            self.assertEqual(status()['claude_desktop'], 'drift')
+            self.write_config('{', mode=0o644)
+            self.assertEqual(status(), {'claude_desktop': 'unavailable'})
+        self.setUp()
+        self.install(self.packet)  # Skipped at install time.
+        self.assertEqual(status(), {'claude_desktop': 'skipped'})
+        self.present()
+        self.assertEqual(status(), {'claude_desktop': 'not_registered'})
+        (self.runtime / 'current.json').write_text('{}')
+        self.assertEqual(status(), {'claude_desktop': 'unavailable'})
+
+    def test_the_launcher_status_action_adds_the_drift_report(self):
+        import importlib.util
+        from telegram_search_mcp import setup_cli
+        self.present()
+        result = self.install(self.packet)
+        spec = importlib.util.spec_from_file_location('desktop_status_launcher',
+                                                      Path(__file__).parents[1] / 'packaging/launcher.py')
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        release = Path(result['release_root'])
+        def fake_status(args):
+            print(json.dumps({'state': 'new', 'broker': 'not_running'}))
+            return 0
+        out = io.StringIO()
+        with mock.patch.object(setup_cli, 'main', side_effect=fake_status), \
+                mock.patch.object(Path, 'home', return_value=self.home), contextlib.redirect_stdout(out):
+            self.assertEqual(launcher.status(release), 0)
+        self.assertEqual(json.loads(out.getvalue()),
+                         {'state': 'new', 'broker': 'not_running', 'clients': {'claude_desktop': 'ok'}})
 
     # --- the launch never depends on Claude Desktop ------------------------------------------
 
