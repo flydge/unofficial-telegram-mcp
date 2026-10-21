@@ -164,7 +164,8 @@ _TOOL_CAPABILITIES = {name: required_capabilities(OPERATION_CAPABILITIES[TOOL_OP
 
 
 def available_tools(enabled_capabilities: Iterable[str]) -> list[str]:
-    """Registered tools, in registration order, whose every required capability is enabled."""
+    """Registered tools, in _TOOL_NAMES order (not tools/list's registration order), whose every required
+    capability is enabled."""
     enabled = frozenset(enabled_capabilities)
     return [name for name, needed in _TOOL_CAPABILITIES.items() if enabled.issuperset(needed)]
 
@@ -1570,7 +1571,7 @@ def _run_check() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="telegram-search-mcp",
-        description=f"Run the local read-only {identity.DISPLAY_NAME} STDIO MCP server.",
+        description=f"Run the {identity.DISPLAY_NAME} local STDIO MCP server.",
     )
     parser.add_argument(
         "--check",

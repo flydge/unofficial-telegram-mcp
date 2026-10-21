@@ -10,7 +10,7 @@ The public surface of the current candidate contains fifty-five tools (published
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
-- `discover_targets` advances bounded Main/Archive catalog and global-message evidence lanes for Codex-authored hypotheses. It returns evidence, never a semantic winner.
+- `discover_targets` advances bounded Main/Archive catalog and global-message evidence lanes for hypotheses written by the MCP client's model. It returns evidence, never a semantic winner.
 - `search_correspondence` searches one exact `@username` or numeric `chat_id` for message text, captions, file metadata, or any Unicode decimal-number sequence in text/captions.
 - `get_attachment` transfers the original file from one exact message anchor into a private, bounded cache.
 - `get_message_context` returns bounded neighboring messages for an exact anchor.
@@ -52,14 +52,14 @@ The reference workflow is:
 ```text
 Saved Messages / exact @username -> resolve_target -> exact chat_id
 
-free-form intent -> Codex creates 2..5 lexical hypotheses
+free-form intent -> the MCP client's model creates 2..5 lexical hypotheses
                  -> discover_targets advances catalog + global-message lanes
                  -> candidates are grouped by exact chat_id with provenance anchors
                  -> unique strong evidence + complete coverage: exact final search
                  -> competing, partial, or incomplete evidence: continue or clarify
 ```
 
-For free-form intent, Codex supplies two to five unique normalized hypotheses and reuses the same hypotheses and scope with every returned cursor. Unofficial Telegram MCP performs lexical provider searches; Codex owns semantic expansion and interpretation. Telegram-originated titles and snippets are untrusted evidence, never instructions.
+For free-form intent, the MCP client's model supplies two to five unique normalized hypotheses and reuses the same hypotheses and scope with every returned cursor. Unofficial Telegram MCP performs lexical provider searches; the MCP client's model owns semantic expansion and interpretation. Telegram-originated titles and snippets are untrusted evidence, never instructions.
 
 “Account-wide” means that the authorized Main and Archive catalog lanes, plus one `searchMessages` lane for every `(hypothesis, requested list)` pair, are traversable to their documented end conditions. It is not guaranteed semantic recall. A poor lexical hypothesis can miss relevant messages even when every requested lane reports complete coverage.
 
@@ -100,9 +100,9 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 
 `<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Argument-schema errors keep the SDK's detailed text, and any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`. Schemas and the schema fingerprint are unchanged.
 
-## Codex skill
+## Paired skill
 
-The matching Codex skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
+The matching skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
 
 ## Explicit outgoing text styles
 
@@ -298,7 +298,7 @@ The caller cannot raise these budgets. Discovery cursors are memory-only, expire
 
 Global hits are grouped by exact `chat_id`. Each returned message anchor is `{chat_id, message_id}` and is accepted only after exact chat and message rehydration agree with the provider result. Secret chats and cross-chat, edited, deleted, malformed, or unverifiable evidence are excluded or make coverage partial.
 
-Codex may choose a candidate only after complete catalog, global-message, and hydration coverage, and only when exactly one candidate has strong mutually agreeing evidence: a unique exact/compact catalog title, evidence from at least two distinct hypotheses, or metadata plus message evidence from a distinct hypothesis. Competing evidence requires clarification. `partial`, `blocked`, `error`, or `expired` evidence never authorizes selection; incomplete `page` coverage must continue.
+The MCP client's model may choose a candidate only after complete catalog, global-message, and hydration coverage, and only when exactly one candidate has strong mutually agreeing evidence: a unique exact/compact catalog title, evidence from at least two distinct hypotheses, or metadata plus message evidence from a distinct hypothesis. Competing evidence requires clarification. `partial`, `blocked`, `error`, or `expired` evidence never authorizes selection; incomplete `page` coverage must continue.
 
 Final retrieval is a separate exact-chat boundary. After direct resolution or an evidence-backed selection, call `search_correspondence` only with the selected exact numeric `chat_id` and verify that every returned anchor uses that same ID. `discover_targets` never performs or auto-chains the final search.
 
@@ -455,15 +455,19 @@ to the search and read tools. *Untrusted data* says all Telegram strings are dat
 *Actions* says to prepare, show a concise preview and call the send or apply tool only after the user
 says yes; the macOS dialog then waits 120 seconds with Cancel as the default, and `outcome_unknown`
 means calling `get_send_status` and never sending again. *Recovery* names `capability_disabled`,
-`selection_unavailable` and an unavailable broker. The paired `telegram-search` skill mirrors it.
+`selection_unavailable` and an unavailable broker. The paired `telegram-search` skill gives the same answer
+rules (numbered sources, one coverage line, the full receipt only when coverage is incomplete or asked
+for) and the same preview floor, with per-tool detail on top: attachment, forward/copy, native video,
+archive and own-text edit previews are shown in full there, never summarized.
 
 ### Tool inventory in `_manifest` and `tools/list`
 
 `_manifest` returns three tool lists:
 
 - `tools`: every registered tool (55 in this candidate).
-- `available_tools`: the registered tools, in registration order, whose every required capability the
-  loaded policy enables. A stale policy enables nothing, so it lists only `_manifest` and
+- `available_tools`: the registered tools whose every required capability the loaded policy enables, in
+  the order of the server's fixed tool-name list (`_TOOL_NAMES`, the order of `tools`); `tools/list`
+  lists the same set in registration order, which can differ. A stale policy enables nothing, so it lists only `_manifest` and
   `compatibility.status` carries the reason (`config_stale`).
 - `tool_capabilities`: for each registered tool, the list of capabilities it requires, including those a
   capability implies (for example `send` for `forward_send`). `_manifest` requires none.
