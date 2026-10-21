@@ -12,6 +12,7 @@ import tomllib
 import unittest
 
 from telegram_search_mcp import __version__, product_identity as identity
+from telegram_search_mcp.bundle_install import encoded
 from telegram_search_mcp.product_identity import check_names
 from telegram_search_mcp.server import _TOOL_NAMES
 
@@ -101,25 +102,30 @@ class ShimTests(unittest.TestCase):
     def setUp(self):
         self.base = Path(tempfile.mkdtemp(prefix='tg-plugin-')).resolve()
         self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
-        self.home = self.base / 'home'
-        self.root = self.home / 'Library' / 'Application Support' / identity.BUNDLE_ROOT_NAME
         self.index = hashlib.sha256(b'synthetic release index').hexdigest()
-        self.release = self.root / 'releases' / self.index
-        (self.release / 'python' / 'bin').mkdir(mode=0o700, parents=True)
         self.out = self.base / 'out'
         self.out.mkdir(mode=0o700)
+        self.install_home(self.base / 'home')
+
+    def install_home(self, home):
+        """A synthetic installed release under `home`, with current.json exactly as the installer writes it."""
+        self.home = home
+        self.root = self.home / 'Library' / 'Application Support' / identity.BUNDLE_ROOT_NAME
+        self.release = self.root / 'releases' / self.index
+        (self.release / 'python' / 'bin').mkdir(mode=0o700, parents=True)
         python = self.release / 'python' / 'bin' / 'python3'
         python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > '{self.out}/argv'\n"
                           f"/usr/bin/env > '{self.out}/env'\n")
         python.chmod(0o700)
         (self.release / 'launcher.py').write_text('# synthetic\n')
         self.pointer = self.root / 'current.json'
-        self.write({'schema_version': 1, 'release_root': str(self.release), 'index_sha256': self.index})
+        self.good = {'schema_version': 1, 'release_root': str(self.release), 'index_sha256': self.index}
+        self.write(self.good)
 
     def write(self, value, *, raw=None):
         if self.pointer.is_symlink() or self.pointer.exists():
             self.pointer.unlink()
-        self.pointer.write_text(raw if raw is not None else json.dumps(value, separators=(',', ':')))
+        self.pointer.write_bytes(raw.encode() if raw is not None else encoded(value))
         self.pointer.chmod(0o600)
 
     def shim(self, passwd=None):
@@ -152,7 +158,8 @@ class ShimTests(unittest.TestCase):
         self.assertFalse(names & {'TG_PLUGIN_CANARY', 'HOME', 'PATH'}, names)
 
     def test_refuses_a_missing_malformed_or_traversing_pointer(self):
-        good = {'schema_version': 1, 'release_root': str(self.release), 'index_sha256': self.index}
+        good = self.good
+        exact = encoded(good).decode()
         cases = {
             'missing': None,
             'not_json': 'not json',
@@ -166,6 +173,21 @@ class ShimTests(unittest.TestCase):
             'no_index': {'schema_version': 1, 'release_root': str(self.release)},
             'schema_2': dict(good, schema_version=2),
             'oversized': json.dumps(good) + ' ' * 4096,
+            # schema_version must be the integer 1; the keys exactly these three, each once.
+            'string_version': dict(good, schema_version='1'),
+            'float_version': exact.replace('"schema_version":1}', '"schema_version":1.0}'),
+            'exponent_version': exact.replace('"schema_version":1}', '"schema_version":1e0}'),
+            'boolean_version': dict(good, schema_version=True),
+            'extra_key': dict(good, extra=1),
+            'duplicate_key': exact.replace('{', '{"schema_version":1,', 1),
+            'duplicate_index': exact.replace('{', '{"index_sha256":"' + 'b' * 64 + '",', 1),
+            'numeric_index': exact.replace(f'"{self.index}"', '1' * 64),
+            # Exactly the installer's bytes: sorted keys, no spaces, one newline.
+            'unsorted': json.dumps(good, separators=(',', ':')) + '\n',
+            'spaced': json.dumps(good, sort_keys=True) + '\n',
+            'no_newline': exact[:-1],
+            'two_newlines': exact + '\n',
+            'leading_space': ' ' + exact[:-1],
         }
         path = self.shim()
         for name, value in cases.items():
@@ -179,6 +201,16 @@ class ShimTests(unittest.TestCase):
                 self.assertRefused(self.run_shim(path))
                 self.write(good)
                 self.assertRuns(path)
+
+    def test_refuses_a_home_env_or_the_pointer_could_misread(self):
+        # "=" would make env take the interpreter path for an assignment; quotes, backslashes and bytes
+        # outside printable ASCII are escaped in the installer's JSON, so the exact match could never hold.
+        for name in ('ho=me', 'home=x', 'ho"me', 'ho\\me', 'hömé', 'ho\tme'):
+            with self.subTest(home=name):
+                self.install_home(self.base / name)
+                self.assertRefused(self.run_shim(self.shim()))
+        self.install_home(self.base / 'Test User')
+        self.assertRuns(self.shim())
 
     def test_refuses_unsafe_pointer_metadata_and_incomplete_releases(self):
         path = self.shim()

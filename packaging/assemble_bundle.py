@@ -309,7 +309,7 @@ def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=Fal
             raise ReleasePackageError('payload_app_mismatch')
         lock_data=_bounded_input(payload/'tdlib-lock.json'); lock=parse_native_manifest(lock_data)
         if digest(lock_data)!=manifest['native_lock_sha256']:raise ValueError
-        if manifest['schema_version']==2:check_publisher_lock(manifest['publisher'],lock_data)
+        check_publisher_lock(manifest,lock_data)  # v1 pairs only with an ad-hoc lock
         inventory={f.name:f for f in files}
         # Shipped TDLib source must be the pinned schema; a complete-source claim requires it.
         schema=inventory.get(TDLIB_SCHEMA)

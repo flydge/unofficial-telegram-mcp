@@ -4,11 +4,13 @@ Every assertion goes through the official SDK client; tool counts derive from th
 """
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 
 from mcp import Client
 
-from telegram_search_mcp.config import RuntimePolicy
+from telegram_search_mcp.config import RuntimePolicy, load_runtime_policy
 from telegram_search_mcp.contract import (OPERATION_CAPABILITIES, TOOL_OPERATIONS, fingerprint, required_capabilities,
                                           schema_document, schema_fingerprint)
 from telegram_search_mcp.server import _TOOL_NAMES, available_tools, build_server
@@ -118,6 +120,29 @@ class FilteredListingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(manifest['available_tools']), set(listed))
                 self.assertEqual(manifest['schema_fingerprint'], schema_fingerprint())
                 self.assertEqual(fingerprint(schema_document(built)), schema_fingerprint())
+
+    async def test_a_stale_policy_lists_only_the_manifest_like_the_manifest_reports(self):
+        async def observe(client):
+            listed = [tool.name for tool in (await client.list_tools()).tools]
+            return listed, (await client.call_tool('_manifest', {})).structured_content
+
+        stale = RuntimePolicy(enabled_capabilities=('read', 'artifacts'), expected_package_version='0.0.0')
+        async with Client(server(stale)) as client:
+            listed, manifest = await observe(client)
+        self.assertEqual((manifest['compatibility']['status'], listed, manifest['available_tools']),
+                         ('config_stale', ['_manifest'], ['_manifest']))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'runtime.toml'
+            path.write_text('config_version = 1\nenabled_capabilities = ["read", "artifacts", "send"]\n')
+            path.chmod(0o600)
+            async with Client(server(load_runtime_policy(path))) as client:
+                fresh, manifest = await observe(client)
+                self.assertEqual(set(fresh), set(available_tools(('read', 'artifacts', 'send'))))
+                self.assertEqual(set(manifest['available_tools']), set(fresh))
+                path.write_text('config_version = 1\nenabled_capabilities = ["read"]\n')  # changed after load
+                listed, manifest = await observe(client)
+        self.assertEqual((manifest['compatibility']['status'], listed, manifest['available_tools']),
+                         ('config_stale', ['_manifest'], ['_manifest']))
 
     async def test_an_unlisted_tool_still_answers_with_its_fixed_refusal(self):
         async with Client(server(CONNECT_DEFAULT)) as client:

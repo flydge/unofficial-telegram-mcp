@@ -1,8 +1,10 @@
 """Build the whole prepared payload for assemble_bundle.py from pinned inputs.
 
-Development host only. Inputs: packaging/payload-lock.json (PBS CPython archive, the TDLib source
-archive and every wheel, each by URL, bytes and sha256), `git archive HEAD` of this checkout, and a
-prepare_native.py output directory whose dylibs must equal HEAD's packaging/tdlib-lock.json.
+Development host only. Inputs: `git archive HEAD` of this checkout, whose packaging/payload-lock.json
+(PBS CPython archive, the TDLib source archive and every wheel, each by URL, bytes and sha256, plus the
+OpenSSL notice hashes) is the only lock read (never the working tree's), and a prepare_native.py
+output directory whose dylibs must equal HEAD's packaging/tdlib-lock.json, whose notices must equal
+the payload lock's hashes and whose build provenance must agree with that native lock.
 Downloads go only to a private content-addressed cache and are used only after their pinned
 hash matches; with --offline nothing is fetched. Nothing here executes downloaded code: wheels
 are unpacked against their RECORD by this script, and the manifest is computed by importing the
@@ -32,13 +34,18 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-LOCK = ROOT / 'packaging/payload-lock.json'
+LOCK = 'packaging/payload-lock.json'  # read from the HEAD export only
 CODES = frozenset({'output_refused', 'cache_refused', 'lock_invalid', 'input_unavailable', 'input_mismatch',
                    'archive_refused', 'wheel_refused', 'source_refused', 'native_mismatch', 'manifest_failed',
-                   'prune_refused'})
+                   'prune_refused', 'payload_refused'})
 HOSTS = frozenset({'files.pythonhosted.org', 'github.com', 'codeload.github.com'})
 SKILLS = ('telegram-search', 'telegram-setup')
 NATIVE_NAMES = ('libtdjson.dylib', 'libssl.3.dylib', 'libcrypto.3.dylib')
+OPENSSL_NOTICES = ('AUTHORS.md', 'LICENSE.txt', 'README.md')
+PROVENANCE = ('provenance/tdlib-build.json', 'provenance/openssl-build.json')
+REDACTED_PATH = 'private-machine-path-redacted; evidence hash retained'  # prepare_native's receipt redaction
+MAX_LOCK = 1 << 20
+MAX_NOTICE = 1 << 20
 SCHEMA = 'td/generate/scheme/td_api.tl'
 MAX_DOWNLOAD = 256 * 1024 * 1024
 MAX_MEMBER = 256 * 1024 * 1024
@@ -124,14 +131,22 @@ def _pin(value, keys):
 
 
 def load_lock(data):
-    """Closed payload lock: python, tdlib_source, app wheels, installer wheels."""
+    """Closed payload lock: python, tdlib_source, OpenSSL notice hashes, app wheels, installer wheels."""
     try:
         lock = _json(data)
     except (ValueError, UnicodeError, RecursionError):
         raise PayloadError('lock_invalid') from None
-    _need(type(lock) is dict and set(lock) == {'schema_version', 'target', 'python', 'tdlib_source', 'app', 'installer'}
+    _need(type(lock) is dict and set(lock) == {'schema_version', 'target', 'python', 'tdlib_source', 'native_notices',
+                                               'app', 'installer'}
           and lock['schema_version'] == 1 and type(lock['schema_version']) is int and lock['target'] == 'macos-arm64',
           'lock_invalid')
+    notices = lock['native_notices']
+    _need(type(notices) is dict and set(notices) == {'openssl_version', 'files'} and type(notices['openssl_version']) is str
+          and VERSION.match(notices['openssl_version']) is not None and type(notices['files']) is dict
+          and tuple(sorted(notices['files'])) == OPENSSL_NOTICES, 'lock_invalid')
+    for pin in notices['files'].values():
+        _need(type(pin) is dict and set(pin) == {'bytes', 'sha256'} and type(pin['bytes']) is int
+              and 1 <= pin['bytes'] <= MAX_NOTICE and type(pin['sha256']) is str and HASH.match(pin['sha256']), 'lock_invalid')
     python = _pin(lock['python'], {'version', 'pbs_tag', 'url', 'bytes', 'sha256'})
     _need(all(type(python[k]) is str and VERSION.match(python[k]) for k in ('version', 'pbs_tag')), 'lock_invalid')
     source = _pin(lock['tdlib_source'], {'commit', 'url', 'bytes', 'sha256', 'files', 'unpacked_bytes'})
@@ -180,8 +195,10 @@ def fetch(pin, cache, *, offline=False, opener=urllib.request.urlopen):
     if not target.exists():
         _need(not offline, 'input_unavailable')
         partial = downloads / (pin['sha256'] + '.partial')
-        if partial.exists():
-            partial.unlink()
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            raise PayloadError('cache_refused') from None
         digest, total = hashlib.sha256(), 0
         try:
             with opener(pin['url'], timeout=FETCH_TIMEOUT) as response, \
@@ -206,8 +223,11 @@ def fetch(pin, cache, *, offline=False, opener=urllib.request.urlopen):
         if total != pin['bytes'] or digest.hexdigest() != pin['sha256']:
             partial.unlink(missing_ok=True)
             raise PayloadError('input_mismatch')
-        os.chmod(partial, 0o400)
-        os.rename(partial, target)
+        try:
+            os.chmod(partial, 0o400)
+            os.rename(partial, target)
+        except OSError:
+            raise PayloadError('cache_refused') from None
     data = _read(target, pin['bytes'], 'input_mismatch')
     _need(len(data) == pin['bytes'] and sha256(data) == pin['sha256'], 'input_mismatch')
     return data
@@ -239,14 +259,20 @@ class Tree:
         _need(_safe_relative(relative), code)
         _need(relative not in self.files and len(self.files) < MAX_MEMBERS, code)
         path = self.root / relative
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as out:
-            out.write(data)
+        try:  # A file and a directory of one name, or any filesystem failure, is this input's refusal.
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as out:
+                out.write(data)
+        except OSError:
+            raise PayloadError(code) from None
         self.files[relative] = executable
 
     def rename(self, old, new):
         _need(old in self.files and new not in self.files, 'prune_refused')
-        os.rename(self.root / old, self.root / new)
+        try:
+            os.rename(self.root / old, self.root / new)
+        except OSError:
+            raise PayloadError('prune_refused') from None
         self.files[new] = self.files.pop(old)
 
     def seal(self):
@@ -404,8 +430,9 @@ def tdlib_source(archive, pin, tree):
                 tree.write('source/tdlib/' + name[len(prefix):], data, False, 'source_refused')
     except (tarfile.TarError, OSError, EOFError):
         raise PayloadError('source_refused') from None
-    _need(count == pin['files'] and total == pin['unpacked_bytes'], 'source_refused')
-    return sha256((tree.root / 'source/tdlib' / SCHEMA).read_bytes())
+    _need(count == pin['files'] and total == pin['unpacked_bytes'] and 'source/tdlib/' + SCHEMA in tree.files,
+          'source_refused')
+    return sha256(_read(tree.root / 'source/tdlib' / SCHEMA, MAX_MEMBER, 'source_refused'))
 
 
 def git_export(root):
@@ -458,13 +485,23 @@ def generate_launcher(template, version):
     return text.encode()
 
 
+def _field(value):
+    """One METADATA header value: a bounded printable string (no line break can add a header)."""
+    return type(value) is str and 0 < len(value) <= 1024 and value.isprintable()
+
+
 def project_distribution(files, version, tree):
     """app/telegram_search_mcp from HEAD plus a generated dist-info with a full RECORD."""
     package = {name[len('src/'):]: data for name, (data, _) in files.items() if name.startswith('src/telegram_search_mcp/')}
     _need(package and all(n.endswith('.py') for n in package), 'source_refused')
     try:
         project = tomllib.loads(files['pyproject.toml'][0].decode('utf-8'))['project']
-    except (KeyError, UnicodeError, tomllib.TOMLDecodeError):
+        _need(type(project) is dict and all(_field(project.get(k)) for k in ('name', 'description', 'license',
+                                                                             'requires-python'))
+              and all(type(project.get(k)) is list and all(_field(v) for v in project[k])
+                      for k in ('license-files', 'dependencies'))
+              and all(name in files for name in project['license-files']), 'source_refused')
+    except (KeyError, TypeError, UnicodeError, tomllib.TOMLDecodeError):
         raise PayloadError('source_refused') from None
     dist = f'telegram_search_mcp-{version}.dist-info'
     metadata = ['Metadata-Version: 2.4', 'Name: ' + project['name'], 'Version: ' + version,
@@ -486,14 +523,18 @@ def project_distribution(files, version, tree):
     return dist
 
 
-def native_tree(native_directory, lock_data, tree):
-    """Copy prepare_native's dylibs only after they equal HEAD's native lock; plus its notices/provenance."""
+def native_tree(native_directory, lock_data, notices, tree):
+    """Copy prepare_native's dylibs only after they equal HEAD's native lock, its OpenSSL notices only
+    after they equal the payload lock's hashes, and its build provenance only after it agrees with
+    that native lock."""
     try:
         lock = _json(lock_data)
         artifacts = {a['name']: (a['bytes'], a['sha256']) for a in lock['artifacts']}
+        openssl_version = lock['build']['openssl_version']
     except (ValueError, UnicodeError, KeyError, TypeError, RecursionError):
         raise PayloadError('native_mismatch') from None
-    _need(tuple(artifacts) == NATIVE_NAMES, 'native_mismatch')
+    _need(tuple(artifacts) == NATIVE_NAMES and type(openssl_version) is str
+          and openssl_version == notices['openssl_version'], 'native_mismatch')
     native_directory = Path(native_directory)
     try:
         names = sorted(p.name for p in (native_directory / 'native').iterdir())
@@ -504,13 +545,58 @@ def native_tree(native_directory, lock_data, tree):
         data = _read(native_directory / 'native' / name, 32 * 1024 * 1024, 'native_mismatch')
         _need((len(data), sha256(data)) == artifacts[name], 'native_mismatch')
         tree.write('native/' + name, data, True, 'native_mismatch')
-    for relative in ('provenance/tdlib-build.json', 'provenance/openssl-build.json'):
-        tree.write(relative, _read(native_directory / relative, 1 << 20, 'native_mismatch'), False, 'native_mismatch')
-    openssl = 'openssl-' + lock['build']['openssl_version']
-    for name in ('LICENSE.txt', 'AUTHORS.md', 'README.md'):
-        tree.write(f'notices/{openssl}/{name}', _read(native_directory / 'notices' / openssl / name, 1 << 20,
-                                                      'native_mismatch'), False, 'native_mismatch')
+    for relative, check in zip(PROVENANCE, (_tdlib_receipt, _openssl_receipt)):
+        data = _read(native_directory / relative, 1 << 20, 'native_mismatch')
+        check(_provenance_record(data), lock)
+        tree.write(relative, data, False, 'native_mismatch')
+    openssl = 'openssl-' + openssl_version
+    for name in OPENSSL_NOTICES:
+        data = _read(native_directory / 'notices' / openssl / name, MAX_NOTICE, 'native_mismatch')
+        _need({'bytes': len(data), 'sha256': sha256(data)} == notices['files'][name], 'native_mismatch')
+        tree.write(f'notices/{openssl}/{name}', data, False, 'native_mismatch')
     return lock
+
+
+def _provenance_record(data):
+    """prepare_native's `{input_sha256, record}` provenance, byte for byte as it writes it, with the
+    receipt's private path redacted; returns the receipt record."""
+    try:
+        value = _json(data)
+        canonical = (json.dumps(value, sort_keys=True) + '\n').encode()
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise PayloadError('native_mismatch') from None
+    record = value.get('record') if type(value) is dict else None
+    _need(type(value) is dict and data == canonical and set(value) == {'input_sha256', 'record'}
+          and type(value['input_sha256']) is str and HASH.match(value['input_sha256']) is not None
+          and type(record) is dict and type(record.get('source')) is dict and type(record.get('built_on')) is dict
+          and record.get('arch') == 'arm64' and record['source'].get('path', REDACTED_PATH) == REDACTED_PATH,
+          'native_mismatch')
+    return record
+
+
+def _tdlib_receipt(record, lock):
+    """The TDLib receipt that the native lock's source pin and build fields were taken from."""
+    try:
+        build, built_on, commit = lock['build'], record['built_on'], lock['source_commit']
+        versions = record['source'].get('versions')
+        openssl = [d.get('version') for d in record.get('runtime_dependencies') or ()
+                   if type(d) is dict and d.get('full_name') == 'openssl@3']
+        _need(type(commit) is str and record['source'].get('scm_revision') == commit and type(versions) is dict
+              and versions.get('head') == 'HEAD-' + commit[:7] and record.get('compiler') == build['compiler']
+              and built_on.get('os_version') == build['build_os'] and built_on.get('xcode') == build['xcode']
+              and built_on.get('clt') == build['clt'] and record.get('used_options') == build['used_options']
+              and openssl == [build['openssl_version']], 'native_mismatch')
+    except (KeyError, TypeError, AttributeError):
+        raise PayloadError('native_mismatch') from None
+
+
+def _openssl_receipt(record, lock):
+    """The OpenSSL receipt of the version that the native lock names."""
+    try:
+        versions = record['source'].get('versions')
+        _need(type(versions) is dict and versions.get('stable') == lock['build']['openssl_version'], 'native_mismatch')
+    except (KeyError, TypeError, AttributeError):
+        raise PayloadError('native_mismatch') from None
 
 
 def macho_inventory(tree):
@@ -530,22 +616,32 @@ def macho_inventory(tree):
 
 # Build ------------------------------------------------------------------------------------------
 
-def prepare_payload(output, *, native_directory, cache, lock_path=LOCK, checkout=ROOT, offline=False,
+def prepare_payload(output, *, native_directory, cache, checkout=ROOT, offline=False,
                     opener=urllib.request.urlopen, python=sys.executable):
     """Build one fresh payload directory; returns a nonsecret summary with the tree digest."""
-    output = Path(output)
+    try:
+        return _prepare_payload(Path(output), native_directory, cache, checkout, offline, opener, python)
+    except PayloadError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError, RecursionError):
+        raise PayloadError('payload_refused') from None  # Never an escaping path or provider text.
+
+
+def _prepare_payload(output, native_directory, cache, checkout, offline, opener, python):
     _need(output.is_absolute() and '..' not in output.parts and not output.exists() and not output.is_symlink()
           and output.parent.is_dir() and not output.is_relative_to(Path(checkout).resolve())
           and not any((p / '.git').exists() for p in output.parents), 'output_refused')
     _private_directory(cache, 'cache_refused')
-    lock = load_lock(_read(Path(lock_path), 1 << 20, 'lock_invalid'))
+    commit, files = git_export(checkout)
+    required = [LOCK, 'packaging/launcher.py', 'packaging/tdlib-lock.json', 'pyproject.toml', 'LICENSE', 'NOTICE',
+                *(f'skills/{s}/SKILL.md' for s in SKILLS), 'src/telegram_search_mcp/__init__.py']
+    _need(all(name in files for name in required), 'source_refused')
+    lock_data = files[LOCK][0]  # HEAD's committed lock; an uncommitted working-tree edit never counts.
+    _need(len(lock_data) <= MAX_LOCK, 'lock_invalid')
+    lock = load_lock(lock_data)
     inputs = {'python': fetch(lock['python'], cache, offline=offline, opener=opener),
               'tdlib_source': fetch(lock['tdlib_source'], cache, offline=offline, opener=opener),
               **{w['sha256']: fetch(w, cache, offline=offline, opener=opener) for w in lock['app'] + lock['installer']}}
-    commit, files = git_export(checkout)
-    required = ['packaging/launcher.py', 'packaging/tdlib-lock.json', 'pyproject.toml', 'LICENSE', 'NOTICE',
-                *(f'skills/{s}/SKILL.md' for s in SKILLS), 'src/telegram_search_mcp/__init__.py']
-    _need(all(name in files for name in required), 'source_refused')
     try:
         output.mkdir(mode=0o700)
     except OSError:
@@ -569,7 +665,7 @@ def prepare_payload(output, *, native_directory, cache, lock_path=LOCK, checkout
     project_dist = project_distribution(files, version, tree)
     _need(('app/segno/__init__.py' in tree.files and 'installer/tomlkit/__init__.py' in tree.files), 'wheel_refused')
     native_lock = files['packaging/tdlib-lock.json'][0]
-    lock_value = native_tree(native_directory, native_lock, tree)
+    lock_value = native_tree(native_directory, native_lock, lock['native_notices'], tree)
     schema = tdlib_source(inputs['tdlib_source'], lock['tdlib_source'], tree)
     _need(lock['tdlib_source']['commit'] == lock_value.get('source_commit') and schema == lock_value.get('schema_sha256'),
           'source_refused')
@@ -579,10 +675,12 @@ def prepare_payload(output, *, native_directory, cache, lock_path=LOCK, checkout
         tree.write(f'skills/{skill}/SKILL.md', files[f'skills/{skill}/SKILL.md'][0])
     tree.write('notices/LICENSE', files['LICENSE'][0])
     tree.write('notices/NOTICE', files['NOTICE'][0])
-    tree.write('notices/tdlib/LICENSE_1_0.txt', (output / 'source/tdlib/LICENSE_1_0.txt').read_bytes())
+    tdlib_license = 'source/tdlib/LICENSE_1_0.txt'
+    _need(tdlib_license in tree.files, 'source_refused')
+    tree.write('notices/tdlib/LICENSE_1_0.txt', _read(output / tdlib_license, MAX_NOTICE, 'source_refused'))
     python_license = 'python/lib/python3.14/LICENSE.txt'
     _need(python_license in tree.files, 'prune_refused')
-    tree.write('notices/python/LICENSE.txt', (output / python_license).read_bytes())
+    tree.write('notices/python/LICENSE.txt', _read(output / python_license, MAX_NOTICE, 'prune_refused'))
     tree.write('provenance/python-runtime.json', json_bytes({
         'upstream': 'astral-sh/python-build-standalone', 'target': 'aarch64-apple-darwin',
         'flavor': 'install_only_stripped', 'python_version': lock['python']['version'], 'tag': lock['python']['pbs_tag'],
@@ -590,7 +688,7 @@ def prepare_payload(output, *, native_directory, cache, lock_path=LOCK, checkout
         'kept_executable': 'python/bin/python3 (upstream bin/python3.14)', 'pruned': pruned}))
     tree.write('provenance/components.json', json_bytes({
         'schema_version': 1, 'source_commit': commit, 'project_dist_info': project_dist,
-        'payload_lock_sha256': sha256(_read(Path(lock_path), 1 << 20, 'lock_invalid')),
+        'payload_lock_sha256': sha256(lock_data),
         'tdlib_source': lock['tdlib_source'], 'native_lock_sha256': sha256(native_lock), 'wheels': components}))
     tree.write('provenance/source-completeness.json', json_bytes({
         'status': 'incomplete', 'publication': 'unreleased',

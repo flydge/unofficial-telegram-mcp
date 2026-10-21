@@ -69,20 +69,25 @@ class ManifestGrammarTests(unittest.TestCase):
     def test_publisher_must_name_the_native_lock_signature(self):
         natives = inert_natives()
         v1 = json.dumps(v1_lock(natives)).encode()
-        check_publisher_lock({'kind': 'adhoc', 'team_id': None}, v1)
+        adhoc, developer = manifest(2), manifest(2, publisher={'kind': 'developer-id', 'team_id': TEAM})
+        check_publisher_lock(adhoc, v1)
+        check_publisher_lock(manifest(), v1)
         with self.assertRaises(BundleError) as caught:
-            check_publisher_lock({'kind': 'developer-id', 'team_id': TEAM}, v1)
+            check_publisher_lock(developer, v1)
         self.assertEqual(str(caught.exception), 'publisher_mismatch')
         with self.assertRaises(BundleError) as caught:
-            check_publisher_lock({'kind': 'adhoc', 'team_id': None}, b'{}')
+            check_publisher_lock(adhoc, b'{}')
         self.assertEqual(str(caught.exception), 'native_lock_mismatch')
         signed = {n: d + b'-signed' for n, d in natives.items()}
         with mock.patch.object(native_runtime, 'APPROVED_PINS', (synthetic_pin(natives, team_ids=(TEAM, 'ZYXWV98765')),)):
+            check_publisher_lock(manifest(), json.dumps(v2_lock(v1_lock(natives))).encode())
             lock = json.dumps(v2_lock(v1_lock(natives), signature='developer-id', team_id=TEAM, signed=signed)).encode()
-            check_publisher_lock({'kind': 'developer-id', 'team_id': TEAM}, lock)
-            for publisher in ({'kind': 'developer-id', 'team_id': 'ZYXWV98765'}, {'kind': 'adhoc', 'team_id': None}):
-                with self.subTest(publisher=publisher), self.assertRaises(BundleError):
-                    check_publisher_lock(publisher, lock)
+            check_publisher_lock(developer, lock)
+            for value in (manifest(2, publisher={'kind': 'developer-id', 'team_id': 'ZYXWV98765'}), adhoc,
+                          manifest()):  # A v1 manifest has no publisher: it pairs only with an ad-hoc lock.
+                with self.subTest(manifest=value), self.assertRaises(BundleError) as caught:
+                    check_publisher_lock(value, lock)
+                self.assertEqual(str(caught.exception), 'publisher_mismatch')
 
 
 class AssemblerManifestTests(unittest.TestCase):
@@ -115,6 +120,18 @@ class AssemblerManifestTests(unittest.TestCase):
                      publisher={'kind': 'developer-id', 'team_id': TEAM})  # v1 ad-hoc lock: publisher mismatch
         self.refused(manifest_version=2, publisher={'kind': 'developer-id', 'team_id': TEAM})
         self.refused(manifest_version=1, publication='published')
+
+    def test_a_v1_manifest_never_pairs_with_a_developer_id_lock(self):
+        natives = inert_natives()
+        signed = {n: d + b'-developer-id' for n, d in natives.items()}
+        lock = v2_lock(v1_lock(natives), signature='developer-id', team_id=TEAM, signed=signed)
+        with mock.patch.object(native_runtime, 'APPROVED_PINS', (synthetic_pin(natives, team_ids=(TEAM,)),)):
+            self.refused(manifest_version=1, natives=signed, lock=lock)
+            with tempfile.TemporaryDirectory() as tmp:  # The same lock under a v2 Developer ID manifest assembles.
+                self.assemble(Path(tmp).resolve(), manifest_version=2, natives=signed, lock=lock,
+                              publisher={'kind': 'developer-id', 'team_id': TEAM})
+            with tempfile.TemporaryDirectory() as tmp:  # A v1 manifest with a v2 ad-hoc lock assembles.
+                self.assemble(Path(tmp).resolve(), manifest_version=1, lock=v2_lock(v1_lock(natives)))
 
     def test_shipped_tdlib_schema_must_match_the_lock(self):
         self.refused('native_schema_mismatch', extra_files={SCHEMA: b'not the pinned schema'})

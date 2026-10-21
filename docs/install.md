@@ -289,7 +289,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 
 `install` registers the background broker in your logged-in macOS session. The broker alone owns TDLib; MCP clients connect to it. Keep the checkout and virtual environment at the same path.
 
-The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stderr and exits `0` on success. It initializes the session when needed but does not search or read messages. Exit `2` means authorization is blocked; exit `1` indicates another setup, transport or compatibility failure.
+The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stderr and exits `0` on success; a Homebrew/source install also prints `TDLIB_OPENSSL_KEG: openssl@3 <version>` after the first line. It initializes the session when needed but does not search or read messages. Exit `2` means authorization is blocked; exit `1` indicates another setup, transport or compatibility failure.
 
 ## Published 0.51: connect an MCP client
 

@@ -28,7 +28,7 @@ from .retained_selection_models import RetainSelectionRequest, RetainSelectionSo
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
-from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError
+from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        required_capabilities)
@@ -169,6 +169,15 @@ def available_tools(enabled_capabilities: Iterable[str]) -> list[str]:
     return [name for name, needed in _TOOL_CAPABILITIES.items() if enabled.issuperset(needed)]
 
 
+def _usable_tools(policy: RuntimePolicy) -> list[str]:
+    """available_tools under the loaded policy as _manifest reports it: a stale policy enables nothing."""
+    try:
+        require_current(policy)
+        return available_tools(contract_descriptor(policy)["enabled_capabilities"])
+    except CompatibilityError:
+        return available_tools(())
+
+
 # Client-neutral, at most 2,500 characters; mirrored by the telegram-search skill.
 _INSTRUCTIONS = (
     "Start: call _manifest(check_broker=true) once per session and continue only when "
@@ -193,13 +202,16 @@ _INSTRUCTIONS = (
 
 
 class _PolicyServer(MCPServer):
-    """tools/list shows only the tools the loaded policy enables. The registration, and so the
-    schema fingerprint, stays complete; an unlisted tool still answers with its guard refusal."""
+    """tools/list shows only the tools the loaded policy enables, rechecked on every listing, so it
+    always agrees with _manifest.available_tools (a stale policy lists only _manifest). The
+    registration, and so the schema fingerprint, stays complete; an unlisted tool still answers with
+    its guard refusal."""
 
-    listed: frozenset[str] = frozenset(_TOOL_NAMES)
+    policy: RuntimePolicy = RuntimePolicy()
 
     async def list_tools(self):
-        return [tool for tool in await super().list_tools() if tool.name in self.listed]
+        listed = frozenset(_usable_tools(self.policy))
+        return [tool for tool in await super().list_tools() if tool.name in listed]
 
 
 _READ_ONLY = ToolAnnotations(
@@ -318,7 +330,7 @@ def build_server(
         version=__version__,
         log_level="CRITICAL",
     )
-    server.listed = frozenset(available_tools(runtime_policy.enabled_capabilities))
+    server.policy = runtime_policy
     service: SearchService | None = None
     consumer_schema_mismatch = False
 
@@ -1529,6 +1541,8 @@ def build_server(
 
 def _run_check() -> int:
     print("INITIALIZING_TDLIB", file=sys.stderr)
+    if bundled_runtime_pin().startswith("Homebrew"):
+        print("TDLIB_OPENSSL_KEG: " + homebrew_openssl_keg(), file=sys.stderr)
     client: BrokerClient | None = None
     try:
         client = BrokerClient(socket_path=BROKER_SOCKET_PATH)

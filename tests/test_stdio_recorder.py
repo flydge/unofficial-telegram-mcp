@@ -14,7 +14,7 @@ import unittest
 from mcp import Client, StdioServerParameters
 
 from telegram_search_mcp import __version__, stdio_recorder
-from telegram_search_mcp.server import available_tools
+from telegram_search_mcp.server import _TOOL_NAMES, available_tools
 from telegram_search_mcp.stdio_recorder import LineSplitter, Recorder, RecorderRefusal, open_record, parse_arguments
 
 CANARY = 'RECORDER_CANARY_7f3a'
@@ -91,7 +91,7 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual((calls[1]['tool'], calls[1]['is_error'], [b['type'] for b in calls[1]['blocks']]),
                          ('prepare_text_send', True, ['text', 'other']))
         self.assertEqual(self.named('rpc_error'), [{'method': 'tools/call', 'tool': 'read_history', 'code': -32602}])
-        self.assertEqual(calls[2], {'tool': 'redacted', 'outcome': 'unanswered'})
+        self.assertEqual(calls[2], {'tool': 'other', 'outcome': 'unanswered'})
         end = self.named('end')[0]
         self.assertEqual(end['exit_status'], 0)
         self.assertEqual(end['frames'], {'client': 9, 'server': 6})
@@ -100,6 +100,23 @@ class RecorderTests(unittest.TestCase):
                                                     'notifications/initialized': 1, 'response': 1, 'tools/call': 4,
                                                     'tools/list': 1})
         self.assertEqual(end['methods']['server'], {'sampling/createMessage': 1})
+
+    def test_only_registered_tool_names_are_recorded(self):
+        # A grammar-valid but unregistered name could carry user text; only registered names pass.
+        names = [CANARY, CANARY.lower() + '_tool', 'read_history', 'Read_History', '_manifest', None, 7, {'n': CANARY}]
+        for index, name in enumerate(names):
+            self.feed('client', {'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {'name': name}})
+            self.feed('server', result(index, {'content': [], 'isError': True}))
+        self.feed('client', call(99, CANARY, {}))
+        self.feed('server', {'jsonrpc': '2.0', 'id': 99, 'error': {'code': -32602, 'message': 'x'}})
+        self.feed('client', call(100, CANARY + '_unanswered', {}))
+        self.recorder.finish(0)
+        self.assertNotIn(CANARY, json.dumps(self.events))
+        self.assertNotIn(CANARY.lower(), json.dumps(self.events))
+        self.assertEqual([e['tool'] for e in self.named('tool_call')],
+                         ['other', 'other', 'read_history', 'other', '_manifest', 'other', 'other', 'other', 'other'])
+        self.assertEqual(self.named('rpc_error'), [{'method': 'tools/call', 'tool': 'other', 'code': -32602}])
+        self.assertTrue(stdio_recorder.TOOL_NAMES and stdio_recorder.TOOL_NAMES == set(_TOOL_NAMES))
 
     def test_tools_fingerprint_ignores_order_and_follows_content(self):
         tools = [{'name': 'b', 'inputSchema': {'type': 'object'}}, {'name': 'a', 'inputSchema': {'type': 'object'}}]
