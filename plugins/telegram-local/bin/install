@@ -4,12 +4,14 @@
 # the fixed GitHub Releases URL pattern below, each downloaded once with /usr/bin/curl --proto =https
 # --fail and no retry or resume (so assets of different uploads are never mixed), into a private
 # mktemp directory under the passwd home. Every asset must match its pinned size and sha256 before
-# anything runs; then the pinned bootstrap.sh installs with --claude-code plugin (plus --seed-team when
-# a Team ID is pinned) and the installer JSON is printed on stdout. The directory is removed on success
+# anything runs; then the pinned bootstrap.sh installs with --claude-code plugin and --seed-team
+# <the pinned Team ID>, and the installer JSON is printed on stdout. The directory is removed on success
 # and kept on failure. The reviewed plugin commit, pinned by the marketplace, is the trust input: no
-# environment value, argument or downloaded byte selects a URL, pin or path. curl sets no quarantine;
-# the seed's signature is checked by bootstrap.sh. Stock absolute tools only; every refusal is one
-# fixed JSON line on stderr.
+# environment value, argument or downloaded byte selects a URL, pin or path. Published pins must carry
+# a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
+# evaluates the downloaded seed, and bootstrap.sh's --seed-team check of its Developer ID designated
+# requirement is what binds it to the publisher, on top of the sha256 pins. Stock absolute tools only;
+# every refusal is one fixed JSON line on stderr.
 set -eu
 umask 077
 
@@ -123,6 +125,7 @@ tg_file "$tg_plugin/.claude-plugin/plugin.json" 65536 || tg_refuse plugin_invali
 [ "$(/usr/bin/env -i /usr/bin/plutil -extract version raw -expect string -o - "$tg_plugin/.claude-plugin/plugin.json" 2>/dev/null)" = "$tg_version" ] \
     || tg_refuse pins_invalid
 [ "$tg_publication" = published ] || tg_refuse release_not_published
+[ -n "$tg_team" ] || tg_refuse pins_invalid
 [ "$tg_bootstrap_bytes" -ge 1 ] && [ "$tg_bootstrap_bytes" -le 262144 ] || tg_refuse pins_invalid
 [ "$tg_seed_bytes" -ge 1 ] && [ "$tg_seed_bytes" -le 2097152 ] || tg_refuse pins_invalid
 [ "$tg_index_bytes" -ge 1 ] && [ "$tg_index_bytes" -le 2097152 ] || tg_refuse pins_invalid
@@ -145,8 +148,7 @@ tg_fetch release.tar.gz "$tg_archive_bytes" 3600 "$tg_archive_sha"
 
 set -- --seed "$tg_work/bootstrap-verifier" --seed-sha256 "$tg_seed_sha" --seed-bytes "$tg_seed_bytes" \
     --archive "$tg_work/release.tar.gz" --index "$tg_work/release-index.json" \
-    --trusted-index-sha256 "$tg_index_sha" --claude-code plugin
-if [ -n "$tg_team" ]; then set -- "$@" --seed-team "$tg_team"; fi
+    --trusted-index-sha256 "$tg_index_sha" --claude-code plugin --seed-team "$tg_team"
 if /usr/bin/env -i /bin/sh -p "$tg_work/bootstrap.sh" "$@" > "$tg_work/result.json"; then
     :
 else

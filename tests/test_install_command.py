@@ -15,6 +15,7 @@ import unittest
 
 ROOT = Path(__file__).parents[1]
 SEED, INDEX = 'a' * 64, 'b' * 64
+TEAM = 'ABCDE12345'
 
 
 def load():
@@ -140,6 +141,40 @@ class InstallCommandTests(unittest.TestCase):
         result = self.run_command()
         self.assertEqual((result.returncode, result.stderr.splitlines()[-1]),
                          (3, '{"schema_version":1,"error_code":"kit_incomplete"}'))
+
+    def test_a_pinned_team_reaches_bootstrap_as_seed_team_in_both_modes(self):
+        self.command.chmod(0o755)
+        self.command.write_bytes(IC.render(seed_sha256=SEED, seed_bytes=71600, index_sha256=INDEX, team_id=TEAM,
+                                           published=True))
+        pinned = ['--seed', f'{self.kit}/bootstrap-verifier', '--seed-sha256', SEED, '--seed-bytes', '71600',
+                  '--archive', f'{self.kit}/release.tar.gz', '--index', f'{self.kit}/release-index.json',
+                  '--trusted-index-sha256', INDEX, '--seed-team', TEAM]
+        result = self.run_command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bootstrap_argv(), pinned)
+        self.assertEqual((self.release / 'activation.argv').read_text().splitlines()[-1], 'connect')
+        self.mode('prepared')
+        result = self.run_command('--prepare-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.bootstrap_argv(), ['--prepare-only', *pinned])
+
+    def test_without_a_team_the_literal_is_empty_and_no_seed_team_is_passed(self):
+        text = IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX).decode()
+        self.assertIn("install_seed_team=''\n", text)
+        self.assertEqual(self.run_command().returncode, 0)
+        self.assertNotIn('--seed-team', self.bootstrap_argv())
+
+    def test_a_published_kit_needs_a_team(self):
+        with self.assertRaises(IC.InstallCommandError) as caught:
+            IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX, published=True)
+        self.assertEqual(str(caught.exception), 'team_required')
+        text = IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX, team_id=TEAM, published=True).decode()
+        self.assertIn(f"install_seed_team='{TEAM}'\n", text)
+        for options in (dict(team_id='abcde12345'), dict(team_id='ABCDE1234'), dict(team_id=''), dict(team_id="A'$(x)"),
+                        dict(team_id=TEAM, published=1), dict(team_id=TEAM, published='yes')):
+            with self.subTest(options=options), self.assertRaises(IC.InstallCommandError) as caught:
+                IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX, **options)
+            self.assertEqual(str(caught.exception), 'pins_invalid')
 
     def test_a_relative_invocation_is_refused(self):
         result = subprocess.run(['/bin/sh', '-p', 'Install.command'], cwd=self.kit, capture_output=True, text=True,

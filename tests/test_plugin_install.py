@@ -3,6 +3,9 @@
 Each case runs a copy of plugins/<plugin>/bin/install whose only changes are the passwd lookup (a
 synthetic home) and the curl path (a stub that serves files from a local directory and records its
 argv). The real URL pattern, pins grammar, verification and bootstrap invocation run unchanged.
+Published pins carry a Team ID, so the real bootstrap.sh checks the seed's Developer ID requirement:
+through a copy whose codesign line is a recorder (success path), and with the stock codesign, which
+refuses an ad hoc seed.
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +21,7 @@ import tomllib
 import unittest
 
 from telegram_search_mcp import __version__, product_identity as identity
+from telegram_search_mcp.native_runtime import designated_requirement
 from test_claude_code_modes import BOOTSTRAP, synthetic_kit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +35,8 @@ ASSETS = {'bootstrap.sh': 'bootstrap', 'bootstrap-verifier': 'seed', 'release-in
 PIN_KEYS = {'schema_version', 'publication', 'version', 'team_id'} | {
     name + suffix for name in ASSETS.values() for suffix in ('_sha256', '_bytes')}
 TEAM = 'ABCDE12345'
+CODESIGN_LINE = 'bootstrap_codesign=/usr/bin/codesign\n'
+STAGE = re.compile(r'/private/tmp/telegram-bootstrap\.[A-Za-z0-9]{8}')
 
 
 def base_url():
@@ -119,7 +126,7 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
         self.pin()
 
     def pins_for_served(self, **overrides):
-        value = {'schema_version': 1, 'publication': 'published', 'version': __version__, 'team_id': ''}
+        value = {'schema_version': 1, 'publication': 'published', 'version': __version__, 'team_id': TEAM}
         for asset, name in ASSETS.items():
             data = (self.served / asset).read_bytes()
             value[name + '_sha256'] = hashlib.sha256(data).hexdigest()
@@ -182,7 +189,7 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
             '--seed', str(workspace / 'bootstrap-verifier'), '--seed-sha256', pins['seed_sha256'],
             '--seed-bytes', str(pins['seed_bytes']), '--archive', str(workspace / 'release.tar.gz'),
             '--index', str(workspace / 'release-index.json'), '--trusted-index-sha256', pins['index_sha256'],
-            '--claude-code', 'plugin'])
+            '--claude-code', 'plugin', '--seed-team', TEAM])
         names = {row.split('=', 1)[0] for row in (self.out / 'bootstrap-env').read_text().splitlines()}
         self.assertFalse(names & {'TG_PLUGIN_CANARY', 'HOME', 'PATH', 'CURL_HOME', 'https_proxy'}, names)
         calls = self.calls()
@@ -195,24 +202,36 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
                 self.assertTrue(any(call[i:i + len(flag)] == flag for i in range(len(call))), (flag, call))
             self.assertFalse([a for a in call if a.startswith(('--retry', '--continue-at', '-C'))], call)
 
-    def test_a_pinned_team_is_passed_as_seed_team(self):
-        self.pin(team_id=TEAM)
-        done = self.run_install()
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((self.out / 'bootstrap-argv').read_text().splitlines()[-4:],
-                         ['--claude-code', 'plugin', '--seed-team', TEAM])
+    def test_published_pins_without_a_team_refuse_before_any_download(self):
+        self.pin(team_id='')
+        self.refusal(self.run_install(), 'pins_invalid', retained=False)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.out / 'bootstrap-argv').exists())
 
-    def test_end_to_end_through_the_real_bootstrap_with_a_synthetic_seed(self):
+    def serve_real_bootstrap(self, *, codesign=None):
+        """The synthetic seed kit and the real bootstrap.sh, its codesign line optionally a recorder."""
         kit, _, _, _ = synthetic_kit(self.base / 'kit', self.home, self.out)
         for asset, source in zip(('bootstrap-verifier', 'release-index.json', 'release.tar.gz'), kit):
             shutil.copyfile(source, self.served / asset)
-        shutil.copyfile(BOOTSTRAP, self.served / 'bootstrap.sh')
+        text = BOOTSTRAP.read_text()
+        self.assertEqual(text.count(CODESIGN_LINE), 1)
+        if codesign is not None:
+            text = text.replace(CODESIGN_LINE, f"bootstrap_codesign='{codesign}'\n")
+        (self.served / 'bootstrap.sh').write_text(text)
         self.pin()
+
+    def test_end_to_end_through_the_real_bootstrap_with_a_synthetic_seed(self):
+        codesign = self.base / 'stub' / 'codesign'
+        codesign.write_text(f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{self.out}/codesign-argv'\n")
+        codesign.chmod(0o700)
+        self.serve_real_bootstrap(codesign=codesign)
         done = self.run_install()
         self.assertEqual((done.returncode, done.stderr), (0, ''))
         self.assertEqual(json.loads(done.stdout)['claude_code'], 'plugin')
         argv = (self.out / 'launcher-argv').read_text().splitlines()
         stage = argv[3][:-len('/release/launcher.py')]
+        self.assertEqual((self.out / 'codesign-argv').read_text().splitlines(),
+                         ['--verify', '--strict', '-R', designated_requirement(TEAM), stage + '/seed'])
         self.assertEqual(argv[4:], ['bootstrap-install',
                                     '--installation-root', str(self.home / 'Library/Application Support/TelegramSearch'),
                                     '--codex-home', str(self.home / '.codex'), '--skills-root', str(self.home / '.agents/skills'),
@@ -222,6 +241,23 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
         self.assertFalse(Path(stage).exists())
         self.assertEqual(self.workspaces(), [])
         self.assertFalse((self.home / 'Library').exists())  # The stand-in installs nothing.
+
+    def test_the_real_bootstrap_refuses_an_ad_hoc_seed_under_the_pinned_team(self):
+        self.serve_real_bootstrap()  # The stock /usr/bin/codesign.
+        seed = self.served / 'bootstrap-verifier'
+        seed.unlink()
+        shutil.copyfile('/usr/bin/true', seed)
+        subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(seed)], check=True, capture_output=True,
+                       timeout=60)
+        self.pin()
+        done = self.run_install()
+        workspace = self.refusal(done, 'bootstrap_failed', retained=True)
+        line = json.loads(done.stderr.splitlines()[0])  # bootstrap.sh's own fixed line.
+        self.assertEqual(line['error_code'], 'seed_signature_invalid')
+        self.assertIsNotNone(STAGE.fullmatch(line['retained_stage']))
+        shutil.rmtree(line['retained_stage'])
+        self.assertFalse((self.out / 'launcher-argv').exists())
+        self.assertTrue((workspace / 'bootstrap-verifier').is_file())
 
     # --- pins are enforced before anything runs ------------------------------------------------
 
@@ -279,6 +315,7 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
             'other version': encode_pins({**good, 'version': '9.9.9'}),
             'version traversal': encode_pins({**good, 'version': '../x'}),
             'bad team': encode_pins({**good, 'team_id': 'abcde12345'}),
+            'no team': encode_pins({**good, 'team_id': ''}),
             'short team': encode_pins({**good, 'team_id': 'ABCDE'}),
             'unknown publication': encode_pins({**good, 'publication': 'draft'}),
             'zero bytes': encode_pins({**good, 'archive_bytes': 0}),
