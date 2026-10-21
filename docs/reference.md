@@ -362,8 +362,9 @@ Every result is one JSON object on stdout; every refusal is one line on stderr.
 
 `bootstrap-install` takes five required options, each once (`--installation-root`, `--codex-home`,
 `--skills-root`, `--index`, `--trusted-index-sha256`), an optional `--claude-code user|plugin|skip`, and
-an optional `--adopt-legacy` that must be the last token. `bootstrap.sh` builds that argument list;
-anything else refuses.
+an optional `--adopt-legacy` that must be the last token. Without `--claude-code` a first install uses
+`user` and an upgrade, a repeat or a resumed install keeps the recorded mode. `bootstrap.sh` builds that
+argument list, with `--claude-code` only when it was given; anything else refuses.
 
 First install fields:
 
@@ -384,12 +385,14 @@ First install fields:
 | `claude_desktop_next_action` | `restart_claude_desktop`, when `claude_desktop` is `registered`. |
 | `claude_desktop_manual_entry` | `{"mcpServers": {"telegram_search": {"command": …, "args": […]}}}`, when `claude_desktop` is `failed` or `unavailable`. |
 
-Upgrade and rollback results carry `status` `upgraded` or `rolled_back`, the same `installation` value,
-`release_root`, `package_version`, `previous_release_root`, `claude_code`, `claude_skills`,
-`claude_desktop`, `service` (`restarted` when the broker ran before and was bootstrapped again,
-`not_loaded` otherwise), `next_action: restart_mcp_clients` and the extras above. Repeating an upgrade to
-the release that is already current returns `installation: reused` without `previous_release_root` and
-`service`.
+Upgrade and rollback results carry `status` `upgraded` or `rolled_back`; `installation` is `upgraded`
+(an upgrade) or `rolled_back` (a rollback), or `reused` on a repeat. They carry `release_root`,
+`package_version`, `previous_release_root`, `claude_code`, `claude_skills`, `claude_desktop`, `service`
+(`restarted` when the broker ran before and was bootstrapped again, `not_loaded` otherwise),
+`next_action: restart_mcp_clients` and the extras above. A repeat changes nothing: repeating an upgrade to
+the release that is already current returns `status: upgraded` with `installation: reused` and without
+`previous_release_root` and `service`; repeating a rollback after it finished returns
+`status: rolled_back` with `installation: reused` and without `service`.
 
 An uninstall result has `status: uninstalled`, `installation` `removed` (or `absent` when nothing was
 installed), `next_action: restart_mcp_clients`, one status for each of `service`, `codex`, `claude_code`,
@@ -404,8 +407,8 @@ or `unavailable`. It reads the file and writes nothing.
 ### Installer refusal codes
 
 A refused install, `rollback` or `uninstall` prints `{"status":"refused","code":<code>}` on stderr, with one
-of these fixed codes or `bundle_admission_or_install_failed` for anything else. Inputs and neighbouring
-configuration are never echoed.
+of these fixed codes or `bundle_admission_or_install_failed` for anything else; a `transaction_pending`
+refusal adds `"pending_action"`. Inputs and neighbouring configuration are never echoed.
 
 | Code | Cause |
 | --- | --- |
@@ -422,17 +425,18 @@ configuration are never echoed.
 | `recovery_limit` | A bounded number of recovery attempts or packets is used up. |
 | `pending_send_unresolved` | The running broker reports a connected client context, or the question could not be answered. |
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
-| `upgrade_conflict` | The Codex home, skills root, home or `--claude-code` mode differs from the installed receipt. |
+| `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
-| `transaction_pending` | An earlier upgrade, rollback or uninstall is unfinished; repeat it first. |
+| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. |
 | `rollback_unavailable` | There is no previous release to return to. |
 | `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
 
-`Install.command`, `bootstrap.sh` and the plugin's `bin/install` have their own fixed codes, listed in
-[installation](install.md#dmg-path).
+`Install.command` and `bootstrap.sh` have their own fixed codes, listed under
+[DMG path](install.md#dmg-path); the plugin's `bin/install` codes are listed under
+[Claude Code plugin](install.md#claude-code-plugin).
 
 ### Server instructions
 

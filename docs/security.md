@@ -2029,6 +2029,12 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   only after its exact bytes (at most 1 MiB each, at most 64 records) are recorded in the transaction,
   `adopted.json` and the receipt. A foreign broker passes the pending-send gate first. `uninstall` moves
   every backup beside the removed root and reports it as `legacy_backups`.
+- **Leftovers only when provably the installer's.** Beside the root, under the parent directory's lock, a
+  killed first install's staged root is removed only when every entry in it is one the installer creates
+  (an empty one only under one of its fixed attempt names), an older intent temporary only when it parses
+  as the intent, and the root an uninstall retired only while it is the exact directory the install
+  intent binds; the intent goes last. A lookalike stays. An unfinished first install or uninstall is
+  named by the next action (`transaction_pending` with `pending_action`), never half-removed.
 
 The release trees of earlier versions stay in `releases/` until an uninstall removes the root. The
 checks are cooperative: they detect drift and refuse; they do not make arbitrary editors take the lease.
