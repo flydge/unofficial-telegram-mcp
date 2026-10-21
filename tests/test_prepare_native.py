@@ -19,8 +19,8 @@ OPT = '/opt/homebrew/opt/openssl@3/lib/'
 SYSTEM = ['/usr/lib/libz.1.dylib', '/usr/lib/libc++.1.dylib', '/usr/lib/libSystem.B.dylib']
 
 
-def load():
-    spec = importlib.util.spec_from_file_location('prepare_native_under_test', ROOT / 'packaging/prepare_native.py')
+def load(name='prepare_native_under_test', script='prepare_native.py'):
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'packaging' / script)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -151,6 +151,15 @@ class PrepareNativeTests(unittest.TestCase):
             self.assertNotIn('private-', text.replace('private-machine-path-redacted', ''))
         self.assertTrue((self.root / 'out/notices/openssl-3.6.4/LICENSE.txt').is_file())
         self.assertTrue((self.root / 'out/notices/tdlib/LICENSE_1_0.txt').is_file())
+        # The payload builder admits exactly this provenance against exactly this lock.
+        builder = load('prepare_payload_under_native_test', 'prepare_payload.py')
+        emitted = json.loads((self.root / 'out/tdlib-lock.json').read_bytes())
+        for label, check in (('tdlib', builder._tdlib_receipt), ('openssl', builder._openssl_receipt)):
+            check(builder._provenance_record((self.root / 'out/provenance' / f'{label}-build.json').read_bytes()), emitted)
+        emitted['build']['xcode'] = '26.5'
+        with self.assertRaises(builder.PayloadError):
+            builder._tdlib_receipt(builder._provenance_record((self.root / 'out/provenance/tdlib-build.json').read_bytes()),
+                                   emitted)
 
     def test_compare_reports_reproduction_and_each_differing_field(self):
         kegs = Kegs(self.root)

@@ -16,6 +16,23 @@
     "files": 1675,
     "unpacked_bytes": 29629794
   },
+  "native_notices": {
+    "openssl_version": "3.6.4",
+    "files": {
+      "AUTHORS.md": {
+        "bytes": 1022,
+        "sha256": "b9f638dfc06b59c2d3b808186c3b30f713805a5db390f5b77b1703ac58acb83e"
+      },
+      "LICENSE.txt": {
+        "bytes": 10175,
+        "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+      },
+      "README.md": {
+        "bytes": 8519,
+        "sha256": "996bff3a223153b1806b11d09fadf775f7ff12d85574879a3005004f113712ff"
+      }
+    }
+  },
   "app": [
     {
       "project": "annotated-types",
