@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.53.0.dev0 — unreleased
+
+Development of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md)).
+
 ## 0.52.0 — 2026-10-20
 
 QR-first onboarding, forward/copy, native video, archive/unarchive and own-text edit

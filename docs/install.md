@@ -4,7 +4,7 @@
 
 **Existing installations:** the product was renamed from TelegramSearch. Keep your current installation folder and MCP configuration. The package, commands, skill identifier and local data paths retain their existing names for compatibility; new checkouts use `unofficial-telegram-mcp`.
 
-## Private bundle 0.52.0
+## Private bundle 0.53.0.dev0
 
 **Current behavior versus the 0.52 target:** the approved
 [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this

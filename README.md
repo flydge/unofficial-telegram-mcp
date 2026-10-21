@@ -105,4 +105,4 @@ Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed. See
   source/redistribution review.
 
 Details and the shared-API-identity risk:
-[the private bundle](docs/install.md#private-bundle-0520).
+[the private bundle](docs/install.md#private-bundle-0530dev0).

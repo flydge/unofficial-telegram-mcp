@@ -7,6 +7,10 @@ Updated **2026-10-20**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
+## In development — **0.53.0.dev0**
+
+Client coverage and distribution: [spec](plans/0.53-client-distribution-spec.md). The earlier `0.53-*` and `0.54-*` specs (forward/copy, native video, archive and edit) shipped in 0.52.0.
+
 ## Current release — 0.52.0
 
 The **0.52.0** release contains QR-first onboarding and

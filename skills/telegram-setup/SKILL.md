@@ -5,7 +5,7 @@ description: Install the local Unofficial Telegram MCP bundle and connect the us
 
 # Telegram setup
 
-Paired with release `0.52.0`, contract 1. Needs Apple Silicon macOS 26+
+Paired with candidate `0.53.0.dev0`, contract 1. Needs Apple Silicon macOS 26+
 and Claude Code or Codex running on the same Mac as the user's browser and Telegram phone app.
 
 **Never ask for, echo, store or pass on:** API ID or hash, phone number, login code, 2FA
@@ -16,7 +16,7 @@ step seems to need one, stop and use the Terminal fallback at the end.
 
 1. **Install** only from an independently authenticated bundle index and seed whose digests
    come from the reviewed trust input (`/bin/sh -p packaging/bootstrap.sh …`, see
-   docs/install.md "Private bundle 0.52.0"; the installer prints its JSON
+   docs/install.md "Private bundle 0.53.0.dev0"; the installer prints its JSON
    result, and this skill is itself installed by that installer). Keep installer failures and transaction evidence. Refuse
    foreign runtime, registration, service or skill conflicts; never stop an existing owner to
    make an install pass. Success is `status: activation_required` with a nonsecret
