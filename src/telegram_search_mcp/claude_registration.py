@@ -10,6 +10,7 @@ working directory; output is discarded, never parsed, returned, logged or raised
 The runner is injectable so tests never touch the real CLI or its configuration.
 """
 from __future__ import annotations
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,32 @@ def state(home, command, args):
     if servers is None: return 'unavailable'
     if SERVER_NAME not in servers: return 'absent'
     return 'exact' if _exact(servers[SERVER_NAME], command, args) else 'different'
+
+
+def present(home):
+    """Plugin mode's read-only note: 'present' when a user-scope entry exists, else 'absent' or 'unavailable'."""
+    servers = _servers(home)
+    return 'unavailable' if servers is None else 'present' if SERVER_NAME in servers else 'absent'
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=True, separators=(',', ':'), allow_nan=False)
+
+
+def entry_backup(home):
+    """Canonical bytes of the user-scope entry (an `--adopt-legacy` backup), or None."""
+    servers = _servers(home)
+    if servers is None or SERVER_NAME not in servers: return None
+    try:
+        return canonical(servers[SERVER_NAME]).encode()
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def adopted(home, sha256):
+    """True while the user-scope entry is exactly the recorded foreign backup."""
+    data = entry_backup(home)
+    return data is not None and hashlib.sha256(data).hexdigest() == sha256
 
 
 # --- locating the CLI ----------------------------------------------------------------------
