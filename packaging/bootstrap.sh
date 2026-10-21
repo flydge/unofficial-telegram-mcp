@@ -6,8 +6,9 @@
 # --seed-team TEAMID (optional) adds a Developer ID check of the staged seed after its
 # sha256/bytes pins and before it runs: codesign's designated requirement, exactly
 # native_runtime.designated_requirement(TEAMID). The pins stay; the Team ID only narrows them.
-# The staged copy keeps com.apple.quarantine (cp copies it), so Gatekeeper still evaluates
-# the notarized seed at exec; a bare Mach-O cannot be stapled, so its ticket is fetched online.
+# The staged copy keeps com.apple.quarantine where the source has it (cp copies it), so that
+# Gatekeeper can still evaluate the notarized seed at exec (a bare Mach-O cannot be stapled, so
+# its ticket would be fetched online). Not yet observed with a signed seed: owner-session row.
 # --adopt-legacy (optional, only as the final token) is the owner's migration of a 0.51/0.52 install:
 # it reaches the launcher as its last token too. Install.command and the plugin never pass it.
 # --claude-code user|plugin|skip (optional) reaches the launcher only when given: without it the
@@ -44,6 +45,9 @@ bootstrap_absolute() {
     [ "${#1}" -le 4096 ] || return 1
     case "$1" in /*) ;; *) return 1;; esac
     case "$1" in *//*|*/../*|*/./*|*/..|*/.|*/) return 1;; esac
+    # grep reads lines, so a newline would split the path past it: refuse it here first.
+    case "$1" in *'
+'*) return 1;; esac
     ! printf '%s' "$1" | /usr/bin/env -i LC_ALL=C /usr/bin/grep '[[:cntrl:]]' >/dev/null
 }
 bootstrap_stat() {

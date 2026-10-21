@@ -324,5 +324,21 @@ class BootstrapPassthroughTests(unittest.TestCase):
                                                            'retained_stage': ''})
                 self.assertFalse((self.out / 'seed-ran').exists())
 
+    def test_a_path_with_a_newline_or_another_control_byte_refuses_before_the_seed_runs(self):
+        # grep reads lines, so each half of '/a\n/b' alone holds no control byte: the case pattern refuses it.
+        for option in ('--installation-root', '--codex-home', '--skills-root'):
+            for value in (f'{self.home}/a\n/b', f'{self.home}/a\tb', f'{self.home}/a\n'):
+                with self.subTest(option=option, value=value):
+                    done = self.bootstrap(option, value)
+                    self.assertEqual(done.returncode, 6)
+                    self.assertEqual(json.loads(done.stderr)['error_code'], 'selection_invalid')
+                    self.assertFalse((self.out / 'launcher-argv').exists())
+        folder = self.base / 'kit\nnext'
+        folder.mkdir(mode=0o700)
+        self.seed = Path(shutil.copy2(self.seed, folder / 'bootstrap-verifier'))
+        done = self.bootstrap()
+        self.assertEqual((done.returncode, json.loads(done.stderr)['error_code']), (6, 'selection_invalid'))
+        self.assertFalse((self.out / 'launcher-argv').exists())
+
 
 if __name__ == '__main__': unittest.main()

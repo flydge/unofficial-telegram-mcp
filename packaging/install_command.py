@@ -67,6 +67,8 @@ install_kit=$(/usr/bin/dirname "$0") || install_fail kit_unavailable 3
 install_kit=$(cd -P "$install_kit" 2>/dev/null && /bin/pwd -P) || install_fail kit_unavailable 3
 case "$install_kit" in /*) ;; *) install_fail kit_unavailable 3;; esac
 [ "${#install_kit}" -le 1024 ] || install_fail kit_unavailable 3
+case "$install_kit" in *'
+'*) install_fail kit_unavailable 3;; esac
 if /usr/bin/printf '%s' "$install_kit" | /usr/bin/env -i LC_ALL=C /usr/bin/grep -q '[[:cntrl:]]'; then
     install_fail kit_unavailable 3
 fi
@@ -91,6 +93,8 @@ install_status=$(install_field status) || install_fail activation_unexpected 5
 install_root=$(install_field release_root) || install_fail activation_unexpected 5
 case "$install_root" in /*/releases/"$install_index_sha256") ;; *) install_fail activation_unexpected 5;; esac
 case "$install_root" in *//*|*/../*|*/./*) install_fail activation_unexpected 5;; esac
+case "$install_root" in *'
+'*) install_fail activation_unexpected 5;; esac
 if /usr/bin/printf '%s' "$install_root" | /usr/bin/env -i LC_ALL=C /usr/bin/grep -q '[[:cntrl:]]'; then
     install_fail activation_unexpected 5
 fi

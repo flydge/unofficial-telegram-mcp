@@ -288,6 +288,17 @@ class NotarizeTests(unittest.TestCase):
         self.refused('kit_incomplete', 3)
         self.assertEqual(self.calls(), [])
 
+    def test_a_path_with_a_newline_is_refused_like_any_control_byte(self):
+        # grep reads lines, so each half of 'kit\nnext' alone holds no control byte: the case pattern refuses it.
+        for name in ('kit\nnext', 'kit\tnext'):
+            with self.subTest(name=name):
+                folder = self.root / name
+                shutil.copytree(self.kit, folder)
+                self.kit = folder
+                self.refused('usage', 2)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse(self.dmg.exists())
+
     def test_usage_refusals_never_echo_arguments(self):
         secretish = 'Hunter2-' + 'x' * 8
         real = {'--kit': str(self.kit), '--dmg': str(self.dmg), '--volume-name': 'Synthetic Product',

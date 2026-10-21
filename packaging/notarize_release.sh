@@ -39,6 +39,9 @@ notary_absolute() {
     case "$1" in /*) ;; *) return 1;; esac
     case "$1" in *//*|*/../*|*/./*|*/..|*/.|*/) return 1;; esac
     case "$1" in /tmp|/tmp/*|/private/tmp|/private/tmp/*) return 1;; esac
+    # grep reads lines, so a newline would split the path past it: refuse it here first.
+    case "$1" in *'
+'*) return 1;; esac
     ! /usr/bin/printf '%s' "$1" | /usr/bin/env -i LC_ALL=C /usr/bin/grep -q '[[:cntrl:]]'
 }
 notary_sha256() {
