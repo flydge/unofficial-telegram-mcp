@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 
+from . import product_identity as identity
+
 
 _SCRIPT = '''on run argv
     set previewText to item 1 of argv
     try
-        set choice to display dialog previewText with title "Unofficial Telegram MCP — approve send" buttons {"Cancel", "Send"} default button "Cancel" cancel button "Cancel" giving up after 120
+        set choice to display dialog previewText with title "@@NAME@@ — approve send" buttons {"Cancel", "Send"} default button "Cancel" cancel button "Cancel" giving up after 120
         if (gave up of choice) is false and (button returned of choice) is "Send" then
             return "APPROVED"
         end if
@@ -22,6 +24,13 @@ end run'''
 # and 120-second give-up, worded as a change.
 _CHANGE_SCRIPT = (_SCRIPT.replace('approve send', 'approve change')
                   .replace('{"Cancel", "Send"}', '{"Cancel", "Apply"}').replace('is "Send"', 'is "Apply"'))
+
+
+def _dialog_script(template):
+    # Resolved per call so the dialog title follows `product_identity.DISPLAY_NAME`.
+    return template.replace('@@NAME@@', identity.DISPLAY_NAME)
+
+
 _LIST_NAMES = {'main': 'Main', 'archive': 'Archive'}
 _EDIT_CHAT_KINDS = {'private': 'private', 'basic_group': 'group', 'supergroup': 'supergroup',
                     'channel': 'channel; visible to all subscribers'}
@@ -107,7 +116,7 @@ def _forward_detail(validated) -> str:
             f"Source SHA-256: {source.source_sha256}\n"
             f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            "Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, "
+            f"{identity.DISPLAY_NAME} will revalidate the source, its permissions and the recipient, "
             "then make one forward attempt.")
 
 
@@ -132,7 +141,7 @@ def _video_detail(validated) -> str:
             f"Streaming: {'yes' if validated.supports_streaming else 'no'}\n{caption}"
             f"Recipient: {recipient.title} (chat {recipient.chat_id})\n"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            "Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, "
+            f"{identity.DISPLAY_NAME} will revalidate the account, the recipient and the file bytes, "
             "then make one upload/send attempt as a native video.")
 
 
@@ -158,7 +167,7 @@ def _archive_detail(validated) -> str:
             f"Current list: {current}\n"
             f"Target list: {target}\n{notes}"
             f"Preview SHA-256: {validated.preview_sha256}\n\n"
-            "Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one "
+            f"{identity.DISPLAY_NAME} will revalidate the account, the chat and its current list, then make one "
             "move attempt and report the list it observes right after.")
 
 
@@ -195,7 +204,7 @@ def _text_edit_detail(validated) -> str:
             "The new text is plain text without formatting; Telegram may detect links in it and show a "
             "link preview. Link preview settings return to Telegram's default. Recipients see the message "
             "marked \"edited\".\n"
-            "Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit "
+            f"{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its edit "
             "permission, then make one edit attempt.")
 
 
@@ -220,9 +229,9 @@ def confirm_approved_send(
             (kind == 'archive') != (archive_preview is not None) or
             (kind == 'text_edit') != (text_edit_preview is not None)):
         return False
-    script = _SCRIPT
+    script = _dialog_script(_SCRIPT)
     if archive_preview is not None or text_edit_preview is not None:
-        script = _CHANGE_SCRIPT
+        script = _dialog_script(_CHANGE_SCRIPT)
         try:
             if archive_preview is not None:
                 from .archive_drafts import ArchiveDraftPreview, archive_digest
@@ -293,7 +302,7 @@ def confirm_approved_send(
                 f"{_outgoing_style_detail(validated)}Bytes: {validated.size_bytes}\n"
                 f"Text SHA-256: {validated.sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
                 "Normal notifications; no reply, link preview, schedule or draft clearing.\n"
-                "Unofficial Telegram MCP will revalidate this account and recipient, including any selected topic, then make one send attempt.")
+                f"{identity.DISPLAY_NAME} will revalidate this account and recipient, including any selected topic, then make one send attempt.")
         else:
             preview = (f"Send this plain text to {validated.recipient_title} (chat {validated.recipient})?\n"
                 f"Account: {validated.account_id}\nTopic: {topic.name}\nTopic ID: {topic.forum_topic_id}\n"
@@ -304,7 +313,7 @@ def confirm_approved_send(
                 f"{validated.text}\n\nBytes: {validated.size_bytes}\nText SHA-256: {validated.sha256}\n"
                 f"Topic SHA-256: {topic.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
                 "Plain text; normal notifications; no reply, formatting, link preview, schedule or draft clearing.\n"
-                "Unofficial Telegram MCP will revalidate this account and topic, then make one send attempt.")
+                f"{identity.DISPLAY_NAME} will revalidate this account and topic, then make one send attempt.")
     elif reply_artifact_preview is not None:
         from .reply_artifact_drafts import ReplyArtifactDraftPreview
         try:
@@ -319,7 +328,7 @@ def confirm_approved_send(
             f"{target.text}\n\nTarget sanitized: {target.sanitized}; truncated: {target.truncated}\n"
             f"Source SHA-256: {target.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
             f"{voice}File: {draft.display_name}\nMIME: {draft.mime_type}\nBytes: {draft.size_bytes}\nSHA-256: {draft.sha256}\n"
-            f"Caption:\n{draft.caption}\n\nUnofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.")
+            f"Caption:\n{draft.caption}\n\n{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.")
     elif reply_preview is not None:
         from .reply_drafts import ReplyDraftPreview
         try:
@@ -345,11 +354,11 @@ def confirm_approved_send(
             f"{target.text}\n\nTarget sanitized: {target.sanitized}; truncated: {target.truncated}\n"
             f"Source SHA-256: {target.source_sha256}\nPreview SHA-256: {validated.preview_sha256}\n\n"
             f"Reply text:\n{draft.text}\n\n{_outgoing_style_detail(draft)}Bytes: {draft.size_bytes}\nText SHA-256: {draft.sha256}\n\n"
-            "Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.")
+            f"{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.")
     elif kind == "text":
         preview = (f"Send this text to {recipient_title} (chat {recipient})?\n\n"
                    f"{text}\n\nSHA-256: {sha256}\n\n"
-                   "Unofficial Telegram MCP will make one send attempt.")
+                   f"{identity.DISPLAY_NAME} will make one send attempt.")
     else:
         voice_detail = (f"Source: {source_display_name}\nSource SHA-256: {source_sha256}\n"
                         f"Duration: {duration_seconds} seconds\nConverted to OGG/Opus mono\n"
@@ -359,7 +368,7 @@ def confirm_approved_send(
             f"{voice_detail}"
             f"File: {display_name}\nBytes: {size_bytes}\nSHA-256: {sha256}\n"
             f"Caption: {caption or '(none)'}\n\n"
-            "Unofficial Telegram MCP will make one upload/send attempt."
+            f"{identity.DISPLAY_NAME} will make one upload/send attempt."
         )
     try:
         result = subprocess.run(

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from . import __version__, product_identity
 from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, validate_tdlib_runtime
 from .discovery_state import CatalogPosition, ChatListName
 from .keychain import ApiCredentials, read_api_credentials
@@ -1131,9 +1132,9 @@ class TDLibClient:
                         "api_id": credentials.api_id,
                         "api_hash": credentials.api_hash,
                         "system_language_code": "en",
-                        "device_model": "TelegramSearchMCP",
+                        "device_model": product_identity.DEVICE_MODEL,
                         "system_version": platform.mac_ver()[0] or "macOS",
-                        "application_version": "0.1.0",
+                        "application_version": __version__,
                     }
                 )
                 continue

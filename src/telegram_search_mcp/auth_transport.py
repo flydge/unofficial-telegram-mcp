@@ -14,6 +14,7 @@ import re
 import time
 from typing import NoReturn, Protocol
 
+from . import product_identity
 from .credentials import ApiCredentials, SecretValue
 from .sanitize import sanitize_telegram_text
 
@@ -220,7 +221,7 @@ class AuthTransport:
             files_directory=files_directory, database_encryption_key=base64.b64encode(key.reveal()).decode('ascii'),
             use_file_database=False, use_chat_info_database=True, use_message_database=True, use_secret_chats=False,
             api_id=credentials.api_id, api_hash=credentials.api_hash, system_language_code='en',
-            device_model='TelegramSearchMCP', system_version='macOS', application_version=application_version), timeout)
+            device_model=product_identity.DEVICE_MODEL, system_version='macOS', application_version=application_version), timeout)
 
     def check_database_key(self, key: SecretValue, *, timeout=10) -> None:
         if type(key) is not SecretValue or len(key.reveal()) != 32:

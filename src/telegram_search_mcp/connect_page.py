@@ -9,7 +9,9 @@ import html
 import json
 import re
 
-PRODUCT = 'Unofficial Telegram MCP'
+from . import product_identity as identity
+
+PRODUCT = identity.DISPLAY_NAME
 
 STRINGS = {
     'en': {

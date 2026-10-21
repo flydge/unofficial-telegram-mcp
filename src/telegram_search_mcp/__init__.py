@@ -1,3 +1,3 @@
-"""Unofficial Telegram MCP MCP package."""
+"""Local Telegram MCP package."""
 
 __version__ = "0.53.0.dev0"
