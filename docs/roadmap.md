@@ -2,14 +2,40 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md) · [Releasing](releasing.md)
 
-Updated **2026-10-20**. The released baseline remains **0.51.0**; the
+Updated **2026-10-21**. The released baseline remains **0.51.0**; the
 **0.52.0** release is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
 ## In development — **0.53.0.dev0**
 
-Client coverage and distribution: [spec](plans/0.53-client-distribution-spec.md). The earlier `0.53-*` and `0.54-*` specs (forward/copy, native video, archive and edit) shipped in 0.52.0.
+Client coverage and distribution: [spec](plans/0.53-client-distribution-spec.md) and its [task record](plans/0.53-client-distribution-spec.tasks.md). The earlier `0.53-*` and `0.54-*` specs (forward/copy, native video, archive and edit) shipped in 0.52.0.
+
+**Implemented, with technical evidence only** (unit tests, synthetic kits, and an ad hoc dry run on the
+build Mac; no signed build and no real run in Claude Desktop or the plugin yet):
+- **A. Product identity:** every user-visible name comes from one module, with a rename-impact test and
+  a check that every plugin tool name fits 64 characters. TDLib reports the product's device model and
+  the package version.
+- **B. Reproducible payload:** the native lock and the pruned payload are rebuilt from pinned inputs;
+  two builds are identical. Manifest v2 and lock v2 add a reviewed pin table and a Team ID check.
+- **C. Signing and distribution scripts:** inside-out signing under a proven entitlement set, seed
+  signing with `--seed-team`, the notarization and DMG script (mocked in tests), `Install.command` with
+  an inline `connect`, `release_build.py`, the signing preflight and the release gate's bundle stage.
+  The ad hoc dry run built a kit and a verified DMG.
+- **D. Clients:** Claude Desktop registration, `--claude-code user|plugin|skip`, a Claude Code plugin
+  with a repository marketplace and a pinned runtime installer, client-neutral server instructions,
+  `available_tools`, a policy-filtered `tools/list` and a structural STDIO recorder.
+- **E. Upgrade, rollback, uninstall and `--adopt-legacy`:** journaled, gated on pending sends, and
+  leaving the session, enrollment and Keychain untouched.
+- **F. Documentation:** the [install guide](install.md#install-from-the-053-kit-dmg-curl-and-plugin-development),
+  the security model, the reference, the setup skill and the changelog.
+
+**Waits for the owner (phase G):** the Developer ID certificate and notary profile, then the signed and
+notarized build; the application-identity decision; the product name and its single rename commit; the
+clean-macOS-user run from a browser-downloaded DMG (QR with 2FA, interruption, logout and login,
+searches in Claude Code, Codex and Claude Desktop, and the plugin path); migration of the owner's daily
+install; publication. An independent critic review of the slice is also still to do. No signed DMG and
+no public release asset exists.
 
 ## Current release — 0.52.0
 
@@ -117,12 +143,14 @@ Still unfinished:
 - **First (0.52.0):** the version and the tag.
 - **Backlog (deferred by the owner on 20.10.2026):** the clean macOS user install of the identity
   bundle, including an interrupted helper and a logout/login on that user.
-- **Next version — client coverage and distribution** (chosen by the owner on 20.10.2026):
-  - registration in Claude Desktop;
-  - a Claude Code plugin package;
-  - Developer ID signing and notarization of the bundle;
+- **In development as 0.53.0.dev0 — client coverage and distribution** (chosen by the owner on
+  20.10.2026; status above):
+  - registration in Claude Desktop (implemented, synthetic evidence);
+  - a Claude Code plugin package (implemented, synthetic evidence);
+  - Developer ID signing and notarization of the bundle (scripts and an ad hoc dry run exist; the signed
+    build waits for the owner);
   - a distinct product name before any public listing, because another vendor's directory listing
-    already uses "Unofficial Telegram MCP".
+    already uses "Unofficial Telegram MCP" (open).
 - Conversational usability, and installed file/page/parser coverage beyond the bounded B2 message
   and B2C text file scenarios; broader conversational and no-skill consumer validation.
 - F13 formatted captions and the remaining applicable topic/reply/live scenarios; retained TextUrl
@@ -142,7 +170,8 @@ The goal is convenient conversational interaction: find information or an attach
 by remembered context, inspect it, process it, prepare a result and explicitly send
 it to the intended Telegram conversation without manual IDs or file copying.
 
-After the 0.52.0 gate, the next focus is client coverage and distribution: the same QR-first
+After the 0.52.0 gate, the next focus is client coverage and distribution (in development as
+0.53.0.dev0): the same QR-first
 setup in Claude Desktop and as a Claude Code plugin, from a signed and notarized bundle. Short answers
 with usable sources, retained conversational selections, understandable approvals
 and recovery take priority alongside capabilities that actually block a task.
@@ -166,7 +195,7 @@ different license are being considered, with no committed migration date; see
 | ID | Scope | 0.51.0 status | What remains |
 | --- | --- | --- | --- |
 | P0/P1/P3 | Public export, privacy/history review and release packaging | Implemented for the selected public source line | Repeat audit for future source/history/artifact changes. Private development history is not part of the public ancestry. |
-| P2 | Installed public product | Partial (0.52 candidate: QR-first first-time provisioning accepted for real on the owner's Mac, 20.10.2026) | Install the identity bundle on a clean macOS user (backlog, deferred by the owner on 20.10.2026); public hosting, Developer ID signing and notarization, and a distinct product name before a public listing. |
+| P2 | Installed public product | Partial (0.52 candidate: QR-first first-time provisioning accepted for real on the owner's Mac, 20.10.2026. 0.53 candidate: reproducible payload, signing and notarization scripts, a DMG with `Install.command`, Claude Desktop registration, the Claude Code plugin, and upgrade, rollback and uninstall are implemented and tested with synthetic kits and an ad hoc dry run) | Owner-run: a Developer ID signed and notarized build, installing it on a clean macOS user from a downloaded DMG (backlog, deferred by the owner on 20.10.2026), migration of the owner's installation, and public hosting. Also a distinct product name before a public listing, and source and notice closure. |
 | F1 | Version/capabilities/compatibility | Implemented | Broader protocol/upgrade compatibility remains part of F18. |
 | F2 | Selected message and batch reads | Implemented | Retain unsupported-type and per-message coverage limits. |
 | F3 | Bounded latest/history | Implemented | The pinned provider path cannot certify complete history coverage; this is an explicit limitation. |
@@ -184,7 +213,7 @@ different license are being considered, with no committed migration date; see
 | F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); albums (F15b) planned | Ordered albums (F15b) with partial outcomes. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
 | F17 | Archive/edit/delete/pin actions | Partial (0.52 candidate): archive/unarchive of one chat and plain-text edit of one own message (F17a), with real owner-approved runs read back (20.10.2026) | Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
-| F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist. The 0.52 candidate adds real Codex (`codex exec`) and Claude Code searches on the owner's Mac. Still open: clean-user onboarding, Claude Desktop and plugin installs (next version), full source-family/protocol/recovery coverage and controlled TDLib upgrades. |
+| F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist. The 0.52 candidate adds real Codex (`codex exec`) and Claude Code searches on the owner's Mac. The 0.53 candidate adds Claude Desktop registration, the plugin, a policy-filtered `tools/list` and upgrade, rollback and uninstall of the installed bundle, with synthetic and ad hoc evidence only. Still open: clean-user onboarding, real Claude Desktop and plugin runs, a real upgrade and rollback on an installed bundle (the owner's migration), full source-family/protocol/recovery coverage and controlled TDLib upgrades. |
 | F19 | Streamable HTTP and final whole-scope audit | Conditional / partial | No current confirmed cloud-consumer requirement: HTTP is not applicable now. Final full-plan audit remains after the applicable backlog. |
 
 ## Completed release slices
@@ -229,10 +258,13 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
      day).
    - **Out of scope:** mandatory end-user API-pair entry or Terminal-only login does not satisfy
      this scope.
-2. **Priority #2 — client coverage and distribution (next version):** the same QR-first setup
-   registered in Claude Desktop and installable as a Claude Code plugin. This includes Developer ID
-   signing and notarization of the bundle so that a downloaded copy passes Gatekeeper, a distinct
-   product name before any public listing, and public hosting with source/notice closure.
+2. **Priority #2 — client coverage and distribution (in development as 0.53.0.dev0):** the same
+   QR-first setup registered in Claude Desktop and installable as a Claude Code plugin. This includes
+   Developer ID signing and notarization of the bundle so that a downloaded copy passes Gatekeeper, a
+   distinct product name before any public listing, and public hosting with source/notice closure.
+   Implemented and tested synthetically: the registrations, the plugin and the scripts. Waiting for
+   the owner: the signed build, the clean-user run, the migration, the name and publication (see the
+   status above).
 3. **Conversational usability:** keep context for selected conversations/messages/files;
    make core tools understandable without a large optional skill; improve concise
    answer/source presentation and the human approval experience without weakening
