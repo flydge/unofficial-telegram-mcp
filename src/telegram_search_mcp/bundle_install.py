@@ -16,10 +16,10 @@ import uuid
 
 from .bundle_paths import (ensure_owned_private_directory, open_owned_directory,
                            open_owned_file, validate_owned_path, object_binding, require_object_binding, RuntimePathError)
-from .bundle_runtime import (validate_tree, require_platform, read, unique_json,
-                             digest, BundleError, CLAUDE_STATUSES)
+from .bundle_runtime import (validate_tree, require_platform, read, unique_json, digest, BundleError,
+                             CLAUDE_CODE_MODES, CLAUDE_MODE_STATUSES, CLAUDE_SKILLS_STATUSES, CLAUDE_DESKTOP_STATUSES)
 from .session_owner import SessionOwnerLease, OwnerLeaseError
-from . import claude_registration
+from . import claude_desktop_registration, claude_registration
 from .codex_registration import (Registration, Receipt, ConfigConflict, read_config,
     merge_registration, commit_transaction, _atomic_write, MAX_CONFIG_BYTES)
 
@@ -174,36 +174,50 @@ def _initialize(root, identity, change, existed, checkpoint):
     checkpoint('published:root')
 
 
-CLAUDE_SKILLS = ('installed', 'skipped')
+CLAUDE_SKILLS = CLAUDE_SKILLS_STATUSES
 _MANUAL = ('failed', 'unavailable', 'not_found')
+_DESKTOP_MANUAL = ('failed', 'unavailable')
 _REFUSALS = (BundleError, RuntimePathError, ConfigConflict, OwnerLeaseError, OSError, ValueError, KeyError, TypeError)
 
 
 def install(release, index_path, index_sha256, *, installation_root, codex_home,
             skills_root, user_home, checkpoint=lambda _: None, claude_candidates=None,
-            claude_runner=subprocess.run):
+            claude_runner=subprocess.run, claude_code='user'):
     """First-install/recovery only; checkpoints observe durable mutation windows.
 
-    Claude Code state is read from `<user_home>/.claude.json`; the `claude` CLI, looked up only at
-    `claude_candidates` (default: the fixed user/system list) and driven through `claude_runner`,
+    `claude_code` is `user` (default), `plugin` or `skip`, and is part of the transaction identity.
+    `user`: Claude Code state is read from `<user_home>/.claude.json`; the `claude` CLI, looked up only
+    at `claude_candidates` (default: the fixed user/system list) and driven through `claude_runner`,
     is used only to add the entry. Claude registration never blocks the install except for a
     different existing entry, which refuses before anything is created. Claude skills go to
-    `<user_home>/.claude/skills` only when `~/.claude` exists or the CLI was located.
+    `<user_home>/.claude/skills` only when `~/.claude` exists or the CLI was located. `plugin` and
+    `skip` never read `~/.claude.json`, run the CLI or touch `~/.claude/skills`; the Claude Code
+    plugin brings its own server and skills.
+
+    Claude Desktop: when `<user_home>/Library/Application Support/Claude` exists, an absent
+    `telegram_search` entry is added once to its `claude_desktop_config.json`; a different entry
+    refuses before anything is created. Otherwise it never blocks the install.
     """
     try:
         require_platform()
+        if type(claude_code) is not str or claude_code not in CLAUDE_CODE_MODES:raise InstallError('installation_refused')
         release,index_path,root,codex,skills,home=map(Path,(release,index_path,installation_root,codex_home,skills_root,user_home))
         claude_skills=home/'.claude'/'skills'
-        cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
+        desktop=claude_desktop_registration.directory(home)
+        cli=None
+        if claude_code=='user':
+            cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
         index,manifest=validate_tree(release,index_path,index_sha256)
         index_bytes=read(index_path,2*1024*1024);config=codex/'config.toml'
         from .config import _owner_paths
         session_root,_,agent_label,plist=_owner_paths(home)
-        if (any(root==p or root.is_relative_to(p) or p.is_relative_to(root) for p in (release,session_root,codex,skills,claude_skills))
-                or skills.is_relative_to(claude_skills) or claude_skills.is_relative_to(skills)):
+        if (any(root==p or root.is_relative_to(p) or p.is_relative_to(root) for p in (release,session_root,codex,skills,claude_skills,desktop))
+                or any(a.is_relative_to(b) for a,b in ((skills,claude_skills),(claude_skills,skills),(skills,desktop),
+                                                       (desktop,skills),(claude_skills,desktop),(desktop,claude_skills)))):
             raise InstallError('overlapping_paths')
         # Only the runtime root must be owner-only; Codex and Claude create their homes 0755.
-        for path in (root,codex,skills,claude_skills,home):validate_owned_path(path,private=path==root)
+        for path in (root,codex,skills,home)+((claude_skills,) if claude_code=='user' else ()):
+            validate_owned_path(path,private=path==root)
         validate_owned_path(plist,regular=True)
         if plist.exists() and not (root/'current.json').exists():raise InstallError('service_conflict')
         installed=root/'releases'/index_sha256
@@ -212,16 +226,21 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         command,arguments=registration.command,list(registration.args)
         identity=dict(schema_version=1,index_sha256=index_sha256,release_root=str(installed),installation_root=str(root),
                       codex_home=str(codex),skills_root=str(skills),claude_skills_root=str(claude_skills),user_home=str(home),
-                      package_version=manifest['package_version'])
+                      package_version=manifest['package_version'],claude_code_mode=claude_code)
         def claude_state():return claude_registration.state(home,command,arguments)  # A file read; never the CLI.
+        def desktop_state():return claude_desktop_registration.state(home,command,arguments)  # A file read only.
         intent_path=root.parent/('.'+root.name+'.install-intent.json')
         if not intent_path.exists():
             if root.exists():raise InstallError('runtime_conflict')
             for skill in manifest['skills']:
-                for base in (skills,claude_skills):
+                for base in (skills,claude_skills) if claude_code=='user' else (skills,):
                     if (base/skill['id']).exists() or (base/skill['id']).is_symlink():raise InstallError('skill_conflict')
             # A different (foreign or malformed) Claude entry refuses the whole install before anything is created.
-            if claude_state()=='different':raise InstallError('claude_registration_conflict')
+            if claude_code=='user' and claude_state()=='different':raise InstallError('claude_registration_conflict')
+            # So does a different Claude Desktop entry, or a config whose neighbours a write could not keep exactly.
+            observed=desktop_state()
+            if observed=='different':raise InstallError('claude_desktop_registration_conflict')
+            if observed=='unsupported':raise InstallError('claude_desktop_config_unsupported')
             source,existed=_config(config);change=merge_registration(source,registration)
         else:source=b'';existed=False;change=None
         _initialize(root,identity,change,existed,checkpoint)
@@ -240,7 +259,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             steps=['prepared','release_pending','release','registration_pending','registration','telegram-search_pending','telegram-search',
                    'telegram-setup_pending','telegram-setup','claude-telegram-search_pending','claude-telegram-search',
                    'claude-telegram-setup_pending','claude-telegram-setup','claude_code_pending','claude_code',
-                   'receipt_pending','receipt','complete']
+                   'claude_desktop_pending','claude_desktop','receipt_pending','receipt','complete']
             if journal['stage'] not in steps:raise InstallError('transaction_conflict')
             if plist.exists():
                 if journal['stage']!='complete' or read(root/'current.json',mode=0o600)!=encoded({'schema_version':1,'release_root':str(installed),'index_sha256':index_sha256}):
@@ -324,7 +343,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             checkpoint('registration')
             # `~/.claude/skills` is touched only when Claude Code is evidently present; decided once per transaction.
             if recorded('claude_skills') is None:
-                present=os.path.lexists(home/'.claude') or cli is not None
+                present=claude_code=='user' and (os.path.lexists(home/'.claude') or cli is not None)
                 update(single=('claude_skills',{'status':'installed' if present else 'skipped'}))
             claude_skills_status=recorded('claude_skills').get('status')
             if claude_skills_status not in CLAUDE_SKILLS:raise InstallError('transaction_conflict')
@@ -342,13 +361,14 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     publish(name,target,lambda p:create(p/'SKILL.md',read(installed/'skills'/sid/'SKILL.md')),validate_skill,directory=True,child=True)
                     if not reached(name):update(name)
                     checkpoint(name)
-            def outcome(publications=None):
-                record=recorded('claude_code',publications)
+            def outcome(publications=None,name='claude_code'):
+                record=recorded(name,publications)
                 return None if record is None else record.get('status')
             added_now=False
             def register_claude():
                 """This transaction's Claude Code outcome. Only an absent entry is added, at most once."""
                 nonlocal added_now
+                if claude_code!='user':return 'plugin' if claude_code=='plugin' else 'skipped'
                 if recorded('claude_add') is not None:
                     # Attempted before an interruption: confirm from the file, never run the CLI again.
                     return 'registered' if claude_state()=='exact' else 'failed'
@@ -371,6 +391,43 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     if outcome(unique_json(read(tx/'journal.json',mode=0o600))['publications']) is None and claude_state()=='exact':
                         claude_registration.remove(claude_runner,cli,home)
                 except Exception:pass
+            desktop_change=None;desktop_written=False
+            def register_desktop():
+                """This transaction's Claude Desktop outcome. Only an absent entry is added, at most once."""
+                nonlocal desktop_change
+                if recorded('claude_desktop_add') is not None:
+                    # Attempted before an interruption: confirm from the file, never write again.
+                    return 'registered' if desktop_state()=='exact' else 'failed'
+                state,change=claude_desktop_registration.observe(home,command,arguments)
+                if state in ('skipped','unavailable'):return state
+                if state=='exact':return 'reused'
+                if state=='unsupported':return 'unavailable'
+                if state!='absent':return 'failed'  # A different entry appeared mid-transaction: never touched.
+                owned=claude_desktop_registration.receipt('install_'+index_sha256[:24],'first_install',command,arguments)
+                # Write-ahead: a journaled attempt is what makes the entry ours. Hashes only; never config bytes.
+                update(single=('claude_desktop_add',{'attempt':1,'existed':change.existed,'source_sha256':change.source_sha256,
+                                                     'candidate_sha256':change.candidate_sha256,
+                                                     'ownership':unique_json(owned.to_bytes())}))
+                checkpoint('recorded:claude_desktop_add')
+                desktop_change=change
+                def admit(value):
+                    nonlocal desktop_written
+                    obj={'kind':'file',**{k:value[k] for k in ('dev','ino','uid','mode','bytes')},'nlink':1}
+                    update(single=('claude_desktop_write',{'object':obj,'temporary':value['temporary']}))
+                    desktop_written=True
+                    checkpoint('recorded:claude_desktop_write')
+                try:claude_desktop_registration.write(home,change,admit)
+                except ConfigConflict:pass  # The confirming read decides.
+                checkpoint('published:claude_desktop_add')
+                return 'registered' if desktop_state()=='exact' else 'failed'
+            def rollback_desktop():
+                """Best effort: only the file this run just wrote, before its outcome is durable, while still exactly ours."""
+                if not desktop_written:return
+                try:
+                    publications=unique_json(read(tx/'journal.json',mode=0o600))['publications']
+                    if outcome(publications,'claude_desktop') is None:
+                        claude_desktop_registration.restore(home,desktop_change,recorded('claude_desktop_write',publications)['object'])
+                except Exception:pass
             try:
                 # Once recorded the outcome is final for this transaction: never re-run, re-read or rolled back.
                 claude_status=outcome()
@@ -378,16 +435,25 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     if not reached('claude_code_pending'):update('claude_code_pending')
                     claude_status=register_claude()
                     update(single=('claude_code',{'status':claude_status}))
-                if claude_status not in CLAUDE_STATUSES:raise InstallError('transaction_conflict')
+                if claude_status not in CLAUDE_MODE_STATUSES[claude_code]:raise InstallError('transaction_conflict')
                 if not reached('complete'):
                     if not reached('claude_code'):update('claude_code')
                     checkpoint('claude_code')
+                desktop_status=outcome(name='claude_desktop')
+                if desktop_status is None and not reached('complete'):
+                    if not reached('claude_desktop_pending'):update('claude_desktop_pending')
+                    desktop_status=register_desktop()
+                    update(single=('claude_desktop',{'status':desktop_status}))
+                if desktop_status not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
+                if not reached('complete'):
+                    if not reached('claude_desktop'):update('claude_desktop')
+                    checkpoint('claude_desktop')
                 names=['release','telegram-search','telegram-setup']
                 if claude_skills_status=='installed':names+=['claude-telegram-search','claude-telegram-setup']
                 objects={name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names}
                 receipt={**identity,'registration_sha256':digest(ownership.to_bytes()),'skills':manifest['skills'],
                          'publication_objects':objects,'claude_code':claude_status,'claude_skills':claude_skills_status,
-                         'status':'activation_required'}
+                         'claude_desktop':desktop_status,'status':'activation_required'}
                 if not reached('receipt_pending'):update('receipt_pending')
                 def exact(expected):
                     def validate(p):
@@ -403,13 +469,18 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 activation=[str(installed/'python/bin/python3'),'-I','-S','-B',str(installed/'launcher.py'),'connect']
                 result={'status':'activation_required','installation':'reused' if reused else 'installed','release_root':str(installed),
                         'package_version':manifest['package_version'],'next_action':'run_activation_then_wait',
-                        'claude_code':claude_status,'claude_skills':claude_skills_status,
+                        'claude_code':claude_status,'claude_skills':claude_skills_status,'claude_desktop':desktop_status,
                         'activation_arguments':activation,'activation_command':shlex.join(activation)}
                 if claude_status in _MANUAL:
                     result['claude_registration_command']=claude_registration.manual_command(command,arguments)
+                # Claude Desktop reads its config only at launch; activation still comes first.
+                if desktop_status=='registered':result['claude_desktop_next_action']='restart_claude_desktop'
+                if desktop_status in _DESKTOP_MANUAL:
+                    result['claude_desktop_manual_entry']=claude_desktop_registration.manual_entry(command,arguments)
                 return result
             except _REFUSALS:
                 rollback_claude()
+                rollback_desktop()
                 raise
     except InstallError:raise
     except _REFUSALS:

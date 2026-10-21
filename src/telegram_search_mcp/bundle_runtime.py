@@ -181,7 +181,13 @@ def check_publisher_lock(manifest, lock_data):
         raise BundleError('publisher_mismatch')
 
 
-CLAUDE_STATUSES = ('registered', 'reused', 'failed', 'unavailable', 'not_found')
+# Claude Code: `--claude-code user` ends in one of the first five; `plugin` and `skip` record themselves.
+CLAUDE_CODE_MODES = ('user', 'plugin', 'skip')
+CLAUDE_USER_STATUSES = ('registered', 'reused', 'failed', 'unavailable', 'not_found')
+CLAUDE_STATUSES = CLAUDE_USER_STATUSES + ('plugin', 'skipped')
+CLAUDE_MODE_STATUSES = {'user': CLAUDE_USER_STATUSES, 'plugin': ('plugin',), 'skip': ('skipped',)}
+CLAUDE_SKILLS_STATUSES = ('installed', 'skipped')
+CLAUDE_DESKTOP_STATUSES = ('registered', 'reused', 'failed', 'unavailable', 'skipped')
 _BINDING_KEYS = {'directory': {'kind', 'dev', 'ino', 'uid', 'mode'},
                  'file': {'kind', 'dev', 'ino', 'uid', 'mode', 'bytes', 'nlink'}}
 
@@ -212,8 +218,8 @@ class Selection:
             raise BundleError('receipt_mismatch')
         index,manifest=validate_tree(self.root, self.root / 'bundle-index.json', self.index_sha256, installed=True)
         keys={'schema_version','index_sha256','release_root','installation_root','codex_home','skills_root',
-              'claude_skills_root','user_home','package_version','registration_sha256','skills','publication_objects',
-              'claude_code','claude_skills','status'}
+              'claude_skills_root','user_home','package_version','claude_code_mode','registration_sha256','skills',
+              'publication_objects','claude_code','claude_skills','claude_desktop','status'}
         if (set(receipt)!=keys or type(receipt['schema_version']) is not int or receipt['schema_version']!=1
                 or receipt['installation_root']!=str(installation) or receipt['package_version']!=manifest['package_version']
                 or receipt['status']!='activation_required' or receipt['skills']!=manifest['skills']
@@ -222,8 +228,13 @@ class Selection:
                 # `~/.agents/skills` and `~/.claude/skills` belong to external clients the user may
                 # reconfigure or wipe. A launch, which runs every time, checks only the records' shape and
                 # never reads, drives or depends on them; the installer verifies them at install and repeat time.
-                or type(receipt['claude_code']) is not str or receipt['claude_code'] not in CLAUDE_STATUSES
-                or type(receipt['claude_skills']) is not str or receipt['claude_skills'] not in ('installed','skipped')):
+                or type(receipt['claude_code_mode']) is not str or receipt['claude_code_mode'] not in CLAUDE_CODE_MODES
+                or type(receipt['claude_code']) is not str
+                or receipt['claude_code'] not in CLAUDE_MODE_STATUSES[receipt['claude_code_mode']]
+                or type(receipt['claude_skills']) is not str or receipt['claude_skills'] not in CLAUDE_SKILLS_STATUSES
+                or receipt['claude_code_mode']!='user' and receipt['claude_skills']!='skipped'
+                # Claude Desktop's config, like the others, is never read at launch: the status only.
+                or type(receipt['claude_desktop']) is not str or receipt['claude_desktop'] not in CLAUDE_DESKTOP_STATUSES):
             raise BundleError('receipt_mismatch')
         try:
             objects=receipt['publication_objects']
@@ -243,7 +254,7 @@ class Selection:
             # Bind receipt's home to the transaction's immutable declaration,
             # without using it as an environment or MCP-driven home override.
             journal=unique_json(read(installation/'transactions'/('install_'+self.index_sha256[:24])/'journal.json',mode=0o600))
-            if any(journal.get(k)!=receipt[k] for k in ('installation_root','codex_home','skills_root','claude_skills_root','user_home','index_sha256','release_root','package_version')):
+            if any(journal.get(k)!=receipt[k] for k in ('installation_root','codex_home','skills_root','claude_skills_root','user_home','index_sha256','release_root','package_version','claude_code_mode')):
                 raise BundleError('receipt_mismatch')
         except BundleError:raise
         except (OSError,ValueError,TypeError,AttributeError,RuntimePathError):raise BundleError('installed_binding_mismatch') from None

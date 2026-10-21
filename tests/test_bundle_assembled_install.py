@@ -54,6 +54,35 @@ class AssembledBundleInstallTests(InstallHarness, unittest.TestCase):
         copies = [p for p in self.home.rglob('*') if p.is_file() and API_HASH.encode() in p.read_bytes()]
         self.assertEqual(copies, [installed])
 
+    def test_one_assembled_install_registers_codex_claude_code_and_claude_desktop(self):
+        import json
+        import tomllib
+        desktop = self.home / 'Library' / 'Application Support' / 'Claude'
+        desktop.mkdir(mode=0o700, parents=True)
+        neighbour = {'command': '/opt/other/bin/server', 'env': {'TOKEN': 'SYNTHETIC-DESKTOP-NEIGHBOUR'}}
+        (desktop / 'claude_desktop_config.json').write_text(json.dumps({'mcpServers': {'other': neighbour}}, indent=2))
+        (desktop / 'claude_desktop_config.json').chmod(0o644)
+        packet = self.assembled(flag=True)
+        result, selection = self.installed_selection(packet)
+        release = Path(result['release_root'])
+        command, args = str(release / 'python/bin/python3'), ['-I', '-S', '-B', str(release / 'launcher.py'), 'mcp']
+        self.assertEqual((result['claude_code'], result['claude_desktop'], result['claude_desktop_next_action']),
+                         ('registered', 'registered', 'restart_claude_desktop'))
+        codex = tomllib.loads((self.codex / 'config.toml').read_text())['mcp_servers']['telegram_search']
+        self.assertEqual((codex['command'], codex['args']), (command, args))
+        self.assertEqual(self.claude().entry, {'type': 'stdio', 'command': command, 'args': args})
+        servers = json.loads((desktop / 'claude_desktop_config.json').read_text())['mcpServers']
+        self.assertEqual(servers, {'other': neighbour, 'telegram_search': {'command': command, 'args': args}})
+        receipt = json.loads((self.runtime / 'receipt.json').read_text())
+        self.assertEqual((receipt['claude_code_mode'], receipt['claude_code'], receipt['claude_desktop']),
+                         ('user', 'registered', 'registered'))
+        selection.check()
+        # No client file carries the identity pair; the neighbour's secret stays only in its own file.
+        copies = [p for p in self.home.rglob('*') if p.is_file() and API_HASH.encode() in p.read_bytes()]
+        self.assertEqual(copies, [release / 'app-identity.json'])
+        held = [p for p in self.base.rglob('*') if p.is_file() and b'SYNTHETIC-DESKTOP-NEIGHBOUR' in p.read_bytes()]
+        self.assertEqual(held, [desktop / 'claude_desktop_config.json'])
+
     def test_bundle_assembled_without_the_flag_has_no_identity_to_serve(self):
         from telegram_search_mcp.app_identity import bundled_app_identity
         packet = self.assembled(flag=False)

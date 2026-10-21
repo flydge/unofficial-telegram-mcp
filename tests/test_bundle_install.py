@@ -188,7 +188,7 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
 
     def test_interruptions_resume_every_pending_transaction_step(self):
         for stage in ['prepared', 'release', 'registration', 'telegram-search', 'telegram-setup', 'claude-telegram-search',
-                      'claude-telegram-setup', 'claude_code', 'receipt']:
+                      'claude-telegram-setup', 'claude_code', 'claude_desktop', 'receipt']:
             with self.subTest(stage=stage):
                 self.setUp()
                 packet = self.fixture()
