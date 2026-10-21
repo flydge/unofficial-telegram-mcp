@@ -6,8 +6,8 @@ no-follow, ACL-checked descriptor reads of an owner-owned single-link file that 
 writable (Electron writes 0644), parsed as strict JSON. A first install only ever adds an absent entry;
 an upgrade or rollback replaces only the entry its receipt owns, an uninstall removes only that entry,
 and `--adopt-legacy` replaces a foreign entry only after its exact backup is recorded. Each write is a
-compare-before-replace atomic replacement that keeps the file's mode and whose temporary inode the caller
-journals before the replace. Every neighbouring value keeps its meaning and every number its exact
+compare-before-replace atomic replacement that keeps the file's mode; the caller journals the temporary's
+name before it is created and its inode before the replace. Every neighbouring value keeps its meaning and every number its exact
 lexeme, otherwise nothing is written (`unsupported`). Config bytes can hold other servers' secrets: they
 are never logged, echoed or raised; only hashes leave this module, except an adopted entry's own backup.
 """
@@ -281,16 +281,17 @@ def entry_backup(home):
     return _canonical(servers[SERVER_NAME]).encode() if SERVER_NAME in servers else None
 
 
-def write(home, change, before_replace):
+def write(home, change, before_replace, temporary=None):
     """Compare-before-replace: only over the exact observed bytes; `before_replace` sees the inode first.
 
-    The replacement keeps the replaced file's mode (Electron's 0644); a new file is 0600.
+    The replacement keeps the replaced file's mode (Electron's 0644); a new file is 0600. `temporary` is
+    the name the caller journaled before this call creates it.
     """
     if type(change) is not Change:
         raise ConfigConflict('invalid_change')
     _atomic_write(config_path(home), change.candidate, MAX_CONFIG_BYTES, expected=change.source,
                   require_existing=change.existed, before_replace=before_replace, max_mode=SHARED_MODE,
-                  preserve_mode=True)
+                  preserve_mode=True, temporary=temporary)
 
 
 def discard_temporary(home, record):
@@ -302,7 +303,7 @@ def discard_temporary(home, record):
         return False
 
 
-def restore(home, change, binding):
+def restore(home, change, binding, temporary=None):
     """Undo our write only while the file is still our exact object and bytes; True when undone."""
     path = config_path(home)
     try:
@@ -312,7 +313,7 @@ def restore(home, change, binding):
         require_object_binding(path, binding)
         if change.existed:
             _atomic_write(path, change.source, MAX_CONFIG_BYTES, expected=change.candidate,
-                          require_existing=True, max_mode=SHARED_MODE, preserve_mode=True)
+                          require_existing=True, max_mode=SHARED_MODE, preserve_mode=True, temporary=temporary)
             return True
         fd = _open_parent(path)
         try:

@@ -369,7 +369,7 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
         self.install(self.packet, checkpoint=seen.append)
         return list(dict.fromkeys(seen))
 
-    def test_crash_and_resume_at_every_checkpoint_never_double_writes(self):
+    def test_crash_and_resume_at_every_checkpoint_writes_exactly_once(self):
         stages = self.all_checkpoints()
         self.assertTrue(set(DESKTOP_CHECKPOINTS) <= set(stages), stages)
         self.assertLess(stages.index('claude_code'), stages.index('recorded:claude_desktop_add'))
@@ -384,14 +384,13 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
                     with self.assertRaises(RuntimeError): self.install(self.packet, checkpoint=crash)
                     result = self.install(self.packet)
                     again = self.install(self.packet)
-                # The write-ahead window before our replace never writes again on resume.
-                status = 'failed' if stage in ('recorded:claude_desktop_add', 'recorded:claude_desktop_write') else 'registered'
-                self.assertCompletedWith(result, status)
-                self.assertEqual((again['installation'], again['claude_desktop']), ('reused', status))
-                self.assertEqual(len(replaced), 1 if status == 'registered' else 0)
+                # A write-ahead window before our replace leaves the file unchanged: the same write, once, on resume.
+                self.assertCompletedWith(result, 'registered')
+                self.assertEqual((again['installation'], again['claude_desktop']), ('reused', 'registered'))
+                self.assertEqual(len(replaced), 1)
                 after = self.document()
                 self.assertEqual(canonical(without_ours(after)), canonical(original))
-                self.assertEqual('telegram_search' in after['mcpServers'], status == 'registered')
+                self.assertEqual(after['mcpServers']['telegram_search'], self.ours())
                 self.assertEqual(sorted(p.name for p in self.desktop_dir.iterdir()), [desktop.CONFIG_NAME])
 
     def test_resume_after_the_outcome_is_recorded_never_reads_the_desktop_config_again(self):
@@ -420,7 +419,7 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
 
     # --- rollback: only our exact write, only before its outcome is durable --------------------
 
-    def test_a_refusal_right_after_our_write_restores_the_preimage_and_resume_never_rewrites(self):
+    def test_a_refusal_right_after_our_write_restores_the_preimage_and_resume_writes_it_once(self):
         for existed in (True, False):
             with self.subTest(existed=existed):
                 self.setUp()
@@ -435,11 +434,13 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
                     self.assertEqual(self.config.read_bytes(), before)
                     self.assertEqual(oct(self.config.stat().st_mode & 0o777), '0o644')  # Restore keeps the mode too.
                 else: self.assertFalse(self.config.exists())
+                # The restored file is byte-identical to the recorded preimage: the same write is made once more.
                 with self.replacements() as replaced:
-                    self.assertCompletedWith(self.install(self.packet), 'failed')
-                self.assertEqual(replaced, [])
-                if existed: self.assertEqual(self.config.read_bytes(), before)
-                else: self.assertFalse(self.config.exists())
+                    self.assertCompletedWith(self.install(self.packet), 'registered')
+                self.assertEqual(len(replaced), 1)
+                self.assertEqual(self.document()['mcpServers']['telegram_search'], self.ours())
+                if existed: self.assertEqual(canonical(without_ours(self.document())), canonical(json.loads(before)))
+                self.assertEqual(sorted(p.name for p in self.desktop_dir.iterdir()), [desktop.CONFIG_NAME])
 
     def test_rollback_never_touches_a_file_changed_since_or_an_entry_it_did_not_write(self):
         self.present()
@@ -505,8 +506,9 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
         self.assertEqual(self.config.read_bytes(), before)
         with self.replacements() as replaced:
             result = self.install(self.packet)
-        self.assertCompletedWith(result, 'failed')  # Never written again on resume.
-        self.assertEqual((replaced, self.config.read_bytes()), ([], before))
+        self.assertCompletedWith(result, 'registered')  # The unchanged file gets the same write again, once.
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(canonical(without_ours(self.document())), canonical(json.loads(before)))
         self.assertEqual(sorted(p.name for p in self.desktop_dir.iterdir()), [desktop.CONFIG_NAME])
 
     def test_a_temporary_that_is_no_longer_our_exact_inode_is_never_unlinked(self):
@@ -516,7 +518,7 @@ class ClaudeDesktopInstallTests(DesktopHarness, unittest.TestCase):
         temporary.unlink()
         temporary.write_bytes(b'someone else wrote this name')
         temporary.chmod(0o600)
-        self.assertCompletedWith(self.install(self.packet), 'failed')
+        self.assertCompletedWith(self.install(self.packet), 'registered')
         self.assertEqual(temporary.read_bytes(), b'someone else wrote this name')
 
     # --- receipt v2 and read-only drift --------------------------------------------------------

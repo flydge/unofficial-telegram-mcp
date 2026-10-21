@@ -30,7 +30,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'runtime_conflict','service_conflict','skill_conflict','target_conflict','transaction_conflict',
     'claude_desktop_registration_conflict','claude_desktop_config_unsupported','pending_send_unresolved',
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
-    'service_restart_failed'}
+    'service_restart_failed','downgrade_refused','uninstall_incomplete'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
                              'claude-telegram-search','claude-telegram-setup')})
 

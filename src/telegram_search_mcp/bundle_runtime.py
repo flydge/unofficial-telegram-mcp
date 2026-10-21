@@ -264,6 +264,28 @@ def check_receipt_v2(receipt, installation):
         raise BundleError('receipt_mismatch')
 
 
+# `<installation>/adopted.json`: every `--adopt-legacy` backup any transaction recorded. No receipt schema writes,
+# replaces or drops it, so a rollback to an older receipt keeps the records and uninstall keeps the backups.
+ADOPTED_NAME = 'adopted.json'
+MAX_ADOPTED = 64
+ADOPTED_RECORD_KEYS = frozenset({'client', 'transaction', 'sha256', 'bytes'})
+
+
+def check_adopted(value):
+    """The closed adopted.json shape; its backup records, or BundleError('adopted_mismatch')."""
+    backups = value.get('backups') if type(value) is dict else None
+    if (type(value) is not dict or set(value) != {'schema_version', 'backups'}
+            or type(value['schema_version']) is not int or value['schema_version'] != 1
+            or type(backups) is not list or not 1 <= len(backups) <= MAX_ADOPTED
+            or any(type(v) is not dict or set(v) != ADOPTED_RECORD_KEYS or type(v['client']) is not str
+                   or v['client'] not in ADOPTION_CLIENTS or not transaction_name(v['transaction'])
+                   or not _hash(v['sha256']) or type(v['bytes']) is not int or not 0 < v['bytes'] <= MAX_BACKUP_BYTES
+                   for v in backups)
+            or len({(v['transaction'], v['client']) for v in backups}) != len(backups)):
+        raise BundleError('adopted_mismatch')
+    return backups
+
+
 @dataclass(frozen=True)
 class Selection:
     root: Path
