@@ -33,6 +33,8 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'service_restart_failed','downgrade_refused','uninstall_incomplete'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
                              'claude-telegram-search','claude-telegram-setup')})
+# A `transaction_pending` refusal also names the unfinished change to retry, from this closed set only.
+PENDING_ACTIONS=('upgrade','rollback','uninstall')
 
 
 def _acl(fd):
@@ -203,6 +205,7 @@ def main(argv=None):
         return 0
     # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
     code='bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES) else 'bundle_admission_failed'
+    pending=None
     try:
         root=Path(__file__).absolute().parent
         if args in [[v] for v in CHANGES]:
@@ -216,6 +219,7 @@ def main(argv=None):
             except bundle_install.InstallError as error:
                 named=error.args[0] if len(error.args)==1 else None
                 if type(named) is str and named in INSTALL_CODES: code=named
+                pending=getattr(error,'pending_action',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
         if args and args[0]=='bootstrap-install':
@@ -241,6 +245,7 @@ def main(argv=None):
             except bundle_install.InstallError as error:
                 named=error.args[0] if len(error.args)==1 else None
                 if type(named) is str and named in INSTALL_CODES: code=named
+                pending=getattr(error,'pending_action',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
         if args not in [[v] for v in ACTIONS]: raise AdmissionError()
@@ -262,7 +267,9 @@ def main(argv=None):
         from telegram_search_mcp.setup_cli import main as dispatch
         return dispatch(args)
     except (Exception,KeyboardInterrupt):
-        print(json.dumps({'status':'refused','code':code}),file=sys.stderr)
+        refusal={'status':'refused','code':code}
+        if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS: refusal['pending_action']=pending
+        print(json.dumps(refusal),file=sys.stderr)
         return 2
 
 
