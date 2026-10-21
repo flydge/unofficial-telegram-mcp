@@ -1,0 +1,162 @@
+#!/bin/sh -p
+# Claude Code plugin runtime installer, run as /bin/sh -p "${CLAUDE_PLUGIN_ROOT}/bin/install" (no
+# arguments). It installs the release this plugin pins in release-pins.json: the four assets come from
+# the fixed GitHub Releases URL pattern below, each downloaded once with /usr/bin/curl --proto =https
+# --fail and no retry or resume (so assets of different uploads are never mixed), into a private
+# mktemp directory under the passwd home. Every asset must match its pinned size and sha256 before
+# anything runs; then the pinned bootstrap.sh installs with --claude-code plugin (plus --seed-team when
+# a Team ID is pinned) and the installer JSON is printed on stdout. The directory is removed on success
+# and kept on failure. The reviewed plugin commit, pinned by the marketplace, is the trust input: no
+# environment value, argument or downloaded byte selects a URL, pin or path. curl sets no quarantine;
+# the seed's signature is checked by bootstrap.sh. Stock absolute tools only; every refusal is one
+# fixed JSON line on stderr.
+set -eu
+umask 077
+
+tg_base='https://github.com/flydge/unofficial-telegram-mcp/releases/download'
+tg_curl=/usr/bin/curl
+tg_work=''
+
+tg_refuse() {
+    if [ -n "$tg_work" ]; then
+        printf '{"schema_version":1,"error_code":"%s","retained":"%s"}\n' "$1" "$tg_work" >&2
+    else
+        printf '{"schema_version":1,"error_code":"%s"}\n' "$1" >&2
+    fi
+    exit 1
+}
+tg_absolute() {
+    [ "${#1}" -le 4096 ] || return 1
+    case "$1" in /*) ;; *) return 1;; esac
+    case "$1" in *//*|*/../*|*/./*|*/..|*/.|*/) return 1;; esac
+    case "$1" in *=*|*'"'*|*\\*) return 1;; esac
+    case "$1" in *'
+'*) return 1;; esac
+    ! printf '%s' "$1" | /usr/bin/env -i LC_ALL=C /usr/bin/grep '[^ -~]' >/dev/null
+}
+tg_hash() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0123456789abcdef]*) return 1;; esac
+}
+tg_number() {
+    case "$1" in ''|*[!0123456789]*) return 1;; esac
+    [ "${#1}" -le 12 ]
+}
+tg_mode() {
+    case "$1" in ''|*[!01234567]*) return 1;; esac
+    [ "$((0$1 & 022))" -eq 0 ]
+}
+# A single-link regular file of ours, not group or world writable, at most $2 bytes; sets tg_size.
+tg_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    tg_owner=$(/usr/bin/env -i /usr/bin/stat -f '%u' "$1" 2>/dev/null) || return 1
+    tg_perm=$(/usr/bin/env -i /usr/bin/stat -f '%Lp' "$1" 2>/dev/null) || return 1
+    tg_links=$(/usr/bin/env -i /usr/bin/stat -f '%l' "$1" 2>/dev/null) || return 1
+    tg_size=$(/usr/bin/env -i /usr/bin/stat -f '%z' "$1" 2>/dev/null) || return 1
+    tg_number "$tg_owner" && tg_number "$tg_links" && tg_number "$tg_size" && tg_mode "$tg_perm" || return 1
+    [ "$tg_owner" = "$tg_uid" ] && [ "$tg_links" = 1 ] && [ "$tg_size" -le "$2" ]
+}
+tg_pin() {
+    /usr/bin/env -i /usr/bin/plutil -extract "$1" raw -expect "$2" -o - "$tg_pins" 2>/dev/null
+}
+tg_sha() {
+    tg_value=$(tg_pin "$1_sha256" string) && tg_hash "$tg_value" && printf '%s' "$tg_value"
+}
+tg_bytes() {
+    tg_value=$(tg_pin "$1_bytes" integer) && tg_number "$tg_value" && printf '%s' "$tg_value"
+}
+# One attempt per asset: no --retry, no --continue-at, no config file (-q first), https only, bounded.
+tg_fetch() {
+    /usr/bin/env -i "$tg_curl" -q --proto =https --proto-redir =https --tlsv1.2 --fail --silent --location \
+        --max-redirs 5 --connect-timeout 30 --max-time "$3" --max-filesize "$2" \
+        --output "$tg_work/$1" "$tg_base/v$tg_version/$1" >/dev/null 2>&1 || tg_refuse download_failed
+    tg_file "$tg_work/$1" "$2" || tg_refuse pin_mismatch
+    [ "$tg_size" = "$2" ] || tg_refuse pin_mismatch
+    tg_actual=$(/usr/bin/env -i LC_ALL=C /usr/bin/openssl dgst -sha256 "$tg_work/$1" 2>/dev/null) || tg_refuse pin_mismatch
+    [ "${tg_actual##* }" = "$4" ] || tg_refuse pin_mismatch
+}
+
+[ "$#" -eq 0 ] || tg_refuse invalid_arguments
+tg_uid=$(/usr/bin/env -i /usr/bin/id -u) || tg_refuse home_invalid
+tg_number "$tg_uid" && [ "$tg_uid" -ne 0 ] || tg_refuse home_invalid
+# id -P prints name:passwd:uid:gid:class:change:expire:gecos:home:shell; read home from the right.
+tg_home=$(/usr/bin/env -i /usr/bin/id -P) || tg_refuse home_invalid
+tg_home=${tg_home%:*}
+tg_home=${tg_home##*:}
+tg_absolute "$tg_home" && [ -d "$tg_home" ] && [ ! -L "$tg_home" ] || tg_refuse home_invalid
+[ "$(/usr/bin/env -i /usr/bin/stat -f '%u' "$tg_home")" = "$tg_uid" ] || tg_refuse home_invalid
+tg_mode "$(/usr/bin/env -i /usr/bin/stat -f '%Lp' "$tg_home")" || tg_refuse home_invalid
+
+# The plugin root is where this file is: <root>/bin/install, named by an absolute path.
+tg_absolute "$0" || tg_refuse plugin_invalid
+case "$0" in */bin/install) ;; *) tg_refuse plugin_invalid;; esac
+tg_plugin=${0%/bin/install}
+tg_pins="$tg_plugin/release-pins.json"
+tg_file "$tg_pins" 4096 || tg_refuse pins_invalid
+tg_pins_size=$tg_size
+[ "$(tg_pin schema_version integer)" = 1 ] || tg_refuse pins_invalid
+tg_publication=$(tg_pin publication string) || tg_refuse pins_invalid
+case "$tg_publication" in published|unpublished) ;; *) tg_refuse pins_invalid;; esac
+tg_version=$(tg_pin version string) || tg_refuse pins_invalid
+[ "${#tg_version}" -le 32 ] || tg_refuse pins_invalid
+case "$tg_version" in [0123456789]*) ;; *) tg_refuse pins_invalid;; esac
+case "$tg_version" in *[!0123456789.devrc]*|*..*|*.) tg_refuse pins_invalid;; esac
+tg_team=$(tg_pin team_id string) || tg_refuse pins_invalid
+case "$tg_team" in '') ;; *[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) tg_refuse pins_invalid;; *)
+    [ "${#tg_team}" -eq 10 ] || tg_refuse pins_invalid;; esac
+tg_bootstrap_sha=$(tg_sha bootstrap) || tg_refuse pins_invalid
+tg_bootstrap_bytes=$(tg_bytes bootstrap) || tg_refuse pins_invalid
+tg_seed_sha=$(tg_sha seed) || tg_refuse pins_invalid
+tg_seed_bytes=$(tg_bytes seed) || tg_refuse pins_invalid
+tg_index_sha=$(tg_sha index) || tg_refuse pins_invalid
+tg_index_bytes=$(tg_bytes index) || tg_refuse pins_invalid
+tg_archive_sha=$(tg_sha archive) || tg_refuse pins_invalid
+tg_archive_bytes=$(tg_bytes archive) || tg_refuse pins_invalid
+# Exactly the reviewed bytes (sorted keys, two-space indent, one newline): no other, repeated or
+# reformatted key can hide behind what plutil extracts.
+tg_expected=$(printf '{\n  "archive_bytes": %s,\n  "archive_sha256": "%s",\n  "bootstrap_bytes": %s,\n  "bootstrap_sha256": "%s",\n  "index_bytes": %s,\n  "index_sha256": "%s",\n  "publication": "%s",\n  "schema_version": 1,\n  "seed_bytes": %s,\n  "seed_sha256": "%s",\n  "team_id": "%s",\n  "version": "%s"\n}' \
+    "$tg_archive_bytes" "$tg_archive_sha" "$tg_bootstrap_bytes" "$tg_bootstrap_sha" "$tg_index_bytes" \
+    "$tg_index_sha" "$tg_publication" "$tg_seed_bytes" "$tg_seed_sha" "$tg_team" "$tg_version")
+[ "$tg_pins_size" -eq "$((${#tg_expected} + 1))" ] || tg_refuse pins_invalid
+[ "$(/usr/bin/env -i /bin/cat "$tg_pins")" = "$tg_expected" ] || tg_refuse pins_invalid
+tg_file "$tg_plugin/.claude-plugin/plugin.json" 65536 || tg_refuse plugin_invalid
+[ "$(/usr/bin/env -i /usr/bin/plutil -extract version raw -expect string -o - "$tg_plugin/.claude-plugin/plugin.json" 2>/dev/null)" = "$tg_version" ] \
+    || tg_refuse pins_invalid
+[ "$tg_publication" = published ] || tg_refuse release_not_published
+[ "$tg_bootstrap_bytes" -ge 1 ] && [ "$tg_bootstrap_bytes" -le 262144 ] || tg_refuse pins_invalid
+[ "$tg_seed_bytes" -ge 1 ] && [ "$tg_seed_bytes" -le 2097152 ] || tg_refuse pins_invalid
+[ "$tg_index_bytes" -ge 1 ] && [ "$tg_index_bytes" -le 2097152 ] || tg_refuse pins_invalid
+[ "$tg_archive_bytes" -ge 1 ] && [ "$tg_archive_bytes" -le 1073741824 ] || tg_refuse pins_invalid
+for tg_tool in /usr/bin/openssl /usr/bin/plutil /usr/bin/mktemp /usr/bin/stat /bin/rm "$tg_curl"; do
+    [ -x "$tg_tool" ] || tg_refuse dependency_unavailable
+done
+
+tg_made=$(/usr/bin/env -i /usr/bin/mktemp -d "$tg_home/.telegram-local-install.XXXXXXXX") || tg_refuse workspace_failed
+tg_work=$tg_made
+trap 'tg_refuse interrupted' INT TERM HUP
+tg_absolute "$tg_work" && [ -d "$tg_work" ] && [ ! -L "$tg_work" ] || tg_refuse workspace_failed
+[ "$(/usr/bin/env -i /usr/bin/stat -f '%u:%Lp' "$tg_work")" = "$tg_uid:700" ] || tg_refuse workspace_failed
+case "$tg_work" in "$tg_home/.telegram-local-install."????????) ;; *) tg_refuse workspace_failed;; esac
+
+tg_fetch bootstrap.sh "$tg_bootstrap_bytes" 120 "$tg_bootstrap_sha"
+tg_fetch bootstrap-verifier "$tg_seed_bytes" 300 "$tg_seed_sha"
+tg_fetch release-index.json "$tg_index_bytes" 300 "$tg_index_sha"
+tg_fetch release.tar.gz "$tg_archive_bytes" 3600 "$tg_archive_sha"
+
+set -- --seed "$tg_work/bootstrap-verifier" --seed-sha256 "$tg_seed_sha" --seed-bytes "$tg_seed_bytes" \
+    --archive "$tg_work/release.tar.gz" --index "$tg_work/release-index.json" \
+    --trusted-index-sha256 "$tg_index_sha" --claude-code plugin
+if [ -n "$tg_team" ]; then set -- "$@" --seed-team "$tg_team"; fi
+if /usr/bin/env -i /bin/sh -p "$tg_work/bootstrap.sh" "$@" > "$tg_work/result.json"; then
+    :
+else
+    tg_refuse bootstrap_failed
+fi
+tg_file "$tg_work/result.json" 65536 || tg_refuse result_invalid
+[ "$(/usr/bin/env -i /usr/bin/plutil -extract status raw -expect string -o - "$tg_work/result.json" 2>/dev/null)" = activation_required ] \
+    || tg_refuse result_invalid
+tg_result=$(/usr/bin/env -i /bin/cat "$tg_work/result.json") || tg_refuse result_invalid
+/usr/bin/env -i /bin/rm -rf "$tg_work" || tg_refuse cleanup_failed
+tg_work=''
+trap - INT TERM HUP
+printf '%s\n' "$tg_result"

@@ -23,7 +23,8 @@ ACTIONS=('mcp','broker','setup','resume','status','connect','wait','cancel','api
 # The installer's closed refusal codes, echoed by a refused bootstrap-install; anything else is generic.
 INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','initialization_conflict',
     'installation_refused','metadata_conflict','overlapping_paths','recovery_limit','registration_conflict',
-    'runtime_conflict','service_conflict','skill_conflict','target_conflict','transaction_conflict'}
+    'runtime_conflict','service_conflict','skill_conflict','target_conflict','transaction_conflict',
+    'claude_desktop_registration_conflict','claude_desktop_config_unsupported'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
                              'claude-telegram-search','claude-telegram-setup')})
 
@@ -183,15 +184,21 @@ def main(argv=None):
         root=Path(__file__).absolute().parent
         if args and args[0]=='bootstrap-install':
             options=args[1:]
-            allowed={'--installation-root','--codex-home','--skills-root','--index','--trusted-index-sha256'}
-            if len(options)!=10 or len(set(options[::2]))!=5 or set(options[::2])!=allowed: raise AdmissionError()
-            values=dict(zip(options[::2],options[1::2])); pin=values['--trusted-index-sha256']
+            # Five required options, each once, plus an optional --claude-code user|plugin|skip (default user).
+            required={'--installation-root','--codex-home','--skills-root','--index','--trusted-index-sha256'}
+            keys=options[::2]
+            if (len(options) not in (10,12) or len(set(keys))!=len(keys) or not required<=set(keys)
+                    or set(keys)-required-{'--claude-code'}): raise AdmissionError()
+            values=dict(zip(keys,options[1::2])); pin=values['--trusted-index-sha256']
+            claude_code=values.get('--claude-code','user')
+            if claude_code not in ('user','plugin','skip'): raise AdmissionError()
             admit(root,Path(values['--index']),pin,False)
             sys.path[:]=[str(root/'app'),str(root/'installer')]+[p for p in sys.path if Path(p).is_relative_to(root/'python')]
             from telegram_search_mcp import bundle_install
             try:
                 result=bundle_install.install(root,Path(values['--index']),pin,installation_root=Path(values['--installation-root']),
-                    codex_home=Path(values['--codex-home']),skills_root=Path(values['--skills-root']),user_home=Path.home())
+                    codex_home=Path(values['--codex-home']),skills_root=Path(values['--skills-root']),user_home=Path.home(),
+                    claude_code=claude_code)
             except bundle_install.InstallError as error:
                 named=error.args[0] if len(error.args)==1 else None
                 if type(named) is str and named in INSTALL_CODES: code=named

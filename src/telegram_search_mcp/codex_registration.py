@@ -28,6 +28,10 @@ SERVER_NAME = identity.MCP_SERVER_NAME
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
 MAX_SUBTREE_BYTES = 32 * 1024
+PRIVATE_MODE = 0o600
+# Ownership receipts name one client. Claude Desktop entries are only ever added where none existed, so
+# their receipts carry no preimage; adopting a foreign entry is a separate, explicit path.
+RECEIPT_CLIENTS = ('codex', 'claude-desktop')
 ENV_KEYS = frozenset(('TELEGRAM_SEARCH_INSTALLATION_ROOT', 'TELEGRAM_SEARCH_PROFILE',
                       'TELEGRAM_SEARCH_RELEASE_ROOT', 'TELEGRAM_SEARCH_INSTALLATION_ID'))
 _ID = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,63}\Z')
@@ -173,10 +177,10 @@ def _entry(desired: Registration, *, inline: bool = False):
     return table
 
 
-def _validate_preimage(encoded: bytes | None):
+def _validate_preimage(encoded: bytes | None, client: str = 'codex'):
     if encoded is None:
         return
-    if type(encoded) is not bytes or len(encoded) > MAX_SUBTREE_BYTES:
+    if client != 'codex' or type(encoded) is not bytes or len(encoded) > MAX_SUBTREE_BYTES:
         raise ConfigConflict('invalid_receipt')
     try:
         document = _parse(encoded)
@@ -237,14 +241,15 @@ class Receipt:
     scope: str = 'user'
 
     def __post_init__(self):
-        if (type(self.schema_version) is not int or self.schema_version != 1 or self.client != 'codex'
+        if (type(self.schema_version) is not int or self.schema_version != 1
+                or type(self.client) is not str or self.client not in RECEIPT_CLIENTS
                 or self.scope != 'user' or not _identifier(self.installation_id) or not _identifier(self.transaction_id)
                 or any(v is not None and (type(v) is not str or not _SHA.fullmatch(v))
                        for v in (self.pre_subtree_hash, self.post_subtree_hash))
                 or self.pre_subtree is not None and type(self.pre_subtree) is not bytes
                 or _digest(self.pre_subtree) != self.pre_subtree_hash):
             raise ConfigConflict('invalid_receipt')
-        _validate_preimage(self.pre_subtree)
+        _validate_preimage(self.pre_subtree, self.client)
 
     def __repr__(self):
         return 'Receipt(<redacted>)'
@@ -300,7 +305,7 @@ class ConfigChange:
 
 
 def _check_ownership(current: bytes | None, ownership: Receipt | None):
-    if ownership is not None and type(ownership) is not Receipt:
+    if ownership is not None and (type(ownership) is not Receipt or ownership.client != 'codex'):
         raise ConfigConflict('ownership_conflict')
     if (current is not None and ownership is None
             or ownership is not None and _digest(current) != ownership.post_subtree_hash):
@@ -379,14 +384,22 @@ def _open_parent(path: Path) -> int:
         raise
 
 
-def _read_at(directory_fd: int, name: str, maximum: int) -> tuple[bytes, bool]:
+def _read_at(directory_fd: int, name: str, maximum: int, max_mode: int = PRIVATE_MODE) -> tuple[bytes, bool]:
+    """Owner-owned single-link regular file: owner read/write, other bits only within `max_mode`.
+
+    The default admits exactly 0600. Claude Desktop (Electron) writes 0644, so its caller passes
+    0o644: never group or world writable, never executable or set-id.
+    """
+    if max_mode not in (PRIVATE_MODE, 0o644):
+        raise ConfigConflict('unsafe_path')
     fd = None
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
         metadata = os.fstat(fd)
         _validate_descriptor_acl(fd)
+        mode = stat.S_IMODE(metadata.st_mode)
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-                or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1):
+                or mode & PRIVATE_MODE != PRIVATE_MODE or mode & ~max_mode or metadata.st_nlink != 1):
             raise ConfigConflict('unsafe_path')
         if metadata.st_size > maximum:
             raise ConfigConflict('config_too_large')
@@ -414,8 +427,11 @@ def read_config(config_path: Path) -> bytes:
 
 
 def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | None = None,
-                  require_existing: bool | None = None, before_replace=None):
-    """Owner-safe atomic replacement, optionally guarding exact source bytes."""
+                  require_existing: bool | None = None, before_replace=None, max_mode: int = PRIVATE_MODE):
+    """Owner-safe atomic replacement, optionally guarding exact source bytes.
+
+    `max_mode` only widens which existing file modes are read (see `_read_at`); the replacement is 0600.
+    """
     if type(candidate) is not bytes or len(candidate) > maximum:
         raise ConfigConflict('invalid_change')
     directory_fd = _open_parent(path)
@@ -423,7 +439,7 @@ def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | 
     temporary = '.telegram-search-' + uuid.uuid4().hex + '.tmp'
     temporary_created = False
     try:
-        original, existed = _read_at(directory_fd, name, maximum)
+        original, existed = _read_at(directory_fd, name, maximum, max_mode)
         if expected is not None and original != expected:
             raise ConfigConflict('concurrent_change')
         if require_existing is not None and existed != require_existing:
@@ -441,7 +457,7 @@ def _atomic_write(path: Path, candidate: bytes, maximum: int, expected: bytes | 
                             'uid':publication.st_uid,'mode':stat.S_IMODE(publication.st_mode),
                             'bytes':publication.st_size,'temporary':temporary})
         # Compare using the same held directory immediately before replacement.
-        now, exists_now = _read_at(directory_fd, name, maximum)
+        now, exists_now = _read_at(directory_fd, name, maximum, max_mode)
         if now != original or exists_now != existed:
             raise ConfigConflict('concurrent_change')
         parent_now = _open_parent(path)

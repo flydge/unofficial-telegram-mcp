@@ -16,6 +16,7 @@ bootstrap_root=''
 bootstrap_codex=''
 bootstrap_skills=''
 bootstrap_prepare=''
+bootstrap_claude_code='user'
 bootstrap_seen=' '
 
 bootstrap_fail() {
@@ -83,6 +84,11 @@ while [ "$#" -gt 0 ]; do
         --json) shift; continue;;
         --seed|--seed-sha256|--seed-bytes|--archive|--index|--trusted-index-sha256|--installation-root|--codex-home|--skills-root)
             [ "$#" -ge 2 ] || bootstrap_fail selection_invalid 6;;
+        --claude-code)
+            # Claude Code registration: user scope (default), the plugin, or none. Closed values only.
+            [ "$#" -ge 2 ] || bootstrap_fail selection_invalid 6
+            case "$2" in user|plugin|skip) bootstrap_claude_code=$2;; *) bootstrap_fail selection_invalid 6;; esac
+            shift 2; continue;;
         *) bootstrap_fail selection_invalid 6;;
     esac
     case "$bootstrap_option" in
@@ -169,4 +175,4 @@ exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
     "$bootstrap_stage/release/python/bin/python3" -I -S -B "$bootstrap_stage/release/launcher.py" \
     bootstrap-install --installation-root "$bootstrap_root" --codex-home "$bootstrap_codex" \
     --skills-root "$bootstrap_skills" --index "$bootstrap_stage/verified-index.json" \
-    --trusted-index-sha256 "$bootstrap_index_sha"
+    --trusted-index-sha256 "$bootstrap_index_sha" --claude-code "$bootstrap_claude_code"
