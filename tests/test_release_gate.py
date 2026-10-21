@@ -290,7 +290,8 @@ class ArtifactRefusalTests(GateCase):
     def sdist_inputs(self) -> tuple[dict[str, tuple[str, bool]], dict[str, bytes]]:
         tracked = {"README.md": b"readme\n", f"src/{gate.DIST}/__init__.py": b'__version__ = "1.2.3"\n',
                    "CLAUDE.md": b"internal\n", "docs/plans/next.md": b"internal\n",
-                   "docs/plans/initial-roadmap.md": b"public plan\n"}
+                   "docs/plans/initial-roadmap.md": b"public plan\n", ".claude-plugin/marketplace.json": b"{}\n",
+                   "plugins/telegram-local/bin/mcp-entry": b"#!/bin/sh -p\n"}
         sources = {name: (sha(data), False) for name, data in tracked.items()}
         members = {name: data for name, data in tracked.items() if gate.shipped(name)}
         members.update({name: b"generated\n" for name in gate.GENERATED})
@@ -302,13 +303,26 @@ class ArtifactRefusalTests(GateCase):
         path = self.root / "ok.tar.gz"
         make_sdist(path, members)
         self.assertEqual(gate.check_sdist(path, VERSION, EPOCH, sources), len(members) + 6)
-        for extra in ("docs/plans/next.md", "notes.txt"):
+        for extra in ("docs/plans/next.md", "notes.txt", "plugins/telegram-local/bin/mcp-entry",
+                      ".claude-plugin/marketplace.json"):
             with self.subTest(extra=extra):
                 path = self.root / f"extra-{secrets.token_hex(4)}.tar.gz"
                 make_sdist(path, {**members, extra: b"unexpected\n"})
                 with self.refused("sdist_member_set") as caught:
                     gate.check_sdist(path, VERSION, EPOCH, sources)
-                self.assertEqual(caught.exception.detail["extra"], [f"{gate.DIST}-{VERSION}/{extra}"])
+                member = f"{gate.DIST}-{VERSION}/{extra}"  # plus any parent directory only it needs
+                self.assertEqual(caught.exception.detail["extra"][-1], member)
+                self.assertTrue(all(member.startswith(name + "/") for name in caught.exception.detail["extra"][:-1]))
+
+    def test_repository_only_plugin_files_are_never_expected_in_the_sdist(self) -> None:
+        tracked = [path.relative_to(TESTS.parent).as_posix() for base in ("plugins", ".claude-plugin")
+                   for path in (TESTS.parent / base).rglob("*") if path.is_file()]
+        self.assertIn(".claude-plugin/marketplace.json", tracked)
+        self.assertIn("plugins/telegram-local/bin/mcp-entry", tracked)
+        self.assertFalse([name for name in tracked if gate.shipped(name)])
+        for name in ("README.md", "skills/telegram-search/SKILL.md", "packaging/launcher.py",
+                     "docs/plans/initial-roadmap.md"):
+            self.assertTrue(gate.shipped(name), name)
 
     def test_sdist_owner_metadata_or_changed_content_is_refused(self) -> None:
         sources, members = self.sdist_inputs()

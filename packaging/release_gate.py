@@ -72,7 +72,7 @@ TOOLS = (
 )
 BUILD_TOOLS = frozenset({"build", "packaging", "pyproject-hooks", "setuptools"})
 # Tracked but never shipped: the sdist must hold exactly the other tracked files plus GENERATED.
-INTERNAL = ("CLAUDE.md", "docs/plans/*")
+INTERNAL = ("CLAUDE.md", "docs/plans/*", "plugins/*", ".claude-plugin/*")
 SHIPPED_INTERNAL = frozenset({"docs/plans/initial-roadmap.md"})
 GENERATED = ("PKG-INFO", "setup.cfg") + tuple(f"src/{DIST}.egg-info/{name}" for name in (
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt", "requires.txt", "top_level.txt"))
