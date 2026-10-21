@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from mcp import Client
+from schema_changes import changed_since_0_52
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_protocol import OPERATIONS
@@ -85,7 +86,7 @@ class SpreadsheetBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # extend this bounded set while all other old schemas stay identical.
         extended = {'analyze_media','get_attachment','get_message_context','prepare_artifact_send',
             'read_attachment','read_messages','read_reply_chain','read_attachment_page',
-            'read_spreadsheet','read_presentation'}
+            'read_spreadsheet','read_presentation'} | set(changed_since_0_52())
         unchanged = {name: digest for name,digest in expected.items() if name not in extended}
         self.assertEqual({name: actual[name] for name in unchanged}, unchanged)
 

@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 
+from schema_changes import changed_since_0_52, legacy_0_52
 from telegram_search_mcp import broker_client as broker_client_module
 from collections import deque
 from datetime import datetime, timezone
@@ -330,7 +331,13 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(new <= set(tools))
         existing = [tools[name] for name in sorted(set(tools) - new)]
         self.assertEqual(len(existing), 51)
-        self.assertEqual(digest(existing), EXISTING_SCHEMAS_SHA256)
+        changed = changed_since_0_52()
+        if not changed:
+            self.assertEqual(digest(existing), EXISTING_SCHEMAS_SHA256)
+        legacy = legacy_0_52()  # later slices change only listed tools
+        for tool in existing:
+            if tool['name'] not in changed:
+                self.assertEqual(digest(tool), legacy[tool['name']], tool['name'])
 
     async def test_sdk_lists_closed_tools_but_refuses_unless_both_capabilities(self):
         from mcp import Client

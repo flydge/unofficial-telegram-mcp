@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from mcp import Client
 
+from schema_changes import changed_since_0_52
 from telegram_search_mcp import __version__, claude_registration, codex_registration, connect_page, product_identity
 from telegram_search_mcp.approval_prompt import _CHANGE_SCRIPT, _SCRIPT, _dialog_script, confirm_approved_send
 from telegram_search_mcp.auth_transport import AuthTransport
@@ -153,7 +154,11 @@ class RenameImpactTests(unittest.TestCase):
                           'Unofficial Telegram MCP', 'Unofficial Telegram MCP'))
 
     def test_schema_fingerprint_is_unchanged(self):
-        self.assertEqual(schema_fingerprint(), FINGERPRINT_BBADC84)
+        # Later slices change schemas only through listed tools; test_release_052_schemas pins the rest.
+        if changed_since_0_52():
+            self.assertNotEqual(schema_fingerprint(), FINGERPRINT_BBADC84)
+        else:
+            self.assertEqual(schema_fingerprint(), FINGERPRINT_BBADC84)
 
 
 class DisplayNameFollowsIdentityTests(unittest.TestCase):

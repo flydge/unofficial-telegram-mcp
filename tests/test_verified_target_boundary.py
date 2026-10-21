@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from mcp import Client
+from schema_changes import changed_since_0_52
 from pydantic import ValidationError
 from telegram_search_mcp import schemas
 from telegram_search_mcp.artifact_store import ArtifactStore
@@ -247,7 +248,7 @@ class ClosedSchemaTests(unittest.TestCase):
         self.assertEqual(len(baseline),24)
         # Retained alternatives intentionally extend these seven old reader/preparation schemas.
         extended = {'analyze_media','get_attachment','get_message_context','prepare_artifact_send',
-            'read_attachment','read_messages','read_reply_chain'}
+            'read_attachment','read_messages','read_reply_chain'} | set(changed_since_0_52())
         for name,digest in baseline.items():
             if name in extended:continue
             self.assertEqual(fingerprint(tools[name]),digest,name)
