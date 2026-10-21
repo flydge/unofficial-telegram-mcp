@@ -751,7 +751,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             source,existed=_config(config)
             try:change=merge_registration(source,registration)
             except ConfigConflict as error:
-                if error.code!='ownership_conflict' or not adopt_legacy:raise
+                if error.code!='ownership_conflict':raise
+                if not adopt_legacy:raise InstallError('registration_conflict') from None
                 adopted['codex']=owned_subtree(source);change=adopt_registration(source,registration)
             if plist.exists():
                 # A foreign broker plist (a source-venv broker) blocks the install; adoption stops it first.

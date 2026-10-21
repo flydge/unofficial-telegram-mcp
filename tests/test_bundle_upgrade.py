@@ -27,10 +27,29 @@ WRITE_AHEAD = {'recorded:claude_remove': 'claude', 'recorded:claude_add': 'claud
 
 
 class FakeLaunchctl:
-    """`launchctl print|bootout|bootstrap` over one label; the loaded job is the plist read at bootstrap."""
+    """`launchctl print|bootout|bootstrap` over one label; the loaded job is the plist read at bootstrap.
 
-    def __init__(self, plist):
-        self.plist, self.loaded, self.calls, self.fail = plist, None, [], set()
+    Like launchd, its state outlives a killed (forked) installer process: it is kept in a file.
+    """
+
+    def __init__(self, plist, state):
+        self.plist, self.state, self.fail = plist, state, set()
+        self._save(None, [])
+
+    def _save(self, loaded, calls):
+        self.state.write_text(json.dumps({'loaded': loaded, 'calls': calls}))
+
+    @property
+    def loaded(self):
+        return json.loads(self.state.read_text())['loaded']
+
+    @loaded.setter
+    def loaded(self, value):
+        self._save(value, self.calls)
+
+    @property
+    def calls(self):
+        return json.loads(self.state.read_text())['calls']
 
     def load(self):
         self.loaded = plistlib.loads(self.plist.read_bytes())['ProgramArguments']
@@ -41,7 +60,7 @@ class FakeLaunchctl:
     def __call__(self, argv, **kwargs):
         assert argv[0] == '/bin/launchctl' and kwargs.get('check') is False and kwargs.get('timeout'), (argv, kwargs)
         verb = argv[1]
-        self.calls.append(argv[1:])
+        self._save(self.loaded, self.calls + [argv[1:]])
         if verb in self.fail:
             return subprocess.CompletedProcess(argv, 5, '', '')
         if verb == 'print':
@@ -67,7 +86,7 @@ class ChangeHarness(InstallHarness):
         super().setUp()
         from telegram_search_mcp.config import _owner_paths
         self.session_root, _, self.label, self.plist = _owner_paths(self.home)
-        self.launchctl = FakeLaunchctl(self.plist)
+        self.launchctl = FakeLaunchctl(self.plist, self.base / 'launchd-state.json')
         self.answers = []
         self.probes = []
         self.module()
@@ -452,6 +471,39 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         self.assertEqual(self.install(c)['status'], 'upgraded')
         self.assertEqual(self.receipt()['transaction'], 'change_2')
         self.selection_check()
+
+
+class KilledWriteTests(ChangeHarness, unittest.TestCase):
+    """A real kill between our journaled temporary and its replace: the resume unlinks exactly that inode."""
+
+    def test_each_journaled_external_write_survives_a_kill(self):
+        directories = {'recorded:registration': lambda: self.codex, 'recorded:plist': lambda: self.plist.parent,
+                       'recorded:policy': lambda: self.session_root,
+                       'recorded:claude_desktop_write': lambda: desktop.directory(self.home)}
+        for stage, directory in directories.items():
+            with self.subTest(stage=stage):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                self.claude()
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        def kill(value):
+                            if value == stage: os._exit(9)
+                        self.install(new, checkpoint=kill)
+                    finally:
+                        os._exit(3)
+                _, status = os.waitpid(pid, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 9)
+                left = [p for p in directory().iterdir() if p.name.startswith('.telegram-search-')]
+                self.assertEqual(len(left), 1)
+                result = self.install(new)
+                self.assertEqual(result['status'], 'upgraded')
+                self.assertEqual([p for p in directory().iterdir() if p.name.startswith('.telegram-search-')], [])
+                self.assertUpgradedTo(self.runtime / 'releases' / new[3], old['release_root'],
+                                      desktop=stage != 'recorded:claude_desktop_write')
+                self.selection_check()
 
 
 class RollbackTests(ChangeHarness, unittest.TestCase):
