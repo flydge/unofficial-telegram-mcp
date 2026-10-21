@@ -1,7 +1,8 @@
 """signing_preflight.sh (CLIENTS-6) against mocked `security` and `xcrun notarytool`.
 
 A copy of the script has exactly its tool block rewritten to mock paths; no Keychain, certificate or
-notary service is used. The output carries only the identity name, the Team ID and `notary: ok`.
+notary service is used. The output carries only the identity name (or, for a name outside the
+printable grammar, the certificate SHA-1), the Team ID and `notary: ok`.
 """
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ TOOL_BLOCK = 'tool_security=/usr/bin/security\ntool_xcrun=/usr/bin/xcrun\n'
 CERT_HASH = '0123456789ABCDEF0123456789ABCDEF01234567'
 DEVELOPER_ID = 'Developer ID Application: Synthetic Example, Ltd. (ABCDE12345)'
 OTHER_TEAM = 'Developer ID Application: Other Example (ZYXWV98765)'
+NON_ASCII = 'Developer ID Application: Jürgen Müller (ABCDE12345)'
 HISTORY = '{"history":[{"id":"aaaaaaaa-0000-0000-0000-000000000000","name":"secret-name.zip"}]}'
 
 
@@ -55,7 +57,8 @@ class PreflightTests(unittest.TestCase):
         result = self.run_script('--profile', 'release-notary')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {'schema_version': 1, 'identity': DEVELOPER_ID,
-                                                     'team_id': 'ABCDE12345', 'notary': 'ok'})
+                                                     'identity_form': 'common_name', 'team_id': 'ABCDE12345',
+                                                     'notary': 'ok'})
         self.assertEqual(result.stderr, '')
         for leaked in (CERT_HASH[:20], 'secret-name', 'aaaaaaaa-0000'):
             self.assertNotIn(leaked, result.stdout)
@@ -71,10 +74,40 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stderr.strip()),
                          (4, '{"schema_version":1,"error_code":"identity_ambiguous"}'))
 
+    def test_a_name_outside_the_printable_grammar_is_named_by_its_sha1_and_never_printed(self):
+        for name in (NON_ASCII, 'Developer ID Application: Bad "Quote" (ABCDE12345)',
+                     'Developer ID Application: Bad $(x) (ABCDE12345)'):
+            with self.subTest(name=name):
+                (self.control / 'identities').write_bytes(listing(name).encode())
+                result = self.run_script('--profile', 'release-notary')
+                self.assertEqual((result.returncode, result.stderr), (0, ''))
+                self.assertEqual(json.loads(result.stdout), {'schema_version': 1, 'identity': CERT_HASH[:-1] + '0',
+                                                             'identity_form': 'sha1', 'team_id': 'ABCDE12345',
+                                                             'notary': 'ok'})
+                self.assertNotIn(name.split(': ', 1)[1].split(' (')[0], result.stdout)
+
+    def test_the_team_filter_runs_before_any_name_is_judged(self):
+        other = NON_ASCII.replace('ABCDE12345', 'ZYXWV98765')
+        broken = 'Developer ID Application: Broken (zyxwv98765)'
+        for rows in ((other, DEVELOPER_ID), (DEVELOPER_ID, other), (broken, DEVELOPER_ID)):
+            with self.subTest(rows=rows):
+                (self.control / 'identities').write_bytes(listing(*rows).encode())
+                result = self.run_script('--profile', 'p', '--team-id', 'ABCDE12345')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                value = json.loads(result.stdout)
+                self.assertEqual((value['identity'], value['identity_form']), (DEVELOPER_ID, 'common_name'))
+        (self.control / 'identities').write_bytes(listing(other, DEVELOPER_ID).encode())
+        result = self.run_script('--profile', 'p')
+        self.assertEqual((result.returncode, result.stderr.strip()),
+                         (4, '{"schema_version":1,"error_code":"identity_ambiguous"}'))
+        value = json.loads(self.run_script('--profile', 'p', '--team-id', 'ZYXWV98765').stdout)
+        self.assertEqual((value['identity'], value['identity_form'], value['team_id']),
+                         (CERT_HASH[:-1] + '0', 'sha1', 'ZYXWV98765'))
+
     def test_refusals_are_fixed_codes(self):
         cases = [(listing('Apple Development: Synthetic Example (QQQQQ11111)'), '0', '0', 'identity_missing', 4),
-                 (listing('Developer ID Application: Bad "Quote" (ABCDE12345)'), '0', '0', 'identity_unavailable', 3),
-                 (listing('Developer ID Application: Bad $(x) (ABCDE12345)'), '0', '0', 'identity_unavailable', 3),
+                 (listing('Developer ID Application: Broken (abcde12345)'), '0', '0', 'identity_unavailable', 3),
+                 ('  1) NOTAHASH "' + DEVELOPER_ID + '"\n', '0', '0', 'identity_unavailable', 3),
                  (listing(DEVELOPER_ID), '1', '0', 'identity_unavailable', 3),
                  (listing(DEVELOPER_ID), '0', '69', 'notary_profile_unavailable', 5)]
         for identities, security, history, code, status in cases:
