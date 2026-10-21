@@ -11,6 +11,7 @@ from unittest.mock import patch
 from telegram_search_mcp import schemas
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.message_reader import read_messages
 from test_message_reader import Provider, message
 
@@ -231,10 +232,11 @@ class ExactSearchRegistrationTests(unittest.IsolatedAsyncioTestCase):
             policy=RuntimePolicy(enabled_capabilities=('search_messages',)) if enabled else RuntimePolicy(enabled_capabilities=('read','read_history'))
             async with Client(build_server(service_factory=Service,policy=policy)) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),55,'current retained-selection tool inventory changed')
-                tool=next(t for t in tools if t.name=='search_messages');self.assertEqual(tool.name,'search_messages')
-                self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
+                self.assertEqual({t.name for t in tools},usable(policy),'tools/list must follow the loaded policy')
+                self.assertEqual(any(t.name=='search_messages' for t in tools),enabled)
+                for tool in (t for t in tools if t.name=='search_messages'):
+                    self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
                 result=await consumer.call_tool('search_messages',args)
                 self.assertEqual(result.is_error,not enabled)
                 if not enabled:self.assertEqual(called,[]);continue

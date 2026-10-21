@@ -111,9 +111,13 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
         server = build_server(policy=config.RuntimePolicy())
         document = schema_document(server)
         self.assertEqual(fingerprint(document), schema_fingerprint())
-        async with Client(server) as client:
+        # tools/list follows the policy; the fingerprint covers the full registration under every policy.
+        full = build_server(policy=config.RuntimePolicy(enabled_capabilities=tuple(sorted(config.KNOWN_CAPABILITIES))))
+        self.assertEqual(fingerprint(schema_document(full)), schema_fingerprint())
+        async with Client(full) as client:
             listing = await client.list_tools()
         observed = {t.name: t for t in listing.tools}
+        self.assertEqual(set(observed), {t['name'] for t in document['tools']})
         for t in document['tools']:
             self.assertEqual(t['inputSchema'], observed[t['name']].input_schema)
             self.assertEqual(t['outputSchema'], observed[t['name']].output_schema)

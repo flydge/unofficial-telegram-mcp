@@ -34,7 +34,7 @@ from telegram_search_mcp.schemas import (
     ResolveTargetRequest,
     SearchRequest,
 )
-from telegram_search_mcp.server import build_server
+from telegram_search_mcp.server import _TOOL_NAMES, available_tools, build_server
 from telegram_search_mcp.tdjson import GlobalMessagePage, TDLibError
 
 
@@ -493,6 +493,10 @@ client.close()
             "prepare_text_edit",
             "apply_prepared_text_edit",
         ]
+        # Registration order, filtered by the loaded policy (tools/list lists only usable tools).
+        usable = set(available_tools(RuntimePolicy().enabled_capabilities))
+        self.assertEqual(sorted(expected_tools), sorted(_TOOL_NAMES))
+        expected_tools = [name for name in expected_tools if name in usable]
         self.assertEqual([tool.name for tool in first_tools.tools], expected_tools)
         self.assertEqual([tool.name for tool in second_tools.tools], expected_tools)
         self.assertFalse(first_result.is_error)

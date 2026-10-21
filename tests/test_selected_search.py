@@ -13,6 +13,7 @@ from pathlib import Path
 from telegram_search_mcp import schemas
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.tdjson import AuthorizationBlocked, TDLibError
 from test_message_reader import message
 
@@ -340,9 +341,10 @@ class SelectedRegistrationTests(unittest.IsolatedAsyncioTestCase):
             async with Client(build_server(service_factory=Service,policy=RuntimePolicy(
                     enabled_capabilities=('search_chats',) if enabled else ('read',)))) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),55)
-                tool=next(t for t in tools if t.name=='search_chats')
-                self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
+                self.assertEqual({t.name for t in tools},usable(RuntimePolicy(enabled_capabilities=('search_chats',) if enabled else ('read',))))
+                self.assertEqual(any(t.name=='search_chats' for t in tools),enabled)
+                for tool in (t for t in tools if t.name=='search_chats'):
+                    self.assertTrue(tool.annotations.read_only_hint);self.assertFalse(tool.annotations.idempotent_hint)
                 args={'targets':[7,8],'query':'Full','mode':'latest'}
                 result=await consumer.call_tool('search_chats',args)
                 self.assertEqual(result.is_error,not enabled)

@@ -14,6 +14,7 @@ from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp import schemas
 from telegram_search_mcp.search_service import SearchService
@@ -51,11 +52,12 @@ class ForumBoundaryTests(unittest.IsolatedAsyncioTestCase):
             policy=RuntimePolicy(enabled_capabilities=('list_topics',)) if enabled else RuntimePolicy()
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
                 tools=(await consumer.list_tools()).tools
-                self.assertEqual(len(tools),55)
-                tool=next(t for t in tools if t.name=='list_topics')
-                self.assertTrue(tool.annotations.read_only_hint)
-                self.assertFalse(tool.annotations.idempotent_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
+                self.assertEqual({t.name for t in tools},usable(policy))
+                self.assertEqual(any(t.name=='list_topics' for t in tools),enabled)
+                for tool in (t for t in tools if t.name=='list_topics'):
+                    self.assertTrue(tool.annotations.read_only_hint)
+                    self.assertFalse(tool.annotations.idempotent_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
                 result=await consumer.call_tool('list_topics',{'target':7,'limit':1})
                 if not enabled:
                     self.assertTrue(result.is_error);self.assertEqual(p.calls,[]);continue

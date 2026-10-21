@@ -30,6 +30,7 @@ from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.broker_protocol import OPERATIONS, BrokerProtocolError
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, LEGACY_CAPABILITIES, RuntimePolicy
+from tool_listing import full_listing, usable
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES, TOOL_OPERATIONS, CompatibilityError
 from telegram_search_mcp.forward_drafts import READABLE_RULE, readable
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry, _safe_display_name
@@ -268,6 +269,15 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         from mcp.shared.exceptions import MCPError
         from telegram_search_mcp.server import build_server
         good = {'artifact_id': 'artifact_' + 'c' * 32 + '_' + 'd' * 64 + '_10', 'recipient': RECIPIENT}
+        tools = await full_listing()
+        self.assertEqual(list(tools)[-6:], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
+                                            'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
+        self.assertEqual(set(tools['prepare_video_send'].input_schema['properties']),
+                         {'artifact_id', 'recipient', 'caption'})
+        self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})
+        for name in ('prepare_video_send', 'send_prepared_video'):
+            self.assertFalse(tools[name].input_schema['additionalProperties'])
+            self.assertFalse(tools[name].annotations.read_only_hint)
         for policy, enabled in ((RuntimePolicy(), False), (RuntimePolicy(enabled_capabilities=('send',)), False),
                                 (RuntimePolicy(enabled_capabilities=('video_send',)), False), (POLICY, True)):
             calls = []
@@ -279,16 +289,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(request)
                     return SendPreparedVideoResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
-                tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                self.assertEqual(len(tools), 55)
-                self.assertEqual(list(tools)[-6:], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
-                                                    'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
-                self.assertEqual(set(tools['prepare_video_send'].input_schema['properties']),
-                                 {'artifact_id', 'recipient', 'caption'})
-                self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})
-                for name in ('prepare_video_send', 'send_prepared_video'):
-                    self.assertFalse(tools[name].input_schema['additionalProperties'])
-                    self.assertFalse(tools[name].annotations.read_only_hint)
+                listed = {t.name for t in (await consumer.list_tools()).tools}
+                self.assertEqual(listed, usable(policy))
+                self.assertEqual({'prepare_video_send', 'send_prepared_video'} <= listed, enabled)
                 result = await consumer.call_tool('prepare_video_send', good)
                 sent = await consumer.call_tool('send_prepared_video', {'draft_id': DID, 'approved': True})
                 if not enabled:

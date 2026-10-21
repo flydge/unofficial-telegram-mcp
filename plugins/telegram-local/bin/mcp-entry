@@ -1,0 +1,61 @@
+#!/bin/sh -p
+# Claude Code plugin entry (.mcp.json runs it as /bin/sh -p). Selects the installed release that
+# current.json names and execs its launcher under env -i; the launcher re-admits receipt, index and
+# tree, so this shim only picks a candidate path. The home comes from the passwd entry, as the
+# launcher's Path.home() does under env -i: no environment value selects a path. Stock absolute
+# tools only; every refusal is one fixed JSON line on stderr.
+set -eu
+umask 077
+
+tg_refuse() {
+    printf '{"schema_version":1,"error_code":"runtime_not_installed"}\n' >&2
+    exit 1
+}
+tg_absolute() {
+    [ "${#1}" -le 4096 ] || return 1
+    case "$1" in /*) ;; *) return 1;; esac
+    case "$1" in *//*|*/../*|*/./*|*/..|*/.|*/) return 1;; esac
+    case "$1" in *'
+'*) return 1;; esac
+    ! printf '%s' "$1" | /usr/bin/env -i LC_ALL=C /usr/bin/grep '[[:cntrl:]]' >/dev/null
+}
+tg_hash() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0123456789abcdef]*) return 1;; esac
+}
+tg_number() {
+    case "$1" in ''|*[!0123456789]*) return 1;; esac
+    [ "${#1}" -le 12 ]
+}
+tg_stat() {
+    /usr/bin/env -i /usr/bin/stat -f "$1" "$tg_pointer" 2>/dev/null
+}
+tg_field() {
+    /usr/bin/env -i /usr/bin/plutil -extract "$1" raw -o - "$tg_pointer" 2>/dev/null
+}
+
+[ "$#" -eq 0 ] || tg_refuse
+tg_uid=$(/usr/bin/env -i /usr/bin/id -u) || tg_refuse
+tg_number "$tg_uid" && [ "$tg_uid" -ne 0 ] || tg_refuse
+# id -P prints name:passwd:uid:gid:class:change:expire:gecos:home:shell; read home from the right.
+tg_home=$(/usr/bin/env -i /usr/bin/id -P) || tg_refuse
+tg_home=${tg_home%:*}
+tg_home=${tg_home##*:}
+tg_absolute "$tg_home" || tg_refuse
+tg_root="$tg_home/Library/Application Support/TelegramSearch"
+tg_pointer="$tg_root/current.json"
+[ -f "$tg_pointer" ] && [ ! -L "$tg_pointer" ] || tg_refuse
+tg_owner=$(tg_stat '%u') && tg_mode=$(tg_stat '%Lp') && tg_links=$(tg_stat '%l') && tg_size=$(tg_stat '%z') || tg_refuse
+tg_number "$tg_owner" && tg_number "$tg_links" && tg_number "$tg_size" || tg_refuse
+case "$tg_mode" in ''|*[!01234567]*) tg_refuse;; esac
+[ "$tg_owner" = "$tg_uid" ] && [ "$tg_links" = 1 ] && [ "$tg_size" -le 4096 ] || tg_refuse
+[ "$((0$tg_mode & 022))" -eq 0 ] || tg_refuse
+[ "$(tg_field schema_version)" = 1 ] || tg_refuse
+tg_index=$(tg_field index_sha256) || tg_refuse
+tg_hash "$tg_index" || tg_refuse
+tg_release=$(tg_field release_root) || tg_refuse
+[ "$tg_release" = "$tg_root/releases/$tg_index" ] || tg_refuse
+[ -d "$tg_release" ] && [ ! -L "$tg_release" ] || tg_refuse
+[ -f "$tg_release/python/bin/python3" ] && [ -x "$tg_release/python/bin/python3" ] || tg_refuse
+[ -f "$tg_release/launcher.py" ] || tg_refuse
+exec /usr/bin/env -i "$tg_release/python/bin/python3" -I -S -B "$tg_release/launcher.py" mcp

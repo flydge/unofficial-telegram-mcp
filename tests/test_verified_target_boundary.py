@@ -21,6 +21,7 @@ from telegram_search_mcp.broker_protocol import (receive_request, send_frame, PR
 from telegram_search_mcp.search_service import SearchService
 from telegram_search_mcp.server import build_server
 from test_verified_targets import TargetProvider
+from tool_listing import usable
 
 POLICY=RuntimePolicy(enabled_capabilities=('verified_targets',))
 GEN='broker_'+'a'*32
@@ -31,9 +32,9 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             provider=TargetProvider();service=SearchService(client=provider,owns_client=False)
             async with Client(build_server(service_factory=lambda:service,policy=policy)) as consumer:
                 tools={t.name:t for t in (await consumer.list_tools()).tools}
-                self.assertIn('verify_target',list(tools),'verification MCP tool is missing')
-                self.assertIn('read_target_messages',list(tools))
-                for name in ['verify_target','read_target_messages']:
+                self.assertEqual(set(tools),usable(policy))
+                self.assertEqual({'verify_target','read_target_messages'}<=set(tools),enabled)
+                for name in ['verify_target','read_target_messages'][:2 if enabled else 0]:
                     self.assertFalse(tools[name].input_schema['additionalProperties'])
                     self.assertTrue(tools[name].annotations.read_only_hint)
                 result=await consumer.call_tool('verify_target',{'target':7})

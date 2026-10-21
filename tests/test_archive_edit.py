@@ -323,9 +323,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
     def test_existing_tool_schemas_are_byte_identical(self):
         from telegram_search_mcp.contract import schema_document
-        from telegram_search_mcp.server import build_server
+        from telegram_search_mcp.server import _TOOL_NAMES, build_server
         tools = {tool['name']: tool for tool in schema_document(build_server(policy=RuntimePolicy()))['tools']}
-        self.assertEqual(len(tools), 55)
+        self.assertEqual(len(tools), len(_TOOL_NAMES))  # the registration, independent of the listing policy
         new = {'prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'}
         self.assertTrue(new <= set(tools))
         existing = [tools[name] for name in sorted(set(tools) - new)]
@@ -339,6 +339,20 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         archive_good = {'chat': CHAT, 'target_list': 'archive'}
         edit_good = {'chat': CHAT, 'message_id': MID, 'new_text': 'New'}
         apply_good = {'draft_id': DID, 'approved': True}
+        from telegram_search_mcp.server import _TOOL_NAMES, available_tools
+        full = RuntimePolicy(enabled_capabilities=tuple(sorted(KNOWN_CAPABILITIES)))
+        async with Client(build_server(service_factory=lambda: self.fail('provider opened'), policy=full)) as consumer:
+            tools = {t.name: t for t in (await consumer.list_tools()).tools}
+        self.assertEqual(len(tools), len(_TOOL_NAMES))
+        self.assertEqual(list(tools)[-4:], ['prepare_chat_archive', 'apply_prepared_archive',
+                                            'prepare_text_edit', 'apply_prepared_text_edit'])
+        self.assertEqual(set(tools['prepare_chat_archive'].input_schema['properties']), {'chat', 'target_list'})
+        self.assertEqual(set(tools['prepare_text_edit'].input_schema['properties']),
+                         {'chat', 'message_id', 'new_text'})
+        for name in list(tools)[-4:]:
+            self.assertFalse(tools[name].input_schema['additionalProperties'])
+            self.assertFalse(tools[name].annotations.read_only_hint)
+        self.assertTrue(tools['apply_prepared_text_edit'].annotations.destructive_hint)
         for policy, archive_on, edit_on in ((RuntimePolicy(), False, False),
                                             (RuntimePolicy(enabled_capabilities=('send',)), False, False),
                                             (RuntimePolicy(enabled_capabilities=('archive_chats',)), False, False),
@@ -360,17 +374,10 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                     calls.append(request)
                     return ApplyPreparedTextEditResponse(status='not_approved', draft_id=request.draft_id, detail='synthetic')
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
-                tools = {t.name: t for t in (await consumer.list_tools()).tools}
-                self.assertEqual(len(tools), 55)
-                self.assertEqual(list(tools)[-4:], ['prepare_chat_archive', 'apply_prepared_archive',
-                                                    'prepare_text_edit', 'apply_prepared_text_edit'])
-                self.assertEqual(set(tools['prepare_chat_archive'].input_schema['properties']), {'chat', 'target_list'})
-                self.assertEqual(set(tools['prepare_text_edit'].input_schema['properties']),
-                                 {'chat', 'message_id', 'new_text'})
-                for name in list(tools)[-4:]:
-                    self.assertFalse(tools[name].input_schema['additionalProperties'])
-                    self.assertFalse(tools[name].annotations.read_only_hint)
-                self.assertTrue(tools['apply_prepared_text_edit'].annotations.destructive_hint)
+                listed = {t.name for t in (await consumer.list_tools()).tools}
+                self.assertEqual(listed, set(available_tools(policy.enabled_capabilities)))
+                self.assertEqual({'prepare_chat_archive', 'apply_prepared_archive'} <= listed, archive_on)
+                self.assertEqual({'prepare_text_edit', 'apply_prepared_text_edit'} <= listed, edit_on)
                 for prepare, apply, good, enabled, request_model in (
                         ('prepare_chat_archive', 'apply_prepared_archive', archive_good, archive_on, PrepareChatArchiveRequest),
                         ('prepare_text_edit', 'apply_prepared_text_edit', edit_good, edit_on, PrepareTextEditRequest)):

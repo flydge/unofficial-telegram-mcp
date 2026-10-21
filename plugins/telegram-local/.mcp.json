@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tg": {
+      "command": "/bin/sh",
+      "args": ["-p", "${CLAUDE_PLUGIN_ROOT}/bin/mcp-entry"]
+    }
+  }
+}

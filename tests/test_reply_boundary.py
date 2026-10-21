@@ -12,6 +12,7 @@ from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
 from telegram_search_mcp.broker_client import BrokerClient
 from telegram_search_mcp.config import RuntimePolicy
+from tool_listing import usable
 from telegram_search_mcp.contract import CompatibilityError, OPERATION_CAPABILITIES
 from telegram_search_mcp.reply_reader import read_reply_chain
 from telegram_search_mcp.schemas import ReadReplyChainRequest
@@ -32,11 +33,12 @@ class ReplyBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 def read_reply_chain(self, request): return read_reply_chain(provider, request)
             async with Client(build_server(service_factory=Service, policy=policy)) as consumer:
                 listing = await consumer.list_tools()
-                tool = next((t for t in listing.tools if t.name == 'read_reply_chain'), None)
-                self.assertIsNotNone(tool, 'reply-chain MCP tool missing')
-                self.assertTrue(tool.annotations.read_only_hint)
-                self.assertFalse(tool.input_schema['additionalProperties'])
-                self.assertEqual(tool.input_schema['properties']['max_depth']['maximum'], 10)
+                self.assertEqual({t.name for t in listing.tools}, usable(policy))
+                self.assertEqual(any(t.name == 'read_reply_chain' for t in listing.tools), enabled)
+                for tool in (t for t in listing.tools if t.name == 'read_reply_chain'):
+                    self.assertTrue(tool.annotations.read_only_hint)
+                    self.assertFalse(tool.input_schema['additionalProperties'])
+                    self.assertEqual(tool.input_schema['properties']['max_depth']['maximum'], 10)
                 result = await consumer.call_tool('read_reply_chain', ARGS)
                 if enabled:
                     self.assertEqual(result.structured_content['result']['stop_reason'], 'no_parent')
