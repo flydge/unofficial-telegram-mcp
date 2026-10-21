@@ -53,7 +53,8 @@ def make_payload(root, *, manifest_version=1, publication='unreleased', source_c
                  publisher=None, natives=None, lock=None, extra_files=None):
     """A synthetic prepared payload that satisfies the assembler's checks (inert bytes, real contract/schema).
 
-    Defaults reproduce the v1 kit; keywords build v2 manifests, other locks and extra files.
+    Defaults reproduce the v1 kit; keywords build v2 manifests, other locks (a dict, or exact bytes)
+    and extra files.
     """
     import telegram_search_mcp
     from telegram_search_mcp import __version__
@@ -72,7 +73,7 @@ def make_payload(root, *, manifest_version=1, publication='unreleased', source_c
                   for path in sorted(package.rglob('*.py')) if '__pycache__' not in path.relative_to(package).parts})
     natives = natives or inert_natives()
     files.update({'native/' + name: data for name, data in natives.items()})
-    lock_bytes = json.dumps(lock or v1_lock(natives)).encode()
+    lock_bytes = lock if type(lock) is bytes else json.dumps(lock or v1_lock(natives)).encode()
     files['tdlib-lock.json'] = lock_bytes
     manifest = dict(schema_version=manifest_version, package_version=__version__, target='macos-arm64',
         minimum_os='26.0', contract_version=CONTRACT_VERSION, schema_fingerprint=schema_fingerprint(),
