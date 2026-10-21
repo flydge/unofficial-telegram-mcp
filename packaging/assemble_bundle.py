@@ -15,6 +15,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import stat
 import subprocess
 import tarfile
@@ -35,6 +36,7 @@ NATIVE_NAMES = {'libtdjson.dylib', 'libssl.3.dylib', 'libcrypto.3.dylib'}
 SKILL_IDS = {'telegram-search', 'telegram-setup'}
 TDLIB_SOURCE = 'source/tdlib/'
 TDLIB_SCHEMA = TDLIB_SOURCE + 'td/generate/scheme/td_api.tl'
+SERVICE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')  # a named Keychain service for the app identity
 
 
 class ReleasePackageError(ValueError):
@@ -193,15 +195,25 @@ def _json_bytes(value):
                        separators=(',', ':')) + '\n').encode('utf-8')
 
 
-def _app_identity_file(runner):
-    """The owner's Keychain pair as an in-memory, indexed `app-identity.json` (mode 0400).
+def _named_service(service, runner):
+    """The same `security find-generic-password` reads under another Keychain service name."""
+    def run(args, **options):
+        args = list(args)
+        args[args.index('-s') + 1] = service
+        return runner(args, **options)
+    return run
 
-    Only behind the explicit assembly flag. Neither value is printed, logged or written
-    anywhere but the archive; failures carry a fixed code and no chained exception.
+
+def _app_identity_file(runner, service=None):
+    """The Keychain pair as an in-memory, indexed `app-identity.json` (mode 0400).
+
+    Only behind an explicit assembly switch: the owner's default service, or a named one
+    (a dedicated product identity). Neither value is printed, logged or written anywhere
+    but the archive; failures carry a fixed code and no chained exception.
     """
     failed = False
     try:
-        credentials = read_api_credentials(runner=runner)
+        credentials = read_api_credentials(runner=runner if service is None else _named_service(service, runner))
         data = _json_bytes({'version': 1, 'api_id': credentials.api_id, 'api_hash': credentials.api_hash})
         parse_app_identity(data)
     except Exception:  # Keychain, parser and encoder errors alike: never forward their text.
@@ -267,16 +279,24 @@ class _VerifiedReader:
 
 
 def assemble_bundle(payload, output_directory, *, app_identity_from_keychain=False,
-                    keychain_runner=subprocess.run):
+                    keychain_runner=subprocess.run, app_identity_service=None):
     """Stream one prepared current bundle; only audited internal Python links.
 
     Preparation is a separate bounded builder operation. This producer verifies
     actual current product/contract/skills/native bytes, never executes payload
     binaries and emits its metadata audit before creating the large archive.
-    `app_identity_from_keychain` is the only way an `app-identity.json` can enter a
-    bundle: a payload that already carries one is refused either way.
+    The identity switch is the only way an `app-identity.json` can enter a bundle:
+    none (the default), `app_identity_from_keychain` (the owner's default service) or
+    `app_identity_service` (a named Keychain service); a payload that already
+    carries one is refused either way.
     """
-    identity = _app_identity_file(keychain_runner) if app_identity_from_keychain else None
+    if app_identity_service is not None and (app_identity_from_keychain or type(app_identity_service) is not str
+                                             or not SERVICE.fullmatch(app_identity_service)):
+        raise ReleasePackageError('app_identity_switch_invalid')
+    if app_identity_from_keychain or app_identity_service is not None:
+        identity = _app_identity_file(keychain_runner, app_identity_service)
+    else:
+        identity = None
     try:
         payload, output = Path(payload), Path(output_directory)
         _safe_path(payload,directory=True); _safe_path(output.parent,directory=True)
@@ -375,7 +395,10 @@ if __name__=='__main__':
     parser.add_argument('--payload',required=True);parser.add_argument('--output-directory',required=True)
     parser.add_argument('--app-identity-from-keychain',action='store_true',
         help='bundle this Mac\'s Keychain api_id/api_hash as app-identity.json (never printed)')
+    parser.add_argument('--app-identity-service',
+        help='bundle api_id/api_hash from this named Keychain service instead (never printed)')
     args=parser.parse_args()
-    result=assemble_bundle(args.payload,args.output_directory,app_identity_from_keychain=args.app_identity_from_keychain)
+    result=assemble_bundle(args.payload,args.output_directory,app_identity_from_keychain=args.app_identity_from_keychain,
+        app_identity_service=args.app_identity_service)
     print(_json_bytes({'archive_sha256':result.archive_sha256,'index_sha256':result.index_sha256,
         'files':result.files,'unpacked_bytes':result.unpacked_bytes,'archive_bytes':result.archive_bytes}).decode(),end='')
