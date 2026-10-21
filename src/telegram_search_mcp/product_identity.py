@@ -2,8 +2,9 @@
 
 Not renamed here, on purpose: the Python package, the `TelegramSearchMCP` support paths, the
 Keychain service, launchd labels, `TELEGRAM_SEARCH_*` environment keys and the intent file.
-Callers read these through the module (`identity.DISPLAY_NAME`), never `from ... import`, so one
-edit here renames the product everywhere.
+Callers read these through the module (`identity.DISPLAY_NAME`), so one edit here renames the
+product everywhere. A few values are captured at import (the connect page assets and the
+registration modules' SERVER_NAME), so patching them at runtime does not reach those.
 """
 from __future__ import annotations
 from collections.abc import Iterable
@@ -49,11 +50,15 @@ def check_names(*, display_name: str | None = None, mcp_server_name: str | None 
                 plugin_name: str | None = None, plugin_server_name: str | None = None,
                 marketplace_name: str | None = None, codesign_id_prefix: str | None = None,
                 bundle_root_name: str | None = None, dmg_volume_name: str | None = None,
-                device_model: str | None = None, tool_names: Iterable[str] = ()) -> None:
+                device_model: str | None = None, tool_names: Iterable[str] | None = None) -> None:
     """Raise `IdentityError(code)` unless the names are valid; an omitted name is the module's own.
 
-    `mcp__plugin_<plugin>_<server>__<tool>` must fit 64 characters for every name in `tool_names`;
-    with the longest registered tool (29 characters) that is `len(plugin) + len(server) <= 20`."""
+    `mcp__plugin_<plugin>_<server>__<tool>` must fit 64 characters for every name in `tool_names`,
+    which defaults to every registered tool; with the longest one (29 characters) that is
+    `len(plugin) + len(server) <= 20`."""
+    if tool_names is None:
+        from .server import _TOOL_NAMES
+        tool_names = _TOOL_NAMES
     display = DISPLAY_NAME if display_name is None else display_name
     server = MCP_SERVER_NAME if mcp_server_name is None else mcp_server_name
     plugin = PLUGIN_NAME if plugin_name is None else plugin_name
@@ -70,7 +75,7 @@ def check_names(*, display_name: str | None = None, mcp_server_name: str | None 
         _need(type(value) is str and len(value) <= limit and bool(_TEXT.match(value)), 'display_grammar')
     _need(type(root) is str and bool(_ROOT.match(root)), 'bundle_root_grammar')
     _need(type(prefix) is str and len(prefix) <= 100 and bool(_REVERSE_DNS.match(prefix)), 'codesign_prefix')
+    _need(len(plugin) + len(plugin_server) <= 20, 'plugin_name_budget')
     head = PLUGIN_TOOL_PREFIX + plugin + '_' + plugin_server + '__'
     for tool in tool_names:
         _need(type(tool) is str and len(head) + len(tool) <= TOOL_NAME_LIMIT, 'plugin_tool_name_length')
-    _need(len(plugin) + len(plugin_server) <= 20, 'plugin_name_budget')

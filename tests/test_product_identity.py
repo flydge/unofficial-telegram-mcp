@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from mcp import Client
@@ -59,7 +60,7 @@ class CheckNamesTests(unittest.IsolatedAsyncioTestCase):
     def test_twenty_characters_is_exactly_the_plugin_budget_of_the_longest_tool(self):
         check_names(plugin_name='a' * 18, plugin_server_name='tg', tool_names=_TOOL_NAMES)
         self.assertEqual(codes(plugin_name='a' * 19, plugin_server_name='tg', tool_names=_TOOL_NAMES),
-                         'plugin_tool_name_length')
+                         'plugin_name_budget')  # the budget is checked first; it equals the longest-tool bound
 
     def test_plugin_named_telegram_is_refused(self):
         self.assertEqual(codes(plugin_name='telegram'), 'plugin_name_reserved')
@@ -67,7 +68,13 @@ class CheckNamesTests(unittest.IsolatedAsyncioTestCase):
     def test_overlong_plugin_and_server_pair_is_refused(self):
         self.assertEqual(codes(plugin_name='telegram-local-a', plugin_server_name='tg123'), 'plugin_name_budget')
         self.assertEqual(codes(plugin_name='a' * 19, plugin_server_name='tg'), 'plugin_name_budget')
-        check_names(plugin_name='a' * 18, plugin_server_name='tg')
+        check_names(plugin_name='a' * 18, plugin_server_name='tg')  # defaults to every registered tool
+
+    def test_bare_check_covers_the_registered_tools(self):
+        from telegram_search_mcp import server
+        longest = 'x' * 30
+        with unittest.mock.patch.object(server, '_TOOL_NAMES', (*server._TOOL_NAMES, longest)):
+            self.assertEqual(codes(plugin_name='a' * 18, plugin_server_name='tg'), 'plugin_tool_name_length')
 
     def test_invalid_reverse_dns_prefix_is_refused(self):
         for bad in ('', 'unofficial', 'io.github', 'IO.github.flydge', 'io..github.flydge', 'io.github.-flydge',
