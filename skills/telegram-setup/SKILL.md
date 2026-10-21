@@ -35,8 +35,9 @@ step seems to need one, stop and use the Terminal fallback at the end.
      `skip`): the installer prints its JSON result. Continue at step 2.
 
    Keep installer failures and transaction evidence. Refuse foreign runtime, registration, service or
-   skill conflicts; never stop an existing owner to make an install pass, and never pass
-   `--adopt-legacy` unless the owner asks for that migration. Success is `status: activation_required` with
+   skill conflicts; never stop an existing owner to make an install pass, and never use the installer's
+   legacy-adoption option (docs/install.md, "Adopting entries the installer does not own") unless the
+   owner asks for that migration. Success is `status: activation_required` with
    a nonsecret `activation_command`. `claude_code` is `registered` or `reused` when Claude Code has the
    entry (Codex is registered either way), or `plugin` or `skipped` in those modes. `claude_skills:
    skipped` means no copies went to `~/.claude/skills` (no Claude Code found, or the plugin supplies
