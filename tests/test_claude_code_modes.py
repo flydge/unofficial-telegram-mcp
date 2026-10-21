@@ -106,8 +106,20 @@ class ModeInstallTests(InstallHarness, unittest.TestCase):
         self.assertEqual(self.receipt()['claude_code_mode'], 'user')
         self.selection_check()
 
+    def test_without_a_mode_a_repeat_or_a_resume_keeps_the_recorded_one(self):
+        fake = self.claude()
+        def crash(value):
+            if value == 'release': raise RuntimeError('simulated crash')
+        with self.assertRaises(RuntimeError): self.install(self.packet, checkpoint=crash, claude_code='plugin')
+        result = self.install(self.packet)  # The resumed first install keeps its intent's mode.
+        self.assertEqual((result['installation'], result['claude_code']), ('installed', 'plugin'))
+        again = self.install(self.packet, claude_code=None)
+        self.assertEqual((again['installation'], again['claude_code']), ('reused', 'plugin'))
+        self.assertEqual((self.receipt()['claude_code_mode'], fake.calls), ('plugin', []))
+        with self.assertRaises(self.bundle.InstallError): self.install(self.packet, claude_code='user')
+
     def test_an_unknown_mode_refuses_before_anything_is_created(self):
-        for mode in ('', 'User', 'both', None, 1, ['plugin']):
+        for mode in ('', 'User', 'both', 1, ['plugin']):
             with self.subTest(mode=mode):
                 self.setUp()
                 with self.assertRaises(self.bundle.InstallError) as caught:
@@ -188,8 +200,9 @@ class LauncherOptionTests(unittest.TestCase):
             sys.path[:] = saved
         return code, out.getvalue(), err.getvalue(), seen
 
-    def test_the_mode_reaches_install_and_defaults_to_user(self):
-        for options, mode in ((self.REQUIRED, 'user'), (self.REQUIRED + ['--claude-code', 'plugin'], 'plugin'),
+    def test_the_mode_reaches_install_only_when_given(self):
+        # Not given, install() gets None: it keeps the installed mode on an upgrade and uses user for a first install.
+        for options, mode in ((self.REQUIRED, None), (self.REQUIRED + ['--claude-code', 'plugin'], 'plugin'),
                               (['--claude-code', 'skip'] + self.REQUIRED, 'skip'),
                               (self.REQUIRED[:4] + ['--claude-code', 'user'] + self.REQUIRED[4:], 'user')):
             with self.subTest(options=options):
@@ -282,8 +295,8 @@ class BootstrapPassthroughTests(unittest.TestCase):
     def launcher_argv(self):
         return (self.out / 'launcher-argv').read_text().splitlines()
 
-    def test_the_mode_is_passed_to_the_launcher_and_defaults_to_user(self):
-        for extra, mode in (((), 'user'), (('--claude-code', 'plugin'), 'plugin'), (('--claude-code', 'skip'), 'skip'),
+    def test_the_mode_is_passed_to_the_launcher_only_when_given(self):
+        for extra, mode in (((), None), (('--claude-code', 'plugin'), 'plugin'), (('--claude-code', 'skip'), 'skip'),
                             (('--claude-code', 'user'), 'user')):
             with self.subTest(mode=mode, extra=extra):
                 done = self.bootstrap('--installation-root', str(self.home / 'runtime'), *extra)
@@ -297,7 +310,8 @@ class BootstrapPassthroughTests(unittest.TestCase):
                                         '--codex-home', str(self.home / '.codex'),
                                         '--skills-root', str(self.home / '.agents/skills'),
                                         '--index', stage + '/verified-index.json',
-                                        '--trusted-index-sha256', self.index_sha, '--claude-code', mode])
+                                        '--trusted-index-sha256', self.index_sha]
+                                 + (['--claude-code', mode] if mode else []))
                 (self.out / 'launcher-argv').unlink()
 
     def test_an_invalid_mode_refuses_before_the_seed_runs(self):

@@ -108,7 +108,7 @@ name=${{url##*/}}
         text = text.replace(PASSWD_LINE, f"tg_home='{passwd}'\n").replace(CURL_LINE, f"tg_curl='{self.curl}'\n")
         (self.plugin / 'bin' / 'install').write_text(text)
 
-    def serve_stub_bootstrap(self, *, status='activation_required'):
+    def serve_stub_bootstrap(self, *, status='activation_required', installation=None):
         (self.served / 'bootstrap.sh').write_text(f'''#!/bin/sh
 for a in "$@"; do printf '%s\\n' "$a"; done > '{self.out}/bootstrap-argv'
 /usr/bin/env > '{self.out}/bootstrap-env'
@@ -118,7 +118,8 @@ if [ -f '{self.out}/bootstrap-fail' ]; then
     printf '{{"schema_version":1,"error_code":"integrity_failure","retained_stage":""}}\\n' >&2
     exit 6
 fi
-printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
+printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status,
+                               **({} if installation is None else {"installation": installation})})}'
 ''')
         (self.served / 'bootstrap-verifier').write_bytes(b'synthetic seed bytes')
         (self.served / 'release-index.json').write_bytes(b'{"synthetic": "index"}\n')
@@ -285,15 +286,32 @@ printf '{{"activation_command":"synthetic","status":"{status}"}}\\n'
                 self.assertEqual([call[-1].rsplit('/', 1)[1] for call in self.calls()], order[:order.index(asset) + 1])
                 self.assertFalse((self.out / 'bootstrap-argv').exists())
 
+    def test_an_upgrade_or_a_repeat_is_a_success_like_a_first_install(self):
+        for status, installation in (('activation_required', 'installed'), ('activation_required', 'reused'),
+                                     ('upgraded', 'upgraded'), ('upgraded', 'reused'), ('rolled_back', 'reused')):
+            with self.subTest(status=status, installation=installation):
+                self.setUp()
+                self.serve_stub_bootstrap(status=status, installation=installation)
+                done = self.run_install()
+                self.assertEqual((done.returncode, done.stderr), (0, ''))
+                self.assertEqual(json.loads(done.stdout), {'activation_command': 'synthetic', 'status': status,
+                                                           'installation': installation})
+                self.assertEqual(self.workspaces(), [])
+                self.assertEqual((self.out / 'bootstrap-argv').read_text().splitlines()[-4:],
+                                 ['--claude-code', 'plugin', '--seed-team', TEAM])
+
     def test_a_bootstrap_refusal_or_an_unexpected_result_retains_the_workspace(self):
         (self.out / 'bootstrap-fail').write_bytes(b'')
         done = self.run_install()
         workspace = self.refusal(done, 'bootstrap_failed', retained=True)
         self.assertEqual(json.loads(done.stderr.splitlines()[0])['error_code'], 'integrity_failure')  # bootstrap's own line.
         self.assertTrue((workspace / 'release.tar.gz').is_file())
-        self.setUp()
-        self.serve_stub_bootstrap(status='refused')
-        self.refusal(self.run_install(), 'result_invalid', retained=True)
+        for status, installation in (('refused', None), ('upgraded', None), ('upgraded', 'installed'),
+                                     ('rolled_back', 'rolled_back'), ('uninstalled', 'removed')):
+            with self.subTest(status=status, installation=installation):
+                self.setUp()
+                self.serve_stub_bootstrap(status=status, installation=installation)
+                self.refusal(self.run_install(), 'result_invalid', retained=True)
 
     def test_the_unpublished_placeholder_refuses_before_any_download(self):
         self.pin(raw=PINS.read_bytes())

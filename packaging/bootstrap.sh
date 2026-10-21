@@ -10,6 +10,8 @@
 # the notarized seed at exec; a bare Mach-O cannot be stapled, so its ticket is fetched online.
 # --adopt-legacy (optional, only as the final token) is the owner's migration of a 0.51/0.52 install:
 # it reaches the launcher as its last token too. Install.command and the plugin never pass it.
+# --claude-code user|plugin|skip (optional) reaches the launcher only when given: without it the
+# installer keeps the installed mode on an upgrade and uses user for a first install.
 set -eu
 umask 077
 # The only tool a test may redirect (in a copy of this script); every other tool is a literal.
@@ -25,7 +27,7 @@ bootstrap_root=''
 bootstrap_codex=''
 bootstrap_skills=''
 bootstrap_prepare=''
-bootstrap_claude_code='user'
+bootstrap_claude_code=''
 bootstrap_team=''
 bootstrap_adopt=''
 bootstrap_seen=' '
@@ -99,7 +101,8 @@ while [ "$#" -gt 0 ]; do
         --seed|--seed-sha256|--seed-bytes|--archive|--index|--trusted-index-sha256|--installation-root|--codex-home|--skills-root|--seed-team)
             [ "$#" -ge 2 ] || bootstrap_fail selection_invalid 6;;
         --claude-code)
-            # Claude Code registration: user scope (default), the plugin, or none. Closed values only.
+            # Claude Code registration: user scope, the plugin, or none. Closed values only; when omitted the
+            # installer keeps the installed mode (upgrade) or uses user (first install).
             [ "$#" -ge 2 ] || bootstrap_fail selection_invalid 6
             case "$2" in user|plugin|skip) bootstrap_claude_code=$2;; *) bootstrap_fail selection_invalid 6;; esac
             shift 2; continue;;
@@ -199,9 +202,10 @@ fi
 # A direct exec keeps native Terminal ancestry shell-only. Installation itself
 # ends with nonsecret activation instructions; no login is attempted here.
 set --
-if [ "$bootstrap_adopt" = yes ]; then set -- --adopt-legacy; fi
+if [ -n "$bootstrap_claude_code" ]; then set -- --claude-code "$bootstrap_claude_code"; fi
+if [ "$bootstrap_adopt" = yes ]; then set -- ${1+"$@"} --adopt-legacy; fi
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
     "$bootstrap_stage/release/python/bin/python3" -I -S -B "$bootstrap_stage/release/launcher.py" \
     bootstrap-install --installation-root "$bootstrap_root" --codex-home "$bootstrap_codex" \
     --skills-root "$bootstrap_skills" --index "$bootstrap_stage/verified-index.json" \
-    --trusted-index-sha256 "$bootstrap_index_sha" --claude-code "$bootstrap_claude_code" ${1+"$@"}
+    --trusted-index-sha256 "$bootstrap_index_sha" ${1+"$@"}

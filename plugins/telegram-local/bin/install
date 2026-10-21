@@ -5,9 +5,11 @@
 # --fail and no retry or resume (so assets of different uploads are never mixed), into a private
 # mktemp directory under the passwd home. Every asset must match its pinned size and sha256 before
 # anything runs; then the pinned bootstrap.sh installs with --claude-code plugin and --seed-team
-# <the pinned Team ID>, and the installer JSON is printed on stdout. The directory is removed on success
-# and kept on failure. The reviewed plugin commit, pinned by the marketplace, is the trust input: no
-# environment value, argument or downloaded byte selects a URL, pin or path. Published pins must carry
+# <the pinned Team ID>, and the installer JSON is printed on stdout. A first install (activation_required),
+# an upgrade or a repeat (upgraded, or rolled_back with installation reused) is a success; any other result
+# refuses as result_invalid. The directory is removed on success and kept on failure. The reviewed plugin
+# commit, pinned by the marketplace, is the trust input: no environment value, argument or downloaded
+# byte selects a URL, pin or path. Published pins must carry
 # a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
 # evaluates the downloaded seed, and bootstrap.sh's --seed-team check of its Developer ID designated
 # requirement is what binds it to the publisher, on top of the sha256 pins. Stock absolute tools only;
@@ -155,8 +157,21 @@ else
     tg_refuse bootstrap_failed
 fi
 tg_file "$tg_work/result.json" 65536 || tg_refuse result_invalid
-[ "$(/usr/bin/env -i /usr/bin/plutil -extract status raw -expect string -o - "$tg_work/result.json" 2>/dev/null)" = activation_required ] \
-    || tg_refuse result_invalid
+tg_field() {
+    /usr/bin/env -i /usr/bin/plutil -extract "$1" raw -expect string -o - "$tg_work/result.json" 2>/dev/null
+}
+tg_status=$(tg_field status) || tg_refuse result_invalid
+case "$tg_status" in
+    activation_required) ;;
+    upgraded|rolled_back)
+        # An upgrade, or a repeat of the installed release: installation upgraded or reused.
+        tg_installation=$(tg_field installation) || tg_refuse result_invalid
+        case "$tg_status:$tg_installation" in
+            upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
+            *) tg_refuse result_invalid;;
+        esac;;
+    *) tg_refuse result_invalid;;
+esac
 tg_result=$(/usr/bin/env -i /bin/cat "$tg_work/result.json") || tg_refuse result_invalid
 /usr/bin/env -i /bin/rm -rf "$tg_work" || tg_refuse cleanup_failed
 tg_work=''
