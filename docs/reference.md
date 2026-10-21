@@ -511,7 +511,9 @@ The record is JSON Lines with schema `tgmcp-stdio-record/v1`. Its events:
 | `rpc_error` | `method`, `tool` and the numeric JSON-RPC `code`. |
 | `end` | `exit_status`, frame and method counts per side, `unparsed`, `oversized`, `untracked` and `suppressed_events`. |
 
-Arguments, result text, Telegram content and identifiers are never recorded. A name or version outside
+Every event also carries `event` (its name) and `t_ms` (milliseconds since start). Arguments, result
+text, Telegram content and identifiers are never recorded, but block sizes follow the content (a found
+and a not-found result differ), so keep a record with owner-only evidence. A name or version outside
 its closed grammar is written as `redacted`. Frames above 32 MiB are relayed but not parsed, at most 4,096
 events are written (later ones are counted), and at most 1,024 requests are tracked at once.
 

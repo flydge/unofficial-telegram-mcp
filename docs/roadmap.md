@@ -2,7 +2,7 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md) · [Releasing](releasing.md)
 
-Updated **2026-10-21**. The released baseline remains **0.51.0**; the
+Updated **2026-10-22**. The released baseline remains **0.51.0**; the
 **0.52.0** release is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
@@ -30,12 +30,14 @@ build Mac; no signed build and no real run in Claude Desktop or the plugin yet):
 - **F. Documentation:** the [install guide](install.md#install-from-the-053-kit-dmg-curl-and-plugin-development),
   the security model, the reference, the setup skill and the changelog.
 
-**Waits for the owner (phase G):** the Developer ID certificate and notary profile, then the signed and
-notarized build; the application-identity decision; the product name and its single rename commit; the
+**Waits for the owner (phase G):** the signed and notarized build (the Developer ID identity and notary
+profile were provisioned on 21.10.2026, preflight ok) and its Gatekeeper observation, including the
+unsigned `Install.command` double-click; the application-identity decision; the product name and its single rename commit; the
 clean-macOS-user run from a browser-downloaded DMG (QR with 2FA, interruption, logout and login,
 searches in Claude Code, Codex and Claude Desktop, and the plugin path); migration of the owner's daily
-install; publication. An independent critic review of the slice is also still to do. No signed DMG and
-no public release asset exists.
+install; publication. An independent critic review of the slice ran on 21.10.2026 and its findings were
+addressed on 22.10.2026; what stays open is listed in the [task record](plans/0.53-client-distribution-spec.tasks.md).
+No signed DMG and no public release asset exists.
 
 ## Current release — 0.52.0
 
