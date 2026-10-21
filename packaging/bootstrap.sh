@@ -8,6 +8,8 @@
 # native_runtime.designated_requirement(TEAMID). The pins stay; the Team ID only narrows them.
 # The staged copy keeps com.apple.quarantine (cp copies it), so Gatekeeper still evaluates
 # the notarized seed at exec; a bare Mach-O cannot be stapled, so its ticket is fetched online.
+# --adopt-legacy (optional, only as the final token) is the owner's migration of a 0.51/0.52 install:
+# it reaches the launcher as its last token too. Install.command and the plugin never pass it.
 set -eu
 umask 077
 # The only tool a test may redirect (in a copy of this script); every other tool is a literal.
@@ -25,6 +27,7 @@ bootstrap_skills=''
 bootstrap_prepare=''
 bootstrap_claude_code='user'
 bootstrap_team=''
+bootstrap_adopt=''
 bootstrap_seen=' '
 
 bootstrap_fail() {
@@ -89,6 +92,9 @@ while [ "$#" -gt 0 ]; do
     bootstrap_seen="$bootstrap_seen$bootstrap_option "
     case "$bootstrap_option" in
         --prepare-only) bootstrap_prepare='yes'; shift; continue;;
+        --adopt-legacy)
+            [ "$#" -eq 1 ] || bootstrap_fail selection_invalid 6
+            bootstrap_adopt='yes'; shift; continue;;
         --json) shift; continue;;
         --seed|--seed-sha256|--seed-bytes|--archive|--index|--trusted-index-sha256|--installation-root|--codex-home|--skills-root|--seed-team)
             [ "$#" -ge 2 ] || bootstrap_fail selection_invalid 6;;
@@ -192,8 +198,10 @@ if [ "$bootstrap_prepare" = yes ]; then
 fi
 # A direct exec keeps native Terminal ancestry shell-only. Installation itself
 # ends with nonsecret activation instructions; no login is attempted here.
+set --
+if [ "$bootstrap_adopt" = yes ]; then set -- --adopt-legacy; fi
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
     "$bootstrap_stage/release/python/bin/python3" -I -S -B "$bootstrap_stage/release/launcher.py" \
     bootstrap-install --installation-root "$bootstrap_root" --codex-home "$bootstrap_codex" \
     --skills-root "$bootstrap_skills" --index "$bootstrap_stage/verified-index.json" \
-    --trusted-index-sha256 "$bootstrap_index_sha" --claude-code "$bootstrap_claude_code"
+    --trusted-index-sha256 "$bootstrap_index_sha" --claude-code "$bootstrap_claude_code" ${1+"$@"}
