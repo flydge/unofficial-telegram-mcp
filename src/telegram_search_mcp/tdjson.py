@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from . import __version__, product_identity
-from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, validate_tdlib_runtime
+from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, tdlib_runtime
 from .discovery_state import CatalogPosition, ChatListName
 from .keychain import ApiCredentials, read_api_credentials
 from .outgoing_stage import STAGING_ROOT
@@ -801,11 +801,19 @@ class LegacyTDJson:
     """Own one client created through the installed legacy tdjson C ABI."""
 
     def __init__(self) -> None:
-        library_path = validate_tdlib_runtime()
+        library_path, expected = tdlib_runtime()
         try:
             library = ctypes.CDLL(str(library_path))
         except OSError as error:
             raise TDLibError("unable to load the pinned TDLib runtime") from error
+        if expected is not None:
+            # The Homebrew path's keg name is not proof: the loaded library must answer the pin
+            # synchronously before any client exists, as the bundled path already requires.
+            from .native_runtime import NativeRuntimeError, probe_identity
+            try:
+                probe_identity(library, *expected)
+            except NativeRuntimeError:
+                raise TDLibError("the loaded TDLib runtime does not answer the approved version and commit") from None
 
         library.td_json_client_create.argtypes = []
         library.td_json_client_create.restype = ctypes.c_void_p
