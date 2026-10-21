@@ -485,6 +485,19 @@ authority tools. `idempotentHint` is set on pure reads and `get_*` tools, but no
 or any `prepare_*` tool, because every preparation creates a new draft. `destructiveHint` is set only on
 `apply_prepared_text_edit`. Every tool is open-world.
 
+### Prompts
+
+The server offers four client-neutral MCP prompts, each at most 1,500 characters when rendered:
+`find_and_summarize`, `reply_with_file`, `unread_overview` and `check_connection`. The first three take one
+optional `request` argument, the user's words; it is sanitized like Telegram text, cut to 200 characters
+and inserted as a JSON-quoted string labelled as intent, never as instructions or a tool argument. A
+prompt grants no capability or approval; the tools, the policy and the owner's dialog decide.
+`prompts/list` follows the loaded policy like `tools/list`: a prompt is listed only while every tool it
+relies on is in `available_tools` (`check_connection` needs only `_manifest`, so a stale policy lists only
+it). `prompts/get` answers an unknown or unlisted prompt with the fixed protocol error
+`prompt_unavailable`, and unexpected or non-string arguments with `invalid_arguments`, without echoing
+either.
+
 ### Tool inventory in `_manifest` and `tools/list`
 
 `_manifest` returns three tool lists:
