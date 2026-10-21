@@ -23,6 +23,14 @@ offline venv with a hermetic HOME and fails on any difference. Evidence made by
 another gate version is verified by the gate stored at the recorded commit when
 its hash matches.
 
+Optional bundle stage: with --bundle-native-directory and --bundle-cache (both or neither), run also
+builds the release bundle after the suite, with the commit's own packaging/release_build.py in ad hoc
+dry-run mode (offline, from the cached pinned inputs; the repository's HEAD must be the commit) into
+<workdir>/bundle, and records the archive, index, seed, pins, SHA256SUMS, corresponding-source, DMG and
+release-build.json hashes, each re-derived from disk, under "bundle". verify then needs the same two
+inputs: it re-derives the recorded hashes from disk and rebuilds, and the rebuild must reproduce every
+hash except the DMG's and those that record it. Without the flags nothing changes.
+
 Both commands take --repo (default: the repository of the current directory).
 Refusals print one fixed code and never echo inputs; run keeps the details in
 <workdir>/refusal.json (privacy hits as path:line:rule, never the matched text).
@@ -122,7 +130,16 @@ CODES = frozenset({
     "pip_check_failed", "freeze_mismatch", "record_mismatch", "census_failed", "smoke_failed",
     "smoke_version_mismatch", "tool_census_mismatch", "smoke_manifest_mismatch", "smoke_policy_mismatch",
     "suite_failed", "suite_unreadable", "tests_failed", "privacy_guard_missing", "privacy_scan_bounds",
-    "privacy_hit", "evidence_invalid", "evidence_mismatch", "toolchain_mismatch", "gate_mismatch"})
+    "privacy_hit", "evidence_invalid", "evidence_mismatch", "toolchain_mismatch", "gate_mismatch",
+    "bundle_inputs_invalid", "bundle_commit_mismatch", "bundle_failed", "bundle_mismatch"})
+# The optional bundle stage: the commit's own packaging/release_build.py in ad hoc dry-run mode.
+BUNDLE_SCRIPT = "packaging/release_build.py"
+BUNDLE_KEYS = frozenset({"mode", "source_commit", "archive", "index", "seed", "pins", "kit_sums", "source_archive",
+                         "dmg", "assets_sums", "build_evidence"})
+# A rebuild from the same commit and pinned inputs reproduces these byte for byte (the DMG and the
+# files that record its hash do not).
+BUNDLE_REPRODUCIBLE = ("archive", "index", "seed", "pins", "kit_sums", "source_archive")
+BUNDLE_TIMEOUT = 3600
 
 CENSUS = r'''
 import json, sys
@@ -1160,6 +1177,63 @@ def rerun_suite(artifacts: tuple, evidence: dict, base: Path, scratch: Path) -> 
     return {**{key: report[key] for key in SUITE_COUNTS}, "returncode": returncode}
 
 
+def bundle_inputs(native_directory: Path | None, cache: Path | None) -> tuple[Path, Path] | None:
+    """Both bundle inputs or neither: existing absolute directories (prepare_payload checks the cache's mode)."""
+    if native_directory is None and cache is None:
+        return None
+    need(native_directory is not None and cache is not None, "bundle_inputs_invalid")
+    need(all(path.is_absolute() and path.is_dir() and not path.is_symlink() for path in (native_directory, cache)),
+         "bundle_inputs_invalid")
+    return native_directory, cache
+
+
+def bundle_record(out: Path, commit: str) -> dict:
+    """The bundle stage's hashes, re-derived from disk; release-build.json must agree with every one."""
+    try:
+        evidence = json.loads((out / "release-build.json").read_bytes())
+        kit, assets = evidence["kit"], evidence["assets"]
+        dmg = [name for name in assets if name.endswith("-macos-arm64.dmg")]
+        source = [name for name in assets if name.startswith("corresponding-source-")]
+        need(evidence["source_commit"] == commit and evidence["mode"] == "adhoc-dry-run" and len(dmg) == 1
+             and len(source) == 1, "bundle_mismatch")
+        record = {"mode": "adhoc-dry-run", "source_commit": commit,
+                  "archive": sha256_file(out / "kit/release.tar.gz", "bundle_mismatch"),
+                  "index": sha256_file(out / "kit/release-index.json", "bundle_mismatch"),
+                  "seed": sha256_file(out / "kit/bootstrap-verifier", "bundle_mismatch"),
+                  "pins": sha256_file(out / "kit/release-pins.json", "bundle_mismatch"),
+                  "kit_sums": sha256_file(out / "kit/SHA256SUMS", "bundle_mismatch"),
+                  "source_archive": sha256_file(out / "assets" / source[0], "bundle_mismatch"),
+                  "dmg": sha256_file(out / "assets" / dmg[0], "bundle_mismatch"),
+                  "assets_sums": sha256_file(out / "assets/SHA256SUMS", "bundle_mismatch"),
+                  "build_evidence": sha256_file(out / "release-build.json", "bundle_mismatch")}
+        recorded = {"archive": kit["release.tar.gz"], "index": kit["release-index.json"],
+                    "seed": kit["bootstrap-verifier"], "pins": kit["release-pins.json"], "kit_sums": kit["SHA256SUMS"],
+                    "source_archive": assets[source[0]], "dmg": assets[dmg[0]], "assets_sums": assets["SHA256SUMS"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        raise GateRefusal("bundle_mismatch") from None
+    need(all(recorded[key].get("sha256") == record[key] for key in recorded), "bundle_mismatch")
+    return record
+
+
+def bundle_stage(git: Git, commit: str, tree: Path, out: Path, inputs: tuple[Path, Path], python: Path,
+                 env: dict, runner=_run) -> dict:
+    """The commit's own release_build.py, ad hoc dry run, into a fresh `out`; then its check and the record.
+
+    release_build exports HEAD, so the repository's HEAD must be the gated commit."""
+    need(git.text("rev-parse", "--verify", "HEAD^{commit}", code="bundle_commit_mismatch") == commit,
+         "bundle_commit_mismatch")
+    script = tree / BUNDLE_SCRIPT
+    need(script.is_file() and not script.is_symlink(), "bundle_failed")
+    environment = {**env, "PYTHONPATH": str(tree / "src")}
+    native_directory, cache = inputs
+    runner([python, "-B", script, "build", "--dry-run", "--offline", "--output", out, "--native-directory",
+            native_directory, "--cache", cache, "--checkout", git.repo], "bundle_failed", timeout=BUNDLE_TIMEOUT,
+           env=environment, cwd=tree)
+    runner([python, "-B", script, "check", "--output", out, "--checkout", git.repo], "bundle_failed",
+           timeout=BUNDLE_TIMEOUT, env=environment, cwd=tree)
+    return bundle_record(out, commit)
+
+
 def canonical(evidence: dict) -> bytes:
     return (json.dumps(evidence, indent=1, sort_keys=True) + "\n").encode()
 
@@ -1175,6 +1249,7 @@ def run(args: argparse.Namespace) -> int:
     git = Git(repo)
     commit = resolve_commit(git, args.commit)
     resolve_tag(git, args.previous_tag, commit)
+    inputs = bundle_inputs(getattr(args, "bundle_native_directory", None), getattr(args, "bundle_cache", None))
     workdir = prepare_workdir(args.workdir, repo)
     try:
         scratch = _private_dir(workdir / "work")
@@ -1189,10 +1264,14 @@ def run(args: argparse.Namespace) -> int:
                                        evidence["constraints"]["file"], workdir, scratch, workdir)
         check_tests(report, returncode)
         evidence["tests"] = report
+        if inputs is not None:
+            chain, venv = evidence["_artifacts"][3], scratch / "venv-install"
+            evidence["bundle"] = bundle_stage(git, commit, scratch / "tree-0", workdir / "bundle", inputs,
+                                              venv / "bin" / "python", chain.env(venv))
         del evidence["_artifacts"]
         for kind in ("sdist", "wheel"):
             evidence[kind]["sha256"] = sha256_file(workdir / evidence[kind]["file"])
-        need(set(evidence) == EVIDENCE_KEYS, "evidence_invalid")
+        need(set(evidence) == (EVIDENCE_KEYS if inputs is None else EVIDENCE_KEYS | {"bundle"}), "evidence_invalid")
         write_evidence(workdir / "evidence.json", evidence)
         shutil.rmtree(scratch)
     except GateRefusal as refusal:
@@ -1224,14 +1303,16 @@ def load_evidence(path: Path) -> dict:
         raise GateRefusal("evidence_invalid") from None
     # Only the exact bytes the gate writes are accepted, so even a formatting edit fails.
     need(type(evidence) is dict and canonical(evidence) == raw, "evidence_invalid")
-    need(set(evidence) == EVIDENCE_KEYS and evidence["schema"] == SCHEMA
+    need("bundle" not in evidence or type(evidence["bundle"]) is dict and set(evidence["bundle"]) == BUNDLE_KEYS,
+         "evidence_invalid")
+    need(set(evidence) - {"bundle"} == EVIDENCE_KEYS and evidence["schema"] == SCHEMA
          and type(evidence["commit"]) is str and type(evidence["previous_tag"]) is str
          and type(evidence["gate"]) is dict and type(evidence["tests"]) is dict
          and type(evidence["sdist"]) is dict and type(evidence["wheel"]) is dict, "evidence_invalid")
     return evidence
 
 
-def delegate(git: Git, evidence: dict, path: Path, scratch: Path) -> int | None:
+def delegate(git: Git, evidence: dict, path: Path, scratch: Path, inputs: tuple[Path, Path] | None = None) -> int | None:
     """Evidence from another gate version is verified by the gate stored at the recorded commit."""
     recorded = evidence["gate"].get("sha256")
     if recorded == own_sha256():
@@ -1241,22 +1322,25 @@ def delegate(git: Git, evidence: dict, path: Path, scratch: Path) -> int | None:
     need(blob.returncode == 0 and _sha(blob.stdout) == recorded, "gate_mismatch")
     gate = scratch / "release_gate.py"
     _write_new(gate, blob.stdout)
+    bundle = [] if inputs is None else ["--bundle-native-directory", inputs[0], "--bundle-cache", inputs[1]]
     try:
         return subprocess.run([sys.executable, "-I", gate, "verify", "--evidence", path, "--repo", git.repo,
-                               "--delegated"], stdin=subprocess.DEVNULL, timeout=SUITE_TIMEOUT).returncode
+                               "--delegated", *bundle], stdin=subprocess.DEVNULL, timeout=SUITE_TIMEOUT).returncode
     except (OSError, subprocess.SubprocessError):
         raise GateRefusal("gate_mismatch") from None
 
 
-def verify(args: argparse.Namespace, derive_evidence=derive, rerun=rerun_suite) -> int:
+def verify(args: argparse.Namespace, derive_evidence=derive, rerun=rerun_suite, rebuild=bundle_stage) -> int:
     path = outside_tmp(args.evidence, None, "evidence_invalid")
     evidence = load_evidence(path)
     base = path.parent
+    inputs = bundle_inputs(getattr(args, "bundle_native_directory", None), getattr(args, "bundle_cache", None))
+    need(("bundle" in evidence) == (inputs is not None), "bundle_inputs_invalid")
     git = Git(toplevel(args.repo))
     scratch = _private_dir(base / f"verify-{secrets.token_hex(8)}")
     try:
         if not args.delegated:
-            delegated = delegate(git, evidence, path, scratch)
+            delegated = delegate(git, evidence, path, scratch, inputs)
             if delegated is not None:
                 return delegated
         version_files = (f"dist/{DIST}-{evidence.get('version')}.tar.gz",
@@ -1276,6 +1360,14 @@ def verify(args: argparse.Namespace, derive_evidence=derive, rerun=rerun_suite) 
             need(sha256_file(artifact) == sha256_file(base / evidence[kind]["file"]), "evidence_mismatch", kind)
         for key in sorted(EVIDENCE_KEYS - {"tests"}):
             need(derived[key] == evidence[key], "evidence_mismatch", key)
+        if inputs is not None:
+            # The recorded bundle on disk, then a fresh rebuild that must reproduce its reproducible hashes.
+            need(bundle_record(base / "bundle", evidence["commit"]) == evidence["bundle"], "evidence_mismatch", "bundle")
+            venv = scratch / "venv-install"
+            rebuilt = rebuild(git, evidence["commit"], scratch / "tree-0", scratch / "bundle", inputs,
+                              venv / "bin" / "python", artifacts[3].env(venv) if artifacts[3] is not None else {})
+            need(all(rebuilt[key] == evidence["bundle"][key] for key in BUNDLE_REPRODUCIBLE), "evidence_mismatch",
+                 "bundle")
         again = rerun(artifacts, evidence, base, scratch)
         need(again.get("returncode") == 0 and all(again.get(key) == tests[key] for key in SUITE_COUNTS),
              "evidence_mismatch", "tests")
@@ -1302,13 +1394,16 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser.add_argument("--evidence", required=True, type=Path)
     verify_parser.add_argument("--repo", default=Path.cwd(), type=Path)
     verify_parser.add_argument("--delegated", action="store_true", help=argparse.SUPPRESS)
+    for command in (run_parser, verify_parser):  # Optional bundle stage: both or neither.
+        command.add_argument("--bundle-native-directory", type=Path, help="prepare_native.py output directory")
+        command.add_argument("--bundle-cache", type=Path, help="private payload download cache")
     try:
         args = parser.parse_args(argv)
         return run(args) if args.command == "run" else verify(args)
     except GateRefusal as refusal:
         section = refusal.detail if refusal.code == "evidence_mismatch" and isinstance(refusal.detail, str) else None
-        print(f"release gate refused: {refusal.code}" + (f" ({section})" if section in EVIDENCE_KEYS else ""),
-              file=sys.stderr)
+        print(f"release gate refused: {refusal.code}"
+              + (f" ({section})" if section in EVIDENCE_KEYS | {"bundle"} else ""), file=sys.stderr)
         return 1
 
 
