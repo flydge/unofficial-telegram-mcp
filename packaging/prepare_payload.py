@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -32,6 +33,7 @@ import tomllib
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = 'packaging/payload-lock.json'  # read from the HEAD export only
@@ -217,7 +219,7 @@ def fetch(pin, cache, *, offline=False, opener=urllib.request.urlopen):
         except PayloadError:
             partial.unlink(missing_ok=True)
             raise
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             partial.unlink(missing_ok=True)
             raise PayloadError('input_unavailable') from None
         if total != pin['bytes'] or digest.hexdigest() != pin['sha256']:
@@ -331,7 +333,7 @@ def python_tree(archive, tree):
                 data = tar.extractfile(member).read(member.size + 1)
                 _need(len(data) == member.size, 'archive_refused')
                 tree.write('python/' + relative, data, bool(member.mode & 0o111), 'archive_refused')
-    except (tarfile.TarError, OSError, EOFError):
+    except (tarfile.TarError, OSError, EOFError, zlib.error):
         raise PayloadError('archive_refused') from None
     tree.rename('python/' + PYTHON_BIN, 'python/bin/python3')
     top = {n.split('/')[1] for n in tree.files if n.startswith('python/')}
@@ -406,7 +408,8 @@ def install_wheel(data, pin, tree, destination):
                 if inner and (inner.startswith('licenses/') or '/' not in inner and LICENSE_NAMES.match(inner)):
                     licenses.append((dist_info + '/' + inner, content))
             _need(set(rows) - {record_name} <= {i.filename for i in infos}, 'wheel_refused')
-    except (zipfile.BadZipFile, KeyError, UnicodeError, csv.Error, OSError, EOFError):
+    except (zipfile.BadZipFile, KeyError, UnicodeError, csv.Error, OSError, EOFError, RuntimeError,
+            NotImplementedError, zlib.error):  # Encrypted members, unknown compression, corrupt deflate.
         raise PayloadError('wheel_refused') from None
     return dist_info, licenses, sorted(dropped)
 
@@ -428,7 +431,7 @@ def tdlib_source(archive, pin, tree):
                 count += 1
                 total += member.size
                 tree.write('source/tdlib/' + name[len(prefix):], data, False, 'source_refused')
-    except (tarfile.TarError, OSError, EOFError):
+    except (tarfile.TarError, OSError, EOFError, zlib.error):
         raise PayloadError('source_refused') from None
     _need(count == pin['files'] and total == pin['unpacked_bytes'] and 'source/tdlib/' + SCHEMA in tree.files,
           'source_refused')
@@ -436,25 +439,43 @@ def tdlib_source(archive, pin, tree):
 
 
 def git_export(root):
-    """`git archive HEAD` of the checkout as {path: bytes} plus the commit; links refuse."""
+    """HEAD's committed blobs as {path: (bytes, executable)} plus the commit; links and submodules refuse.
+
+    Read with ls-tree and cat-file --batch, the raw objects, so local config (autocrlf, smudge filters)
+    and attributes cannot change the bytes the way `git archive` would."""
+    def git(*args, data=None):
+        return subprocess.run(['/usr/bin/git', '-C', str(root), *args], input=data, capture_output=True, check=True,
+                              timeout=TOOL_TIMEOUT, env=TOOL_ENV).stdout
     try:
-        commit = subprocess.run(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True,
-                                check=True, timeout=TOOL_TIMEOUT, env=TOOL_ENV).stdout.decode().strip()
-        archive = subprocess.run(['/usr/bin/git', '-C', str(root), 'archive', '--format=tar', 'HEAD'], capture_output=True,
-                                 check=True, timeout=TOOL_TIMEOUT, env=TOOL_ENV).stdout
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+        commit = git('rev-parse', 'HEAD').decode('ascii').strip()
+        _need(re.match(r'^[0-9a-f]{40}$', commit) is not None, 'source_refused')
+        listing = git('ls-tree', '-r', '-z', '--full-tree', commit)
+        _need(len(listing) <= MAX_SOURCE, 'source_refused')
+        entries = []
+        for row in filter(None, listing.split(b'\0')):
+            meta, _, name = row.partition(b'\t')
+            mode, kind, sha = meta.decode('ascii').split(' ')
+            path = name.decode('utf-8')
+            _need(kind == 'blob' and mode in ('100644', '100755') and re.match(r'^[0-9a-f]{40}$', sha) is not None
+                  and _safe_relative(path), 'source_refused')
+            entries.append((path, sha, mode == '100755'))
+        out = git('cat-file', '--batch', data=''.join(sha + '\n' for _, sha, _ in entries).encode('ascii'))
+    except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         raise PayloadError('source_refused') from None
-    _need(re.match(r'^[0-9a-f]{40}$', commit) is not None and len(archive) <= MAX_SOURCE, 'source_refused')
-    files = {}
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as tar:
-            for member in _members(tar):
-                if member.isdir() or member.type == tarfile.XGLTYPE:
-                    continue
-                _need(member.isfile() and _safe_relative(member.name) and member.name not in files, 'source_refused')
-                files[member.name] = (tar.extractfile(member).read(), bool(member.mode & 0o111))
-    except (tarfile.TarError, OSError, EOFError):
-        raise PayloadError('source_refused') from None
+    _need(len(out) <= MAX_SOURCE, 'source_refused')
+    files, offset = {}, 0
+    for path, sha, executable in entries:
+        end = out.find(b'\n', offset)
+        _need(end > 0, 'source_refused')
+        header = out[offset:end].split(b' ')
+        _need(len(header) == 3 and header[0] == sha.encode() and header[1] == b'blob' and header[2].isdigit(),
+              'source_refused')
+        size = int(header[2])
+        data = out[end + 1:end + 1 + size]
+        _need(len(data) == size and out[end + 1 + size:end + 2 + size] == b'\n' and path not in files, 'source_refused')
+        files[path] = (data, executable)
+        offset = end + 2 + size
+    _need(offset == len(out), 'source_refused')
     return commit, files
 
 
@@ -623,8 +644,8 @@ def prepare_payload(output, *, native_directory, cache, checkout=ROOT, offline=F
         return _prepare_payload(Path(output), native_directory, cache, checkout, offline, opener, python)
     except PayloadError:
         raise
-    except (OSError, ValueError, KeyError, TypeError, UnicodeError, RecursionError):
-        raise PayloadError('payload_refused') from None  # Never an escaping path or provider text.
+    except Exception:  # The last boundary: never a traceback, an escaping path or provider text.
+        raise PayloadError('payload_refused') from None
 
 
 def _prepare_payload(output, native_directory, cache, checkout, offline, opener, python):

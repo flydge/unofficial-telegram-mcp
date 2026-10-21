@@ -41,6 +41,14 @@ def codesign(*args):
     subprocess.run(['/usr/bin/codesign', *args], check=True, capture_output=True, timeout=60)
 
 
+def team_stand_in(argv, **options):
+    """Real codesign without the Team ID requirement: ad hoc copies stand in for a team signature."""
+    if '-R' in argv:
+        at = argv.index('-R')
+        argv = argv[:at] + argv[at + 2:]
+    return subprocess.run(argv, **options)
+
+
 class RepinTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -77,7 +85,7 @@ class RepinTests(unittest.TestCase):
     def test_adhoc_signed_copies_repin_and_assemble_under_a_test_pin_row(self):
         signed = {name: (self.signed / name).read_bytes() for name in NAMES}
         self.assertTrue(all(signed[n] != self.natives[n] for n in NAMES))
-        summary = self.repin(team_id=TEAM)
+        summary = self.repin(team_id=TEAM, runner=team_stand_in)
         data = (self.root / 'tdlib-lock.json').read_bytes()
         self.assertEqual((self.root / 'tdlib-lock.json').stat().st_mode & 0o777, 0o400)
         lock = parse_native_manifest(data)
@@ -108,6 +116,10 @@ class RepinTests(unittest.TestCase):
         provenance = json.loads(result.provenance.read_bytes())
         self.assertEqual((provenance['publisher_identity'], provenance['team_id']), (True, TEAM))
 
+    def test_developer_id_lock_requires_outputs_signed_by_that_team(self):
+        real = subprocess.run
+        self.refused('signature_invalid', team_id=TEAM, runner=real)  # ad hoc outputs fail the Team ID requirement
+
     def test_unchanged_outputs_repin_to_an_adhoc_v2_lock(self):
         summary = self.repin(signed_directory=self.unsigned)
         lock = parse_native_manifest((self.root / 'tdlib-lock.json').read_bytes())
@@ -129,10 +141,11 @@ class RepinTests(unittest.TestCase):
         self.refused('unsigned_mismatch', team_id=TEAM)
 
     def test_unsigned_or_unapproved_outputs_and_bad_inputs_refuse(self):
-        self.refused('pin_not_approved', team_id=OTHER)
+        self.refused('pin_not_approved', team_id=OTHER, runner=team_stand_in)
         self.refused('pin_not_approved')  # re-signed bytes under the ad-hoc kind
-        self.refused('pin_not_approved', team_id=TEAM, signed_directory=self.unsigned)  # Developer ID needs new bytes
-        self.refused('pin_not_approved', team_id='abcde12345')
+        self.refused('pin_not_approved', team_id=TEAM, signed_directory=self.unsigned,
+                     runner=team_stand_in)  # Developer ID needs new bytes
+        self.refused('pin_not_approved', team_id='abcde12345', runner=team_stand_in)
         v2 = json.dumps(json.loads(RN.lock_bytes(RN.v2_document(json.loads(self.v1), self.natives, None)))).encode()
         for lock in (v2, b'{}', b'not json', b'{"manifest_version": 1, "manifest_version": 1}'):
             with self.subTest(lock=lock[:24]):

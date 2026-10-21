@@ -1937,7 +1937,7 @@ acceptance remain separate gates.
 capability, which is effective only together with `send`. The conjunction is
 enforced by the SDK guard, by the proxy before it connects, by the broker before
 dispatch, and again for status and receipt replay of a forward draft; with either
-capability missing the tools stay listed but fail with `capability_disabled`. The
+capability missing the tools are not listed in tools/list and fail with `capability_disabled`. The
 authority is exactly one existing message from one exact chat to one exact chat, as
 a `forward` (recipients see the original sender) or a `copy` (a new message from
 the account, no attribution). It never covers several messages, albums, topic
@@ -2075,7 +2075,7 @@ capability, which is effective only together with `send`. The conjunction is enf
 by the SDK guard, by the proxy before it connects, by the broker before dispatch, by
 preparation and send ownership checks, again for status and receipt replay of a video
 draft, inside the provider call, and a last time inside the raw-dispatch fence around
-the TDLib send; with either capability missing the tools stay listed but fail with
+the TDLib send; with either capability missing the tools are not listed in tools/list and fail with
 `capability_disabled`. The authority is exactly one owned artifact, as one MP4 or MOV of
 at most 64 MiB, to one exact chat, as a native video. It never covers albums or several
 videos, replies, topic destinations, thumbnails or covers, spoilers, self-destruct
@@ -2206,7 +2206,7 @@ The conjunction is enforced by the SDK guard, by the proxy before it connects, b
 dispatch, by preparation and apply ownership checks (repeated after the owner dialog and before the
 attempt is reported), again for status and receipt replay of a draft of that feature, inside the
 provider call (the pre-send guard checks both capabilities and the current claim) and a last time
-immediately before transport; with either capability missing the tools stay listed but fail with
+immediately before transport; with either capability missing the tools are not listed in tools/list and fail with
 `capability_disabled`. The authority is exactly one chat moved between the Main and Archive lists, or
 exactly one own outgoing plain-text message whose whole text is replaced. It never covers caption edits,
 styled edits (the request carries no entities), other people's messages or non-text messages, pin and

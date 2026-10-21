@@ -367,6 +367,38 @@ class PreparePayloadTests(unittest.TestCase):
                          {p.name for p in (inputs.cache / 'downloads').iterdir()})
         self.assertFalse([p for p in (inputs.cache / 'downloads').iterdir() if p.name.endswith('.partial')])
 
+    def test_a_truncated_download_is_a_fixed_code_and_leaves_no_partial(self):
+        import http.client
+        inputs = self.inputs(prime=False)
+        plain = inputs.opener()
+
+        def truncated(url, timeout):
+            response = plain(url, timeout)
+            def read(size=-1):
+                raise http.client.IncompleteRead(b'partial')
+            response.read = read
+            return response
+        with self.assertRaises(PP.PayloadError) as caught:
+            inputs.build(offline=False, opener=truncated)
+        self.assertEqual(str(caught.exception), 'input_unavailable')
+        self.assertFalse([p for p in (inputs.cache / 'downloads').iterdir() if p.name.endswith('.partial')])
+
+    def test_corrupt_or_unsupported_wheel_members_are_fixed_codes(self):
+        good = wheel('segno', '1.6.6', {'segno/__init__.py': b'# qr\n' * 64})
+        tomlkit = [('tomlkit', '0.13.3', wheel('tomlkit', '0.13.3', {'tomlkit/__init__.py': b''}))]
+
+        def patch_first_entry(data, offset, value):
+            # Patch the first central-directory entry (segno/__init__.py), which zipfile reads.
+            data = bytearray(data)
+            central = data.find(b'PK\x01\x02')
+            data[central + offset:central + offset + 2] = value.to_bytes(2, 'little')
+            return bytes(data)
+        variants = {'encrypted': patch_first_entry(good, 8, 0x1), 'unknown compression': patch_first_entry(good, 10, 99)}
+        for label, data in variants.items():
+            with self.subTest(label):
+                self.fresh()
+                self.refused('wheel_refused', self.inputs(wheels={'app': [('segno', '1.6.6', data)], 'installer': tomlkit}))
+
     def refused(self, code, inputs=None, **options):
         inputs = inputs or self.inputs()
         with self.assertRaises(PP.PayloadError) as caught:
@@ -526,6 +558,49 @@ class PreparePayloadTests(unittest.TestCase):
 
 def launcher_versions(text):
     return [site.findall(text) for site in PP.LAUNCHER_SITES]
+
+
+class GitExportTests(unittest.TestCase):
+    def test_exports_committed_blobs_despite_local_config_and_attributes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name).resolve() / 'repo'
+        repo.mkdir()
+        run = lambda *a: subprocess.run(['git', '-C', str(repo), *a], check=True, capture_output=True)
+        run('init', '-q')
+        run('config', 'user.email', 'noreply@users.noreply.github.com')
+        run('config', 'user.name', 'Test')
+        (repo / 'packaging').mkdir()
+        committed = b'{"a": 1}\n'
+        (repo / 'packaging' / 'payload-lock.json').write_bytes(committed)
+        (repo / 'tool.sh').write_bytes(b'#!/bin/sh\n')
+        (repo / 'tool.sh').chmod(0o755)
+        run('add', '.')
+        run('commit', '-qm', 'one')
+        run('config', 'core.autocrlf', 'true')
+        run('config', 'filter.x.smudge', 'sed s/1/2/')
+        (repo / '.git' / 'info').mkdir(exist_ok=True)
+        (repo / '.git' / 'info' / 'attributes').write_text('*.json filter=x text eol=crlf\n')
+        commit, files = PP.git_export(repo)
+        self.assertEqual(files['packaging/payload-lock.json'], (committed, False))
+        self.assertEqual(files['tool.sh'], (b'#!/bin/sh\n', True))
+        self.assertRegex(commit, r'^[0-9a-f]{40}$')
+
+    def test_links_refuse(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name).resolve() / 'repo'
+        repo.mkdir()
+        run = lambda *a: subprocess.run(['git', '-C', str(repo), *a], check=True, capture_output=True)
+        run('init', '-q')
+        run('config', 'user.email', 'noreply@users.noreply.github.com')
+        run('config', 'user.name', 'Test')
+        (repo / 'link').symlink_to('/etc')
+        run('add', '.')
+        run('commit', '-qm', 'link')
+        with self.assertRaises(PP.PayloadError) as caught:
+            PP.git_export(repo)
+        self.assertEqual(str(caught.exception), 'source_refused')
 
 
 class LauncherVersionTests(unittest.TestCase):

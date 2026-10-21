@@ -16,11 +16,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 
 from telegram_search_mcp.native_runtime import (NAMES, NativeManifest, NativeManifestV2, NativeRuntimeError,
-                                                lock_signature, parse_native_manifest)
+                                                designated_requirement, lock_signature, parse_native_manifest)
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = 'packaging/tdlib-lock.json'
@@ -81,12 +82,14 @@ def _exact_names(directory, code):
     _need(names == sorted(NAMES), code)
 
 
-def _signed(path, runner):
-    """One signed output: its signature verifies (any identity) and its bytes do not change meanwhile."""
+def _signed(path, runner, team_id=None):
+    """One signed output: its signature verifies, against the Team ID requirement for a Developer ID lock,
+    and its bytes do not change meanwhile."""
     data = _read(path, 'signed_refused')
+    requirement = [] if team_id is None else ['-R', designated_requirement(team_id)]
     try:
-        result = runner(['/usr/bin/codesign', '--verify', '--strict', str(path)], capture_output=True, check=False,
-                        timeout=TOOL_TIMEOUT, env=TOOL_ENV)
+        result = runner(['/usr/bin/codesign', '--verify', '--strict', *requirement, str(path)], capture_output=True,
+                        check=False, timeout=TOOL_TIMEOUT, env=TOOL_ENV)
     except (OSError, subprocess.TimeoutExpired):
         raise RepinError('signature_invalid') from None
     _need(result.returncode == 0, 'signature_invalid')
@@ -117,6 +120,8 @@ def lock_bytes(document):
 def repin_native(output, *, v1_lock, unsigned_directory, signed_directory, team_id=None, runner=subprocess.run):
     """Write one new v2 lock file; returns a nonsecret summary. `team_id` None keeps the ad-hoc kind."""
     output = Path(output)
+    _need(team_id is None or (type(team_id) is str and re.fullmatch(r'[A-Z0-9]{10}', team_id) is not None),
+          'pin_not_approved')
     _need(output.is_absolute() and '..' not in output.parts and not output.exists() and not output.is_symlink()
           and output.parent.is_dir(), 'output_refused')
     try:
@@ -129,7 +134,7 @@ def repin_native(output, *, v1_lock, unsigned_directory, signed_directory, team_
     for artifact in v1['artifacts']:
         data = _read(Path(unsigned_directory) / artifact['name'], 'unsigned_mismatch')
         _need((len(data), sha256(data)) == (artifact['bytes'], artifact['sha256']), 'unsigned_mismatch')
-    signed = {name: _signed(Path(signed_directory) / name, runner) for name in NAMES}
+    signed = {name: _signed(Path(signed_directory) / name, runner, team_id) for name in NAMES}
     data = lock_bytes(v2_document(v1, signed, team_id))
     try:
         lock = parse_native_manifest(data)

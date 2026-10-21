@@ -343,7 +343,7 @@ To enable the server for this project, review `.codex/config.toml.example`, then
 
 ## Selected full messages
 
-After selecting exact anchors, call `read_messages(anchors=[{"chat_id": 123, "message_id": 456}])` with 1–20 unique anchors. The example IDs are synthetic. Enable the `read_messages` capability in trusted `runtime.toml`, restart the matching proxy and broker, and include the tool in the consumer's allowlist. The tool stays listed but fails closed when disabled.
+After selecting exact anchors, call `read_messages(anchors=[{"chat_id": 123, "message_id": 456}])` with 1–20 unique anchors. The example IDs are synthetic. Enable the `read_messages` capability in trusted `runtime.toml`, restart the matching proxy and broker, and include the tool in the consumer's allowlist. The tool is not listed in tools/list and fails closed when disabled.
 
 Results preserve request order and carry their own exact source anchor, status and `coverage_complete`. Pending/failed sends and ephemeral replacement content are unsupported. Supported content kinds are text, document, photo, video, audio, animation, voice note, video note and sticker. Text/captions are limited to 20,000 Unicode characters per message and 100,000 per batch; the aggregate provider deadline is 30 seconds. Up to 20 exact chat resolutions, 20 selected-message reads and 20 sender hydrations may occur after bounded authorization readiness. A budget exhausted before an anchor is read returns an explicit partial result for that anchor. No adjacent message, reply target or media download is requested.
 
@@ -2515,7 +2515,7 @@ Enable `archive_chats`, `send` **and** `read` for the archive tools, and `edit_o
 **and** `read` for the edit tools, in trusted runtime policy, restart matching components and add the tools to
 the consumer allowlist. The two capabilities are absent from the legacy defaults, independent of
 each other, and no read, reply or other send capability enables either. Without both of its
-capabilities a tool stays listed but is refused with `capability_disabled` at the SDK guard, the
+capabilities a tool is not listed in tools/list and is refused with `capability_disabled` at the SDK guard, the
 proxy (before it connects) and the broker; `get_send_status` for a draft of that feature needs
 both as well. Preparation does not need the read capabilities (see the
 [informational read side effect](#informational-read-side-effect)).
