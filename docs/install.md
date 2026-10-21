@@ -24,6 +24,11 @@ unreleased private installation route; published 0.51 instructions below remain
 historical published support. Public hosting, publisher trust (Developer ID signing and
 notarization), source completeness and the clean-user install remain open.
 
+The 0.53 distribution path (a DMG with `Install.command`, the curl path, the Claude Code
+plugin, Claude Desktop registration, upgrade, rollback and uninstall) is described in
+[Install from the 0.53 kit](#install-from-the-053-kit-dmg-curl-and-plugin-development).
+Its signed DMG and public release assets do not exist yet.
+
 From native Terminal, run the reviewed local `packaging/bootstrap.sh` with
 `/bin/sh -p`, absolute `--seed`, independently supplied `--seed-sha256` and
 `--seed-bytes`, absolute `--archive` and `--index`, and independently supplied
@@ -38,7 +43,8 @@ The installer registers, with ownership receipts:
 
 - Codex: only its owned `mcp_servers.telegram_search` subtree in `~/.codex/config.toml`;
   neighboring TOML is preserved.
-- Claude Code: a user-scope server `telegram_search`. Its state is read only from the
+- Claude Code (the default `--claude-code user`; `plugin` and `skip` are described in
+  [the 0.53 section](#claude-code-user-scope-plugin-or-skip)): a user-scope server `telegram_search`. Its state is read only from the
   `mcpServers` object of `~/.claude.json` (a bounded, no-follow, strict-JSON read that never
   starts a process). A different `telegram_search` entry there (for example the 0.51
   manual `claude mcp add`) refuses the install as `claude_registration_conflict` before
@@ -55,6 +61,9 @@ The installer registers, with ownership receipts:
   `claude_registration_command` argv you can run yourself. The outcome is final for that
   installation; a repeat or resumed install never re-runs it. Only an entry the installer
   has just added, before its outcome is recorded, is ever removed on a refusal.
+- Claude Desktop: one `mcpServers.telegram_search` entry in
+  `~/Library/Application Support/Claude/claude_desktop_config.json`, only when the `Claude`
+  directory exists there; see [Claude Desktop](#claude-desktop).
 - The paired `telegram-search` and `telegram-setup` skills under `~/.agents/skills`, and
   under `~/.claude/skills` only when `~/.claude` already exists or the CLI was found
   (otherwise the receipt records `claude_skills: skipped`).
@@ -62,8 +71,8 @@ The installer registers, with ownership receipts:
 It refuses foreign registrations, skills, runtime roots and existing services.
 A refused install prints only `{"status":"refused","code":...}` on stderr: the installer's
 fixed code (for example `claude_registration_conflict` or `recovery_limit`), or
-`bundle_admission_or_install_failed` for anything else; other launcher actions refuse as
-`bundle_admission_failed`. Recovery retains one lease, journal, original config bytes and exact receipts;
+`bundle_admission_or_install_failed` for anything else; `rollback` and `uninstall` refuse the same
+way, and other launcher actions refuse as `bundle_admission_failed`. Recovery retains one lease, journal, original config bytes and exact receipts;
 repeating the same admitted installation verifies/reuses it, without consulting the
 `claude` CLI again. Apart from those registration commands it performs no login,
 Keychain operation, service start/stop or session mutation. A launch checks the release
@@ -251,6 +260,352 @@ gains `credential_source` and `identity_fingerprint`, and 0.51 binaries refuse i
 `edit_own_text`, …) is refused by 0.51 too. Roll back only with the preserved pre-upgrade files;
 see [rollback](security.md#rollback).
 
+
+## Install from the 0.53 kit: DMG, curl and plugin (development)
+
+**Nothing in this section is published.** The signed DMG, the GitHub release and every public
+release asset do not exist: Developer ID signing and notarization wait for the owner's signing setup
+([owner checklist](plans/0.53-signing-owner-checklist.md)). The Claude Code plugin's
+`release-pins.json` is the unpublished placeholder (all-zero hashes, `"publication": "unpublished"`),
+so the plugin's `bin/install` refuses with `release_not_published` before any download, and the
+marketplace entry exists only in the repository.
+
+The text below describes what the committed scripts and installer do. Unit tests cover them with
+synthetic kits. On the build Mac an ad hoc dry run built a kit, and `bootstrap.sh --prepare-only`
+and `Install.command --prepare-only` from its mounted image both returned `verified: true`. A signed
+kit, a clean macOS user, Claude Desktop and the plugin on a real machine, and the owner's migration
+are owner-run rows that have not happened yet
+([spec, phase G](plans/0.53-client-distribution-spec.md)).
+
+### The ad hoc dry run versus the signed build
+
+`packaging/release_build.py build --dry-run` (see section 5 of the owner checklist) builds the same
+kit with the ad hoc identity `-`. It differs from the signed build in these ways:
+
+- Nothing is notarized or stapled and the DMG is signed ad hoc, so Gatekeeper refuses that DMG on any
+  other Mac. It is a test artifact for the build Mac.
+- The kit's `release-pins.json` has `"publisher": "adhoc"` and `"team_id": null`. Its
+  `Install.command` therefore carries no Team ID and does not pass `--seed-team`.
+- The seed and the payload's Mach-O files are signed ad hoc. The three TDLib/OpenSSL natives keep their
+  pinned unsigned bytes. Passing `--seed-team` to `bootstrap.sh` with an ad hoc seed refuses as
+  `seed_signature_invalid`.
+- The manifest stays `publication: unreleased` and `source_completeness: incomplete`.
+
+### What a kit contains
+
+A kit is one folder. The DMG holds exactly that folder (the build compares the mounted image with
+`SHA256SUMS`), under a volume named `Unofficial Telegram MCP`; both that name and the DMG file name
+`<name>-<version>-macos-arm64.dmg` (currently `unofficial-telegram-mcp-…`) are placeholders until the
+product has its own name.
+
+| File | Purpose |
+| --- | --- |
+| `Install.command` | Generated for this kit. The seed and index pins, and a Developer ID kit's Team ID, are literals in the script. |
+| `bootstrap.sh` | The reviewed entry script. |
+| `bootstrap-verifier` | The native seed that authenticates the index and archive. |
+| `release.tar.gz`, `release-index.json` | The bundle archive and the index it is checked against. |
+| `release-pins.json` | Release version, publisher, Team ID, publication and the seed, index and archive hashes and sizes. |
+| `README.txt`, `LICENSE`, `NOTICE`, `third-party-notices.md` | Short instructions and licences. |
+| `SHA256SUMS` | The sha256 of every other file. |
+
+The release assets of the build would be the DMG, the five curl-path files (`bootstrap.sh`,
+`bootstrap-verifier`, `release.tar.gz`, `release-index.json`, `release-pins.json`),
+`release-provenance.json`, `corresponding-source-<version>.tar.gz` and a `SHA256SUMS` over them.
+
+### DMG path
+
+Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
+
+1. Download the DMG. Optional checks before opening it: `/usr/bin/shasum -a 256 <dmg>` against the
+   `SHA256SUMS` asset, `xcrun stapler validate <dmg>`, and
+   `spctl -a -vv -t open --context context:primary-signature <dmg>`, which should print `accepted`
+   and `source=Notarized Developer ID`. The release build runs the last two itself before it
+   accepts the image.
+2. Open the DMG and double-click `Install.command`. It runs in Terminal. How Gatekeeper treats a
+   double-clicked script from the stapled image has not been observed, because no signed image exists.
+3. `Install.command` checks that it was started by an absolute path and that `bootstrap.sh`,
+   `bootstrap-verifier`, `release.tar.gz` and `release-index.json` sit beside it as regular files
+   (not links). It then runs `/usr/bin/env -i /bin/sh -p bootstrap.sh` with its embedded pins:
+   `--seed-sha256`, `--seed-bytes`, `--trusted-index-sha256` and, for a Developer ID kit,
+   `--seed-team <TEAMID>`. Nothing is read from the kit's `release-pins.json` at install time.
+4. `bootstrap.sh` copies the seed to a private stage under `/private/tmp`, checks its sha256 and size,
+   with `--seed-team` checks its Developer ID signature, and runs it. The seed authenticates the index
+   and every archive member before extraction, and the installer from the extracted tree then does the
+   [bundle installation](#private-bundle-0530dev0) and client registrations above. The stage directory
+   is not removed by the scripts.
+5. `Install.command` prints the installer's JSON result and continues only when `status` is
+   `activation_required` and the activation argv is exactly the installed release's `python3 -I -S -B
+   launcher.py connect`. It then prints `Installed. Starting the Telegram login (connect) in this
+   window.` and runs `connect` in the same Terminal, so the QR page opens and the final result prints
+   there; scan it as under [Connect with a QR code](#connect-with-a-qr-code-primary-path). No assistant
+   and no separate `wait` are needed. `Install.command finished.` follows a successful `connect`.
+6. Restart Claude Desktop if the result says so (below), reconnect the other clients, and have an
+   assistant call `_manifest` with `check_broker=true` and make one bounded own-chat read or search.
+
+`Install.command --prepare-only` authenticates and extracts without installing and prints the
+verification result. It accepts no other argument.
+
+`Install.command` always uses the default `--claude-code user`. To choose another mode, or to pass
+`--adopt-legacy`, run `bootstrap.sh` directly as in the next section.
+
+Its refusals print a text line and `{"schema_version":1,"error_code":"<code>"}` on stderr:
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `usage` | 2 | An argument other than `--prepare-only`. |
+| `kit_unavailable` | 3 | Not started by an absolute path, or the folder cannot be resolved. |
+| `kit_incomplete` | 3 | A required kit file is missing or is a link. |
+| `bootstrap_failed` | 4 | `bootstrap.sh` refused; its own JSON line with `error_code` and `retained_stage` is printed first. |
+| `activation_unexpected` | 5 | The installer result was not `activation_required` with the exact activation argv. An upgrade ends here; see [Upgrade](#upgrade). |
+| `activation_failed` | 6 | `connect` ended unsuccessfully; its own result is printed above. |
+
+`bootstrap.sh` refuses with `{"schema_version":1,"error_code":…,"retained_stage":…}` on stderr:
+`selection_invalid` (an unknown, repeated or malformed option, a bad pin, `--claude-code` outside
+`user|plugin|skip`, or `--adopt-legacy` that is not the last token), `unsupported_platform`,
+`dependency_unavailable` (a stock tool is missing), `integrity_failure` (a pin, size, owner, mode,
+link count or ACL check failed), `seed_signature_invalid`, `bootstrap_verification_failed` (the seed
+refused the index or archive) and `interrupted`. The installer's own refusals are listed in the
+[reference](reference.md#installer-actions-and-result-fields).
+
+### Curl path
+
+Without the DMG, fetch the five curl-path files into a folder you own and run the pinned
+`bootstrap.sh` yourself. The plugin's installer fetches four of them (it carries the pins itself) the
+same way from `https://github.com/flydge/unofficial-telegram-mcp/releases/download/v<version>/<file>`,
+which does not exist yet.
+
+```bash
+KIT="$HOME/tgmcp-kit"       # an absolute folder you own
+/bin/mkdir -m 700 "$KIT"
+for name in bootstrap.sh bootstrap-verifier release-index.json release.tar.gz release-pins.json; do
+  /usr/bin/curl -q --proto =https --proto-redir =https --tlsv1.2 --fail --silent --location \
+    --output "$KIT/$name" "https://github.com/flydge/unofficial-telegram-mcp/releases/download/v<version>/$name"
+done
+/usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh" \
+  --seed "$KIT/bootstrap-verifier" --seed-sha256 <seed.sha256> --seed-bytes <seed.bytes> \
+  --archive "$KIT/release.tar.gz" --index "$KIT/release-index.json" \
+  --trusted-index-sha256 <index.sha256> --seed-team <team_id> --claude-code user
+```
+
+The values come from `release-pins.json`: `seed.sha256`, `seed.bytes`, `index.sha256` and `team_id`.
+Omit `--seed-team` only for an ad hoc dry-run kit, whose `team_id` is `null`. Each input must be a
+regular file you own, with one link and no group or world write bit; the seed is at most 2 MiB and the
+archive at most 1 GiB. The pins must come from a reviewed release input, not only from files fetched in
+the same download: a `release-pins.json` fetched next to the archive guards against corruption, not
+against a compromised download location. The Team ID check is what binds the seed to the publisher.
+
+The result is the installer's JSON with `activation_command`. Run that command from native Terminal
+(`connect` then runs inline), or let an assistant run it and `wait` as under
+[Connect with a QR code](#connect-with-a-qr-code-primary-path). Options `--installation-root`,
+`--codex-home` and `--skills-root` (absolute paths) override the default locations.
+
+### Claude Code: user scope, plugin or skip
+
+`bootstrap.sh` takes `--claude-code user|plugin|skip` (default `user`). The mode is recorded in the
+installation: an upgrade must repeat it, or it refuses as `upgrade_conflict`.
+
+| Mode | Claude Code state | Result fields |
+| --- | --- | --- |
+| `user` | The user-scope `telegram_search` entry and the `~/.claude/skills` copies described above. | `claude_code`: `registered`, `reused`, `failed`, `unavailable` or `not_found`; `claude_skills`: `installed` or `skipped`. |
+| `plugin` | No user-scope entry and no `~/.claude/skills` copies: the plugin supplies the server and the skills. | `claude_code: plugin`, `claude_skills: skipped`. If a user-scope entry exists, `claude_code_user_entry: present`; the installer never removes it. |
+| `skip` | Claude Code is not touched. | `claude_code: skipped`, `claude_skills: skipped`. |
+
+User scope and the plugin are exclusive because both at once would list the tool set twice. Codex, the
+`~/.agents/skills` copies and Claude Desktop are registered in every mode.
+
+### Claude Desktop
+
+When `~/Library/Application Support/Claude` exists, the installer adds one
+`mcpServers.telegram_search` entry to `claude_desktop_config.json` there. Its `command` is the installed
+release's `python3` and its `args` are `-I -S -B <release>/launcher.py mcp`, the same runtime the other
+clients use.
+
+- With no `Claude` directory the result is `claude_desktop: skipped` and nothing is read or written.
+- The file is read as strict JSON, at most 1 MiB, without following links. It must be yours, have one
+  link and no group or world write bit; Claude Desktop's own 0644 is accepted. Anything else reads
+  as `unavailable`.
+- An absent entry is added once, in Claude Desktop's own layout (two-space indent). Every neighbouring
+  server and value keeps its meaning, and every number keeps its exact spelling; a file for which that
+  cannot be guaranteed refuses the install as `claude_desktop_config_unsupported` before anything is
+  created. The file keeps its mode; a file the installer creates is `0600`.
+- An identical entry is `reused`. A different `telegram_search` entry (for example the 0.51 manual one)
+  refuses the whole install as `claude_desktop_registration_conflict` before anything is created.
+  Remove it yourself, or see [--adopt-legacy](#adopting-entries-the-installer-does-not-own---adopt-legacy).
+- After `claude_desktop: registered`, the result carries `claude_desktop_next_action:
+  restart_claude_desktop`. Quit Claude Desktop and open it again; it reads its configuration only at
+  launch. For `failed` or `unavailable` the result carries `claude_desktop_manual_entry`, a nonsecret
+  JSON object to merge into the file yourself.
+- Claude Desktop may rewrite its configuration from memory while it runs. The installed launcher's
+  `status` action reports `clients.claude_desktop` as `ok`, `drift` (with `claude_desktop_manual_entry`),
+  `not_registered`, `skipped` or `unavailable`, reading the file only.
+
+### Claude Code plugin
+
+The repository root is a Claude Code marketplace (`.claude-plugin/marketplace.json`, marketplace
+`unofficial-telegram-mcp`) holding one plugin, `telegram-local`. Both names, and the plugin's MCP server
+name `tg`, are placeholders until the product is renamed. The plugin carries the `telegram-search` and
+`telegram-setup` skills (byte-identical copies of `skills/`) and an MCP server whose tools are named
+`mcp__plugin_telegram-local_tg__<tool>`; every such name fits the 64-character limit.
+
+1. In Claude Code, add the marketplace and install the plugin:
+   `/plugin marketplace add flydge/unofficial-telegram-mcp`, then
+   `/plugin install telegram-local@unofficial-telegram-mcp`. The repository is not published yet, and
+   this guide does not verify Claude Code's own command syntax.
+2. Until the runtime is installed, the plugin's server `tg` stops at once with
+   `{"schema_version":1,"error_code":"runtime_not_installed"}` on stderr.
+3. Install the runtime with `/bin/sh -p "<plugin root>/bin/install"` and no arguments, where
+   `<plugin root>` is the directory the plugin is installed in (Claude Code's `${CLAUDE_PLUGIN_ROOT}`).
+   The script refuses `plugin_invalid` unless it is started by an absolute path ending in
+   `/bin/install`. It reads the plugin's committed `release-pins.json` and downloads the four assets
+   `bootstrap.sh`, `bootstrap-verifier`, `release-index.json` and `release.tar.gz` from the fixed
+   GitHub Releases URL above, once each with `/usr/bin/curl --proto =https --fail` and no retry, into a
+   private `~/.telegram-local-install.<random>` folder. Each must match its pinned size and sha256
+   before anything runs. Then the pinned `bootstrap.sh` installs with `--claude-code plugin` and
+   `--seed-team <the pinned Team ID>`. The folder is removed on success and kept on failure, and a
+   refusal names it as `retained`.
+4. The script prints the installer JSON on stdout. Run its `activation_command` (`connect`) as for any
+   install; the paired `telegram-setup` skill walks an assistant through it. Reconnect with `/mcp`
+   (restart Claude Code if `/mcp` does not list the server).
+5. If `claude_code_user_entry` is `present`, remove the older user-scope entry yourself with
+   `claude mcp remove telegram_search -s user`, or the tool set appears twice.
+
+`bin/install` refuses with `release_not_published` (unpublished pins), `pins_invalid`,
+`download_failed`, `pin_mismatch`, `bootstrap_failed`, `result_invalid`, `dependency_unavailable`,
+`home_invalid`, `workspace_failed`, `cleanup_failed`, `invalid_arguments` or `interrupted`, each as
+one JSON line on stderr. Published pins must carry a Team ID.
+
+How a Claude Code session exposes `${CLAUDE_PLUGIN_ROOT}` to a shell command is Claude Code's
+behaviour and is not verified here; if the directory is unknown, ask the user to run the command.
+
+### Upgrade
+
+Run the newer kit's `Install.command`, or the same `bootstrap.sh` command with the newer kit's pins
+and the installed `--claude-code` mode (the plugin's `bin/install` from a newer plugin does the same).
+Over a receipt-bound installation of another release, `bootstrap-install` runs an upgrade transaction
+instead of a first install. Refusals for a downgrade, a foreign or changed object or a pending send come
+before the transaction exists, so they change nothing. The steps, each journaled so that an interruption
+resumes by repeating the command:
+
+1. The new release tree is copied next to the current one; older release trees stay in `releases/`.
+2. The broker is observed and the pending-send gate runs (below), before any client file is written.
+3. The Codex subtree, the skill copies, the Claude Code user-scope entry (in `user` mode) and the
+   Claude Desktop entry are replaced. Only entries the installer's receipt owns are replaced; an entry
+   you removed is added back, and a different entry refuses (`registration_conflict`,
+   `claude_registration_conflict`, `claude_desktop_registration_conflict`).
+4. The exact receipt-bound broker is booted out, if it is loaded, and its LaunchAgent plist is rewritten.
+5. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
+   other byte, capabilities included, stays. A file that cannot be changed that way refuses as
+   `policy_conflict`.
+6. `receipt.json` is rewritten and `current.json` is switched last. The broker is bootstrapped again
+   only if it was running before.
+
+The result is `status: upgraded` with `previous_release_root`, `service` and `next_action:
+restart_mcp_clients`. Reconnect every client: a running proxy that loaded the old policy lists only
+`_manifest` until it restarts. The Telegram session, the enrollment, the managed key and the Keychain
+are not written.
+
+**Pending-send gate.** If the broker is running, the installer asks it, through its own release's
+client, whether any client context is connected. A context may hold a draft or an unresolved send
+outcome, and an unknown answer counts as pending. Any such answer refuses as `pending_send_unresolved`
+before anything changes; the gate runs again right before the broker is stopped. Quit the MCP clients,
+wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send is never
+retried by an upgrade.
+
+**Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
+(going back is only `rollback`). Different Codex home, skills root, home or `--claude-code` mode than the
+installed receipt refuse as `upgrade_conflict`. Another upgrade, a rollback or an uninstall started while a
+change is unfinished refuses as `transaction_pending`; repeat the interrupted command first.
+
+**`Install.command` and upgrades.** `Install.command` continues only after a first install. On an
+upgrade it prints the installer result (`status: upgraded`), then stops with `activation_unexpected`
+(exit 5). The upgrade is complete when the result prints; the stop is how the current script ends it.
+Running the `bootstrap.sh` command directly ends without that message.
+
+### Rollback
+
+`rollback` returns to the release before the last upgrade. Run it with the current release's launcher;
+`release_root` in `current.json` names it:
+
+```bash
+ROOT="$HOME/Library/Application Support/TelegramSearch"
+RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+  "$RELEASE/python/bin/python3" -I -S -B "$RELEASE/launcher.py" rollback
+```
+
+It re-registers the previous release's entries by the same owned-entry rules, rewrites the broker plist,
+passes the same pending-send gate, restores the `runtime.toml` version line and switches `current.json`
+back. The result is `status: rolled_back` with `next_action: restart_mcp_clients`.
+
+It refuses as `rollback_unavailable` when there is no previous release, and as `rollback_refused` when
+newer state exists: `enrollment.json` differs from its state when the upgrade began (for example after
+a new `connect` enrollment), `runtime.toml` differs from its earlier bytes in more than the version line,
+or the previous release's manifest or Codex ownership no longer matches. A rollback does not undo a
+send, move or edit that already happened. Going back to a 0.51 install is a manual procedure; see
+[rollback](security.md#rollback).
+
+### Uninstall
+
+`uninstall` removes only objects the receipt owns. Run it the same way as `rollback`, with `uninstall`
+in place of `rollback`. In order it removes: the broker plist (the exact LaunchAgent label is booted out
+first, after the pending-send gate); the Codex subtree, only while it is exactly what the receipt
+recorded; the Claude Code user-scope entry (through the `claude` CLI, `user` mode only); the Claude
+Desktop entry, leaving its neighbours and the file's mode; the skill copies the receipt binds; and
+finally the installation root with all releases.
+
+Each part reports `removed`, `absent`, `kept` (changed since the install, so left alone), or for a
+client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
+`claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
+present after its removal attempt; repeat the command.
+
+It never touches the Telegram session, `enrollment.json`, `runtime.toml`, the managed key or any
+Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`. The Claude Code
+plugin itself is not removed here; remove it with Claude Code. After uninstall, clients still hold the
+old tool list until they reconnect.
+
+### Adopting entries the installer does not own: --adopt-legacy
+
+By default the installer refuses foreign entries: a different `telegram_search` entry in Codex, Claude Code
+user scope or Claude Desktop, and a broker plist it did not write (for example a source-venv broker). To
+migrate a 0.51 or 0.52 installation, pass `--adopt-legacy` as the **last** token of the `bootstrap.sh`
+command (any other position is `selection_invalid`). `Install.command` and the plugin never pass it. For
+the owner's migration, with `KIT` the kit folder and the pins from its `release-pins.json`:
+
+```bash
+/usr/bin/env -i /bin/sh -p "$KIT/bootstrap.sh" --seed "$KIT/bootstrap-verifier" \
+  --seed-sha256 <seed.sha256> --seed-bytes <seed.bytes> --archive "$KIT/release.tar.gz" \
+  --index "$KIT/release-index.json" --trusted-index-sha256 <index.sha256> --seed-team <team_id> --adopt-legacy
+```
+
+then the printed activation command. It applies to a first install and to an upgrade, not to `rollback`.
+
+- Before anything is created, each foreign entry's exact bytes (at most 1 MiB each) are saved in the
+  transaction and listed in `adopted.json` in the installation root and in the receipt. The result
+  lists the adopted clients in `adopted`.
+- A foreign broker is stopped only after the pending-send gate, and its plist is replaced by the new
+  definition. The `expected_package_version` line of `runtime.toml` follows, whatever its old value.
+- `uninstall` keeps every backup, moved beside the removed root as
+  `~/Library/Application Support/.TelegramSearch-adopted-<random>`; the result names it in
+  `legacy_backups`.
+
+### Quarantine, notarization tickets and the Keychain
+
+- `bootstrap.sh` copies the seed with `cp`, which keeps `com.apple.quarantine` where the file has it (a
+  browser download does). Gatekeeper then evaluates the notarized seed when it runs. A bare Mach-O cannot
+  carry a stapled ticket, so its notarization ticket is fetched online on that first run; an offline first
+  run of a quarantined seed can be refused. The DMG itself is stapled.
+- A file fetched with `curl` has no quarantine attribute, so Gatekeeper does not evaluate the seed. For
+  that path, and for the plugin, the sha256 pins and the Team ID check bind the seed.
+- The seed writes the extracted files itself and copies no extended attributes, so they carry no
+  quarantine. The archive `release.tar.gz` is not a notarization subject; see
+  [the notarization scope](security.md#signing-and-team-id-trust-chain-053-candidate).
+- The database key's Keychain item is tied to the code identity of the runtime's `python3`. A runtime
+  signed with a different identity than the one that created the key (for example the owner's earlier
+  source install, or a switch between the ad hoc and the Developer ID build) may make macOS ask once
+  whether to allow access. This has not been observed with a signed build; that run is the owner's
+  migration test. The interpreter's signing identifier is the same in every release, so that its
+  designated requirement does not change between upgrades; that is the design and is not yet
+  observed on a signed build.
 
 ## Published 0.51: prepare the legacy runtime
 

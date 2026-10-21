@@ -360,6 +360,8 @@ Before an upgrade, save the previous installed runtime, owner-only plist, consum
 
 Rolling back from the 0.52 candidate to 0.51 needs the preserved pre-upgrade files. Once the candidate writes the session state (setup, resume or `connect`), a pre-0.52 `enrollment.json` gains `credential_source` and `identity_fingerprint`, and 0.51 binaries refuse it; a `runtime.toml` naming any capability 0.51 does not know (`forward_send`, `video_send`, `archive_chats`, `edit_own_text` and the other new ones) is refused by 0.51 as well. Restore the saved pre-upgrade `enrollment.json` and `runtime.toml` together with the runtime, never the candidate-written ones.
 
+An installed 0.53 bundle has its own `rollback` action, which returns to the release before the last upgrade only while no newer session state exists; see [the upgrade, rollback and uninstall invariants](#upgrade-rollback-and-uninstall-invariants-053-candidate). It does not restore a 0.51 source install, and the manual procedure above remains the way back to 0.51.
+
 Do not delete historical custom-index or TDLib session data as part of rollback. Historical index cleanup remains separately authorized and recoverable; session revocation is an explicit owner action if authority must be withdrawn.
 
 ## Optional local media prerequisites
@@ -1769,7 +1771,10 @@ owned Codex subtree still permits unrelated neighbor edits after its completed
 publication. Interrupted unbound packets are preserved without adoption, and
 recovery attempts are bounded.
 Current pointer publication occurs last; interrupted installations fail closed
-until exact checked recovery. No active broker is stopped or foreign data adopted.
+until exact checked recovery. A first install stops no active broker and adopts no foreign data.
+Upgrade, rollback, uninstall and the explicit `--adopt-legacy` option of the 0.53 candidate are the
+exceptions, with their own gates (see
+[the upgrade, rollback and uninstall invariants](#upgrade-rollback-and-uninstall-invariants-053-candidate)).
 
 
 ## QR connect boundary (0.52 candidate)
@@ -1835,6 +1840,198 @@ only, add-only, before the first `connect`) overrides it. A new policy lists onl
 claim protection against hostile software running as the same OS user. Evidence is synthetic
 (fake Telegram, launchd, `claude` CLI and Keychain); real clean-user acceptance is pending.
 
+
+## Claude Desktop registration boundary (0.53 candidate)
+
+The installer can add, replace or remove exactly one key, `mcpServers.telegram_search`, in
+`~/Library/Application Support/Claude/claude_desktop_config.json`. When the `Claude` directory does
+not exist it reads and writes nothing. It starts no process and reads no other Claude Desktop file.
+
+**Read.** The file is read through held no-follow parents and a descriptor, at most 1 MiB, with ACL
+checks. It must be owned by you, have one link and no group or world write bit. Mode `0644`, which
+Claude Desktop writes, is accepted; a file the installer creates is `0600`. The bytes must be strict
+JSON: one object, no duplicate key, no `NaN` or `Infinity`, at most 64 levels of nesting. An unsafe or
+unparsable file reads as `unavailable`: the install continues without Claude Desktop and returns a
+manual entry.
+
+**Write.** A write replaces only the exact bytes just observed. The temporary file's name is journaled
+before it is created and its inode before the replace; the file is compared again through the same held
+directory immediately before an atomic replace, and the replaced file's mode is kept. The candidate is
+re-read and compared with the original: every neighbouring server and value must keep its meaning and
+every number its exact spelling, or nothing is written and the install refuses
+(`claude_desktop_config_unsupported`). The config can hold other servers' secrets, so its bytes are never
+logged, echoed or raised; only hashes leave the module. The one exception is an adopted entry's own
+backup, which stays in the installation's private transaction evidence.
+
+**Ownership.** The receipt (`claude_desktop_ownership`) records an entry only when this installer wrote
+it. A first install adds only an absent entry. An identical entry is `reused` and not owned. A different
+entry refuses the whole install before anything is created (`claude_desktop_registration_conflict`);
+only `--adopt-legacy` replaces one, after its exact bytes are backed up. An upgrade or rollback replaces
+the entry only while it still equals the owned one, and an uninstall removes it only while it is exactly
+that, so an entry you changed is kept. After an interruption the same write is repeated only over a file
+still byte-identical to the journaled preimage, at most 8 attempts, and a killed attempt's temporary is
+unlinked only while it is the journaled inode.
+
+**Limits.** Claude Desktop may rewrite its configuration from memory while it runs; the read-only
+`status` action reports `drift` and the manual entry, and the install asks for a restart. The entry
+names an exact release path. These cooperative checks detect drift; they do not protect against a hostile
+process running as the same OS user.
+
+## Claude Code plugin boundary (0.53 candidate)
+
+The plugin ships skills, a marketplace entry and an MCP server; it grants no capability. The broker's
+`runtime.toml` still decides what is allowed, and the policy-filtered `tools/list` only hides what the
+policy does not enable.
+
+**The shim.** `.mcp.json` runs `/bin/sh -p ${CLAUDE_PLUGIN_ROOT}/bin/mcp-entry`. The shim takes no
+argument and accepts no environment value as input: the home directory comes from the passwd entry
+(`id -P`) and must be an absolute path without `=`, quote, backslash or non-printable byte. It then
+requires `<home>/Library/Application Support/TelegramSearch/current.json` to be a regular file, not a
+link, owned by you, with one link, at most 4,096 bytes and no group or world write bit. The pointer
+must be exactly the installer's bytes: `schema_version` the integer 1, `index_sha256` 64 lowercase hex
+digits, `release_root` equal to `<root>/releases/<index_sha256>`, sorted keys, no spaces and one
+newline, so a repeated or extra key cannot hide behind what `plutil` extracts. The release directory
+(not a link), its `python/bin/python3` (executable) and `launcher.py` must exist. Then it runs
+`exec /usr/bin/env -i <release>/python/bin/python3 -I -S -B <release>/launcher.py mcp`, an empty
+environment. Any failure prints one fixed line, `{"schema_version":1,"error_code":"runtime_not_installed"}`,
+and exits 1.
+
+The shim only chooses a candidate path. The launcher then re-admits the receipt, the index and every
+file of that release tree by hash before importing anything, and it admits only the release the
+receipt names, so a pointer to any other tree fails there.
+
+**The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's committed
+`release-pins.json`, reviewed with the plugin commit the marketplace pins: no environment value,
+argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the reviewed bytes
+(sorted keys, two-space indent, one newline) and its `version` must equal `plugin.json`'s. Unpublished
+pins refuse (`release_not_published`), and published pins must carry a Team ID. Each of the four
+assets comes from the fixed GitHub Releases URL pattern through `/usr/bin/curl -q --proto =https
+--proto-redir =https --tlsv1.2 --fail --silent --location --max-redirs 5`, with a 30-second connect
+timeout, a per-asset time limit and `--max-filesize` set to the pinned size. There is one attempt per
+asset, no retry and no resume, so assets of different uploads are never mixed. They land in a `0700`
+folder created under your home, and each must match its pinned size and sha256 before anything runs.
+Then the pinned `bootstrap.sh` installs with `--claude-code plugin --seed-team <pinned Team ID>`.
+`curl` sets no quarantine, so Gatekeeper never evaluates that seed; the Team ID check of its Developer
+ID designated requirement, on top of the sha256 pins, is what binds it to the publisher. The plugin
+never passes `--adopt-legacy`.
+
+In plugin mode the installer writes no Claude Code user-scope entry and no `~/.claude/skills` copy. An
+existing user-scope entry is only noted (`claude_code_user_entry: present`), never removed. Every
+plugin tool name, `mcp__plugin_<plugin>_<server>__<tool>`, fits the client's 64-character limit
+(`product_identity.check_names`).
+
+## Signing and Team ID trust chain (0.53 candidate)
+
+This is the chain from a downloaded kit to the running interpreter, outermost first. The Developer ID
+steps cannot be exercised until the owner's certificate exists; the ad hoc dry run exercises the same
+code with the identity `-`.
+
+1. **Pins.** The seed's sha256 and byte count and the index's sha256 are literals in `Install.command`
+   (the plugin's committed pins, or the operator's, on the other paths). `bootstrap.sh` checks the seed
+   against them before running it. The seed then authenticates the archive and every member against the
+   index before extraction, and the launcher re-hashes the installed tree at every start.
+2. **Team ID, `--seed-team`.** With `--seed-team <TEAMID>`, after the pins and before the seed runs,
+   `bootstrap.sh` runs `codesign --verify --strict -R` with the requirement
+   `native_runtime.designated_requirement(TEAMID)`: Apple's anchor, a certificate chain through Apple's
+   Developer ID CA, a Developer ID Application leaf, and `subject.OU` equal to the Team ID. An unsigned,
+   ad hoc or other-team seed refuses as `seed_signature_invalid`. The pins stay; the Team ID narrows them.
+   A Team ID alone was rejected, because it would trust anything the team ever signs. `Install.command`
+   is rendered with the Team ID and a published kit without one is refused at render time
+   (`team_required`).
+3. **Manifest v2.** `publisher {kind: adhoc|developer-id, team_id}`, `publication
+   unreleased|published` and `source_completeness incomplete|complete`. `published` requires `complete`
+   and a Developer ID publisher. A v1 manifest stays admitted, as unreleased and incomplete only, and
+   pairs only with an ad hoc lock.
+4. **Native lock v2.** Every pin must equal one reviewed row of the approved-pin table in
+   `native_runtime` (source commit, TDLib version, schema hash, minimum OS, ABI, license source, OpenSSL
+   version, build method) and the unsigned artifacts must equal the v1 pins. An `adhoc` lock has no
+   Team ID and ships the unsigned bytes. A `developer-id` lock ships different bytes and its Team ID
+   must be listed in the row. No row lists a Team ID yet, so no Developer ID lock is admitted until a
+   reviewed commit adds the owner's. At load each native passes `codesign --verify --strict`, plus the
+   Team ID requirement for `developer-id`, and the manifest's publisher must equal the lock's kind and
+   Team ID (`publisher_mismatch`).
+5. **Signing.** `packaging/sign_payload.py` signs every Mach-O found by its magic, matched against the
+   payload inventory, inside out: dylibs, bundles, executables, `python3` last, each with
+   `--options runtime` and, for a real identity, a secure timestamp. The identifiers are stable: the
+   product prefix plus `python3` for the interpreter, the relative path for the rest.
+6. **Entitlements.** Only `python3` carries any. The build re-signs a scratch interpreter with each
+   candidate set, smallest first, and runs probes (every distribution imports, TDLib answers its version,
+   a Security.framework Keychain query returns not-found, `osascript` runs); it accepts the committed
+   plist only if that is the smallest passing set
+   (`entitlements_unproven` otherwise). Result for the ad hoc identity: no entitlements,
+   `allow-unsigned-executable-memory` alone, or `allow-jit` alone fail with different Team IDs, and
+   `com.apple.security.cs.disable-library-validation` is the minimal passing set, so the ad hoc plist
+   carries it. The Developer ID plist is empty and unproven until the owner's signed run; the
+   broker-under-launchd and connect-helper probes also wait for that run. `allow-dyld-environment-variables`,
+   `get-task-allow` and `disable-executable-page-protection` are refused everywhere
+   (`entitlement_forbidden`).
+7. **Kit check before notarization.** Every Mach-O the kit ships (the seed and each payload file that
+   `release.tar.gz` holds, bound to its index hash) must carry the Developer ID requirement with the
+   Team ID, a secure timestamp and the hardened runtime, or the build stops (`signature_refused`). An ad
+   hoc seed in a real build stops it as `seed_unsigned`. In the dry run the same check requires ad hoc
+   signatures.
+
+**Notarization scope.** `notarize_release.sh` submits two things. The DMG is signed with the identity,
+submitted, required to be accepted with zero issues, stapled and validated; its signature is checked
+against the Team ID requirement before submission and again after stapling, and `spctl` must accept it as
+notarized Developer ID. Separately, a zip of the signed payload tree is submitted so the notary service
+registers every Mach-O. The shipped `release.tar.gz` is not submitted: the service does not look inside
+it, so its members are not notary-inspected, and its integrity rests on the pinned index and the seed
+(step 1), not on Gatekeeper. The seed keeps the quarantine attribute `cp` copies, so Gatekeeper
+evaluates it and, because a bare Mach-O cannot be stapled, fetches its ticket online. The seed
+creates the extracted files with plain `openat` calls and copies no extended attribute, so they carry no
+quarantine and Gatekeeper does not evaluate them individually; this has not been confirmed by listing
+attributes on a real install. A file fetched with `curl` has no quarantine, so on that path only the
+pins and the Team ID check stand between the download and the seed.
+
+**Keychain.** The managed database key's Keychain access is tied to the code identity of the runtime's
+interpreter. A different signing identity than the one that created the item can make macOS ask once;
+the owner's migration run is the test. The stable interpreter identifier is meant to keep the
+designated requirement the same across releases.
+
+The chain proves who signed what was shipped and that the installed bytes equal the index. It does not
+protect against a hostile process running as the same OS user, and a certificate or pin the owner
+accepts is a trust decision, not a legal sign-off.
+
+## Upgrade, rollback and uninstall invariants (0.53 candidate)
+
+All three are journaled transactions under the installer lease (`.install.lock` in the installation root).
+Each effect is recorded write-ahead and happens at most once; a rerun resumes from the journal, and a
+different action or kit started over an unfinished one refuses (`transaction_pending`).
+
+- **Session, enrollment and Keychain are not written.** The installer touches the installation root, the
+  Codex subtree, the owned skill copies, the Claude Code and Claude Desktop entries it owns, the broker
+  plist and, on an upgrade, rollback or adoption of a service, one line of `runtime.toml`:
+  `expected_package_version`. Every other byte of that file, capabilities included, stays, and a file
+  that cannot be changed that way refuses (`policy_conflict`). `enrollment.json`, the managed key, the
+  TDLib session and the Keychain are never written; their hashes are only read.
+- **Pending-send gate.** Before the first client write, and again right before the broker is booted out,
+  a running exact receipt-bound broker is asked, through its own interpreter, whether any client context
+  is connected. A context may hold a draft or an unresolved send outcome. Anything but "none" (including an
+  unknown answer) refuses with nothing changed (`pending_send_unresolved`). Only the exact label is
+  booted out, an owned broker only after its live registration matches the on-disk plist, and it is
+  bootstrapped again after the commit only if it was running. An uncertain send is never retried.
+- **Downgrade refused.** A package version that sorts below the installed one refuses
+  (`downgrade_refused`); an unparsable version refuses the same way. Going back is only `rollback`.
+- **Rollback only to unchanged state.** It refuses (`rollback_refused`) unless `enrollment.json` is
+  byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
+  in the version line, and the previous release's manifest and Codex ownership still match.
+- **Commit order.** The new release tree is copied next to the old one, clients and the plist follow,
+  then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
+  name it, so an interrupted change leaves the previous release launchable.
+- **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
+  receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A Claude Code
+  entry is changed only through the located `claude` CLI, each attempt recorded before it is made, and
+  an entry that is still exactly ours after its removal attempts refuses as `uninstall_incomplete`.
+- **Adoption is explicit.** `--adopt-legacy` must be the last token of the `bootstrap.sh` command and is
+  never passed by `Install.command` or the plugin. It applies to a first install and an upgrade. Each
+  foreign entry or plist (Codex, Claude Code user scope, Claude Desktop, the broker plist) is replaced
+  only after its exact bytes (at most 1 MiB each, at most 64 records) are recorded in the transaction,
+  `adopted.json` and the receipt. A foreign broker passes the pending-send gate first. `uninstall` moves
+  every backup beside the removed root and reports it as `legacy_backups`.
+
+The release trees of earlier versions stay in `releases/` until an uninstall removes the root. The
+checks are cooperative: they detect drift and refuse; they do not make arbitrary editors take the lease.
 
 ## Retained-selection boundary (B2B candidate)
 
