@@ -6,7 +6,9 @@ description: Install the local Unofficial Telegram MCP bundle and connect the us
 # Telegram setup
 
 Paired with candidate `0.53.0.dev0`, contract 1. Needs Apple Silicon macOS 26+
-and Claude Code or Codex running on the same Mac as the user's browser and Telegram phone app.
+and Claude Code, Codex or Claude Desktop running on the same Mac as the user's browser and Telegram
+phone app. The signed DMG and the public release assets do not exist yet, so the routes below
+describe what the installer does; confirm with the user which kit they have.
 
 **Never ask for, echo, store or pass on:** API ID or hash, phone number, login code, 2FA
 password, QR link or the connection-screen address. No command below takes any of them. If a
@@ -14,15 +16,32 @@ step seems to need one, stop and use the Terminal fallback at the end.
 
 ## Flow
 
-1. **Install** only from an independently authenticated bundle index and seed whose digests
-   come from the reviewed trust input (`/bin/sh -p packaging/bootstrap.sh …`, see
-   docs/install.md "Private bundle 0.53.0.dev0"; the installer prints its JSON
-   result, and this skill is itself installed by that installer). Keep installer failures and transaction evidence. Refuse
-   foreign runtime, registration, service or skill conflicts; never stop an existing owner to
-   make an install pass. Success is `status: activation_required` with a nonsecret
-   `activation_command`. `claude_code` is `registered` or `reused` when Claude Code has the
-   entry (Codex is registered either way). `claude_skills: skipped` means no Claude Code was
-   found, so no copies went to `~/.claude/skills`.
+1. **Install.** Pick the route that fits the client. Every route installs from an
+   independently authenticated bundle index and seed whose digests come from the reviewed trust
+   input, and ends in the installer's JSON result (see docs/install.md "Install from the 0.53 kit").
+   - **Claude Desktop, or any client without a shell for you:** ask the user to open the DMG and
+     double-click `Install.command`. It installs and then runs `connect` inline in the user's own
+     Terminal: the QR page opens there and the final result prints there, so no `wait` and no pasted
+     command are needed. When the user says it finished, ask them to quit and reopen Claude Desktop
+     (it reads its configuration only at launch), then go to step 4.
+   - **Claude Code plugin** (`telegram-local`, added with `/plugin marketplace add` and
+     `/plugin install`): the plugin carries no runtime until it is installed, and its server stops with
+     `runtime_not_installed`. With the user's go-ahead, run
+     `/bin/sh -p "<plugin root>/bin/install"` with no arguments, where `<plugin root>` is the directory
+     the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`); if you cannot tell what it is, ask the user
+     to run the command instead of guessing a path. It prints the installer result with
+     `claude_code: plugin`. Continue at step 2.
+   - **Shell route** (`/bin/sh -p bootstrap.sh …` from a kit folder, with `--claude-code user`, `plugin` or
+     `skip`): the installer prints its JSON result. Continue at step 2.
+
+   Keep installer failures and transaction evidence. Refuse foreign runtime, registration, service or
+   skill conflicts; never stop an existing owner to make an install pass, and never pass
+   `--adopt-legacy` unless the owner asks for that migration. Success is `status: activation_required` with
+   a nonsecret `activation_command`. `claude_code` is `registered` or `reused` when Claude Code has the
+   entry (Codex is registered either way), or `plugin` or `skipped` in those modes. `claude_skills:
+   skipped` means no copies went to `~/.claude/skills` (no Claude Code found, or the plugin supplies
+   them). `claude_desktop: registered` comes with `claude_desktop_next_action:
+   restart_claude_desktop`.
 2. **Connect.** Run `activation_command` exactly as returned; it ends in `connect`. It is safe in
    a captured shell, returns within seconds (up to about 40 s while a broker starts) and never
    prints the page address.
@@ -34,7 +53,8 @@ step seems to need one, stop and use the Terminal fallback at the end.
    `ready`, `failed`, `expired` or `cancelled`. The first `wait` usually returns
    `waiting_for_scan` within seconds: that is the moment to tell the user to scan.
 4. **On `ready`** (or `already_connected`), ask the user to reconnect the MCP client: Claude Code
-   `/mcp`, Codex restart. If `/mcp` does not list `telegram_search` after an install made during
+   `/mcp`, Codex restart, Claude Desktop quit and reopen. If `/mcp` does not list `telegram_search`
+   (or the plugin's `tg` server) after an install made during
    this Claude Code session, the user restarts Claude Code. Then call
    `_manifest(check_broker=true)` and require `compatible`. Finish with one bounded,
    user-chosen own-chat read or search using the paired telegram-search skill.
@@ -74,8 +94,38 @@ Installer results:
 |---|---|
 | `claude_code`: `failed`, `unavailable` or `not_found` | Claude Code is not registered. Offer the returned `claude_registration_command` (an argv list; quote each element as one shell word) for the user to run in their own terminal, then `/mcp`. If it says `telegram_search` already exists (for example the 0.51 manual `claude mcp add`), the user removes it themselves with `claude mcp remove telegram_search -s user` and runs the command again. |
 | `claude_registration_conflict` | Nothing was installed: Claude Code has a different `telegram_search` entry. The user removes it themselves with `claude mcp remove telegram_search -s user`, then install again. Never remove it for them. |
+| `claude_code_user_entry`: `present` (plugin mode) | An older user-scope entry would list the tools twice. The user removes it with `claude mcp remove telegram_search -s user`; the installer never does. |
+| `claude_desktop`: `registered` | Ask the user to quit and reopen Claude Desktop (`claude_desktop_next_action: restart_claude_desktop`). `reused` needs nothing; `skipped` means Claude Desktop is not installed. |
+| `claude_desktop`: `failed` or `unavailable` | Claude Desktop is not registered. Show the returned `claude_desktop_manual_entry` (nonsecret JSON) for the user to merge into `claude_desktop_config.json` themselves, then restart Claude Desktop. Never edit that file for them. |
+| `claude_desktop_registration_conflict` | Nothing was installed: Claude Desktop has a different `telegram_search` entry (for example the 0.51 manual one). The user removes or renames it themselves, then installs again. |
+| `claude_desktop_config_unsupported` | Nothing was installed: that config cannot be rewritten without changing a neighbour. Stop and report it; the user can add the entry by hand. |
+| `release_not_published`, `pins_invalid`, `pin_mismatch`, `download_failed`, `bootstrap_failed`, `result_invalid` (plugin `bin/install`); `activation_unexpected`, `activation_failed`, `kit_incomplete` (`Install.command`) | Stop and report the code; do not retry in a loop. `release_not_published` means no release exists yet for this plugin version. |
 | `recovery_limit`, any other installer code, `bundle_admission_or_install_failed`, `bundle_admission_failed`, `invalid_arguments` | Stop and report it with the retained transaction evidence; do not retry. |
 | `api-credentials`: `stored` or `already_present` | The pair is in the Keychain (nothing was overwritten). Continue with `connect`. |
+
+## Upgrade, rollback and uninstall
+
+Only when the user asks, and best in the user's own native Terminal. Before it stops the broker, the
+installer asks it whether any client context is connected, and an open MCP client can count as one.
+It then refuses with `pending_send_unresolved` and nothing has changed. Ask the user to quit every
+MCP client (or leave the Telegram tools unused for about five minutes) and run it again; stop after
+two refusals.
+
+- **Upgrade:** the user runs the newer kit's `Install.command`, or the same `bootstrap.sh` command with
+  the newer pins and the installed `--claude-code` mode. The result is `status: upgraded`, and
+  `Install.command` then stops with `activation_unexpected`: that is how it ends an upgrade, not a
+  failure. Every client then reconnects.
+- **Rollback or uninstall:** the installed release's launcher with `rollback` or `uninstall` in place of
+  `connect`. `RELEASE` is the `release_root` in
+  `~/Library/Application Support/TelegramSearch/current.json`, for example
+  `RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$HOME/Library/Application Support/TelegramSearch/current.json")`,
+  then `"$RELEASE/python/bin/python3" -I -S -B "$RELEASE/launcher.py" rollback`. Rollback returns to the
+  release before the last upgrade and refuses (`rollback_refused`) once newer session state exists.
+  Uninstall removes only what the installer owns; the Telegram session, enrollment and Keychain stay.
+- `downgrade_refused`, `upgrade_conflict`, `policy_conflict`, `rollback_unavailable`, `service_conflict`,
+  `service_restart_failed`, `uninstall_incomplete`, `installation_refused`: stop and report the code.
+  `transaction_pending`: an earlier change is unfinished, so repeat that command first. Never edit
+  `runtime.toml`, the broker plist or a registration to get past a refusal.
 
 ## Terminal fallback
 
@@ -94,4 +144,6 @@ revoked from here. The default policy (written by `connect`) enables only `read`
 "Enabling more capabilities"). There is no account
 alias or profile registry, cloud auth or model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
-download missing runtime, source, media tools or models without authority.
+download missing runtime, source, media tools or models without authority. The plugin's pinned
+`bin/install` is the one download this skill runs, only for a user who chose the plugin, and it
+verifies every asset before anything runs.
