@@ -4,8 +4,9 @@ A client registers `python -m telegram_search_mcp.stdio_recorder --record <new f
 as the server command. Every byte is relayed unchanged in both directions. The record is JSON
 Lines: the protocol revision, client and server name/version, the tools/list census and
 fingerprint, and per call the tool name, isError and content-block types and byte sizes. Arguments,
-result text and Telegram content are never recorded; a name or version outside its closed grammar
-becomes "redacted". Exits with the server's status; refusals are fixed codes on stderr.
+result text and Telegram content are never recorded; a tools/call name that is not a registered tool
+becomes "other", and a name or version outside its closed grammar becomes "redacted". Exits with the
+server's status; refusals are fixed codes on stderr.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import threading
 import time
 
 from . import __version__
+from .server import _TOOL_NAMES
 
 SCHEMA = 'tgmcp-stdio-record/v1'
 MAX_FRAME = 32 * 1024 * 1024    # a larger line is relayed but not parsed
@@ -36,7 +38,7 @@ KILL_GRACE_SECONDS = 5
 REDACTED = 'redacted'
 _LABEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9 ._+/@()-]{0,63}\Z')
 _REVISION = re.compile(r'[A-Za-z0-9][A-Za-z0-9.-]{0,31}\Z')
-_TOOL = re.compile(r'[A-Za-z0-9_.-]{1,128}\Z')
+TOOL_NAMES = frozenset(_TOOL_NAMES)  # any other tools/call name is recorded as 'other'
 BLOCK_TYPES = frozenset({'text', 'image', 'audio', 'resource_link', 'resource'})
 # The 2026-07-28 revision replaces initialize with server/discover and stamps every request's _meta.
 PROTOCOL_META = 'io.modelcontextprotocol/protocolVersion'
@@ -150,7 +152,8 @@ class Recorder:
             self.event('initialize', requested_protocol=_label(params.get('protocolVersion'), _REVISION),
                        client_name=_label(info.get('name')), client_version=_label(info.get('version')))
         elif method == 'tools/call':
-            tool = _label(params.get('name'), _TOOL)
+            name = params.get('name')
+            tool = name if type(name) is str and name in TOOL_NAMES else 'other'
         if 'id' in message and method in CORRELATED:
             key = _key(message['id'])
             if key is None or (key not in self._pending and len(self._pending) >= MAX_PENDING):
