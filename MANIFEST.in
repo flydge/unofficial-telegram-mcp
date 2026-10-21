@@ -8,6 +8,7 @@ include docs/release-preflight.md
 include skills/telegram-search/SKILL.md
 include skills/telegram-setup/SKILL.md
 recursive-include packaging *.py *.sh *.c *.json
+recursive-include packaging/entitlements *.plist
 include packaging/constraints-0.53.0.txt
 recursive-include src/telegram_search_mcp *.py
 recursive-include tests *.py
