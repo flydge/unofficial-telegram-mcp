@@ -455,6 +455,30 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 `search_again`, `restart_listing`, `check_send_status`), and names `capability_disabled`,
 `selection_unavailable` and an unavailable broker. The paired `telegram-search` skill mirrors it.
 
+### Tool titles, descriptions and annotations
+
+Since the 0.54 candidate every tool carries a top-level MCP `title` (never `ToolAnnotations.title`, which
+would enter the schema fingerprint) and a short user-facing description: what the tool does, a
+`Needs: …` sentence generated from the same capability table as the guard and `tool_capabilities`, where
+key inputs come from, the approval or retry rule, and that Telegram content is untrusted data. The eight
+reply tools share one text naming the source-dependent `reply_*_targets` capabilities. Every send and
+apply tool says that the owner approves in a local dialog and that `outcome_unknown` means calling
+`get_send_status` and never resending. The tools that accept a retained selection add that it expires
+after a bounded time set by the owner's policy. Each description is at most 1,500 characters and all of
+them together at most 30,000. Descriptions and titles are outside the schema fingerprint.
+
+Key top-level inputs carry a short JSON Schema `description` (for example where a `draft_id`, an
+`anchor` or a `cursor` comes from); each such description changes that tool's input schema.
+
+Annotations follow one rule. Read-only: every reader and search, `_manifest`, `resolve_target`,
+`discover_targets`, every `prepare_*` tool (preparation creates local draft state only), every `get_*`
+tool (including `get_attachment`, which only fills the owner-only local cache), every `list_*` tool,
+`verify_target` and `retain_selection`. Not read-only: `send_prepared_*`, `apply_prepared_*`,
+`update_*`, `refresh_*`, `cancel_draft`, the local artifact and upload tools and the owner upload
+authority tools. `idempotentHint` is set on pure reads and `get_*` tools, but not on the cursor readers
+or any `prepare_*` tool, because every preparation creates a new draft. `destructiveHint` is set only on
+`apply_prepared_text_edit`. Every tool is open-world.
+
 ### Tool inventory in `_manifest` and `tools/list`
 
 `_manifest` returns three tool lists:
@@ -2050,7 +2074,8 @@ account/session changes without provider observation are not claimed detectable.
 
 The candidate exposes 55 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
-needed: their tool descriptions and CLI help contain this complete sequence.
+needed: the `issue_local_upload_authority` description and the CLI help contain this
+complete sequence.
 
 1. Run `telegram-search-transfer manifest --source ABSOLUTE_PATH --kind document`
    (or `photo`/`voice_note`, optional `--file-name SAFE_BASENAME`). It pins and
@@ -2699,9 +2724,10 @@ result = apply_prepared_text_edit(draft_id=edit.text_edit.draft_id, approved=Tru
 ```
 
 The IDs are synthetic; use observed numeric chat IDs and committed message IDs. All four tools
-are annotated non-read-only, non-idempotent and open-world; only `apply_prepared_text_edit`
-also carries `destructiveHint`, because it overwrites provider state (text, formatting, link
-preview settings) that no tool can restore.
+are annotated non-idempotent and open-world. Since the 0.54 candidate the two prepare tools are
+read-only (they create local draft state only) and the two apply tools are not; only
+`apply_prepared_text_edit` carries `destructiveHint`, because it overwrites provider state (text,
+formatting, link preview settings) that no tool can restore.
 
 ### Archive: inputs and refusals
 

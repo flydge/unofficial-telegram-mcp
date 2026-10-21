@@ -358,8 +358,10 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
                          {'chat', 'message_id', 'new_text'})
         for name in list(tools)[-4:]:
             self.assertFalse(tools[name].input_schema['additionalProperties'])
-            self.assertFalse(tools[name].annotations.read_only_hint)
-        self.assertTrue(tools['apply_prepared_text_edit'].annotations.destructive_hint)
+            # 0.54: preparation creates local draft state only, so it is read-only.
+            self.assertEqual(tools[name].annotations.read_only_hint, name.startswith('prepare_'))
+        self.assertEqual([name for name in list(tools)[-4:] if tools[name].annotations.destructive_hint],
+                         ['apply_prepared_text_edit'])
         for policy, archive_on, edit_on in ((RuntimePolicy(), False, False),
                                             (RuntimePolicy(enabled_capabilities=('send',)), False, False),
                                             (RuntimePolicy(enabled_capabilities=('archive_chats',)), False, False),

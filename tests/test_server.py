@@ -274,7 +274,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         media_types = query_schema["properties"]["media_type"]["anyOf"][0]["enum"]
         self.assertNotIn("other", media_types)
         attachment_tool = listing.tools[4]
-        self.assertFalse(attachment_tool.annotations.read_only_hint)
+        # 0.54: get_attachment only fills the owner-only local cache, like every get_* tool.
+        self.assertTrue(attachment_tool.annotations.read_only_hint)
+        self.assertTrue(attachment_tool.annotations.idempotent_hint)
         self.assertFalse(attachment_tool.input_schema["additionalProperties"])
         self.assertEqual(set(attachment_tool.input_schema["properties"]), {"anchor", "selection_id"})
 
