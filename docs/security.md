@@ -2134,6 +2134,64 @@ explicitly authorized CLI exports remain, without a hostile same-UID secrecy cla
 Synthetic writer tests are technical evidence; installed/native/live and release
 acceptance remain separate gates.
 
+## Owner approval dialog (0.54 candidate)
+
+Every send and change needs two approvals: `approved=true` in the task, then a click in a local macOS
+dialog that only the broker opens, after its own revalidation and before the single-use claim. The
+client cannot open, answer, skip or pre-fill that dialog.
+
+**One dialog.** An `NSAlert` through `osascript -l JavaScript` (JXA). The script is a fixed constant;
+only the product name is substituted, escaped as a JavaScript string. The rendered document and the
+timer's seconds reach the script as command-line arguments after `--`, never as script text, so
+untrusted content cannot become code. `Cancel` is added first and is the default button, with Return
+set explicitly (AppKit would otherwise give a "Cancel" button Escape and leave no default). `Send` (or
+`Apply` for a change) has no key equivalent. A read-only, fixed-size scrolling view holds the document
+and never wraps. The window joins the owner's current Space and full-screen apps, and has no appear
+animation. Without that, the proof found it off-Space, occluded and transparent. A 120-second timer,
+registered for the modal run-loop mode, ends the dialog with AppKit's abort response. The script prints
+exactly one token: `APPROVED`, `DECLINED` or `TIMEOUT`.
+
+**Fail-closed decision.** The broker accepts approval only as `True` or the closed `ApprovalDecision`
+value `approved`. Only that value is truthy, so the legacy `if not decision` checks keep refusing.
+Everything else maps to a status that never sends or changes anything:
+- `declined`: `approved` was not `true` (no dialog), or the owner clicked Cancel. Each has its own fixed
+  detail.
+- `timeout`: the dialog timer ended it.
+- `dialog_unavailable`: no dialog decision exists. That covers a missing or failing `osascript`, a
+  non-zero exit, any other output (including a token in a different case or with extra text), the outer
+  125-second process limit, an exception inside the script, a timer value outside 1–120 seconds, or
+  arguments that do not describe exactly one preview bound to the broker's own draft. Any other value an
+  injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`.
+
+The dialog runs through `subprocess.run` with a bounded timeout. Details are fixed strings; no input,
+dialog text or provider message is echoed.
+
+**One renderer.** Every kind uses the same document: a plain-language summary (action, chat, account,
+expiry), the exact payload, the reading rule, and a technical block with the draft ID and hashes. The
+kinds are plain text, file, topic or formatted text, text reply, reply with a file, forward or copy,
+native video, archive move and own text edit. Untrusted strings are rendered under
+`forward_drafts.READABLE_RULE`:
+- A multi-line text or caption keeps its real line feeds. Each line is its own row behind the gutter
+  `│ `, and `«` and `»` mark its exact ends.
+- Short strings (titles, names, URLs, covered spans) are inline `« »` spans, where every line break is
+  marked.
+- Rows are split at 96 columns (wide characters count two) onto rows that start with `┆ `. A split
+  before a space leaves the space visible after `┆ `.
+
+No untrusted string can begin a row that looks like a dialog line. The topic, reply and artifact
+dialogs no longer print raw Telegram text, as they did in 0.53. Each preview is revalidated by its
+model and compared with the broker's own recipient, title, hashes, size, text, caption, file name and
+kind; reply-artifact previews gained that comparison in 0.54.
+
+**Proof and fallback.** The JXA dialog was run for real on the timeout path from a temporary user
+LaunchAgent (background process type, Aqua session, isolated HOME) and directly. The record is in
+`docs/plans/0.54-conversational-usability-spec.tasks.md`, section C. The spec's fallback (the earlier
+`display dialog` with a short summary and a truncation notice) was not needed.
+
+Residual risks: the dialog shares the screen with other software of the same user, which can draw over
+it or send synthetic clicks, as with the earlier dialog. A single space at the end of a payload line is
+invisible. The JXA bridge and AppKit behaviour are macOS components outside this project.
+
 ## Exact forward/copy boundary (F14 candidate)
 
 `prepare_forward_send` and `send_prepared_forward` add the default-off `forward_send`
@@ -2200,23 +2258,25 @@ Telegram-originated strings are untrusted data. The MCP preview carries text and
 captions as a marked reversible JSON string in which only ASCII letters, digits, `_`
 and `-` are literal, so homoglyphs, bidi and zero-width controls and whitespace are
 visible as `\uXXXX`; one decoded layer is exactly the hashed raw text, and entity
-offsets address it in UTF-16 code units. The local dialog is written for a human:
-letters of every script stay literal, and the text or caption, each entity's covered
-span and each link-preview URL are enclosed in `« … »` below a legend line that states
-the rule. Rendered as reversible `⟦U+XXXX⟧` are control (including newline and tab),
-format, private-use and unassigned characters; every Unicode 16 default-ignorable code
-point except one U+FE0E/U+FE0F directly after a non-selector character (emoji
-presentation); line, paragraph and non-ASCII spaces; each U+0020 after the first in a
-run; U+2800; characters that NFKC changes; combining marks after the second in a row;
-the brackets `« » ⟦ 〚 〛`; and, inside a word that also has ASCII letters, Cyrillic,
-Greek, Armenian, Cherokee and Lisu letters and non-ASCII Latin letters without a
-canonical decomposition. Because literal `«`, `»` and line breaks are marked, untrusted
-content can neither close its span nor start a dialog line. The dialog lists every
-entity, the link-preview options, the link-card URL and the media facts, and prints
-account, draft ID and expiry. Names are admitted only when sanitizing leaves them
-unchanged, so they are shown exactly; one longer than 255 characters refuses. The
-dialog is rebuilt from the stored immutable draft and validated against recipient,
-hash and mode before display; a mismatch is a decline.
+offsets address it in UTF-16 code units. The local dialog is written for a human (see
+[Owner approval dialog](#owner-approval-dialog-054-candidate)): letters of every script stay
+literal; the text or caption is an exact payload behind the `│ ` gutter, one row per real line;
+and each entity's covered span, each link-preview URL, the chat titles, the author signature and
+the media names are enclosed in `« … »`. One reading rule, printed in full, states what is
+rendered as reversible `⟦U+XXXX⟧`: control characters (including tab and every line break other
+than a payload's own line feeds), format, private-use and unassigned characters; every Unicode 16
+default-ignorable code point except one U+FE0E/U+FE0F directly after a non-selector character
+(emoji presentation); line, paragraph and non-ASCII spaces; each U+0020 after the first in a run;
+U+2800; characters that NFKC changes; combining marks after the second in a row; the brackets
+`« » ⟦ 〚 〛`; and, inside a word that also has ASCII letters, Cyrillic, Greek, Armenian, Cherokee
+and Lisu letters and non-ASCII Latin letters without a canonical decomposition. Because literal
+`«` and `»` are marked and every payload row starts with the gutter, untrusted content can neither
+close its span nor start a dialog line. The dialog lists every entity, the link-preview options,
+the link-card URL and the media facts, and prints account, expiry and, in its technical block, the
+draft ID and hashes. Names are admitted only when sanitizing leaves them unchanged, so they are
+shown exactly; one longer than 255 characters refuses. The dialog is rebuilt from the stored
+immutable draft and validated against recipient, hash and mode before display; a mismatch shows
+no dialog and is `dialog_unavailable`.
 
 Protected content cannot be forwarded or copied. `protected_content` applies to
 both modes when the source chat is protected or the message properties report
@@ -2254,9 +2314,10 @@ Residual risks, recorded rather than closed:
   Latin letters inside a word with ASCII letters, plus NFKC-unstable forms; look-alike
   words written entirely in one script appear literally, and legitimate letters such
   as ß or ł are marked when mixed with ASCII. A single U+FE0E/U+FE0F after any
-  non-selector character stays literal, and dialog word wrapping can still put an
-  untrusted word at the start of a visual line inside a `« »` span. The escaped MCP
-  preview and the hash cover all of these.
+  non-selector character stays literal, and a single space at the end of a payload line
+  is invisible. The escaped MCP preview and the hash cover all of these. Since 0.54 the
+  dialog view never wraps: the renderer splits rows at 96 columns with a `┆ ` continuation
+  mark, so an untrusted word no longer starts an unmarked visual line.
 - The source and recipient reads are cached or offline provider evidence, not an
   atomic Telegram guarantee: a remote edit can race the final check, and the delivered
   message is whatever the provider holds at transport time.
@@ -2363,12 +2424,13 @@ recomputed facts. Only a numeric provider error code appears in a fixed detail.
 
 The file name and caption are untrusted. The MCP preview carries each as a marked
 reversible JSON string in which only ASCII letters, digits, `_` and `-` are literal. The
-local dialog encloses each in `« … »` below the same legend line and readable rule as the
-forward dialog (letters of every script literal; control, format, default-ignorable,
-repeated-space and look-alike characters, `« » ⟦ 〚 〛` and line breaks shown as
-reversible `⟦U+XXXX⟧`), so untrusted content can neither close its span nor start a
-dialog line. The dialog is rebuilt from the stored immutable draft and validated against
-recipient, hash, size, name and caption before display; a mismatch is a decline. File
+local dialog shows the name in `« … »` and the caption as a gutter payload, under the same
+reading rule as the forward dialog (letters of every script literal; control, format,
+default-ignorable, repeated-space and look-alike characters, `« » ⟦ 〚 〛` and line breaks other
+than the caption's own line feeds shown as reversible `⟦U+XXXX⟧`), so untrusted content can
+neither close its span nor start a dialog line. The dialog is rebuilt from the stored immutable
+draft and validated against recipient, hash, size, name and caption before display; a mismatch
+shows no dialog and is `dialog_unavailable`. File
 names are normalized with NFKC before directory parts are removed, so a compatibility
 solidus (U+FF0F, U+FF3C, U+FE68) cannot become a separator after the split. This applies
 to every artifact-backed draft name: a document named `a／b.txt` is now `b.txt` instead of
@@ -2498,11 +2560,12 @@ registry records an `applied` receipt only for these kinds, with the observed li
 reads never disclose it and never report `sent`. Receipt retention is 900 seconds from the attempt.
 
 **Hostile content in the dialog.** Chat titles and message texts are untrusted. The MCP preview carries
-the texts as marked reversible JSON strings. The local dialogs are written for a human: the chat title,
-current text, each covered entity span and the new text are enclosed in `« … »` below the same legend
-line and readable rule as the forward dialog, so untrusted content can neither close its span nor start
-a dialog line. Each dialog is rebuilt from the stored immutable draft and validated against chat ID,
-title and hash before display (a mismatch is a decline). The archive dialog states that the chat leaves
+the texts as marked reversible JSON strings. The local dialogs are written for a human: the chat title
+and each covered entity span are enclosed in `« … »`, and the current and new texts are gutter payloads,
+under the same reading rule as the forward dialog, so untrusted content can neither close its span nor
+start a dialog line. Each dialog is rebuilt from the stored immutable draft and validated against chat
+ID, title and hash before display (a mismatch shows no dialog and is `dialog_unavailable`). The archive
+dialog states that the chat leaves
 its list and loses any pin there, that a chat folder excluding archived chats hides an archived chat,
 and Telegram's return-to-Main behaviour; the edit dialog shows the chat kind (a channel edit is visible
 to all subscribers), that link-preview settings return to Telegram's default and that recipients see the

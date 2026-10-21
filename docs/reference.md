@@ -284,6 +284,168 @@ reachable through these tools either: `list_drafts` omits them, `get_draft`, `up
 return `error`. Prepare again for the same chat (archive) or the same message (edit) to
 supersede one; see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 
+## Owner approval dialog
+
+Every send and change ends in one local macOS dialog. The broker opens it after its own revalidation and
+before the single-use claim; the MCP client cannot open, answer or skip it.
+
+**The window.** An `NSAlert` shown through `osascript -l JavaScript`. Its heading is "Unofficial Telegram
+MCP — approve send", or "… — approve change" for archive moves and own text edits. It has two buttons:
+`Cancel`, the default (Return), and `Send` or `Apply`, which has no key equivalent. A fixed-size,
+read-only scrolling view (740×400 points, monospaced, never wrapping) holds the document below. The
+window opens on the current Space, also over a full-screen app. The document reaches the script only as
+a command-line argument, never as script text. A 120-second timer ends the dialog.
+
+**The decision.** Only a click on `Send` or `Apply` approves. Everything else is one of three closed
+statuses, with no send or change:
+
+| What happened | `status` | `detail` |
+| --- | --- | --- |
+| `approved` was not `true`; no dialog is opened | `declined` | `explicit approval was not given` |
+| The owner clicked `Cancel` | `declined` | `the owner declined in the local dialog; no attempt was made` |
+| 120 seconds passed without a choice | `timeout` | `the local dialog timed out without a choice; no attempt was made` |
+| No dialog could be shown: `osascript` missing or failing, a non-zero exit, output other than the three tokens, the outer 125-second limit, or arguments that do not describe exactly one validated preview | `dialog_unavailable` | `the local dialog could not be shown; no attempt was made` |
+
+The draft stays pending in all three cases, until it expires, is superseded or is cancelled. Ask the user
+again before another send call; a timeout or an unavailable dialog is never approval. These statuses
+replace 0.53's `not_approved`. A `not_attempted` status was rejected, because no attempt can be proven
+for every path.
+
+**The document.** One renderer builds it for every kind, in a fixed order:
+
+1. A plain-language summary: what happens, to which chat, then `Account:` and `Expires:`.
+2. The exact payload. Untrusted strings use the reading rule below. A multi-line text keeps its real line
+   breaks: each line is its own row behind the gutter `│ `, and `«` before the first line and `»` after
+   the last mark the exact ends. Short strings such as titles and file names sit inline in `« »`.
+3. The reading rule, stated once in full: `Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks …`.
+4. `Technical details:`, with the draft ID and every bound hash.
+5. One closing sentence naming the revalidation and the single attempt.
+
+A row is at most 96 columns; wide characters count as two. A longer line continues on rows that start
+with `┆ `, and it breaks before a space, so a space at the break is visible right after `┆ `. Removing
+every line break followed by `┆ ` restores the logical lines exactly. A payload line can never start a
+row of its own: every payload row starts with `│ ` or `┆ `, and every other line break is marked
+`⟦U+XXXX⟧`.
+
+The templates below show logical lines. `[...]` marks optional lines; `<...>` marks values.
+
+Plain text:
+
+```text
+Send text to «<chat title>» (chat <ID>)
+Account: <ID>
+Expires: <time>
+
+Text (exact):
+│ «<first line>
+│ <next line>»
+
+Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the rule>. A row starting with │ is one payload line; a row starting with ┆ continues the row above, and a space right after ┆ belongs to the text.
+
+Technical details:
+Draft: <draft ID>
+Bytes: <N>
+Text SHA-256: <hash>
+
+Unofficial Telegram MCP will make one send attempt.
+```
+
+A document, photo or voice note:
+
+```text
+Send a document|photo|voice note to «<chat title>» (chat <ID>)
+Account: <ID>
+Expires: <time>
+
+File: «<file name>»
+MIME: <type>
+Bytes: <N>
+[Source file: «<original name>»]           (voice note)
+[Duration: <N> seconds]
+[Converted to OGG/Opus mono: True|False]
+Caption (exact):                         (or: Caption: (none))
+│ «<caption>»
+
+<reading rule>
+
+Technical details:
+Draft: <draft ID>
+SHA-256: <hash>
+[Source SHA-256: <hash>]                  (voice note)
+
+Unofficial Telegram MCP will make one upload/send attempt.
+```
+
+Text in a forum topic, formatted text, or both:
+
+```text
+Send text to a topic in «<chat title>» (chat <ID>)      (or: Send formatted text to «<chat title>» (chat <ID>))
+Account: <ID>
+Expires: <time>
+[Topic [untrusted Telegram evidence]: «<topic name>» (topic <ID>)]
+
+Text (exact):
+│ «<text>»
+[Outgoing styles (final normalized text; UTF-16 code units):
+textEntityType<Style>: offset <N>, length <M>; covered «<span>»]
+
+Plain text; normal notifications; no reply, formatting, link preview, schedule or draft clearing.
+  (formatted: Normal notifications; no reply, link preview, schedule or draft clearing.)
+
+<reading rule>
+
+Technical details:
+Draft: <draft ID>
+[Topic type: forum_supergroup|topics_bot; peer: <ID>]
+[Topic created: <unix time>; creator: user|chat <ID>]
+[Topic general: …; outgoing: …; closed: False; hidden: False]
+[Topic SHA-256: <hash>]
+Bytes: <N>
+Text SHA-256: <hash>
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate this account and topic, then make one send attempt.
+  (formatted: … this account and recipient, including any selected topic, then make one send attempt.)
+```
+
+A text reply, optionally in a topic and with styles:
+
+```text
+Send a reply to «<chat title>» (chat <ID>)
+Account: <ID>
+Expires: <time>
+[Topic [untrusted Telegram evidence]: «<topic name>» (topic <ID>)]
+
+In reply to message <ID> in chat <ID> [untrusted Telegram evidence]:
+│ «<the message replied to>»
+
+Reply text (exact):
+│ «<text>»
+[Outgoing styles (final normalized text; UTF-16 code units): …]
+
+<reading rule>
+
+Technical details:
+Draft: <draft ID>
+[the four topic lines]
+Bytes: <N>
+Text SHA-256: <hash>
+Target sanitized: True|False; truncated: False
+Target source SHA-256: <hash>
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.
+```
+
+A reply with a document, photo or voice note uses the same reply block, then the file lines of a plain
+file send. Its heading is `Send a document|photo|voice note reply to …`. A voice reply adds
+`Waveform (base64): <value>` after its source hash. Forward/copy, native video, archive and text-edit
+dialogs follow the same layout, shown in their own sections.
+
+The dialog is mutually exclusive with every other preview. Each preview is checked against the broker's
+own arguments: recipient, title, hashes, size, text, caption, file name and kind. A disagreement shows
+nothing and is `dialog_unavailable`. Labels are English until the owner decides on localisation.
+
 ## Discovery and selection
 
 Catalog and global-message coverage progress independently in deterministic round-robin order. Per call, the server advances at most:
@@ -2249,7 +2411,7 @@ draft, prepare again or let it expire; nothing is sent without
 `send_prepared_forward(draft_id, approved)` takes only the draft ID and a strict
 boolean. In order:
 
-1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+1. `approved` must be exactly `true`, otherwise `declined` with no lookup.
 2. Policy (`send` and `forward_send`) and owner (proxy client and current account)
    are checked; a draft of another kind returns `error`.
 3. A stored receipt is replayed; no dialog, no provider call.
@@ -2262,7 +2424,8 @@ boolean. In order:
    `forward` or `copy` no longer allowed is `source_not_forwardable`; protected
    content is `protected_content`; any other eligibility refusal is also
    `source_changed` because the hash binds the facts behind those refusals.
-7. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+7. The local owner dialog (below). Cancel is `declined`, the 120-second timer `timeout`, and a
+   dialog that cannot be shown `dialog_unavailable`.
 8. Owner, policy, provider session and account are checked again, then the
    single-use claim is taken (loss of authority is `expired`).
 9. Inside the serialized provider call the account, policy, claim, recipient
@@ -2281,54 +2444,62 @@ Notifications are normal; nothing is scheduled, paid or content-protected.
 
 ### Owner dialog
 
-The macOS dialog (default button Cancel, gives up after 120 seconds, which counts
-as declined) shows the same immutable preview that the proxy validated:
+The [owner approval dialog](#owner-approval-dialog) (Cancel default, 120-second timer) shows the
+same immutable preview that the proxy validated:
 
 ```text
-Forward this message to <recipient title> (chat <ID>)?
-FORWARD — recipients see the original sender
-  (or: COPY — sent as your own message, no attribution[; caption removed])
+Forward a message to «<recipient title>» (chat <ID>)
+Mode: FORWARD — recipients see the original sender
+  (or: Mode: COPY — sent as your own message, no attribution[; caption removed])
 Account: <ID>
-Draft: <draft ID>
 Expires: <time>
 
-Source chat: <title> (chat <ID>)
+Source chat: «<title>» (chat <ID>)
 Message ID: <ID>
 Sender [untrusted Telegram evidence]: user|chat <ID>
-[Author signature [untrusted Telegram evidence]: "<value>"]
+[Author signature [untrusted Telegram evidence]: «<value>»]
 [Via bot [untrusted Telegram evidence]: user <ID>]
 [Source is itself a forward: the copy carries no original attribution]
 Date: <time>
 Content: <kind>
-Untrusted spans in « » below are exact; ⟦U+XXXX⟧ marks <the rule below>.
-Text|Caption [untrusted Telegram evidence] (exact): «<text>»
-  (or: Text|Caption: (none)   or: Caption: removed — not sent; then no legend line)
+Text|Caption [untrusted Telegram evidence] (exact):
+│ «<first line>
+│ <next line>»
+  (or: Text|Caption: (none)   or: Caption: removed — not sent)
 [Text|Caption entities (raw text UTF-16 code units):
 <Type>: offset <N>, length <M>; covered «<span>»]
 [Link preview options [untrusted Telegram evidence]: disabled …; URL «…» or (none); small media …; large media …; above text …]
 [Link preview card [untrusted Telegram evidence]: URL «…»; its title, description and media are not shown]
-[Media [untrusted Telegram evidence]: file "…"; MIME "…"; title "…"; performer "…"; N seconds; WxH; starts at N seconds; N bytes; N variants; spoiler …; caption above media …]
+[Media [untrusted Telegram evidence]: file «…»; MIME «…»; title «…»; performer «…»; N seconds; WxH; starts at N seconds; N bytes; N variants; spoiler …; caption above media …]
+
+Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the rule below>. …
+
+Technical details:
+Draft: <draft ID>
 Source SHA-256: <hash>
-Recipient: <title> (chat <ID>)
 Preview SHA-256: <hash>
 
 Unofficial Telegram MCP will revalidate the source, its permissions and the recipient, then make one forward attempt.
 ```
 
 In the dialog, letters of every script stay literal, so Cyrillic or CJK text is
-readable. The legend line states the exact rule: shown as reversible `⟦U+XXXX⟧` are
-control (including newlines and tabs), format (bidi, zero-width), private-use and
+readable. The reading rule states the exact rule: shown as reversible `⟦U+XXXX⟧` are
+control (including tabs and line breaks other than a payload's own line feeds), format (bidi,
+zero-width), private-use and
 unassigned characters; every Unicode 16 default-ignorable code point except one
 U+FE0E/U+FE0F right after a non-selector character (ordinary emoji presentation);
 line, paragraph and non-ASCII spaces; every repeated space; U+2800; characters that
 NFKC changes; combining marks after the second in a row; `« » ⟦ 〚 〛`; and, inside a
 word that also has ASCII letters, Cyrillic, Greek, Armenian, Cherokee and Lisu
 letters and non-ASCII Latin letters without a canonical decomposition (ɡ, ı, ɑ; é and
-ü stay literal). Look-alike words written in one script are not marked. Literal `«`,
-`»` and line breaks are always marked, so untrusted content cannot close its span or
-start a dialog line. The dialog is mutually exclusive
-with every other send preview; a recipient, hash or field that disagrees with the
-validated preview shows nothing and counts as declined.
+ü stay literal). Look-alike words written in one script are not marked. Literal `«`
+and `»` are always marked, so untrusted content cannot close its span. A line feed in the
+text or caption starts a new `│ ` payload row and every other line break is marked, so untrusted
+content cannot start a dialog line. Titles, names and file facts are `« »` spans; 0.53 showed
+the titles raw and the file facts as JSON strings. The duplicate `Recipient:` line of 0.53 is gone;
+the summary names the recipient. The dialog is mutually exclusive with every other send preview; a
+recipient, hash or field that disagrees with the validated preview shows nothing and is
+`dialog_unavailable`.
 
 ### Outcomes and status
 
@@ -2337,7 +2508,9 @@ validated preview shows nothing and counts as declined.
 | `sent` | Exact provider confirmation; `message_id` is the positive final ID in the recipient chat | yes |
 | `failed` | Provider rejection or coherent correlated failure; the detail names at most the error code | yes |
 | `outcome_unknown` | Result lost, malformed or unconfirmed; do not retry automatically | possibly |
-| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `declined` | `approved` was not `true`, or the owner clicked Cancel | no |
+| `timeout` | The dialog's 120-second timer ended it without a choice | no |
+| `dialog_unavailable` | No dialog could be shown | no |
 | `expired` | Unknown, foreign, superseded or expired draft, broker restart, a provider read failure, or account, policy or session change | no |
 | `recipient_changed` | Step 5 | no |
 | `source_changed` | Step 6 | no |
@@ -2525,7 +2698,7 @@ other recipients and other clients are unaffected. Nothing is sent without
 `send_prepared_video(draft_id, approved)` takes only the draft ID and a strict boolean.
 In order:
 
-1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+1. `approved` must be exactly `true`, otherwise `declined` with no lookup.
 2. Policy (`send` and `video_send`) and owner (proxy client and current account) are
    checked; a draft of another kind returns `error`.
 3. A stored receipt is replayed; no dialog, no provider call.
@@ -2536,7 +2709,8 @@ In order:
    prepared ones, otherwise `recipient_changed`. A recipient that has become a secret chat
    or cannot be read is `expired`.
 6. Owner, policy and provider session are checked again, then the local owner dialog
-   (below). Decline, timeout or failure is `not_approved`.
+   (below). Cancel is `declined`, the 120-second timer `timeout`, and a dialog that cannot be
+   shown `dialog_unavailable`.
 7. Owner, policy, provider session and account are checked again, then the single-use claim
    is taken (loss of authority before this point is `expired`).
 8. The approved bytes are copied into a private staging directory and re-hashed. A mismatch
@@ -2560,39 +2734,41 @@ Notifications are normal; nothing is scheduled, paid or content-protected.
 
 ### Video owner dialog
 
-The macOS dialog (default button Cancel, gives up after 120 seconds, which counts as
-declined) shows the same immutable preview that the proxy validated:
+The [owner approval dialog](#owner-approval-dialog) (Cancel default, 120-second timer) shows the
+same immutable preview that the proxy validated:
 
 ```text
-Send this native video to <recipient title> (chat <ID>)?
+Send a native video to «<recipient title>» (chat <ID>)
 Account: <ID>
-Draft: <draft ID>
 Expires: <time>
 
-Untrusted spans in « » below are exact; ⟦U+XXXX⟧ marks <the listed characters>; look-alike words in one script are not marked.
 File name [untrusted] (exact): «<name>»
 Bytes: <N>
-SHA-256: <hash>
 Declared by the file (not decoded):
 Duration: <N> seconds
 Dimensions: <W>x<H>
 Codec: h264|hevc
 Audio: yes|no
 Streaming: yes|no
-Caption [untrusted] (exact): «<caption>»   (or: Caption: (none))
-Recipient: <title> (chat <ID>)
+Caption [untrusted] (exact):              (or: Caption: (none))
+│ «<caption>»
+
+Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the listed characters>; …
+
+Technical details:
+Draft: <draft ID>
+SHA-256: <hash>
 Preview SHA-256: <hash>
 
 Unofficial Telegram MCP will revalidate the account, the recipient and the file bytes, then make one upload/send attempt as a native video.
 ```
 
-The file name and caption use the same readable rendering and legend line as the
-[forward dialog](#owner-dialog): letters of every script stay literal, and the exact rule
-for what is shown as reversible `⟦U+XXXX⟧` is printed in the legend. Literal `«`, `»` and
-line breaks are always marked, so untrusted content cannot close its span or start a
-dialog line. The dialog is mutually exclusive with every other send preview; a recipient,
-hash, size, name or caption that disagrees with the validated preview shows nothing and
-counts as declined.
+The file name and caption use the same reading rule as the [forward dialog](#owner-dialog):
+letters of every script stay literal, and the exact rule for what is shown as reversible
+`⟦U+XXXX⟧` is printed once. Literal `«` and `»` are always marked; a caption line feed starts a
+new `│ ` payload row, so a forged caption line such as `Codec: hevc` stays behind the gutter. The
+dialog is mutually exclusive with every other send preview; a recipient, hash, size, name or
+caption that disagrees with the validated preview shows nothing and is `dialog_unavailable`.
 
 ### Outcomes and status of a video send
 
@@ -2601,7 +2777,9 @@ counts as declined.
 | `sent` | Exact provider confirmation; `message_id` is the positive final ID in the recipient chat | yes |
 | `failed` | Provider rejection or coherent correlated failure; the detail names at most the error code | yes |
 | `outcome_unknown` | Result lost, malformed, unconfirmed or still pending after the wait; do not retry automatically | possibly |
-| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `declined` | `approved` was not `true`, or the owner clicked Cancel | no |
+| `timeout` | The dialog's 120-second timer ended it without a choice | no |
+| `dialog_unavailable` | No dialog could be shown | no |
 | `expired` | Unknown, foreign, superseded or expired draft, broker restart, changed or missing artifact bytes, an unreadable recipient, or account, policy or session change before the claim | no |
 | `recipient_changed` | Step 5 | no |
 | `local_failed` | A local guard failed after approval and before transport (staging, authority, a recipient changed during the dialog); the claim is consumed | no |
@@ -2748,7 +2926,7 @@ has there is lost, and an archived chat can come back to Main.
 
 `apply_prepared_archive(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
 
-1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+1. `approved` must be exactly `true`, otherwise `declined` with no lookup.
 2. Policy (`send`, `read` and `archive_chats`) and owner (proxy client and current account) are checked;
    a draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
 3. A stored receipt is replayed; no dialog, no provider call.
@@ -2759,7 +2937,8 @@ has there is lost, and an archived chat can come back to Main.
    `target_list` is `already_in_target`. Any other change of its list (to no own list, to another
    list, to a sponsored or PSA position, to two lists) is `chat_changed`. A provider read failure
    or timeout is `expired`.
-6. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+6. The local owner dialog (below). Cancel is `declined`, the 120-second timer `timeout`, and a dialog
+   that cannot be shown `dialog_unavailable`.
 7. Owner, policy, provider session and account are checked again, then the single-use claim is
    taken (loss of authority before this point is `expired`).
 8. Inside the serialized provider call the account, policy, claim, chat identity, title, kind and
@@ -2778,15 +2957,13 @@ shape, enforced before transport (see the [security model](security.md#archive-a
 
 ### Archive: owner dialog
 
-The macOS dialog (title "Unofficial Telegram MCP — approve change", buttons `Cancel` (default) and
-`Apply`, gives up after 120 seconds, which counts as declined) shows the same immutable preview that
-the proxy validated:
+The [owner approval dialog](#owner-approval-dialog) for a change (heading "Unofficial Telegram MCP —
+approve change", buttons `Cancel` (default) and `Apply`, 120-second timer) shows the same immutable
+preview that the proxy validated:
 
 ```text
-Move chat «<title>» (chat <ID>, <kind>) from Main to Archive?
-Untrusted spans in « » are exact; ⟦U+XXXX⟧ marks <the characters listed by the legend>; look-alike words in one script are not marked.
+Move chat «<title>» (chat <ID>, <kind>) from Main to Archive
 Account: <ID>
-Draft: <draft ID>
 Expires: <time>
 
 Current list: Main
@@ -2794,6 +2971,11 @@ Target list: Archive
 Note: the chat leaves Main and loses any pin there; it is not pinned in Archive (Telegram behaviour).
 [Note: chat folders that exclude archived chats will hide it (Telegram behaviour).]
 [Note: <the preview note> (Telegram behaviour).]
+
+Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
+
+Technical details:
+Draft: <draft ID>
 Preview SHA-256: <hash>
 
 Unofficial Telegram MCP will revalidate the account, the chat and its current list, then make one move attempt and report the list it observes right after.
@@ -2802,11 +2984,12 @@ Unofficial Telegram MCP will revalidate the account, the chat and its current li
 Moving back to Main reads "from Archive to Main" and shows only the first note (`the chat leaves
 Archive and loses any pin there; it is not pinned in Main`). The two bracketed notes appear only
 when archiving. The pin and folder notes belong to the dialog only; the preview's `note` field is
-unchanged. The chat title is untrusted: it uses the same readable rendering and legend line as the
+unchanged. The chat title is untrusted: it uses the same reading rule as the
 [forward dialog](#owner-dialog) (letters of every script literal; control, format, look-alike and
 repeated-space characters, `« » ⟦ 〚 〛` and line breaks as reversible `⟦U+XXXX⟧`), so it can neither
 close its span nor start a dialog line. The dialog is mutually exclusive with every other preview;
-a chat ID, title or hash that disagrees with the validated preview shows nothing and counts as declined.
+a chat ID, title or hash that disagrees with the validated preview shows nothing and is
+`dialog_unavailable`.
 
 ### Archive: outcomes
 
@@ -2817,7 +3000,9 @@ a chat ID, title or hash that disagrees with the validated preview shows nothing
 | `chat_changed` | Step 5: identity, title, kind or list changed | no |
 | `failed` | Provider rejection with a 4xx error code; the detail is `TDLib rejected the change (code N)` | yes (rejected) |
 | `outcome_unknown` | Result lost, malformed or unconfirmed, a non-4xx error code, timeout, transport loss, or the target list not observed; do not retry automatically | possibly |
-| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `declined` | `approved` was not `true`, or the owner clicked Cancel | no |
+| `timeout` | The dialog's 120-second timer ended it without a choice | no |
+| `dialog_unavailable` | No dialog could be shown | no |
 | `expired` | Unknown, foreign, superseded or expired draft, broker restart, or account or policy change before the claim | no |
 | `local_failed` | A local guard failed after approval and before transport; the claim is consumed | no |
 | `error` | The draft is not an archive draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
@@ -2924,7 +3109,7 @@ chat and its kind, and the edit date. The whole text is replaced; there is no pa
 
 `apply_prepared_text_edit(draft_id, approved)` takes only the draft ID and a strict boolean. In order:
 
-1. `approved` must be exactly `true`, otherwise `not_approved` with no lookup.
+1. `approved` must be exactly `true`, otherwise `declined` with no lookup.
 2. Policy (`send`, `read` and `edit_own_text`) and owner (proxy client and current account) are checked; a
    draft of another kind returns `error`, an unknown, foreign, superseded or expired one `expired`.
 3. A stored receipt is replayed; no dialog, no provider call.
@@ -2936,7 +3121,8 @@ chat and its kind, and the edit date. The whole text is replaced; there is no pa
    is `message_changed`. So is a message whose edit permission has closed (detail `message can no
    longer be edited; no change was attempted`). Another provider read failure or a timeout is
    `expired`.
-6. The local owner dialog (below). Decline, timeout or failure is `not_approved`.
+6. The local owner dialog (below). Cancel is `declined`, the 120-second timer `timeout`, and a dialog
+   that cannot be shown `dialog_unavailable`.
 7. Owner, policy, provider session and account are checked again, then the single-use claim is taken
    (loss of authority before this point is `expired`).
 8. Inside the serialized provider call the account, policy, claim, projection hash, chat identity,
@@ -2954,27 +3140,33 @@ the new text and no entities, `link_preview_options: null` and `clear_draft: fal
 
 ### Edit: owner dialog
 
-The macOS dialog (same title, `Cancel` default and `Apply` button, 120-second give-up as the archive
+The change dialog (same heading, `Cancel` default and `Apply` button, 120-second timer as the archive
 dialog) shows the same immutable preview that the proxy validated:
 
 ```text
-Edit your message <ID> in «<chat title>» (chat <ID>, <kind>)?
-Untrusted spans in « » are exact; ⟦U+XXXX⟧ marks <the characters listed by the legend>; look-alike words in one script are not marked.
+Edit your message <ID> in «<chat title>» (chat <ID>, <kind>)
 Account: <ID>
-Draft: <draft ID>
 Expires: <time>
+Last edited: never | <UTC time>
 
-Current text [untrusted Telegram evidence] (exact): «<current text>»
+Current text [untrusted Telegram evidence] (exact):
+│ «<current text>»
 [Current formatting, removed by this plain-text edit (raw text UTF-16 code units):
 <Type>: offset <N>, length <M>; covered «<span>»]
 [Current auto-detected entities, auto-detected again by Telegram wherever the new text contains them (raw text UTF-16 code units):
 <Type>: offset <N>, length <M>; covered «<span>»]
-New text (exact): «<new text>»
-Last edited: never | <UTC time>
+New text (exact):
+│ «<new text>»
+
+The new text is plain text without formatting; Telegram may detect links in it and show a link preview. Link preview settings return to Telegram's default. Recipients see the message marked "edited".
+
+Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
+
+Technical details:
+Draft: <draft ID>
 Source SHA-256: <hash>
 Preview SHA-256: <hash>
 
-The new text is plain text without formatting; Telegram may detect links in it and show a link preview. Link preview settings return to Telegram's default. Recipients see the message marked "edited".
 Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, then make one edit attempt.
 ```
 
@@ -2983,9 +3175,10 @@ a channel reaches every subscriber. Only formatting that Telegram does not detec
 under "removed"; Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and
 BankCardNumber entities are listed separately as auto-detected again, and a block is omitted when it
 would be empty. The chat title, the current text, each covered span and the new text use the same
-readable rendering and legend line as the [forward dialog](#owner-dialog). The dialog is mutually
-exclusive with every other preview; a chat ID, title, source hash or field that disagrees with the
-validated preview shows nothing and counts as declined.
+reading rule as the [forward dialog](#owner-dialog); both texts keep their line feeds as `│ ` payload
+rows, so a forged `New text (exact):` line inside the current text stays behind the gutter. The dialog
+is mutually exclusive with every other preview; a chat ID, title, source hash or field that disagrees
+with the validated preview shows nothing and is `dialog_unavailable`.
 
 Explain to the owner what Telegram does with the edit: recipients see the message marked "edited",
 formatting listed as removed is gone, link-preview settings go back to Telegram's default and
@@ -3000,7 +3193,9 @@ these tools and no tool restores it.
 | `message_changed` | Step 5: the message, its chat or its edit permission changed | no |
 | `failed` | Provider rejection with a 4xx error code; the detail is `TDLib rejected the change (code N)` | yes (rejected) |
 | `outcome_unknown` | Result lost, malformed or unconfirmed (wrong text, message or chat, missing or stale `edit_date`), a non-4xx error code, timeout or transport loss; do not retry automatically | possibly |
-| `not_approved` | `approved` was not `true`, or the owner declined | no |
+| `declined` | `approved` was not `true`, or the owner clicked Cancel | no |
+| `timeout` | The dialog's 120-second timer ended it without a choice | no |
+| `dialog_unavailable` | No dialog could be shown | no |
 | `expired` | Unknown, foreign, superseded or expired draft, broker restart, or account or policy change before the claim | no |
 | `local_failed` | A local guard failed after approval and before transport; the claim is consumed | no |
 | `error` | The draft is not a text edit draft, or the proxy rejected the request before dispatch (for example `capability_disabled`) | no |
