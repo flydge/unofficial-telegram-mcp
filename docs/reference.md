@@ -98,7 +98,13 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 - `Error executing tool <tool>: config_stale (restart matching components)`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Argument-schema errors keep the SDK's detailed text, and any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
+
+Since the 0.54 candidate, arguments that do not match a tool's input schema get one fixed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`):
+
+- `Error executing tool <tool>: invalid_arguments (arguments must match the input schema)`
+
+It never contains field paths, caller-chosen keys, values, pydantic text or documentation URLs. A call naming an unregistered tool gets `unknown_tool (refresh tools/list)` without the name. Argument validation runs before the guard, so invalid arguments to a disabled tool report `invalid_arguments`. Any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`.
 
 ## Codex skill
 

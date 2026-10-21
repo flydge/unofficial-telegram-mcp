@@ -1,7 +1,8 @@
-"""The 0.54 tool surface (spec A, criterion 2), observed through the official SDK client.
+"""The 0.54 tool surface (spec A and B, criteria 2 and 3), observed through the official SDK client.
 
 Descriptions are short user-facing contracts within budget; every tool has a top-level title and the
-annotations of the 21.10 lead decision; and key inputs are described.
+annotations of the 21.10 lead decision; key inputs are described; and every argument refusal is one
+fixed, input-free text.
 """
 from __future__ import annotations
 
@@ -9,11 +10,13 @@ import json
 import re
 import unittest
 
+from mcp import Client
+
 from telegram_search_mcp import server as server_module
 from telegram_search_mcp.config import KNOWN_CAPABILITIES
 from telegram_search_mcp.selection_broker import selected_models
-from telegram_search_mcp.server import _TOOL_CAPABILITIES, _TOOL_NAMES
-from tool_listing import full_listing
+from telegram_search_mcp.server import _TOOL_CAPABILITIES, _TOOL_NAMES, build_server
+from tool_listing import FULL_POLICY, full_listing
 
 PER_TOOL, TOTAL = 1500, 30000
 JARGON = re.compile(r"private v\d|\bv\d{1,2}\b|\bipc ?2\b|canonical|prewire|contract ?1\b|display bytes", re.I)
@@ -37,6 +40,26 @@ KEY_INPUTS = {'target', 'targets', 'anchor', 'anchors', 'selection_id', 'reply_s
 REPLY_TOOLS = ('prepare_reply_artifact_send', 'get_reply_artifact_draft', 'update_reply_artifact_draft',
                'refresh_reply_artifact_draft', 'prepare_reply_text_send', 'get_reply_draft', 'update_reply_draft',
                'refresh_reply_draft')
+CALLER_KEY, VALUE = 'caller_key_sentinel_7d2e', 'VALUE_SENTINEL_91c4'
+INVALID = 'Error executing tool {}: invalid_arguments (arguments must match the input schema)'
+
+
+class _Untouched:
+    """Every service method exists, so a tool body builds its request first; calling one is a test failure."""
+
+    def close(self):
+        pass
+
+    def __getattr__(self, name):
+        def method(*args, **kwargs):
+            raise AssertionError('provider called')
+        return method
+
+
+def server(policy=FULL_POLICY, factory=_Untouched):
+    return build_server(service_factory=factory, policy=policy)
+
+
 class DescriptionBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tools = await full_listing()
@@ -137,6 +160,84 @@ class AnnotationAndFieldTests(unittest.IsolatedAsyncioTestCase):
                 # Shared aliases stay untouched: no output schema carries an input description.
                 rendered = json.dumps(tool.output_schema or {}, ensure_ascii=False)
                 self.assertFalse([text for text in documented if text in rendered])
+
+
+class InputRefusalTests(unittest.IsolatedAsyncioTestCase):
+    def assertInvalid(self, result, name):
+        self.assertTrue(result.is_error)
+        self.assertIsNone(result.structured_content)
+        self.assertEqual([(block.type, block.text) for block in result.content], [('text', INVALID.format(name))])
+
+    def assertInputFree(self, text):
+        for leak in ('errors.pydantic.dev', 'validation error', CALLER_KEY, VALUE, 'input_value', '[type='):
+            self.assertNotIn(leak.casefold(), text.casefold())
+
+    async def test_every_tool_refuses_invalid_arguments_with_one_fixed_text(self):
+        tools = await full_listing()
+        self.assertEqual(len(tools), len(_TOOL_NAMES))
+        async with Client(server()) as client:
+            for name, tool in tools.items():
+                properties = tool.input_schema['properties']
+                cases = [{CALLER_KEY: VALUE}]
+                for key in properties:
+                    # A JSON string exercises the SDK's pre-parse; the extra key makes even a string input invalid.
+                    cases += [{key: {CALLER_KEY: VALUE}}, {key: json.dumps({CALLER_KEY: VALUE}), CALLER_KEY: VALUE},
+                              {key: [VALUE]}, {key: True, CALLER_KEY: VALUE}]
+                if tool.input_schema.get('required') or name in selected_models():
+                    cases.append({})
+                for arguments in cases:
+                    with self.subTest(tool=name, arguments=arguments):
+                        result = await client.call_tool(name, arguments)
+                        self.assertInvalid(result, name)
+                        self.assertInputFree(result.content[0].text)
+
+    async def test_strict_hooks_and_request_models_refuse_with_the_same_text(self):
+        cases = (('search_correspondence', {'target': -1001, 'query': '{"text":"' + VALUE + '"}'}),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': '1750000000'}),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_to': 1750000000}),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': VALUE}),
+                 ('read_history', {'target': 7, 'mode': 'latest', 'date_from': '2026-01-01T00:00:00Z'}),
+                 ('search_messages', {'target': 7, 'query': {'all': [VALUE], 'nested': {CALLER_KEY: 1}},
+                                      'mode': 'latest'}),
+                 ('create_local_artifact', {'file_name': 'a.txt'}),
+                 ('create_local_artifact', {'file_name': 'a.txt', 'content': VALUE, 'content_base64': 'QQ=='}),
+                 ('get_attachment', {'anchor': {'chat_id': 7, 'message_id': 8}, 'selection_id': 'selection_' + 'a' * 64}),
+                 ('prepare_reply_text_send', {'recipient': 7, 'text': VALUE}))
+        async with Client(server()) as client:
+            for name, arguments in cases:
+                with self.subTest(tool=name, arguments=arguments):
+                    result = await client.call_tool(name, arguments)
+                    self.assertInvalid(result, name)
+                    self.assertInputFree(result.content[0].text)
+
+    async def test_unknown_tool_is_not_echoed(self):
+        async with Client(server()) as client:
+            result = await client.call_tool('no_such_tool_' + VALUE, {CALLER_KEY: VALUE})
+        self.assertTrue(result.is_error)
+        self.assertEqual([(block.type, block.text) for block in result.content],
+                         [('text', 'unknown_tool (refresh tools/list)')])
+
+    async def test_provider_and_output_failures_are_not_called_argument_errors(self):
+        class BadOutput:
+            def close(self):
+                pass
+
+            def resolve(self, request):
+                return {CALLER_KEY: VALUE}
+
+        async with Client(server()) as client:
+            crashed = await client.call_tool('resolve_target', {'target': '@valid_name'})
+        async with Client(server(factory=BadOutput)) as client:
+            malformed = await client.call_tool('resolve_target', {'target': '@valid_name'})
+        for result in (crashed, malformed):
+            self.assertTrue(result.is_error)
+            self.assertEqual(result.content[0].text, 'Error executing tool resolve_target')
+
+    def test_request_models_cover_the_bodies_that_build_requests(self):
+        for model in ('CreateLocalArtifactRequest', 'DiscoverTargetsRequest', 'SearchRequest', 'ReadHistoryRequest',
+                      'PrepareReplyTextSendRequest', 'IssueLocalUploadAuthorityRequest', 'RetainSelectionRequest'):
+            self.assertIn(model, server_module._REQUEST_MODELS)
+        self.assertFalse({name for name in server_module._REQUEST_MODELS if not name.endswith('Request')})
 
 
 if __name__ == '__main__':

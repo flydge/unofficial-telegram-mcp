@@ -21,7 +21,7 @@ from pathlib import Path
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .selection_refs import SelectionId, SelectionRefusal, source_schema
 from .retained_selection_models import RetainSelectionRequest, RetainSelectionSource, RetainSelectionResponse
@@ -559,17 +559,51 @@ def _describe(name: str, *, selection: bool = False) -> str:
     return " ".join((what, _needs(name), rules) + ((_SELECTION,) if selection else ()))
 
 
+# SDK 2.2.0 reports an argument failure as pydantic text (loc, caller-chosen keys, documentation URLs)
+# and echoes an unknown tool name. Both reach the client as one fixed, input-free text instead.
+_INPUT_REFUSALS = {
+    "invalid_arguments": "Error executing tool {}: invalid_arguments (arguments must match the input schema)",
+    "unknown_tool": "unknown_tool (refresh tools/list)",
+}
+# Request models a tool body builds from already-validated arguments; their refusals are argument refusals.
+_REQUEST_MODELS = frozenset(name for name, value in tuple(globals().items())
+                            if name.endswith("Request") and isinstance(value, type) and issubclass(value, BaseModel))
+
+
+class _InvalidArguments(ValueError):
+    """A strict pre-parse hook refused the raw arguments."""
+
+
+def _invalid_arguments(error: ToolError) -> bool:
+    """SDK or strict-hook validation (a plain ToolError caused by a ValidationError), a hook's own refusal,
+    or a request model built in the tool body; never an output or provider failure."""
+    cause = error.__cause__
+    if isinstance(cause, _InvalidArguments):
+        return True
+    return isinstance(cause, ValidationError) and (type(error) is ToolError or cause.title in _REQUEST_MODELS)
+
+
 class _PolicyServer(MCPServer):
     """tools/list shows only the tools the loaded policy enables, rechecked on every listing, so it
     always agrees with _manifest.available_tools (a stale policy lists only _manifest). The
     registration, and so the schema fingerprint, stays complete; an unlisted tool still answers with
-    its guard refusal."""
+    its guard refusal. Argument failures and unknown tool names get fixed texts."""
 
     policy: RuntimePolicy = RuntimePolicy()
 
     async def list_tools(self):
         listed = frozenset(_usable_tools(self.policy))
         return [tool for tool in await super().list_tools() if tool.name in listed]
+
+    async def call_tool(self, name, arguments, context=None):
+        if self._tool_manager.get_tool(name) is None:
+            raise ToolError(_INPUT_REFUSALS["unknown_tool"])
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as error:
+            if _invalid_arguments(error):
+                raise ToolError(_INPUT_REFUSALS["invalid_arguments"].format(name)) from None
+            raise
 
 
 # 0.54 lead decision (21.10): read-only covers every reader, prepare_* (local draft state only), get_*,
@@ -595,14 +629,17 @@ _GUARD_REFUSALS = {
 
 def _validate_raw_search_arguments(arguments: dict[str, object]) -> None:
     if "query" in arguments and not isinstance(arguments["query"], dict):
-        raise ValueError("invalid search arguments")
+        raise _InvalidArguments
     for name in ("date_from", "date_to"):
         value = arguments.get(name)
         if value is None:
             continue
         if not isinstance(value, str):
-            raise ValueError("invalid search arguments")
-        validate_search_datetime(value)
+            raise _InvalidArguments
+        try:
+            validate_search_datetime(value)
+        except ValueError:
+            raise _InvalidArguments from None
 
 
 def _default_service() -> SearchService:

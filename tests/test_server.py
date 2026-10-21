@@ -568,7 +568,8 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result.is_error)
                     self.assertEqual(
                         result.content[0].text,
-                        "Error executing tool search_correspondence",
+                        "Error executing tool search_correspondence: invalid_arguments "
+                        "(arguments must match the input schema)",
                     )
 
         self.assertIsNone(self.service.last_request)
