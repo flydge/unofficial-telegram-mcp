@@ -15,14 +15,29 @@ RULE = ('⟦U+XXXX⟧ marks control, format, private-use, unassigned and default
         'spaces, every repeated space, U+2800, characters NFKC changes, combining marks after the second '
         'in a row, « » ⟦ 〚 〛, and Cyrillic, Greek, Armenian, Cherokee, Lisu or undecomposed non-ASCII '
         'Latin letters in a word that also has ASCII letters; look-alike words in one script are not marked')
-LEGEND = ('Reading rule: text in « » is exact; ' + RULE + '. A row starting with │ is one payload line; '
-          'a row starting with ┆ continues the row above, and a space right after ┆ belongs to the text.')
+LEGEND = ('Reading rule: text in « » is exact unless its label says rendering; ' + RULE + '. A row starting with '
+          '│ is one payload line; a row starting with ┆ continues the row above: the marker is "┆ " (┆ and one '
+          'space), and any further space after it belongs to the text.')
 MARK = '[untrusted Telegram evidence]'
 WIDTH = 96
 
 
 def logical(document: str) -> str:
     return document.replace('\n┆ ', '')
+
+
+def read_as_stated(rows: list[str]) -> list[str]:
+    """Payload lines read from gutter rows by the dialog's own rule alone: "│ " opens a line, "┆ " (the
+    marker plus exactly one space) continues it, and any further space is text."""
+    lines: list[str] = []
+    for row in rows:
+        marker, text = row[:2], row[2:]
+        assert marker in ('│ ', '┆ '), row
+        if marker == '│ ':
+            lines.append(text)
+        else:
+            lines[-1] += text
+    return lines
 
 
 def columns(row: str) -> int:

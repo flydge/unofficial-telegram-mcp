@@ -323,13 +323,14 @@ for every path.
 2. The exact payload. Untrusted strings use the reading rule below. A multi-line text keeps its real line
    breaks: each line is its own row behind the gutter `│ `, and `«` before the first line and `»` after
    the last mark the exact ends. Short strings such as titles and file names sit inline in `« »`.
-3. The reading rule, stated once in full: `Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks …`.
+3. The reading rule, stated once in full: `Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks …`.
 4. `Technical details:`, with the draft ID and every bound hash.
 5. One closing sentence naming the revalidation and the single attempt.
 
 A row is at most 96 columns; wide characters count as two. A longer line continues on rows that start
-with `┆ `, and it breaks before a space, so a space at the break is visible right after `┆ `. Removing
-every line break followed by `┆ ` restores the logical lines exactly. No payload line can pass for a
+with the marker `┆` plus exactly one space. It breaks before a space where it can, so that space is
+visible as text after the marker (`┆  word`); a long word or URL breaks at the width with no space
+(`┆ xxxx`). Removing every line break followed by `┆ ` restores the logical lines exactly. No payload line can pass for a
 dialog line: every payload row starts with `│ ` or `┆ `, and every other line break in untrusted text
 is marked `⟦U+XXXX⟧`.
 
@@ -346,7 +347,7 @@ Text (exact):
 │ «<first line>
 │ <next line>»
 
-Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the rule>. A row starting with │ is one payload line; a row starting with ┆ continues the row above, and a space right after ┆ belongs to the text.
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the rule>. A row starting with │ is one payload line; a row starting with ┆ continues the row above: the marker is "┆ " (┆ and one space), and any further space after it belongs to the text.
 
 Technical details:
 Draft: <draft ID>
@@ -422,8 +423,9 @@ Account: <ID>
 Expires: <time>
 [Topic [untrusted Telegram evidence]: «<topic name>» (topic <ID>)]
 
-In reply to message <ID> in chat <ID> [untrusted Telegram evidence]:
+In reply to message <ID> in chat <ID> [untrusted Telegram evidence][ (cleaned rendering, not exact)]:
 │ «<the message replied to>»
+Target sanitized: True|False; truncated: False
 
 Reply text (exact):
 │ «<text>»
@@ -436,12 +438,15 @@ Draft: <draft ID>
 [the four topic lines]
 Bytes: <N>
 Text SHA-256: <hash>
-Target sanitized: True|False; truncated: False
 Target source SHA-256: <hash>
 Preview SHA-256: <hash>
 
 Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.
 ```
+
+The reply evidence is the bound rendering of the message replied to (`render_content` or
+`sanitize_telegram_text`), not Telegram's raw text. When cleaning changed it (`sanitized` true), its label
+says `(cleaned rendering, not exact)`; the sanitized flag always sits directly under the evidence.
 
 A reply with a document, photo or voice note uses the same reply block, then the file lines of a plain
 file send. Its heading is `Send a document|photo|voice note reply to …`. A voice reply adds
@@ -2522,7 +2527,7 @@ Text|Caption [untrusted Telegram evidence] (exact):
 [Link preview card [untrusted Telegram evidence]: URL «…»; its title, description and media are not shown]
 [Media [untrusted Telegram evidence]: file «…»; MIME «…»; title «…»; performer «…»; N seconds; WxH; starts at N seconds; N bytes; N variants; spoiler …; caption above media …]
 
-Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the rule below>. …
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the rule below>. …
 
 Technical details:
 Draft: <draft ID>
@@ -2803,7 +2808,7 @@ Streaming: yes|no
 Caption [untrusted] (exact):              (or: Caption: (none))
 │ «<caption>»
 
-Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the listed characters>; …
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the listed characters>; …
 
 Technical details:
 Draft: <draft ID>
@@ -3023,7 +3028,7 @@ Note: the chat leaves Main and loses any pin there; it is not pinned in Archive 
 [Note: chat folders that exclude archived chats will hide it (Telegram behaviour).]
 [Note: <the preview note> (Telegram behaviour).]
 
-Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
 
 Technical details:
 Draft: <draft ID>
@@ -3211,7 +3216,7 @@ New text (exact):
 
 The new text is plain text without formatting; Telegram may detect links in it and show a link preview. Link preview settings return to Telegram's default. Recipients see the message marked "edited".
 
-Reading rule: text in « » is exact; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the characters listed by the rule>; …
 
 Technical details:
 Draft: <draft ID>

@@ -219,8 +219,9 @@ class _Payload:
 
 def _legend() -> str:
     from .forward_drafts import READABLE_RULE
-    return (f'Reading rule: text in « » is exact; {READABLE_RULE}. A row starting with │ is one payload line; '
-            'a row starting with ┆ continues the row above, and a space right after ┆ belongs to the text.')
+    return (f'Reading rule: text in « » is exact unless its label says rendering; {READABLE_RULE}. A row starting '
+            'with │ is one payload line; a row starting with ┆ continues the row above: the marker is "┆ " (┆ and '
+            'one space), and any further space after it belongs to the text.')
 
 
 def _document(summary, body, technical, closing) -> str:
@@ -310,12 +311,15 @@ def _topic_document(draft) -> str:
 
 
 def _reply_target(target) -> tuple[list, list[str]]:
-    """(payload lines, technical lines) for the message replied to; its text is untrusted evidence."""
+    """(payload lines, technical lines) for the message replied to; its text is untrusted evidence. The
+    evidence is the bound rendering (render_content / sanitize_telegram_text), so a sanitized target is
+    labelled a cleaned rendering and its sanitized flag stays directly under it."""
     anchor = target.anchor
-    return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}:',
-             _Payload(_evidence(target.text))],
-            [f'Target sanitized: {target.sanitized}; truncated: {target.truncated}',
-             f'Target source SHA-256: {target.source_sha256}'])
+    label = ' (cleaned rendering, not exact)' if target.sanitized else ''
+    return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}{label}:',
+             _Payload(_evidence(target.text)),
+             f'Target sanitized: {target.sanitized}; truncated: {target.truncated}'],
+            [f'Target source SHA-256: {target.source_sha256}'])
 
 
 def _reply_document(validated) -> str:
