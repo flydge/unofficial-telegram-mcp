@@ -335,7 +335,7 @@ python3 -m venv .venv
 
 Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO/unofficial-telegram-mcp` placeholders in the config example with its actual absolute path; neither shell variables nor `~` are expanded by the example. Runtime data lives under the signed-in user’s `~/Library/Application Support/TelegramSearchMCP`, and the local service names derive from that home directory’s final component.
 
-The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`.
+The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`. On the Homebrew/source path a `TDLIB_OPENSSL_KEG: openssl@3 <version>` line (or `unavailable`/`unrecognized`) follows `INITIALIZING_TDLIB`, naming the OpenSSL keg the Homebrew TDLib loads; the bundled runtime omits it.
 
 To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-five tools of the current candidate.
 

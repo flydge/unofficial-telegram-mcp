@@ -28,7 +28,7 @@ from .retained_selection_models import RetainSelectionRequest, RetainSelectionSo
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
-from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError
+from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        required_capabilities)
@@ -1529,6 +1529,8 @@ def build_server(
 
 def _run_check() -> int:
     print("INITIALIZING_TDLIB", file=sys.stderr)
+    if bundled_runtime_pin().startswith("Homebrew"):
+        print("TDLIB_OPENSSL_KEG: " + homebrew_openssl_keg(), file=sys.stderr)
     client: BrokerClient | None = None
     try:
         client = BrokerClient(socket_path=BROKER_SOCKET_PATH)

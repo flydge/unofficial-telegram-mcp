@@ -583,12 +583,14 @@ class FakeClient:
     def close(self):
         pass
 server.BrokerClient = lambda **kwargs: FakeClient()
+server.homebrew_openssl_keg = lambda: "openssl@3 9.9.9"
 raise SystemExit(server._run_check())
 """,
             f"""
 from telegram_search_mcp import server
 from telegram_search_mcp.broker_client import BrokerUnavailable
 server.BrokerClient = lambda **kwargs: (_ for _ in ()).throw(BrokerUnavailable({sentinel!r}))
+server.homebrew_openssl_keg = lambda: "openssl@3 9.9.9"
 raise SystemExit(server._run_check())
 """,
         )
@@ -604,7 +606,7 @@ raise SystemExit(server._run_check())
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(
                     result.stderr,
-                    "INITIALIZING_TDLIB\nTDLIB_CHECK_FAILED\n",
+                    "INITIALIZING_TDLIB\nTDLIB_OPENSSL_KEG: openssl@3 9.9.9\nTDLIB_CHECK_FAILED\n",
                 )
                 self.assertNotIn(sentinel, result.stdout + result.stderr)
 
@@ -622,11 +624,40 @@ raise SystemExit(server._run_check())
         ), patch(
             "telegram_search_mcp.tdjson.TDLibClient.from_defaults",
             side_effect=AssertionError("must not construct TDLib in proxy"),
+        ), patch.object(
+            server_module, "homebrew_openssl_keg", return_value="openssl@3 3.6.4"
         ), contextlib.redirect_stderr(stderr):
             result = server_module._run_check()
 
         self.assertEqual(result, 0)
-        self.assertEqual(stderr.getvalue(), "INITIALIZING_TDLIB\nAUTHORIZATION_READY\n")
+        self.assertEqual(
+            stderr.getvalue(),
+            "INITIALIZING_TDLIB\nTDLIB_OPENSSL_KEG: openssl@3 3.6.4\nAUTHORIZATION_READY\n",
+        )
+
+    def test_check_reports_the_openssl_keg_only_on_the_homebrew_path(self) -> None:
+        class ReadyBroker:
+            def check(self) -> str:
+                return "ready"
+
+            def close(self) -> None:
+                pass
+
+        self.assertTrue(server_module.bundled_runtime_pin().startswith("Homebrew"))
+        for pin, keg, expected in (
+            ("Homebrew TDLib HEAD-d1085f9 legacy tdjson ABI", "unavailable", "TDLIB_OPENSSL_KEG: unavailable\n"),
+            ("Homebrew TDLib HEAD-d1085f9 legacy tdjson ABI", "unrecognized", "TDLIB_OPENSSL_KEG: unrecognized\n"),
+            ("receipt-bound bundled TDLib d1085f9 legacy tdjson ABI; macos-arm6426+", "openssl@3 3.6.4", ""),
+        ):
+            stderr = io.StringIO()
+            with self.subTest(pin=pin, keg=keg), patch.object(
+                server_module, "BrokerClient", return_value=ReadyBroker()
+            ), patch.object(server_module, "bundled_runtime_pin", return_value=pin), patch.object(
+                server_module, "homebrew_openssl_keg", return_value=keg
+            ) as probe, contextlib.redirect_stderr(stderr):
+                self.assertEqual(server_module._run_check(), 0)
+            self.assertEqual(stderr.getvalue(), "INITIALIZING_TDLIB\n" + expected + "AUTHORIZATION_READY\n")
+            self.assertEqual(probe.call_count, 1 if expected else 0)
 
 
 if __name__ == "__main__":
