@@ -3,6 +3,72 @@
 ## 0.53.0.dev0 — unreleased
 
 Development of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md)).
+Every item below has unit-test or ad hoc dry-run evidence only. The Developer ID signed and notarized
+build, the clean-user install, the owner's migration, the product name and publication wait for the
+owner; no signed DMG or public release asset exists yet.
+
+- Product identity (phase A): every user-visible name comes from `product_identity.py`, with a
+  rename-impact test and a name-length check that keeps every plugin tool name within 64 characters.
+  TDLib now reports the product's device model and the package version. Internal compatibility names
+  (the Python package, support paths, Keychain service, launchd labels, environment keys) are unchanged.
+  The product name itself is still a placeholder (owner-pending).
+- Reproducible payload (phase B): `packaging/prepare_native.py` reproduces the native lock from the pinned
+  Homebrew kegs and `packaging/prepare_payload.py` builds the pruned payload from pinned inputs (the
+  archive is about 81 MB, down from about 106 MB; two builds are identical). Manifest v2 (`publication`,
+  `source_completeness`, `publisher`) and native lock v2 (a reviewed pin table with a Team ID check) are
+  admitted next to v1. The Homebrew path runs the same TDLib version and commit probe as the bundle,
+  and `--check` reports the OpenSSL keg.
+- Signing and distribution (phase C):
+  - `sign_payload.py` signs every Mach-O inside out with the hardened runtime and stable identifiers.
+    The entitlement matrix gives `disable-library-validation` for the ad hoc identity; the Developer ID
+    set is empty and stays unproven until the owner's signed run.
+  - The seed is signed too, and `bootstrap.sh --seed-team <TEAMID>` checks its Developer ID requirement
+    before running it (`seed_signature_invalid`).
+  - `notarize_release.sh` notarizes the payload zip, builds the DMG, then signs, notarizes and staples it
+    (`notarytool` is mocked in tests). `Install.command` runs the pinned bootstrap and then `connect`
+    inline in Terminal, so one double-click covers install and login.
+  - `release_build.py` runs the whole chain to a corresponding-source archive, `signing_preflight.sh` and an
+    [owner checklist](docs/plans/0.53-signing-owner-checklist.md) cover the identity and notary profile,
+    and the release gate gains an optional bundle stage. The bundle is assembled without the application
+    identity by default, or with one from a named Keychain service.
+  - Owner-pending: the certificate and notary profile, the signed and notarized build, and the
+    application-identity decision.
+- Clients (phase D):
+  - Claude Desktop: the installer adds one owned `mcpServers.telegram_search` entry to
+    `claude_desktop_config.json` (bounded strict read, journaled compare-before-replace write, neighbours
+    preserved or the install refuses). A different entry refuses the install
+    (`claude_desktop_registration_conflict`), a missing Claude directory skips it, and the result asks
+    for a restart.
+  - `--claude-code user|plugin|skip` selects Claude Code's user scope, the plugin or nothing. The plugin
+    `telegram-local` and a repository marketplace add byte-identical skills, a `/bin/sh -p` shim that reads
+    `current.json`, and a `bin/install` that installs from pinned release assets. It refuses
+    (`release_not_published`) while its pins are the unpublished placeholder.
+  - The server sends client-neutral `instructions` (1,378 characters). `_manifest` gains `available_tools`
+    and `tool_capabilities`, and `tools/list` now shows only the tools the loaded policy enables (15 of 55
+    under the default `read` and `artifacts` policy). The schema fingerprint still covers the full
+    registration and is unchanged.
+  - A structural STDIO recorder records a client's protocol revision, tool census and a hash of the tool list and,
+    per call, the tool name, `isError` and result block sizes; never arguments or result content.
+- Upgrade, rollback, uninstall and `--adopt-legacy` (phase E):
+  - Re-running the installer with a newer kit upgrades in place: the new release is published next to the old
+    one, owned registrations and skills are re-registered, the broker plist is rewritten, only the
+    `expected_package_version` line of `runtime.toml` changes, and `current.json` switches last. A running
+    broker with a connected client context refuses first (`pending_send_unresolved`), and a lower
+    version refuses (`downgrade_refused`).
+  - `launcher.py rollback` returns to the previous release while no newer state exists, and
+    `launcher.py uninstall` removes only owned objects. The Telegram session, enrollment and Keychain are
+    never written. The receipt moves to schema 2 and `status` reports Claude Desktop drift.
+  - `--adopt-legacy`, as the last token of `bootstrap.sh`, replaces a foreign Codex, Claude Code or
+    Claude Desktop entry or broker plist only after an exact backup is recorded. `Install.command` and
+    the plugin never pass it.
+  - Known limit: `Install.command` continues only after a first install, so on an upgrade it prints the
+    result (`status: upgraded`) and then stops with `activation_unexpected`.
+  - Owner-pending: the real upgrade and migration of the owner's installation.
+- Documentation (phase F): the [install guide](docs/install.md#install-from-the-053-kit-dmg-curl-and-plugin-development)
+  covers the DMG, curl and plugin paths, Claude Desktop, upgrade, rollback, uninstall and `--adopt-legacy`;
+  the [security model](docs/security.md#signing-and-team-id-trust-chain-053-candidate) and
+  [reference](docs/reference.md#client-distribution-reference-053-candidate) have the matching sections,
+  and the setup skill describes the new routes.
 
 ## 0.52.0 — 2026-10-20
 
