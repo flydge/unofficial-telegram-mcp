@@ -185,6 +185,46 @@ class PendingGateTests(SafetyHarness, unittest.TestCase):
         self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
 
 
+class PendingActionTests(SafetyHarness, unittest.TestCase):
+    """An unfinished change blocks every other action until that same action is retried; the refusal names it."""
+
+    def assertPending(self, action, pending):
+        with self.assertRaises(self.module().InstallError) as caught:
+            action()
+        self.assertEqual((str(caught.exception), caught.exception.pending_action), ('transaction_pending', pending))
+
+    def test_each_unfinished_change_is_named_until_it_is_retried(self):
+        self.full()
+        new = self.build('b', launcher=b'# second release\n')
+        self.answers = ['none', 'pending']  # The upgrade journal exists; its first gate refuses.
+        with self.assertRaises(self.module().InstallError):
+            self.install(new)
+        for action in (lambda: self.change('rollback'), lambda: self.change('uninstall'),
+                       lambda: self.install(self.build('c', launcher=b'# third release\n'))):
+            self.assertPending(action, 'upgrade')
+        self.assertEqual(self.install(new)['status'], 'upgraded')
+        self.answers = ['none', 'pending']
+        with self.assertRaises(self.module().InstallError):
+            self.change('rollback')
+        for action in (lambda: self.change('uninstall'), lambda: self.install(self.build('d', launcher=b'# fourth release\n'))):
+            self.assertPending(action, 'rollback')
+        self.assertEqual(self.change('rollback')['status'], 'rolled_back')
+        self.launchctl.fail = {'bootout'}
+        with self.assertRaises(self.module().InstallError):
+            self.change('uninstall')
+        self.launchctl.fail = set()
+        for action in (lambda: self.change('rollback'), lambda: self.install(new)):
+            self.assertPending(action, 'uninstall')
+        self.assertEqual(self.change('uninstall')['status'], 'uninstalled')
+
+    def test_only_a_fixed_pending_action_is_carried(self):
+        error = self.module().InstallError
+        self.assertEqual(error('transaction_pending', pending_action='uninstall').pending_action, 'uninstall')
+        for value in (error('transaction_pending', pending_action='/Users/example/secret'), error('transaction_pending'),
+                      error('recovery_limit', pending_action='upgrade'), error('transaction_pending', 'x', pending_action='upgrade')):
+            self.assertIsNone(value.pending_action)
+
+
 class KilledTemporaryTests(SafetyHarness, unittest.TestCase):
     """A real kill right after one of our temporaries is created: the resume leaves no temporary anywhere."""
 

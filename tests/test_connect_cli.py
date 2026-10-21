@@ -1881,6 +1881,21 @@ class LauncherRefusalTests(unittest.TestCase):
                 self.assertEqual(self.install_refusal(InstallError(name)),
                                  json.dumps({'status': 'refused', 'code': name}) + '\n')
 
+    def test_a_pending_change_is_named_only_from_its_closed_set(self):
+        from telegram_search_mcp.bundle_install import InstallError, PENDING_ACTIONS
+        self.assertEqual(self.launcher().PENDING_ACTIONS, PENDING_ACTIONS)
+        for action in PENDING_ACTIONS:
+            with self.subTest(action):
+                self.assertEqual(self.install_refusal(InstallError('transaction_pending', pending_action=action)),
+                                 json.dumps({'status': 'refused', 'code': 'transaction_pending', 'pending_action': action}) + '\n')
+        plain = json.dumps({'status': 'refused', 'code': 'transaction_pending'}) + '\n'
+        forged = InstallError('transaction_pending')
+        forged.pending_action = '/Users/SYNTHETIC_SECRET_SENTINEL'
+        for error in (InstallError('transaction_pending'), forged):
+            self.assertEqual(self.install_refusal(error), plain)
+        self.assertEqual(self.install_refusal(InstallError('recovery_limit', pending_action='upgrade')),
+                         json.dumps({'status': 'refused', 'code': 'recovery_limit'}) + '\n')
+
     def test_anything_else_is_the_generic_code_and_carries_no_text(self):
         from telegram_search_mcp.bundle_install import InstallError
         secret = '/Users/SYNTHETIC_SECRET_SENTINEL/.codex'

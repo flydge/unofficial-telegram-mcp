@@ -254,7 +254,7 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
                 with self.assertRaises(packet[0].InstallError):self.install(packet)
                 self.assertFalse(self.runtime.exists())
 
-    def test_partial_bulk_copy_is_quarantined_and_exact_retry_completes(self):
+    def test_partial_bulk_copy_is_removed_and_exact_retry_completes(self):
         packet=self.fixture();module=packet[0];original=module.shutil.copyfileobj;calls=0
         def interrupted(source,destination,length):
             nonlocal calls
@@ -262,11 +262,13 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
             if calls==2:raise RuntimeError('simulated bulk interruption')
         with mock.patch.object(module.shutil,'copyfileobj',side_effect=interrupted):
             with self.assertRaises(RuntimeError):self.install(packet)
+        transaction=self.runtime/'transactions'/('install_'+packet[3][:24])
+        self.assertTrue((transaction/'failed-release-0/app').is_dir())  # Unbound: no journal record names it.
         self.assertFalse((self.runtime/'current.json').exists())
         self.assertEqual(self.install(packet)['status'],'activation_required')
-        transaction=self.runtime/'transactions'/('install_'+packet[3][:24])
-        self.assertTrue((transaction/'failed-release-0').is_dir())
-        self.assertTrue((transaction/'failed-release-0/app').is_dir())
+        # The retry removed the unbound partial copy before staging its own, which became the release.
+        self.assertEqual(sorted(p.name for p in transaction.iterdir() if p.name.startswith('failed-release-')),[])
+        self.assertTrue((self.runtime/'releases'/packet[3]/'app').is_dir())
 
     def test_exact_repeat_reuses_owned_bundled_service_without_service_actions(self):
         import plistlib

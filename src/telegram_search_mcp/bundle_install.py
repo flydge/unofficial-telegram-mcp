@@ -6,6 +6,8 @@ receipt or journal binds are ever replaced or removed; the Telegram session, enr
 key and Keychain are never written.
 """
 from __future__ import annotations
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -35,8 +37,21 @@ from .codex_registration import (Registration, Receipt, ConfigConflict, read_con
     commit_transaction, new_temporary, is_temporary, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
 
 
+# The closed set of unfinished change kinds a `transaction_pending` refusal names.
+PENDING_ACTIONS = ('upgrade', 'rollback', 'uninstall')
+
+
 class InstallError(ValueError):
-    """An integrity/conflict refusal; inputs and neighboring config stay redacted."""
+    """An integrity/conflict refusal; inputs and neighboring config stay redacted.
+
+    `pending_action` (only with `transaction_pending`) names the unfinished change from PENDING_ACTIONS that must
+    be retried first; anything else is dropped.
+    """
+
+    def __init__(self, *args, pending_action=None):
+        super().__init__(*args)
+        self.pending_action = (pending_action if args == ('transaction_pending',) and type(pending_action) is str
+                               and pending_action in PENDING_ACTIONS else None)
 
 
 def encoded(value):
@@ -145,7 +160,7 @@ def _check_existing_service(plist, installed, label):
 
 
 def _fresh_packet(tx, label):
-    """Never adopt/delete an earlier packet without publication authority."""
+    """A fresh packet; an earlier one is never adopted (opening the journal removed each unbound one of ours)."""
     for attempt in range(8):
         path=tx/(label+'-'+str(attempt))
         if path.exists() or path.is_symlink():continue
@@ -159,59 +174,147 @@ def _sync_directories(root):
         with open_owned_directory(Path(parent),private=True) as fd:os.fsync(fd)
 
 
+class _NotOurs(Exception):
+    """An entry of an abandoned tree is not provably ours: nothing of it is removed."""
+
+
+def _check_owned(fd, allowed, budget, prefix=()):
+    """Every entry under the held directory `fd` is an owner-only directory, or an owner-only single-link regular
+    file, whose relative path `allowed(parts, is_directory)` admits; at most `budget[0]` entries in all."""
+    names=os.listdir(fd)
+    budget[0]-=len(names)
+    if budget[0]<0:raise _NotOurs()
+    for name in names:
+        path=prefix+(name,)
+        m=os.stat(name,dir_fd=fd,follow_symlinks=False)
+        directory=stat.S_ISDIR(m.st_mode)
+        if (m.st_uid!=os.getuid() or stat.S_IMODE(m.st_mode)&0o077 or len(path)>32
+                or not (directory or stat.S_ISREG(m.st_mode) and m.st_nlink==1) or not allowed(path,directory)):
+            raise _NotOurs()
+        if directory:
+            child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            try:
+                if (os.fstat(child).st_dev,os.fstat(child).st_ino)!=(m.st_dev,m.st_ino):raise _NotOurs()
+                _check_owned(child,allowed,budget,path)
+            finally:os.close(child)
+
+
+def _remove_abandoned(parent, name, allowed, budget=64):
+    """Remove `parent/name`, an abandoned unpublished directory of ours, only when it and everything in it is
+    provably ours (owner-only, single-link files, every path one we create; see `_check_owned`); True when
+    removed. The caller holds the lock that excludes its writer, so it never races the creation."""
+    with open_owned_directory(parent) as fd:
+        m=os.stat(name,dir_fd=fd,follow_symlinks=False)
+        if not stat.S_ISDIR(m.st_mode) or m.st_uid!=os.getuid() or stat.S_IMODE(m.st_mode)&0o077:return False
+        child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+        try:
+            if (os.fstat(child).st_dev,os.fstat(child).st_ino)!=(m.st_dev,m.st_ino):return False
+            _check_owned(child,allowed,[budget])
+        except _NotOurs:return False
+        finally:os.close(child)
+        shutil.rmtree(name,dir_fd=fd)
+        os.fsync(fd)
+        return True
+
+
+_INITIAL_FILES = frozenset({'config.preimage','config.candidate','registration.json','journal.json',
+                            *('adopted-'+c for c in ADOPTION_CLIENTS)})
+# The intent is written inside the unpublished staged root; its no-replace rename out is its publication.
+_STAGED_INTENT = 'install-intent.json'
+
+
+def _initial_entry(path, directory):
+    """Whether `path` (parts relative to an unpublished staged root) is one `_initialize` creates."""
+    if len(path)==1:
+        if path[0] in ('transactions','releases'):return directory
+        return not directory and (path[0] in ('.install.lock',_STAGED_INTENT) or is_temporary(path[0]))
+    if path[0]!='transactions' or not path[1].startswith('install_') or not transaction_name(path[1]):return False
+    if len(path)==2:return directory
+    return len(path)==3 and not directory and (path[2] in _INITIAL_FILES or is_temporary(path[2]))
+
+
+@contextlib.contextmanager
+def _parent_lock(parent):
+    """An exclusive advisory lock on the root's parent directory: first-install staging and its cleanup never
+    overlap another installer's. Busy refuses."""
+    with open_owned_directory(parent) as fd:
+        try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError:raise InstallError('installation_refused') from None
+        yield
+
+
+def _sweep_initial(root, keep):
+    """Under the parent lock: remove what killed first-install attempts left beside `root` (an unpublished staged
+    root other than `keep`, provably ours by its exact contents, or an earlier release's intent temporary)."""
+    staged=re.compile(re.escape('.'+root.name+'-initial-')+r'[a-z0-9_]{8}\Z')
+    temporary=re.compile(re.escape('.'+root.name+'-intent-')+r'[0-9a-f]{32}\.tmp\Z')
+    with open_owned_directory(root.parent) as fd:
+        for name in os.listdir(fd):
+            if staged.fullmatch(name) and root.parent/name!=keep:
+                _remove_abandoned(root.parent,name,_initial_entry)
+            elif temporary.fullmatch(name):
+                m=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                if (stat.S_ISREG(m.st_mode) and m.st_uid==os.getuid() and m.st_nlink==1
+                        and not stat.S_IMODE(m.st_mode)&0o077 and m.st_size<=65536):
+                    os.unlink(name,dir_fd=fd);os.fsync(fd)
+
+
 def _initialize(root, identity, change, existed, checkpoint, adopted=None):
     """Publish a complete owned root once; incomplete preparations stay outside.
 
     The adjacent immutable intent precedes final root mutation and records its
-    exact staged inode. Unbound early staging files are retained, never adopted.
-    A normal retry makes a fresh bounded packet instead of repairing foreign or
-    ambiguous metadata. The supported root's parent must already exist safely.
+    exact staged inode. A retry removes the unbound staged roots of killed
+    attempts (only exactly what this function creates) and makes a fresh one
+    instead of repairing foreign or ambiguous metadata; the recorded one is kept.
+    The supported root's parent must already exist safely.
     `adopted` maps a client to its exact `--adopt-legacy` backup bytes, kept in the transaction.
     """
     with open_owned_directory(root.parent):pass
     intent_path=root.parent/('.'+root.name+'.install-intent.json')
-    if intent_path.exists() or intent_path.is_symlink():
-        intent=unique_json(read(intent_path,mode=0o600))
-        if (set(intent)!={'identity','staged_root','object'} or intent['identity']!=identity):
-            raise InstallError('initialization_conflict')
-        staged=Path(intent['staged_root'])
-        if staged.parent!=root.parent or not staged.name.startswith('.'+root.name+'-initial-'):
-            raise InstallError('initialization_conflict')
-        if root.exists():
-            require_object_binding(root,intent['object'])
-            return
-        require_object_binding(staged,intent['object'])
-        _rename(staged,root);checkpoint('published:root');return
-    if root.exists() or root.is_symlink():raise InstallError('runtime_conflict')
-    prefix='.'+root.name+'-initial-'
-    if sum(p.name.startswith(prefix) for p in root.parent.iterdir())>=8:raise InstallError('recovery_limit')
-    staged=Path(tempfile.mkdtemp(prefix=prefix,dir=root.parent))
-    checkpoint('created:initial_root')
-    transactions=staged/'transactions';ensure_owned_private_directory(transactions)
-    ensure_owned_private_directory(staged/'releases')
-    tx=transactions/('install_'+identity['index_sha256'][:24]);ensure_owned_private_directory(tx)
-    create(staged/'.install.lock',b'')
-    create(tx/'config.preimage',change.source,maximum=MAX_CONFIG_BYTES)
-    create(tx/'config.candidate',change.candidate,maximum=MAX_CONFIG_BYTES)
-    adopted=adopted or {}
-    # An adopted foreign Codex entry is backed up beside the transaction, never kept as a receipt preimage.
-    pre=(None,None) if 'codex' in adopted else (change.pre_subtree_hash,change.pre_subtree)
-    ownership=Receipt('install_'+identity['index_sha256'][:24],'first_install',pre[0],change.post_subtree_hash,pre[1])
-    create(tx/'registration.json',ownership.to_bytes())
-    for client,data in adopted.items():create(tx/('adopted-'+client),data,maximum=MAX_BACKUP_BYTES)
-    records={'adopted':[{c:{'sha256':digest(d),'bytes':len(d)} for c,d in adopted.items()}]} if adopted else {}
-    journal={**identity,'stage':'prepared','config_existed':existed,'publications':records}
-    create(tx/'journal.json',encoded(journal))
-    _sync_directories(staged)
-    intent={'identity':identity,'staged_root':str(staged),'object':object_binding(staged,directory=True)}
-    # Fully flush an unbound fresh file before no-replace intent publication.
-    # Interrupted temporary writes have no authority over the final target.
-    temporary=root.parent/('.'+root.name+'-intent-'+uuid.uuid4().hex+'.tmp')
-    create(temporary,encoded(intent))
-    _rename(temporary,intent_path)
-    checkpoint('recorded:root')
-    _rename(staged,root)
-    checkpoint('published:root')
+    with _parent_lock(root.parent):
+        if intent_path.exists() or intent_path.is_symlink():
+            intent=unique_json(read(intent_path,mode=0o600))
+            if (set(intent)!={'identity','staged_root','object'} or intent['identity']!=identity):
+                raise InstallError('initialization_conflict')
+            staged=Path(intent['staged_root'])
+            if staged.parent!=root.parent or not staged.name.startswith('.'+root.name+'-initial-'):
+                raise InstallError('initialization_conflict')
+            _sweep_initial(root,None if root.exists() else staged)
+            if root.exists():
+                require_object_binding(root,intent['object'])
+                return
+            require_object_binding(staged,intent['object'])
+            _rename(staged,root);checkpoint('published:root');return
+        if root.exists() or root.is_symlink():raise InstallError('runtime_conflict')
+        _sweep_initial(root,None)
+        prefix='.'+root.name+'-initial-'
+        if sum(p.name.startswith(prefix) for p in root.parent.iterdir())>=8:raise InstallError('recovery_limit')
+        staged=Path(tempfile.mkdtemp(prefix=prefix,dir=root.parent))
+        checkpoint('created:initial_root')
+        transactions=staged/'transactions';ensure_owned_private_directory(transactions)
+        ensure_owned_private_directory(staged/'releases')
+        tx=transactions/('install_'+identity['index_sha256'][:24]);ensure_owned_private_directory(tx)
+        create(staged/'.install.lock',b'')
+        create(tx/'config.preimage',change.source,maximum=MAX_CONFIG_BYTES)
+        create(tx/'config.candidate',change.candidate,maximum=MAX_CONFIG_BYTES)
+        adopted=adopted or {}
+        # An adopted foreign Codex entry is backed up beside the transaction, never kept as a receipt preimage.
+        pre=(None,None) if 'codex' in adopted else (change.pre_subtree_hash,change.pre_subtree)
+        ownership=Receipt('install_'+identity['index_sha256'][:24],'first_install',pre[0],change.post_subtree_hash,pre[1])
+        create(tx/'registration.json',ownership.to_bytes())
+        for client,data in adopted.items():create(tx/('adopted-'+client),data,maximum=MAX_BACKUP_BYTES)
+        records={'adopted':[{c:{'sha256':digest(d),'bytes':len(d)} for c,d in adopted.items()}]} if adopted else {}
+        journal={**identity,'stage':'prepared','config_existed':existed,'publications':records}
+        create(tx/'journal.json',encoded(journal))
+        _sync_directories(staged)
+        intent={'identity':identity,'staged_root':str(staged),'object':object_binding(staged,directory=True)}
+        # Fully flushed inside the unbound staged root, then published beside the root by a no-replace rename:
+        # an interrupted write leaves nothing outside the staged root, which a retry removes.
+        create(staged/_STAGED_INTENT,encoded(intent))
+        _rename(staged/_STAGED_INTENT,intent_path)
+        checkpoint('recorded:root')
+        _rename(staged,root)
+        checkpoint('published:root')
 
 
 def _file_object(value):
@@ -230,10 +333,24 @@ def _sweep_temporaries(directory):
         os.fsync(fd)
 
 
+# `_stage` packets: `<label>-<attempt>` in the transaction directory, label to journal record name.
+_PACKET = re.compile(r'(?:(failed-release)|skill-packet-([a-z][a-z-]{0,63})|metadata-packet-([a-z][a-z_]{0,63}))-[0-7]\Z')
+
+
+def _packet_entry(kind):
+    """What `_stage` creates in a packet: a release tree, a skill directory or one metadata file (plus the
+    temporaries a killed `create` leaves)."""
+    if kind=='release':return lambda path,directory:True
+    if kind=='skill':return lambda path,directory:len(path)==1 and not directory and (path[0]=='SKILL.md' or is_temporary(path[0]))
+    return lambda path,directory:len(path)==1 and not directory and (path[0] in ('receipt.json','current.json',ADOPTED_NAME)
+                                                                    or is_temporary(path[0]))
+
+
 class _Journal:
     """One transaction's journal under the installer lease; each update is compare-before-replace.
 
-    Opening it removes what a killed journal update left in the transaction directory.
+    Opening it removes what a killed run left in the transaction directory: journal temporaries and every packet
+    no journal record binds (a `_stage` killed before its binding). Neither ever counts toward a recovery bound.
     """
 
     def __init__(self, tx, lease, steps, checkpoint):
@@ -242,6 +359,19 @@ class _Journal:
         self.value=unique_json(read(tx/'journal.json',mode=0o600))
         if type(self.value.get('publications')) is not dict or self.value.get('stage') not in steps:
             raise InstallError('transaction_conflict')
+        self._sweep_packets()
+
+    def _sweep_packets(self):
+        with open_owned_directory(self.tx,private=True) as fd:names=os.listdir(fd)
+        for name in names:
+            match=_PACKET.fullmatch(name)
+            if match is None:continue
+            record=match.group(2) or match.group(3) or 'release'
+            packet=self.tx/name
+            if any(type(a.get('staged')) is str and packet in (Path(a['staged']),Path(a['staged']).parent)
+                   for a in self.attempts(record)):continue
+            kind='release' if match.group(1) else 'skill' if match.group(2) else 'metadata'
+            _remove_abandoned(self.tx,name,_packet_entry(kind),1<<20 if kind=='release' else 64)
 
     def __getitem__(self, key):
         return self.value[key]
@@ -714,6 +844,24 @@ def _latest_change(root):
     return name,unique_json(read(root/'transactions'/name/'journal.json',mode=0o600))
 
 
+_STAGING = re.compile(r'\.change_[1-9][0-9]{0,2}-staging-[a-z0-9_]{8}\Z')
+_STAGED_FILES = frozenset({'journal.json','receipt.previous','config.preimage','config.candidate','registration.json',
+                           'receipt.target',*('adopted-'+c for c in ADOPTION_CLIENTS)})
+
+
+def _staged_entry(path, directory):
+    return len(path)==1 and not directory and (path[0] in _STAGED_FILES or is_temporary(path[0]))
+
+
+def _sweep_staging(root):
+    """Under the lease no staging directory is being written: each one a killed opening left (it never had
+    authority) is removed when exactly ours (`_staged_entry`); one that is not stays and counts toward the bound."""
+    transactions=root/'transactions'
+    _changes(root)  # Bounded listing.
+    for path in list(transactions.iterdir()):
+        if _STAGING.fullmatch(path.name):_remove_abandoned(transactions,path.name,_staged_entry)
+
+
 def _open_change(root, journal):
     """Publish a complete change transaction directory once (no-replace); returns its name."""
     numbers=_changes(root)
@@ -721,6 +869,7 @@ def _open_change(root, journal):
     if number>MAX_CHANGES:raise InstallError('recovery_limit')
     name='change_%d'%number
     transactions=root/'transactions'
+    _sweep_staging(root)
     prefix='.'+name+'-staging-'
     if sum(p.name.startswith('.change_') for p in transactions.iterdir())>=8:raise InstallError('recovery_limit')
     staged=Path(tempfile.mkdtemp(prefix=prefix,dir=transactions))
@@ -1168,19 +1317,24 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         name,journal=_latest_change(root)
         resuming=journal is not None and journal.get('stage')!='finished'
         if resuming:
+            # An unfinished change blocks every other action until that same action is retried.
             if journal.get('kind')!=kind or kind=='upgrade' and journal.get('index_sha256')!=source['index_sha256']:
-                raise InstallError('transaction_pending')
+                raise InstallError('transaction_pending',pending_action=journal.get('kind'))
+            _sweep_staging(root)
             tx=root/'transactions'/name
             previous_bytes=read(tx/'receipt.previous',mode=0o600)
             current=_receipt_shape(unique_json(previous_bytes),root)
         else:
             current,previous_bytes=_installation(root)
             if kind=='upgrade' and current['index_sha256']==source['index_sha256']:
-                return _reused(root,current)
+                return _reused(root,current,name,journal)
         if kind=='upgrade' and (str(codex)!=current['codex_home'] or str(skills)!=current['skills_root']
                                 or str(home)!=current['user_home'] or claude_code!=current['claude_code_mode']):
             raise InstallError('upgrade_conflict')
         if str(home)!=current['user_home']:raise InstallError('upgrade_conflict')
+        if not resuming and kind=='rollback' and _finished(current,journal,'rollback'):
+            # Repeated after it finished (a retry after a kill past its last journal write): its result, no effect.
+            return _rolled_back(current,journal)
         codex,skills=Path(current['codex_home']),Path(current['skills_root'])
         claude_skills,mode=Path(current['claude_skills_root']),current['claude_code_mode']
         from_root,from_index=Path(current['release_root']),current['index_sha256']
@@ -1474,11 +1628,44 @@ def _exact(expected):
     return validate
 
 
-def _reused(root, receipt):
+def _finished(receipt, journal, kind):
+    """Whether the newest change journal is a finished `kind` that left `receipt`'s release installed."""
+    return (journal is not None and journal.get('kind')==kind and journal.get('stage')=='finished'
+            and journal.get('index_sha256')==receipt['index_sha256'] and journal.get('release_root')==receipt['release_root'])
+
+
+def _record(journal, name):
+    """A finished journal's single record `name`, or None."""
+    publications=journal.get('publications')
+    records=publications.get(name) if type(publications) is dict else None
+    if records is None:return None
+    if type(records) is not list or len(records)!=1 or type(records[0]) is not dict:raise InstallError('transaction_conflict')
+    return records[0]
+
+
+def _reused(root, receipt, name=None, journal=None):
     installed=Path(receipt['release_root'])
-    return {'status':'upgraded','installation':'reused','release_root':str(installed),'package_version':receipt['package_version'],
+    result={'status':'upgraded','installation':'reused','release_root':str(installed),'package_version':receipt['package_version'],
             'claude_code':receipt['claude_code'],'claude_skills':receipt['claude_skills'],'claude_desktop':receipt['claude_desktop'],
             'next_action':'restart_mcp_clients'}
+    if _finished(receipt,journal,'upgrade') and receipt_transaction(receipt)==name:
+        adopted=_check_adopted(_record(journal,'adopted'))
+        if adopted:result['adopted']=sorted(adopted)
+    return result
+
+
+def _rolled_back(receipt, journal):
+    """The result a finished rollback returned, from its journal and the receipt it restored."""
+    claude_status,desktop_status=((_record(journal,n) or {}).get('status') for n in ('claude_code','claude_desktop'))
+    previous=journal.get('from_release_root')
+    if (claude_status not in CLAUDE_MODE_STATUSES[receipt['claude_code_mode']] or desktop_status not in CLAUDE_DESKTOP_STATUSES
+            or type(previous) is not str):
+        raise InstallError('transaction_conflict')
+    command,arguments=_commands(Path(receipt['release_root']))
+    result={'status':'rolled_back','installation':'reused','release_root':receipt['release_root'],
+            'package_version':receipt['package_version'],'previous_release_root':previous,'claude_code':claude_status,
+            'claude_skills':receipt['claude_skills'],'claude_desktop':desktop_status,'next_action':'restart_mcp_clients'}
+    return _result_extras(result,claude_status,desktop_status,command,arguments)
 
 
 def _unlink_exact(path, expected):
@@ -1562,7 +1749,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
         with SessionOwnerLease(root/'.install.lock') as lease:
             name,journal=_latest_change(root)
             if journal is not None and journal.get('stage') not in ('finished',) and journal.get('kind')!='uninstall':
-                raise InstallError('transaction_pending')
+                raise InstallError('transaction_pending',pending_action=journal.get('kind'))
             receipt,_=_installation(root)
             if str(home)!=receipt['user_home']:raise InstallError('upgrade_conflict')
             installed=Path(receipt['release_root'])
@@ -1584,6 +1771,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
                 name=_open_change(root,lambda _:{'journal.json':encoded({**identity,'stage':'prepared','publications':{}})})
+            else:_sweep_staging(root)
             tx=root/'transactions'/name
             j=_Journal(tx,lease,_UNINSTALL_STEPS,checkpoint)
             if j['index_sha256']!=receipt['index_sha256'] or j['installation_root']!=str(root):raise InstallError('transaction_conflict')
@@ -1597,9 +1785,12 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             if j.recorded('service') is None:
                 kind,loaded=observed if observed is not None else _uninstall_service(service)
                 if kind=='to':
+                    # Write-ahead, so a resume after the unlink reports our definition removed, not absent.
+                    if j.recorded('service_owned') is None:j.update(single=('service_owned',{'plist':'to'}))
                     if loaded and _live(launchctl,label) is not None:_bootout(launchctl,label)
                     checkpoint('stopped:service')
                     status='removed' if _unlink_exact(plist,service.kind()[1]) else 'kept'
+                elif kind=='absent' and j.recorded('service_owned') is not None:status='removed'
                 else:status='absent' if kind=='absent' else 'kept'
             else:status=None
             out['service']=done('service',status)
@@ -1610,6 +1801,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 if status=='remove':
                     j.write('codex',config,candidate,source,existed=True,maximum=MAX_CONFIG_BYTES)
                     status='removed'
+                elif status=='absent' and any('object' in a for a in j.attempts('codex')):
+                    status='removed'  # Our journaled replacement landed before an interruption.
             else:status=None
             out['codex']=done('registration',status)
             # Claude Code: our owned user-scope entry, write-ahead; while it stays exactly ours it is removed again.

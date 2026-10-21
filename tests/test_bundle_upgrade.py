@@ -478,7 +478,7 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
             self.install(b, checkpoint=crash)
         with self.assertRaises(self.module().InstallError) as caught:
             self.install(self.build('c', launcher=b'# third release\n'))
-        self.assertEqual(str(caught.exception), 'transaction_pending')
+        self.assertEqual((str(caught.exception), caught.exception.pending_action), ('transaction_pending', 'upgrade'))
         self.assertEqual(self.install(b)['status'], 'upgraded')
         c = self.build('c2', launcher=b'# third release again\n')
         self.assertEqual(self.install(c)['status'], 'upgraded')
@@ -573,6 +573,27 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                     self.change('rollback')
                 self.assertEqual(str(caught.exception), 'rollback_refused')
                 self.assertEqual(self.receipt(), snapshot)
+
+    def test_a_rollback_repeated_after_it_finished_returns_its_result_without_another_step(self):
+        for chained in (False, True):
+            with self.subTest(chained=chained):
+                self.setUp()
+                _, old, new, _ = self.upgraded()
+                target = old['release_root']
+                if chained:  # A -> B -> C: the rollback goes back to B, and a repeat never steps on to A.
+                    self.install(self.build('c', launcher=b'# third release\n', search=b'search-skill-3'))
+                    target = str(self.runtime / 'releases' / new[3])
+                first = self.change('rollback')
+                self.assertEqual((first['status'], first['release_root']), ('rolled_back', target))
+                transactions = sorted(p.name for p in (self.runtime / 'transactions').iterdir())
+                calls, verbs, receipt = len(self.claude().calls), self.launchctl.verbs(), self.receipt()
+                with self.no_other_process():
+                    again = self.change('rollback')
+                expected = {k: v for k, v in first.items() if k != 'service'}
+                self.assertEqual(again, {**expected, 'installation': 'reused'})
+                self.assertEqual(sorted(p.name for p in (self.runtime / 'transactions').iterdir()), transactions)
+                self.assertEqual((len(self.claude().calls), self.launchctl.verbs(), self.receipt()), (calls, verbs, receipt))
+                self.assertEqual(self.pointer()['release_root'], target)
 
     def test_every_rollback_checkpoint_resumes_without_double_effects(self):
         seen = []
