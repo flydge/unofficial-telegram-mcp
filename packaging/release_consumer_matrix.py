@@ -138,7 +138,8 @@ REAL_DIALOG_SECONDS = 5
 # Argument refusals name only schema parameters (missing, invalid) and count undeclared keys.
 INVALID_ARGUMENTS = "Error executing tool {}: invalid_arguments: {}"
 UNKNOWN_TOOL = "unknown_tool (refresh tools/list)"
-CAPABILITY_DISABLED = ("Error executing tool {}: capability_disabled: {} (owner must enable in runtime.toml); "
+# The guard names the profile that unlocks the missing capabilities.
+CAPABILITY_DISABLED = ("Error executing tool {}: capability_disabled: {} (owner enables profile {}); "
                        "next_action: enable_capability")
 CONFIG_STALE = "Error executing tool {}: config_stale (restart matching components); next_action: update_installation"
 CLIENT_SCHEMA_MISMATCH = "Error executing tool {}: client_schema_mismatch (refresh tools/list, then recheck _manifest)"
@@ -833,13 +834,13 @@ class Driver:
                 cell.expect("unlisted", "read_history" not in names and "list_chats" not in names)
                 manifest = structured(await consumer.call("_manifest", {"check_broker": True}))
                 cell.expect("compatible", manifest.get("compatibility", {}).get("status") == "compatible")
-                for name, arguments, capability in (
-                        ("read_history", {"target": FIRST_CHAT, "mode": "latest"}, "read_history"),
-                        ("list_chats", {"scope": "main", "limit": 1}, "list_chats"),
+                for name, arguments, capability, profile in (
+                        ("read_history", {"target": FIRST_CHAT, "mode": "latest"}, "read_history", "readers"),
+                        ("list_chats", {"scope": "main", "limit": 1}, "list_chats", "readers"),
                         ("prepare_forward_send", {"source_chat": FIRST_CHAT, "source_message_id": SOURCE_MESSAGE,
-                                                  "recipient": FIRST_CHAT, "mode": "copy"}, "forward_send")):
+                                                  "recipient": FIRST_CHAT, "mode": "copy"}, "forward_send", "forward")):
                     text = error_text(await consumer.call(name, arguments))
-                    cell.expect(f"{name}:text", text == CAPABILITY_DISABLED.format(name, capability))
+                    cell.expect(f"{name}:text", text == CAPABILITY_DISABLED.format(name, capability, profile))
 
             async def prompt_policy(cell):
                 prompts = await consumer.prompts()

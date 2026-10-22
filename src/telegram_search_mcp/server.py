@@ -30,7 +30,8 @@ from .retained_selection_models import RetainSelectionRequest, RetainSelectionSo
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
-from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg
+from .config import (BROKER_SOCKET_PATH, CAPABILITY_PROFILES, PROFILE_DEPENDENCIES, RuntimePolicy, load_runtime_policy,
+                     ConfigurationError, homebrew_openssl_keg, unlocking_profiles)
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        missing_capabilities, required_capabilities)
@@ -824,10 +825,20 @@ _OVERWRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempoten
 # capability_disabled, only the missing names from the closed capability set, then the
 # fixed next_action suffix of the closed recovery map where one applies.
 _GUARD_REFUSALS = {
-    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)" + guard_suffix("capability_disabled"),
+    "capability_disabled": "capability_disabled: {} ({})" + guard_suffix("capability_disabled"),
     "client_schema_mismatch": "client_schema_mismatch (refresh tools/list, then recheck _manifest)",
     "config_stale": "config_stale (restart matching components)" + guard_suffix("config_stale"),
 }
+
+
+def _enable_hint(missing) -> str:
+    """How the owner turns the missing capabilities on: the profiles that unlock them, else runtime.toml."""
+    profiles = unlocking_profiles(missing)
+    if not profiles:
+        return "owner must enable in runtime.toml"
+    return ("owner enables profile " if len(profiles) == 1 else "owner enables profiles ") + ", ".join(profiles)
+
+
 # _manifest compatibility codes that name a recovery step.
 _MANIFEST_NEXT_ACTIONS = {code: NEXT_ACTIONS[code] for code in ("broker_unavailable", "config_stale")}
 
@@ -983,6 +994,9 @@ def build_server(
             "tools": list(_TOOL_NAMES),
             "available_tools": available_tools(descriptor["enabled_capabilities"]),
             "tool_capabilities": {name: list(needed) for name, needed in _TOOL_CAPABILITIES.items()},
+            "capability_profiles": {"profiles": {name: list(members) for name, members in CAPABILITY_PROFILES.items()},
+                                    "dependencies": {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()},
+                                    "switch": "launcher.py capabilities enable|disable <profile> (owner, in Terminal)"},
             "authorization_required": "authorizationStateReady",
             "target_scope": (
                 "direct resolution handles Saved Messages and exact @usernames; account-wide "
@@ -1844,7 +1858,8 @@ def build_server(
                 except CompatibilityError as error:
                     if _upload_owner:
                         return LocalUploadUnavailable()
-                    raise ToolError(_GUARD_REFUSALS[error.code].format(", ".join(missing))) from None
+                    raise ToolError(_GUARD_REFUSALS[error.code].format(", ".join(missing), _enable_hint(missing))
+                                    if error.code == "capability_disabled" else _GUARD_REFUSALS[error.code]) from None
                 return _fn(*args, **kwargs)
             registered.fn = guarded
 

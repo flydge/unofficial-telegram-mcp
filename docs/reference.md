@@ -102,11 +102,11 @@ Every operation performs a fresh handshake on its own owner-authenticated Unix c
 
 In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broker or Telegram contact, is an MCP tool error (`isError`, no structured content) with one fixed text item, one of:
 
-- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml); next_action: enable_capability`
+- `Error executing tool <tool>: capability_disabled: <capabilities> (owner enables profile <profile>); next_action: enable_capability`
 - `Error executing tool <tool>: config_stale (restart matching components); next_action: update_installation`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. Since the 0.54 candidate the parenthesis names the capability profile that turns the missing capabilities on (`owner enables profile <profile>`, or `owner enables profiles <a>, <b>` when two are needed; a profile's dependencies are implied, see [Capability profiles](#capability-profiles)); when a missing capability belongs to no profile (the base `read` or `artifacts`) it reads `owner must enable in runtime.toml`. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner enables profile replies); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
 Since the 0.54 candidate, arguments that do not match a tool's input schema get one closed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`). It names what failed:
 
@@ -682,6 +682,17 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 `search_again`, `restart_listing`, `check_send_status`), and names `capability_disabled`,
 `selection_unavailable` and an unavailable broker. The paired `telegram-search` skill gives the same answer rules
 (numbered sources, one coverage line) and the same preview floor, with per-tool detail on top.
+
+### Capability profiles
+
+Since the 0.54 candidate the owner switches capabilities in named profiles with the installed launcher's
+`capabilities show | enable <profile> | disable <profile>` (see [installation](install.md#enabling-more-capabilities-candidate)):
+`readers`, `send`, `replies`, `forward`, `video` and `archive_edit`. Every optional capability belongs to
+exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`
+or `archive_edit` also enables `send`, and disabling `send` disables them. `_manifest` reports the table under
+`capability_profiles` (`profiles`, `dependencies`), and a `capability_disabled` guard refusal names the
+profile that unlocks the missing capabilities. Profiles grant nothing by themselves: the broker still
+enforces the policy file it loaded.
 
 ### Tool titles, descriptions and annotations
 

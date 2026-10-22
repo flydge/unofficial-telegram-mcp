@@ -84,6 +84,12 @@ class ManifestAvailabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(manifest['available_tools']) - set(CONNECT_TOOLS), SEND_TOOLS)
         self.assertFalse({name for name in manifest['available_tools'] if 'reply' in name or 'forward' in name})
 
+    async def test_manifest_publishes_the_capability_profiles(self):
+        from telegram_search_mcp.config import CAPABILITY_PROFILES
+        profiles = (await self.manifest(CONNECT_DEFAULT))['capability_profiles']
+        self.assertEqual(profiles['profiles'], {name: list(members) for name, members in CAPABILITY_PROFILES.items()})
+        self.assertEqual(profiles['dependencies']['replies'], ['send'])
+
     async def test_retained_selection_lifetime_is_the_policy_value(self):
         self.assertEqual((await self.manifest(CONNECT_DEFAULT))['retained_selections']['ttl_seconds'], 900)
         policy = RuntimePolicy(enabled_capabilities=('read', 'artifacts'), selection_ttl_seconds=1200)
@@ -157,7 +163,7 @@ class FilteredListingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('prepare_text_send', listed)
         self.assertTrue(result.is_error)
         self.assertEqual(result.content[0].text, 'Error executing tool prepare_text_send: capability_disabled: send '
-                                                 '(owner must enable in runtime.toml); next_action: enable_capability')
+                                                 '(owner enables profile send); next_action: enable_capability')
 
 
 if __name__ == '__main__':

@@ -14,7 +14,14 @@ from telegram_search_mcp.server import build_server
 CONNECT_DEFAULT = RuntimePolicy(enabled_capabilities=('read', 'artifacts'))
 SENTINEL = 'GUARD_INPUT_SENTINEL_5c1e'
 # Each text ends with the fixed next_action suffix from the closed recovery map (0.54).
-OWNER = ' (owner must enable in runtime.toml); next_action: enable_capability'
+SUFFIX = '; next_action: enable_capability'
+# The refusal names the profile that unlocks the missing capabilities (0.54 D); a base capability (read,
+# artifacts) belongs to no profile and keeps the runtime.toml wording.
+RUNTIME = ' (owner must enable in runtime.toml)' + SUFFIX
+
+
+def profile(*names):
+    return (' (owner enables profile ' if len(names) == 1 else ' (owner enables profiles ') + ', '.join(names) + ')' + SUFFIX
 STALE = 'config_stale (restart matching components); next_action: update_installation'
 
 
@@ -34,48 +41,49 @@ class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_read_capability_names_code_and_capability(self):
         result = await self.call(CONNECT_DEFAULT, 'read_history', {'target': 7, 'mode': 'latest', 'limit': 1})
-        self.assertRefused(result, 'read_history', 'capability_disabled: read_history' + OWNER)
+        self.assertRefused(result, 'read_history', 'capability_disabled: read_history' + profile('readers'))
 
     async def test_disabled_send_names_send(self):
         result = await self.call(CONNECT_DEFAULT, 'prepare_text_send', {'recipient': 7, 'text': SENTINEL})
-        self.assertRefused(result, 'prepare_text_send', 'capability_disabled: send' + OWNER)
+        self.assertRefused(result, 'prepare_text_send', 'capability_disabled: send' + profile('send'))
         self.assertNotIn(SENTINEL, result.content[0].text)
 
     async def test_send_dependent_capability_names_every_missing_capability(self):
         args = {'recipient': 7, 'reply_to': {'chat_id': 7, 'message_id': 8}, 'text': SENTINEL}
-        for enabled, missing in ((('read', 'artifacts'), 'reply_text_send, send'),
-                                 (('read', 'send'), 'reply_text_send'),
-                                 (('read', 'reply_text_send'), 'send')):
+        for enabled, missing, hint in ((('read', 'artifacts'), 'reply_text_send, send', profile('replies')),
+                                       (('read', 'send'), 'reply_text_send', profile('replies')),
+                                       (('read', 'reply_text_send'), 'send', profile('send'))):
             with self.subTest(enabled=enabled):
                 result = await self.call(RuntimePolicy(enabled_capabilities=enabled), 'prepare_reply_text_send', args)
-                self.assertRefused(result, 'prepare_reply_text_send', 'capability_disabled: ' + missing + OWNER)
+                self.assertRefused(result, 'prepare_reply_text_send', 'capability_disabled: ' + missing + hint)
                 self.assertNotIn(SENTINEL, result.content[0].text)
         result = await self.call(RuntimePolicy(enabled_capabilities=('send',)), 'send_prepared_forward',
                                  {'draft_id': 'draft_' + 'a' * 32, 'approved': True})
-        self.assertRefused(result, 'send_prepared_forward', 'capability_disabled: forward_send' + OWNER)
+        self.assertRefused(result, 'send_prepared_forward', 'capability_disabled: forward_send' + profile('forward'))
 
     async def test_archive_and_edit_also_name_read(self):
         args = {'chat': 1, 'message_id': 1, 'new_text': 'x'}
-        for enabled, missing in ((('send', 'edit_own_text'), 'read'), ((), 'edit_own_text, send, read'),
-                                 (('read',), 'edit_own_text, send')):
+        for enabled, missing, hint in ((('send', 'edit_own_text'), 'read', RUNTIME),
+                                       ((), 'edit_own_text, send, read', RUNTIME),
+                                       (('read',), 'edit_own_text, send', profile('archive_edit'))):
             with self.subTest(enabled=enabled):
                 result = await self.call(RuntimePolicy(enabled_capabilities=enabled), 'prepare_text_edit', args)
-                self.assertRefused(result, 'prepare_text_edit', 'capability_disabled: ' + missing + OWNER)
+                self.assertRefused(result, 'prepare_text_edit', 'capability_disabled: ' + missing + hint)
         result = await self.call(RuntimePolicy(enabled_capabilities=('send', 'archive_chats')), 'prepare_chat_archive',
                                  {'chat': 1, 'target_list': 'archive'})
-        self.assertRefused(result, 'prepare_chat_archive', 'capability_disabled: read' + OWNER)
+        self.assertRefused(result, 'prepare_chat_archive', 'capability_disabled: read' + RUNTIME)
 
     async def test_disabled_selection_names_retained_selections(self):
         policy = RuntimePolicy(enabled_capabilities=('read', 'read_messages'))
         result = await self.call(policy, 'read_messages', {'selection_id': 'selection_' + 'a' * 64})
-        self.assertRefused(result, 'read_messages', 'capability_disabled: retained_selections' + OWNER)
+        self.assertRefused(result, 'read_messages', 'capability_disabled: retained_selections' + profile('readers'))
         result = await self.call(RuntimePolicy(enabled_capabilities=('read',)), 'read_messages',
                                  {'selection_id': 'selection_' + 'a' * 64})
-        self.assertRefused(result, 'read_messages', 'capability_disabled: read_messages, retained_selections' + OWNER)
+        self.assertRefused(result, 'read_messages', 'capability_disabled: read_messages, retained_selections' + profile('readers'))
 
     async def test_disabled_reason_is_redacted(self):
         result = await self.call(RuntimePolicy(enabled_capabilities=()), 'resolve_target', {'target': '@' + SENTINEL})
-        self.assertRefused(result, 'resolve_target', 'capability_disabled: read' + OWNER)
+        self.assertRefused(result, 'resolve_target', 'capability_disabled: read' + RUNTIME)
         self.assertNotIn(SENTINEL, result.content[0].text)
 
     async def test_client_schema_mismatch_reason(self):
@@ -113,8 +121,18 @@ class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
 
     def test_suffixes_come_from_the_closed_recovery_map(self):
         from telegram_search_mcp.next_actions import NEXT_ACTIONS
-        self.assertTrue(OWNER.endswith('; next_action: ' + NEXT_ACTIONS['capability_disabled']))
+        self.assertTrue(RUNTIME.endswith('; next_action: ' + NEXT_ACTIONS['capability_disabled']))
         self.assertTrue(STALE.endswith('; next_action: ' + NEXT_ACTIONS['config_stale']))
+
+    def test_profiles_cover_every_optional_capability_exactly_once(self):
+        from telegram_search_mcp.config import BASE_CAPABILITIES, CAPABILITY_PROFILES, unlocking_profiles
+        members = [capability for names in CAPABILITY_PROFILES.values() for capability in names]
+        self.assertEqual(len(members), len(set(members)))
+        self.assertEqual(set(members) | set(BASE_CAPABILITIES), set(KNOWN_CAPABILITIES))
+        self.assertEqual(unlocking_profiles(['forward_send', 'video_send', 'send']), ('forward', 'video'))
+        self.assertEqual(unlocking_profiles(['send']), ('send',))
+        self.assertIsNone(unlocking_profiles(['read', 'send']))
+        self.assertIsNone(unlocking_profiles([]))
 
     def test_reason_names_come_from_the_closed_capability_set(self):
         self.assertLessEqual(set(OPERATION_CAPABILITIES.values()) | {'send', 'retained_selections'}, KNOWN_CAPABILITIES)

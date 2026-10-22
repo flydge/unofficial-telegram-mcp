@@ -161,9 +161,12 @@ open from `connect` must be closed first with `cancel`.
 Installation, a started page or a launch is never Ready; only `ready` followed by a compatible
 `_manifest` is. The preserved default session lives under
 `~/Library/Application Support/TelegramSearchMCP/tdlib` and is never overwritten, purged or
-revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`; `send`,
-`forward_send` and `video_send` need a manual `runtime.toml` edit and a broker restart (docs/install.md,
-"Enabling more capabilities"). There is no account
+revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`. The
+owner turns more on in Terminal with the installed launcher's `capabilities enable <profile>` (`readers`,
+`send`, `replies`, `forward`, `video`, `archive_edit`; `show` lists them, `disable` turns one off). It
+checks for pending sends, changes only the policy's capability line and restarts the installed broker; then
+reconnect the MCP client (docs/install.md, "Enabling more capabilities"). Never edit the policy yourself.
+There is no account
 alias or profile registry, cloud auth or model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
 download missing runtime, source, media tools or models without authority. The plugin's pinned

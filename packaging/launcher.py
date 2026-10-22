@@ -35,6 +35,8 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
                              'claude-telegram-search','claude-telegram-setup')})
 # A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only.
 PENDING_ACTIONS=('install','upgrade','rollback','uninstall')
+# The owner's capability profiles (telegram_search_mcp.config.CAPABILITY_PROFILES), spelled here for the grammar.
+PROFILES=('readers','send','replies','forward','video','archive_edit')
 
 
 def _acl(fd):
@@ -196,12 +198,31 @@ def status(root):
     return result
 
 
+def capabilities(root, args):
+    """Show, enable or disable one capability profile of the installed release's runtime.toml."""
+    from telegram_search_mcp import bundle_install, capability_profiles as profiles
+    home=Path.home()
+    try:
+        if args==['show']: result=profiles.show(home)
+        else:
+            result=profiles.apply(home,args[0],args[1],
+                pending=lambda: bundle_install.default_pending_sends(home,Path(sys.executable),root/'app'),
+                restart=lambda: bundle_install.restart_receipt_broker(root,home))
+    except profiles.ProfileError as error:
+        print(json.dumps({'status':'refused','code':error.code}),file=sys.stderr); return 2
+    except bundle_install.InstallError as error:
+        named=error.args[0] if len(error.args)==1 else None
+        code=named if named in ('service_conflict','service_restart_failed') else 'service_restart_failed'
+        print(json.dumps({'status':'refused','code':code}),file=sys.stderr); return 2
+    print(json.dumps(result,sort_keys=True)); return 0
+
+
 def main(argv=None):
     args=list(sys.argv[1:] if argv is None else argv)
     if args==['--help']:
         print('0.54.0.dev0: mcp | broker | setup | resume | status | connect | wait | cancel | '
-              'api-credentials | rollback | uninstall. setup, resume and api-credentials require native Apple '
-              'Terminal; connect, wait and cancel take no credentials.')
+              'api-credentials | capabilities show|enable|disable <profile> | rollback | uninstall. setup, resume '
+              'and api-credentials require native Apple Terminal; connect, wait and cancel take no credentials.')
         return 0
     # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
     code='bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES) else 'bundle_admission_failed'
@@ -249,17 +270,23 @@ def main(argv=None):
                 pending=getattr(error,'pending_action',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
-        if args not in [[v] for v in ACTIONS]: raise AdmissionError()
+        # capabilities show | enable <profile> | disable <profile>: the owner's profile switch (closed grammar;
+        # the profile name is checked again against the closed table).
+        profile_change=(args[:1]==['capabilities'] and (args[1:]==['show'] or (len(args)==3 and args[1] in ('enable','disable')
+                        and args[2] in PROFILES)))
+        if args not in [[v] for v in ACTIONS] and not profile_change: raise AdmissionError()
         receipt=_json(_read(root.parent.parent/'receipt.json',mode=0o600)); pin=receipt.get('index_sha256')
         if receipt.get('release_root')!=str(root) or root!=root.parent.parent/'releases'/str(pin): raise AdmissionError()
         admit(root,root/'bundle-index.json',pin,True)
         # status also reads the Claude Desktop entry (its registration module needs the installer path).
-        sys.path[:]=([str(root/'app')]+([str(root/'installer')] if args==['status'] else [])
+        sys.path[:]=([str(root/'app')]+([str(root/'installer')] if args==['status'] or profile_change else [])
                      +[p for p in sys.path if Path(p).is_relative_to(root/'python')])
         from telegram_search_mcp.bundle_runtime import activate
         activate(root,pin)
         if args==['status']:
             return status(root)
+        if profile_change:
+            return capabilities(root,args[1:])
         if args==['mcp']:
             return dispatch_mcp()
         if args==['broker']:

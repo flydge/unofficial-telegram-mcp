@@ -104,6 +104,40 @@ def _homebrew_tdlib() -> Path:
 RUNTIME_POLICY_PATH = APP_SUPPORT_ROOT / "runtime.toml"
 LEGACY_CAPABILITIES = ("artifacts", "read", "send")
 KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "forward_send", "video_send", "archive_chats", "edit_own_text"))
+# Owner-facing capability profiles: every optional capability belongs to exactly one profile; the base
+# (read, artifacts) is not a profile. Enabling a profile also enables the profiles it depends on, and
+# disabling one also disables the profiles that depend on it.
+BASE_CAPABILITIES = ("read", "artifacts")
+CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
+    "readers": ("read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history",
+                "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages",
+                "spreadsheets", "presentations", "retained_selections"),
+    "send": ("send", "formatted_text_send", "topic_text_send"),
+    "replies": ("reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets",
+                "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets",
+                "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets"),
+    "forward": ("forward_send",),
+    "video": ("video_send",),
+    "archive_edit": ("archive_chats", "edit_own_text"),
+}
+PROFILE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    "replies": ("send",), "forward": ("send",), "video": ("send",), "archive_edit": ("send",)}
+
+
+def profile_of(capability: str) -> str | None:
+    return next((name for name, members in CAPABILITY_PROFILES.items() if capability in members), None)
+
+
+def unlocking_profiles(missing) -> tuple[str, ...] | None:
+    """The fewest profiles whose enabling (with their dependencies) adds every missing capability, in profile
+    order; None when one of them belongs to no profile (a base capability)."""
+    names = [profile_of(capability) for capability in missing]
+    if not names or None in names:
+        return None
+    implied = {dependency for name in names for dependency in PROFILE_DEPENDENCIES.get(name, ())}
+    return tuple(name for name in CAPABILITY_PROFILES if name in names and name not in implied)
+
+
 # Retained selections live a fixed, never-sliding time from capture start.
 SELECTION_TTL_DEFAULT, SELECTION_TTL_MINIMUM, SELECTION_TTL_MAXIMUM = 900, 60, 1800
 

@@ -237,7 +237,7 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects this MCP client |
 | `connect_account` | authorization not ready (`blocked`) | The owner connects the account with the telegram-setup skill (QR code on their phone), then reconnects |
 | `update_installation` | `config_stale` | The policy changed or a pin no longer matches: the owner restarts or updates the matching components; then call `_manifest` again |
-| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text). The owner adds them to the trusted policy file and restarts the broker; never edit it yourself |
+| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and the profile the refusal names; the owner enables it in Terminal (`capabilities enable <profile>`), then reconnects. Never edit the policy yourself |
 | `search_again` | `selection_unavailable` | Choose the source again from search or read results and call `retain_selection` again; never reuse the old `selection_id` |
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
 | `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |

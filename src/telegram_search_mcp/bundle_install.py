@@ -2529,6 +2529,24 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
         raise InstallError('installation_refused') from None
 
 
+def restart_receipt_broker(release_root, user_home, runner=subprocess.run):
+    """Restart the broker LaunchAgent so it reads a changed policy: 'not_running' when it is not loaded; otherwise
+    only when both its plist on disk and the loaded registration are exactly `release_root`'s broker definition
+    (else `service_conflict`), with `kickstart -k`, answering 'restarted'."""
+    from .config import _owner_paths
+    from .launch_agent import LAUNCHCTL
+    _,_,label,plist=_owner_paths(Path(user_home))
+    text=_live(runner,label)
+    if text is None:return 'not_running'
+    expected=_service_payload(Path(release_root),label)
+    try:actual=plistlib.loads(read(plist,1024*1024,mode=0o600))
+    except (ValueError,TypeError,plistlib.InvalidFileException,BundleError):raise InstallError('service_conflict') from None
+    if actual!=expected or not _matches_live(text,plist,expected):raise InstallError('service_conflict')
+    if _launchctl(runner,[LAUNCHCTL,'kickstart','-k','gui/%d/%s'%(os.getuid(),label)]).returncode!=0:
+        raise InstallError('service_restart_failed')
+    return 'restarted'
+
+
 def client_status(installation_root, user_home):
     """Read-only drift of the owned Claude Desktop entry: never writes, runs a CLI or holds a lease.
 

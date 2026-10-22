@@ -188,20 +188,44 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
 a `0700` directory) with `expected_package_version` set to the running package version
 (`"0.54.0.dev0"` for this candidate),
-`expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
-`forward_send`, `video_send`, `archive_chats`, `edit_own_text` and every extended reader are off. To enable more, edit that file
-yourself. Keep the pins as written and add only the capabilities you need from the
-[capability table below](#published-051-choose-capabilities) (for example `"send"` plus
-`"forward_send"`, `"video_send"`, `"archive_chats"` or `"edit_own_text"`). The bundle has no `telegram-search-broker install`. Check
-pending send outcomes first, then restart the broker so it loads the new policy:
+`expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: sending, forwarding,
+video, archive and edit, and every extended reader are off. Since the 0.54 candidate the installed launcher
+switches whole **capability profiles** in Terminal:
+
+```bash
+"$HOME/Library/Application Support/TelegramSearch/releases/<pin>/python/bin/python3" -I -S -B \
+  "$HOME/Library/Application Support/TelegramSearch/releases/<pin>/launcher.py" capabilities show
+```
+
+The same command with `capabilities enable <profile>` or `capabilities disable <profile>` changes one
+profile (the `releases/<pin>` directory is the one `current.json` names):
+
+| Profile | Capabilities | Also enables |
+| --- | --- | --- |
+| `readers` | `read_messages`, `read_history`, `read_reply_chain`, `list_topics`, `read_topic_history`, `search_messages`, `list_chats`, `search_chats`, `verified_targets`, `attachment_pages`, `spreadsheets`, `presentations`, `retained_selections` | |
+| `send` | `send`, `formatted_text_send`, `topic_text_send` | |
+| `replies` | `reply_text_send`, `reply_artifact_send` and every `reply_*_targets` source family | `send` |
+| `forward` | `forward_send` | `send` |
+| `video` | `video_send` | `send` |
+| `archive_edit` | `archive_chats`, `edit_own_text` | `send` |
+
+Disabling `send` also disables `replies`, `forward`, `video` and `archive_edit`; the base `read` and
+`artifacts` are not a profile and stay. The action changes only the `enabled_capabilities` line (every other
+byte, pins and comments included, stays) through a validated atomic replace, and only after the running
+broker reports no pending send (`pending_send_unresolved` otherwise, with nothing changed). Then it restarts
+the installed broker with `launchctl kickstart -k` when it is loaded and its definition is exactly the
+installed release's (`service_conflict` otherwise). A file changed meanwhile refuses with
+`policy_conflict`; a multi-line or missing `enabled_capabilities` line, or any other unsafe policy, with
+`policy_unsupported`. If the restart fails after the write (`service_restart_failed`), restart it yourself:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker
 ```
 
-`<home-directory-name>` is the last component of your home directory. Running components
-report `config_stale` until restarted. Restarting the broker clears in-memory drafts, uploads
-and cursors, so reconnect the MCP client afterwards (Claude Code: `/mcp`; Codex: restart it).
+`<home-directory-name>` is the last component of your home directory. Editing the file by hand with the
+[capability table below](#published-051-choose-capabilities) still works; keep the pins as written. Running
+components report `config_stale` until restarted. Restarting the broker clears in-memory drafts, uploads,
+cursors and selections, so reconnect the MCP client afterwards (Claude Code: `/mcp`; Codex: restart it).
 
 ### Terminal fallback: phone and code setup
 

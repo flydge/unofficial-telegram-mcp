@@ -147,8 +147,9 @@ class ContractTextTests(unittest.TestCase):
         self.assertEqual(server._argument_refusal("t", schema, {"zzz": 1}, None),
                          matrix.INVALID_ARGUMENTS.format("t", "missing a; 1 unexpected argument(s)"))
         self.assertEqual(matrix.UNKNOWN_TOOL, server._INPUT_REFUSALS["unknown_tool"])
-        self.assertEqual(matrix.CAPABILITY_DISABLED.format("t", "c"),
-                         prefix.format("t") + server._GUARD_REFUSALS["capability_disabled"].format("c"))
+        self.assertEqual(matrix.CAPABILITY_DISABLED.format("t", "c", "readers"),
+                         prefix.format("t") + server._GUARD_REFUSALS["capability_disabled"].format(
+                             "c", server._enable_hint(["read_history"])))
         self.assertEqual(matrix.CONFIG_STALE.format("t"), prefix.format("t") + server._GUARD_REFUSALS["config_stale"])
         self.assertEqual(matrix.CLIENT_SCHEMA_MISMATCH.format("t"),
                          prefix.format("t") + server._GUARD_REFUSALS["client_schema_mismatch"])
@@ -161,7 +162,7 @@ class ContractTextTests(unittest.TestCase):
         reference = (ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
         for text in (matrix.INVALID_ARGUMENTS.format("<tool>", "missing <names>; invalid <names>; <n> unexpected "
                                                      "argument(s)"), matrix.UNKNOWN_TOOL,
-                     matrix.CAPABILITY_DISABLED.format("<tool>", "<capabilities>"),
+                     matrix.CAPABILITY_DISABLED.format("<tool>", "<capabilities>", "<profile>"),
                      matrix.CONFIG_STALE.format("<tool>"), matrix.CLIENT_SCHEMA_MISMATCH.format("<tool>")):
             self.assertIn(text, reference)
 
