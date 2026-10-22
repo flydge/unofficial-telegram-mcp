@@ -781,6 +781,47 @@ class NoDeadEndTests(ParkedHarness, unittest.TestCase):
                                      ('uninstalled', 'kept' if touch == 'edit' else 'absent'))
                     self.assertFalse(self.runtime.exists())
 
+    def test_uninstall_over_a_parked_change_removes_a_client_entry_written_before_its_status(self):
+        """0.53.0rc1 re-review (R5j, R5k, seed 10387): killed right after the change wrote the Claude Desktop entry
+        (or ran `claude mcp add`) and before it recorded that client's outcome, then parked by a late refusal at
+        the repeat (our skill copy edited, then put back). Ownership comes from the change's write-ahead record,
+        so uninstall removes the entry while it is exactly what the change wrote (it was kept, naming the removed
+        release). Killed before the write, the older entry is the installation's and is removed as before (for
+        Claude Code the older entry was already removed then, write-ahead, so nothing is left: `absent`)."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('published:claude_desktop_add', 'recorded:claude_desktop_add', 'published:claude_add',
+                       'recorded:claude_add'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    _, old = self.full()
+                    new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+                    if kind == 'rollback':
+                        self.install(new)
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                    self.claude()
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                    command, args = self.commands(target)
+                    written = ({'command': command, 'args': args} if 'desktop' in at else
+                               {'type': 'stdio', 'command': command, 'args': args})
+                    entry = (json.loads(self.desktop_config.read_text())['mcpServers'].get('telegram_search')
+                             if 'desktop' in at else self.claude().entry)
+                    self.assertEqual(entry == written, at.startswith('published:'))
+                    skill = self.skills / 'telegram-search' / 'SKILL.md'
+                    saved, mode = skill.read_bytes(), skill.stat().st_mode & 0o777
+                    skill.chmod(0o600)
+                    skill.write_bytes(b'mine')
+                    self.assertEqual(self.refused(action), 'skill_conflict')
+                    skill.write_bytes(saved)
+                    skill.chmod(mode)
+                    removed = self.change('uninstall')
+                    if at == 'recorded:claude_add':
+                        # Our older entry was removed (write-ahead) before the kill, and nothing was added.
+                        self.assertEqual(removed['claude_code'], 'absent')
+                        removed = {**removed, 'claude_code': 'removed'}
+                    self.assertRemoved(removed)
+
     def test_our_codex_table_changed_after_the_commit_never_blocks_the_repeat(self):
         """The same after the commit (killed short of its restart) for our Codex table: changed or removed, the
         repeat finishes and leaves it; uninstall keeps a changed table as the user's."""

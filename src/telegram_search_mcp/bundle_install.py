@@ -1189,7 +1189,7 @@ def _owned_desktop(value, command, arguments):
     return value if owned.client=='claude-desktop' and owned.post_subtree_hash==expected else None
 
 
-def _client_owners(root, below=None, parked=None):
+def _client_owners(root, below=None, parked=None, home=None):
     """The Claude Code and Claude Desktop entries the installation owns: {client: (command, arguments, record)}.
 
     For each client, the entry written by the newest finished transaction whose step for that client ended
@@ -1198,8 +1198,10 @@ def _client_owners(root, below=None, parked=None):
     replaced nothing of ours, so the earlier entry stays ours while it is still exactly that entry. Read newest
     first from the journals: the finished changes numbered below `below` (the one being run does not count yet),
     then the first install. `parked` names an unfinished change an uninstall goes over (`_parked`): its recorded
-    outcomes count like a finished one's. A client missing from the result owns nothing. The same for v1 and v2
-    receipts.
+    outcomes count like a finished one's, and a client whose outcome it never recorded (killed between its write
+    and that record) is its own by the write-ahead record (`claude_add`, or `claude_desktop_add` with its
+    ownership) while the entry in `home` is exactly the one it wrote; otherwise the older owner stands. A client
+    missing from the result owns nothing. The same for v1 and v2 receipts.
     """
     paths=[root/'transactions'/('change_%d'%n)/'journal.json' for n in reversed(_changes(root)) if below is None or n<below]
     found=_install_transactions(root)
@@ -1214,7 +1216,15 @@ def _client_owners(root, below=None, parked=None):
         if type(journal.get('release_root')) is not str:raise InstallError('transaction_conflict')
         command,arguments=_commands(Path(journal['release_root']))
         for client in ('claude_code','claude_desktop'):
-            if client in decided or (_record(journal,client) or {}).get('status')!='registered':continue
+            if client in decided:continue
+            if (_record(journal,client) or {}).get('status')!='registered':
+                if path.parent.name!=parked or home is None or _record(journal,client) is not None:continue
+                # The parked change's write-ahead record, while the entry is exactly what it wrote.
+                if client=='claude_code':
+                    if _record(journal,'claude_add') is None or claude_registration.state(home,command,arguments)!='exact':continue
+                else:
+                    value=_owned_desktop((_record(journal,'claude_desktop_add') or {}).get('ownership'),command,arguments)
+                    if value is None or claude_desktop_registration.state(home,command,arguments)!='exact':continue
             decided.add(client)
             if client=='claude_code':owners[client]=(command,arguments,None);continue
             value=_owned_desktop((_record(journal,'claude_desktop_add') or {}).get('ownership'),command,arguments)
@@ -2423,7 +2433,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             codex_owners,parked_skills=_parked_objects(root,*parked,receipt) if parked else ([],{})
             codex_owners=[_codex_ownership(root,receipt),*codex_owners]
             owners=_client_owners(root,int(name[7:]) if journal is not None and journal.get('kind')=='uninstall' else None,
-                                  parked[0] if parked else None)
+                                  parked[0] if parked else None,home)
             backups=_adoption_backups(root,receipt,parked)
             service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
             observed=None

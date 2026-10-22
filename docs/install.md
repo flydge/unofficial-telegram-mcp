@@ -783,8 +783,11 @@ exactly that entry: the next upgrade replaces it and `uninstall` removes it. An 
 there (`reused` on a first install), one you wrote, and one you changed are never owned. That includes an
 entry you changed while an interrupted step was writing it: the resumed step ends `failed`, and the entry
 stays yours (`kept` by `uninstall`) even if you change it back to what the step wrote, until a later
-upgrade or rollback registers that client again. Ownership is read from the installation's own transaction
-journals, the same way for every receipt schema.
+upgrade or rollback registers that client again. An upgrade or rollback parked by a refusal after it wrote
+an entry but before it recorded that step's result (an interruption in between) owns the entry it wrote by
+the record it journals before every write, so `uninstall` over it removes the entry while it is exactly what
+was written. Ownership is read from the installation's own transaction journals, the same way for every
+receipt schema.
 
 ### Uninstall
 

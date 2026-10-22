@@ -2125,7 +2125,8 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   refusal's finished restore, is parked: its repeat resumes it once the named object is put back or
   removed, and `uninstall` goes over it, removing what the receipt the change started from owns plus what
   the change's journal binds (its Codex entry once written, its skill copies, the Claude Code and Claude
-  Desktop entries it recorded `registered`), each only while it is exactly that object; its adoption
+  Desktop entries it recorded `registered`, or wrote under its write-ahead record before an interruption cut
+  off the outcome record), each only while it is exactly that object; its adoption
   backups are kept. `rollback` and another kit refuse (`transaction_pending`). A change interrupted with
   its broker stopped or its restore unfinished is not parked: uninstall names it too. A parked adopting
   first install has no installed release yet, so only its repeat ends it.
