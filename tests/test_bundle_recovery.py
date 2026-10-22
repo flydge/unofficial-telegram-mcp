@@ -112,12 +112,12 @@ class RecoveryTests(BundleInstallTests):
                                 changed=target/'launcher.py' if kind=='release' else target/'SKILL.md' if kind.startswith(('telegram-','claude-')) else target
                                 changed.chmod(0o600);changed.write_bytes(b'foreign')
                         foreign=(target,target.stat().st_ino)
+                    if kind=='registration' and not matching:
+                        # Neighbours only, no entry: the write is planned again over them in the same run, every byte kept.
+                        self.assertEqual(self.install(packet,checkpoint=actor)['status'],'activation_required')
+                        self.assertTrue(foreign[0].read_bytes().startswith(b'# foreign\n'));continue
                     with self.assertRaises(module.InstallError):self.install(packet,checkpoint=actor)
                     self.assertIsNotNone(foreign);self.assertEqual(foreign[0].stat().st_ino,foreign[1])
-                    if kind=='registration' and not matching:
-                        # Neighbours only, no entry: the resume merges onto them, every byte kept.
-                        self.assertEqual(self.install(packet)['status'],'activation_required')
-                        self.assertTrue(foreign[0].read_bytes().startswith(b'# foreign\n'));continue
                     with self.assertRaises(module.InstallError):self.install(packet)
                     self.assertEqual(foreign[0].stat().st_ino,foreign[1])
 

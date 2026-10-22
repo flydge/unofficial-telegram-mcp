@@ -1148,29 +1148,52 @@ def _codex_change(source, registration, ownership):
 
 
 def _codex_write(j, config, before, existed, candidate, post_hash, replan, code):
-    """The journaled Codex write (`registration`) over the file as it is now.
+    """The journaled Codex write (`registration`) over the file as it is now, run by every run until the commit.
 
     Over the exact preimage the prepared candidate is written. When the file changed since, only the
-    `telegram_search` entry decides: still the preimage's (ours, or the adopted foreign one) or removed, the
-    same edit is planned again over the current bytes (`replan`, which must yield `post_hash`), keeping every
-    neighbour byte the user wrote meanwhile; any other entry refuses as `code`, untouched, even one equal to
-    ours (only the object this transaction wrote is ever taken as its own).
+    `telegram_search` entry decides: once the journal records the write done (stage `registration`), our
+    written entry (`post_hash`) is done, whatever the neighbours; still the preimage's (ours, or the adopted
+    foreign one) or removed, the same edit is planned again over the current bytes (`replan`, which must yield
+    `post_hash`), keeping every neighbour byte the user wrote meanwhile; any other entry refuses as `code`,
+    untouched, even one equal to ours before the write is recorded done (only the object this transaction
+    wrote is ever taken as its own). A file changed between the write's record and its replace is planned
+    again the same way, a bounded number of times.
     """
     j.discard('registration',config)
     bound=j.proof('registration')
     if bound is not None and 'object' in bound:
         try:require_object_binding(config,bound['object']);return
         except RuntimePathError:pass
-    current,exists=_read_file(config,MAX_CONFIG_BYTES)
-    if (current,exists)!=(before,existed):
+    landed=j.reached('registration')
+    try:reference=owned_subtree(before)
+    except ConfigConflict:raise InstallError('transaction_conflict') from None
+    for _ in range(3):
+        current,exists=_read_file(config,MAX_CONFIG_BYTES)
+        if (current,exists)!=(before,existed):
+            try:
+                mine=owned_subtree(current)
+                if landed and mine is not None and digest(mine)==post_hash:return
+                if mine is not None and mine!=reference:raise InstallError(code)
+                change=replan(current,mine is not None)
+            except ConfigConflict:raise InstallError(code) from None
+            if change.post_subtree_hash!=post_hash:raise InstallError(code)
+            before,existed,candidate=current,exists,change.candidate
         try:
-            mine=owned_subtree(current)
-            if mine is not None and mine!=owned_subtree(before):raise InstallError(code)
-            change=replan(current,mine is not None)
-        except ConfigConflict:raise InstallError(code) from None
-        if change.post_subtree_hash!=post_hash:raise InstallError(code)
-        before,existed,candidate=current,exists,change.candidate
-    j.write('registration',config,candidate,before,existed=existed,maximum=MAX_CONFIG_BYTES)
+            j.write('registration',config,candidate,before,existed=existed,maximum=MAX_CONFIG_BYTES)
+            return
+        except ConfigConflict as error:  # Changed between the write's record and its replace.
+            if error.code!='concurrent_change':raise
+        except InstallError as error:  # Changed between this read and the write's own.
+            if str(error)!='target_conflict':raise
+    raise InstallError(code)
+
+
+def _codex_check(config, registration, ownership, code):
+    """After the Codex step: our entry is exactly the one this transaction wrote (a no-op merge), else `code`."""
+    try:
+        if merge_registration(read_config(config),registration,ownership).is_noop:return
+    except ConfigConflict:pass
+    raise InstallError(code)
 
 
 def _changes(root):
@@ -1456,16 +1479,18 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     service.observe(j)
                     j.advance('service_pending');service.stop(j)
                 j.advance('service_pending');j.advance('service')
-                if not reached('registration'):
-                    if not reached('registration_pending'):update('registration_pending')
+                if not reached('complete'):
+                    j.advance('registration_pending')
                     # Each attempt is journaled (and counted) before its temporary exists; the write goes over the
-                    # current bytes (`_codex_write`), a killed attempt's temporary discarded first.
+                    # current bytes (`_codex_write`), a killed attempt's temporary discarded first. Until the commit
+                    # every run writes our entry again if it was removed since.
                     def replan(source, present):
                         return (adopt_registration if 'codex' in adopted and present else merge_registration)(source,registration)
                     _codex_write(j,config,before,journal['config_existed'],candidate,ownership.post_subtree_hash,replan,
                                  'foreign_registration')
-                    update('registration')
-                if not merge_registration(read_config(config),registration,ownership).is_noop:raise InstallError('registration_conflict')
+                    j.advance('registration')
+                # Our entry changed after the write: inside the transaction the same code as before it.
+                _codex_check(config,registration,ownership,'registration_conflict' if reached('complete') else 'foreign_registration')
                 checkpoint('registration')
                 # `~/.claude/skills` is touched only when Claude Code is evidently present; decided once per transaction.
                 if recorded('claude_skills') is None:
@@ -1898,16 +1923,17 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 service.observe(j)
                 j.advance('service_pending');service.stop(j);j.advance('service')
             checkpoint('service')
-            # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`).
-            if not j.reached('registration'):
+            # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`); until the commit
+            # every run writes it again if it was removed since.
+            if not j.reached('complete'):
                 j.advance('registration_pending')
                 ensure_owned_private_directory(codex,private_leaf=False)
                 def replan(source, present):
                     if 'codex' in adopted and present:return adopt_registration(source,to_registration)
                     return _codex_change(source,to_registration,ownership)
                 _codex_write(j,config,before,j['config_existed'],candidate,new_ownership.post_subtree_hash,replan,'target_conflict')
-                j.update('registration')
-            if not merge_registration(read_config(config),to_registration,new_ownership).is_noop:raise InstallError('registration_conflict')
+                j.advance('registration')
+            _codex_check(config,to_registration,new_ownership,'target_conflict')
             checkpoint('registration')
             objects={}
             to_skills={s['id']:s['sha256'] for s in to_manifest['skills']}

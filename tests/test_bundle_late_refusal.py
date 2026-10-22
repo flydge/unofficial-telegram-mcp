@@ -3,8 +3,11 @@
 A client file the user edits while the release is copied is merged: only a change of our own entry (or, when
 adopting, of the adopted foreign entry) counts as a conflict. Any refusal after the broker stop and before the
 commit first restores the previous service, byte for byte, through a journaled step: the old release keeps
-serving and the same command finishes the transaction once the named object is put back. launchctl, the claude
-CLI and the pending-send probe are fakes; nothing real is read or written.
+serving and the same command finishes the transaction once the named object is put back. Round 4: the service
+step is idempotent by state, so a kill anywhere in the repeat's stop still ends on one release; refusals are not
+limited and the journal does not grow with them; a parked change ends by its repeat or by `uninstall`; our Codex
+table changed around its write refuses with the documented code. launchctl, the claude CLI and the pending-send
+probe are fakes; nothing real is read or written.
 """
 import json
 from pathlib import Path
@@ -644,7 +647,7 @@ class NoDeadEndTests(ParkedHarness, unittest.TestCase):
     def test_an_object_the_change_wrote_and_the_user_removed_is_written_again(self):
         """Parked after every client names the target, then the user removes an object the change already wrote:
         the repeat writes it again and finishes."""
-        for removed in ('skill',):
+        for removed in ('skill', 'codex'):
             with self.subTest(removed=removed):
                 self.setUp()
                 action, target = self.parked('upgrade', cause='receipt')
@@ -670,6 +673,59 @@ class NoDeadEndTests(ParkedHarness, unittest.TestCase):
                 self.die(lambda checkpoint: self.change('uninstall', checkpoint=checkpoint), at=stage)
                 self.assertPending(lambda: self.install(self.build('c', launcher=b'# third\n')), 'uninstall')
                 self.assertRemoved(self.change('uninstall'))
+
+
+class CodexWriteWindowTests(ParkedHarness, unittest.TestCase):
+    """Our Codex table changed between the write's record and its replace, or right after it: the documented code
+    (`target_conflict`, `foreign_registration` when adopting), never `installation_refused`."""
+
+    def test_our_codex_table_changed_around_its_write_refuses_with_the_documented_code(self):
+        for kind in RepeatStopTests.KINDS:
+            for at in ('recorded:registration', 'published:registration'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    if kind == 'adopting first install':
+                        self.legacy()
+                        packet = self.build('a')
+                        action = lambda **kwargs: self.install(packet, adopt_legacy=True, **kwargs)
+                        target = self.runtime / 'releases' / packet[3]
+                        # Before the replace the file still holds the adopted entry; after it, ours.
+                        mine = (LEGACY_ARGS, LEGACY_CHANGED) if at == 'recorded:registration' else (OURS, CHANGED)
+                        code = 'foreign_registration'
+                    else:
+                        _, old = self.full()
+                        new = self.build('b', launcher=b'# second release\n')
+                        if kind == 'rollback':
+                            self.install(new)
+                        target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                        action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                            lambda **kwargs: self.change('rollback', **kwargs))
+                        mine, code = (OURS, CHANGED), 'target_conflict'
+                    served = self.service_state()
+                    saved = []
+
+                    def edit(stage):
+                        if stage == at and not saved:
+                            saved.append(self.config.read_bytes())
+                            self.assertIn(mine[0], saved[0])
+                            self.config.write_bytes(saved[0].replace(*mine))
+                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), code)
+                    self.assertEqual(self.service_state(), served)
+                    self.config.write_bytes(saved[0])
+                    self.assertEqual(action()['service'], 'restarted')
+                    self.assertOneRelease(target)
+
+    def test_a_neighbour_added_in_the_codex_write_window_is_merged(self):
+        _, old = self.full()
+        new = self.build('b', launcher=b'# second release\n')
+
+        def edit(stage):
+            if stage == 'recorded:registration' and WEATHER not in self.config.read_bytes():
+                self.config.write_bytes(self.config.read_bytes() + WEATHER)
+        result = self.install(new, checkpoint=edit)
+        self.assertEqual((result['status'], result['service']), ('upgraded', 'restarted'))
+        self.assertTrue(self.config.read_bytes().endswith(WEATHER))
+        self.assertOneRelease(self.runtime / 'releases' / new[3])
 
 
 if __name__ == '__main__':

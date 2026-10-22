@@ -4,8 +4,12 @@ uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that k
 upgrade whose Codex write is planned again over a neighbour added while the release is copied, and a late
 refusal whose journaled restore runs after the broker stop: our Codex entry (or the adopted one) changed while
 the release is copied, for an upgrade and an adopting first install, and `receipt.json` changed after the
-`runtime.toml` version line was rewritten, which the restore puts back first. The parent then resumes the same
-action. A late refusal's resume refuses with the same code and leaves the same restored state.
+`runtime.toml` version line was rewritten, which the restore puts back first, or our Codex table changed right
+after its write. After a late refusal (0.53 critic round 4) also the successful repeat of an upgrade, a rollback
+and an adopting first install, the repeat after nine refusals, and an uninstall over a parked upgrade or
+rollback. The parent then resumes the same action. A late refusal's resume refuses with the same code and leaves
+the same restored state; where a scenario names a `final` check, the resumed state also passes it (one release
+named by `current.json`, the `runtime.toml` pin, the plist and the loaded broker; or nothing left).
 
 The resumed final state must equal the uninterrupted run's: a normalised tree of the whole synthetic base, every
 publication binding resolved to the path that now holds that inode. Nothing may be left anywhere (no staging
@@ -497,6 +501,28 @@ def _uninstall_parked_check(h, result):
     h.assertEqual(_nothing_left(h), [])
 
 
+def _after_codex_write(h):
+    """Our Codex table changed right after this transaction wrote it (`published:registration`); a resume killed
+    between the write and that checkpoint makes the same edit once our written table is found in place."""
+    config, ours = h.codex / 'config.toml', str(h.runtime / 'releases' / h.new[3]).encode()
+
+    def checkpoint(stage):
+        data = config.read_bytes()
+        if stage in ('service', 'published:registration') and ours in data and OURS in data:
+            config.write_bytes(data.replace(OURS, CHANGED))
+    return checkpoint
+
+
+def _codex_write_refusal_check(h, result):
+    h.assertEqual(result, {'refused': 'target_conflict', 'pending_action': None})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+    h.target = h.runtime / 'releases' / h.new[3]
+    _upgrade_check(h, h.install(h.new))
+    h.assertEqual(_one_release(h), [])
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -536,6 +562,9 @@ SCENARIOS = {
         'uninstall', launchctl=lc, claude_runner=cl), _uninstall_parked_check, write_ahead=False, final=_nothing_left),
     'uninstall_over_a_parked_rollback': Scenario(_uninstall_parked_rollback_prepare, lambda h, lc, cl: h.change(
         'uninstall', launchctl=lc, claude_runner=cl), _uninstall_parked_check, write_ahead=False, final=_nothing_left),
+    'late_refusal_after_the_codex_write': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_after_codex_write(h))), _codex_write_refusal_check,
+        write_ahead=False, final=_one_release),
 }
 
 
@@ -794,6 +823,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_uninstall_over_a_parked_rollback_removes_what_it_wrote(self):
         self.sweep('uninstall_over_a_parked_rollback')
+
+    def test_late_refusal_after_the_codex_write_refuses_with_its_documented_code(self):
+        self.sweep('late_refusal_after_the_codex_write')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""
