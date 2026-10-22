@@ -141,6 +141,8 @@ return one of these statuses.
 
 The matching Codex skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
 
+Since the 0.54 candidate the skill is a lean workflow guide of at most 20,000 bytes and 300 lines (it was about 85 KB): the start gate (`_manifest(check_broker=true)`, `compatible`, then `available_tools`, with no fixed tool count), target routing, semantic discovery, thorough search with coverage rules, a which-tool table, the answer-and-source format with provider links, the approval rule and recovery by `next_action`. Per-tool limits, refusal codes and preview fields now live only in the tool descriptions and this reference. The Claude Code plugin carries a byte-identical copy. `tests/test_skill_coverage.py` checks it against the built server: every tool, capability, status, field, argument, `next_action` value and transfer-helper option the skill names exists; each row of the which-tool table names exactly the capabilities its tools need, and every tool appears once; the recovery table lists the closed `next_action` map; and every `next_action` value, the approval statuses `declined`, `timeout` and `dialog_unavailable`, `capability_disabled` with `missing_capabilities`, `outcome_unknown` and `get_send_status` appear in it.
+
 ## Explicit outgoing text styles
 
 The four text preparation/revision tools accept optional `outgoing_entities`.
