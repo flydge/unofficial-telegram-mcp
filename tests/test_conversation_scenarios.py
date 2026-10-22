@@ -252,6 +252,15 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assert_fails("capability_disabled", rows, answer, "anchors_from_evidence")
         refusal_row = run.rows[refused_at]
         self.assert_fails("capability_disabled", run.rows + [copy.deepcopy(refusal_row)] * 2, answer, "no_workaround")
+        # Stopping before the call, from _manifest (the capability is off) and the tool description, is the
+        # same recovery when the answer names the capability; without that answer it is not shown.
+        manifest_only = [row for row in run.rows if row.get("event") != "tool_call" or row["tool"] == "_manifest"]
+        result = score(SCENARIOS["capability_disabled"], Run(manifest_only), answer)
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(failed(result), {"refusal_seen"})
+        self.assert_fails("capability_disabled", manifest_only, None, "stopped_at_capability")
+        self.assert_fails("capability_disabled", manifest_only, "I cannot do that.", "stopped_at_capability",
+                          "answer_names_capability")
 
     async def test_recover_from_an_unknown_outcome(self):
         run, answer = await self.run_scenario("outcome_unknown")
