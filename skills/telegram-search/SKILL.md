@@ -241,7 +241,7 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |
 
 Without a hint: `client_schema_mismatch` means refresh tools/list, then call `_manifest`; `invalid_arguments`
-means fix the arguments to the input schema (the text names no field), without looping; `unknown_tool`
+names only the missing or invalid schema parameters (never values): fix those once, without looping; `unknown_tool`
 means refresh tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means
 report it and stop. A broker restart clears drafts, uploads, cursors and selections, so check pending send
 outcomes before the owner restarts it.
