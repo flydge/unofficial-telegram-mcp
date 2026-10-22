@@ -168,10 +168,9 @@ off; docs/install.md, "Enabling more capabilities"). Never run it yourself, even
 present it as a step in the middle of a session: it refuses (`pending_send_unresolved`) while any MCP client
 context is active, up to 300 s after the last Telegram call. Tell the owner to quit or disconnect every MCP
 client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
-`policy_unsupported` change nothing: stop and report the code. `status: changed` with `broker:
-restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the policy
-yourself.
-There is no account
+`policy_unsupported` change nothing: stop and report the code. `status: changed` with
+`broker: restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the
+policy yourself. There is no account
 alias or profile registry, cloud auth or model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
 download missing runtime, source, media tools or models without authority. The plugin's pinned
