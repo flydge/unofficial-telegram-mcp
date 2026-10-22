@@ -1016,7 +1016,7 @@ Besides the keys above, the file accepts two optional numeric settings; leave th
 | `max_draft_ttl_seconds` | integer 1..86400 | 900 | How long an unsent draft revision stays usable |
 | `selection_ttl_seconds` | integer 60..1800 | 900 | How long a retained selection lives from capture (0.54 candidate; 300 before); never renewed and still capped by the file or verified-target expiry |
 
-Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decimal, quoted or out-of-range value makes the whole file invalid. Changing either setting changes the configuration fingerprint, so restart the broker and reconnect the client as for a capability change.
+Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decimal, quoted or out-of-range value makes the whole file invalid. Changing either setting changes the configuration fingerprint, so restart the broker and reconnect the client as for a capability change. Releases before 0.54 reject the `selection_ttl_seconds` key, so a [rollback](#rollback) to one refuses (`rollback_refused`) while a line added after the upgrade is present: remove it first.
 
 | To enable | Add these capabilities |
 | --- | --- |
