@@ -2119,7 +2119,10 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **The service step is idempotent by state.** Every run before the commit, whatever stage the journal
   records, makes the service the target's: a previous definition that was loaded again after the stop is
   gated and booted out again (also when no broker ran as the change began; then none is started after the
-  commit), and the plist is rewritten until it is the target's; a plist removed since the change began is
+  commit), and the plist is rewritten until it is the target's. Once the plist is the target's, the
+  definition it replaced loaded again from the same path (a login or a concurrent bootstrap between the
+  bootout and the rewrite) is recognised by the kept `service.previous` bytes and gated and booted out the
+  same way, by every run before the commit and by the restart after it; a plist removed since the change began is
   nothing to stop, and the target's is written anew. After the commit only the target's plist is
   bootstrapped (written again first if it was removed), and only if a broker ran as the change began; any
   other definition refuses (`service_conflict`) and nothing is started. A registration still loaded from the

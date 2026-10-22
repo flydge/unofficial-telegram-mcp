@@ -546,6 +546,7 @@ class _Journal:
             # write: a record kept per cycle, so the journal stays the same size however many cycles there are.
             name,value=put
             next_value['publications']={**{k:v for k,v in next_value['publications'].items() if k not in clear},name:[value]}
+        elif clear:next_value['publications']={k:v for k,v in next_value['publications'].items() if k not in clear}
         write(self.tx/'journal.json',encoded(next_value),expected=encoded(self.value),existed=True)
         self.value=next_value
 
@@ -722,6 +723,17 @@ def _client_temporaries(publications, home, config, plist, session_root):
     def desktop(_, record):claude_desktop_registration.discard_temporary(home,record)
     for name,key in _CLIENT_WRITES:
         _discard_journaled(publications,name,paths[key],desktop if key=='desktop' else discard_temporary)
+
+
+def _settle_codex_attempts(j):
+    """In a late refusal's restore, once its `undo` discarded their temporaries: the Codex write's attempts shrink to
+    the one that proves this transaction's own write (the last with its flushed object), so attempts never pile up
+    across cycles and every run the user starts has fresh ones (no `recovery_limit` from repeated refusals)."""
+    attempts=j.attempts('registration')
+    proof=[a for a in attempts if 'object' in a][-1:]
+    if len(attempts)>len(proof):
+        if proof:j.update(put=('registration',proof[0]))
+        else:j.update(clear=('registration',))
 
 
 def _desktop_write(j, home, plan):
@@ -938,6 +950,27 @@ class _Service:
         self.gate(self._loaded_payload(live,kind,payload))
         return True
 
+    def _previous_loaded(self, j):
+        """Whether a definition other than the target's is loaded, gated first (True: the caller boots it out).
+
+        Before the rewrite as `_recheck`. Once the plist is the target's, the definition it replaced may be loaded
+        again from the same path: a login, a concurrent `connect` or a manual bootstrap between the stop's bootout
+        and the rewrite. It is recognised by the kept previous bytes (or a known definition). The target's loaded
+        broker is False, and so is one that is neither: the restore and the restart refuse it (`service_conflict`)."""
+        if self.kind()[0]!='to':return self._recheck()
+        live=_live(self.runner,self.label)
+        if live is None or _matches_live(live,self.plist,self.target):return False
+        candidates=list(self.known.values())
+        if j.recorded('service_previous') is not None:
+            try:candidates.insert(0,plistlib.loads(self._kept(j)))
+            except (ValueError,TypeError,plistlib.InvalidFileException):pass
+        for value in candidates:
+            if (type(value) is dict and type(value.get('ProgramArguments')) is list and value['ProgramArguments']
+                    and _matches_live(live,self.plist,value)):
+                self.gate(value)
+                return True
+        return False
+
     def cycle(self, j):
         """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
         while `restoring`."""
@@ -980,7 +1013,7 @@ class _Service:
             if self._recheck():
                 self.stopping=True;_bootout(self.runner,self.label)
             j.update(put=('service_cycle',{'cycle':number+1,'state':'stopped'}));j.checkpoint('stopped:service')
-        elif self.kind()[0]!='to' and self._recheck():
+        elif self._previous_loaded(j):
             self.stopping=True;_bootout(self.runner,self.label)
         if observed['plist']!='absent':
             j.discard('plist',self.plist)
@@ -1062,9 +1095,13 @@ class _Service:
     def restart(self, j):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
         while the plist is the target's (the stop made it so before the commit); a plist removed since (by hand
-        or a cleanup) is written again first, as the stop writes it; any other definition refuses."""
+        or a cleanup) is written again first, as the stop writes it; any other definition refuses. The definition
+        the stop replaced, loaded again between its bootout and the rewrite (`_previous_loaded`), is gated and
+        booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
         observed=j.recorded('service')
-        if observed is None or not observed['loaded']:return 'not_loaded'
+        if observed is None:return 'not_loaded'
+        if observed['plist']!='absent' and self.kind()[0]=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
+        if not observed['loaded']:return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
             if self.kind()[0]=='absent':
@@ -1567,6 +1604,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             unfinished=service.unfinished(j) if service is not None else None
             def undo():
                 _client_temporaries(j.value['publications'],home,config,plist,session_root)
+                _settle_codex_attempts(j)
                 _policy_back(j,session_root,manifest['package_version'])
             if unfinished is not None:
                 service.restore(j,unfinished,undo);raise InstallError(unfinished)
@@ -2016,6 +2054,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         unfinished=service.unfinished(j)
         def undo():
             _client_temporaries(j.value['publications'],home,config,plist,session_root)
+            _settle_codex_attempts(j)
             _policy_back(j,session_root,to_manifest['package_version'])
         if unfinished is not None:
             service.restore(j,unfinished,undo);raise InstallError(unfinished)

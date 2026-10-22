@@ -896,6 +896,34 @@ class CodexWriteWindowTests(ParkedHarness, unittest.TestCase):
                     self.assertEqual(action()['service'], 'restarted')
                     self.assertOneRelease(target)
 
+    def test_refusals_in_the_codex_write_window_run_after_run_never_reach_recovery_limit(self):
+        """0.53.0rc1 re-review (R5a): our table changed between the write's record and its replace, then put back,
+        run after run. Every attempt stayed journaled, so from the ninth run on the repeat refused `recovery_limit`
+        for good (only uninstall ended it). A finished restore now keeps only the attempt that proves the change's
+        own write, so each run the user starts has fresh attempts: the plain repeat finishes."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                if kind == 'rollback':
+                    self.install(new)
+                target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                    lambda **kwargs: self.change('rollback', **kwargs))
+
+                def edit(stage):
+                    if stage == 'recorded:registration':
+                        self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+                for _ in range(10):
+                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'target_conflict')
+                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                name = max(self.changes(), key=lambda n: int(n[7:]))
+                self.assertLessEqual(len(self.journal(name)['publications'].get('registration', [])), 1)
+                self.assertEqual(action()['service'], 'restarted')
+                self.assertOneRelease(target)
+                self.assertEqual(self.change('uninstall')['codex'], 'removed')
+
     def test_a_neighbour_added_in_the_codex_write_window_is_merged(self):
         _, old = self.full()
         new = self.build('b', launcher=b'# second release\n')
@@ -1061,6 +1089,40 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
                 self.assertIsNone(self.launchctl.loaded)
                 self.launchctl.load()  # The next login.
                 self.assertOneRelease(target)
+
+    def test_the_previous_plist_bootstrapped_between_the_bootout_and_the_rewrite_is_stopped(self):
+        """0.53.0rc1 re-review (R5d): a concurrent `connect` or a manual bootstrap loads the previous plist right
+        after the stop's bootout, before the rewrite. The commit then found the previous broker loaded beside the
+        target's plist and refused `service_conflict` for good (uninstall named the change). It is the previous
+        definition the change kept, so it is gated and booted out like any other: the restart starts the target's
+        when a broker ran before, and none otherwise."""
+        for kind in ('upgrade', 'rollback'):
+            for loaded in (True, False):
+                with self.subTest(kind=kind, loaded=loaded):
+                    self.setUp()
+                    _, old = self.full(loaded=loaded)
+                    new = self.build('b', launcher=b'# second release\n')
+                    if kind == 'rollback':
+                        self.install(new)
+                        if not loaded:
+                            self.launchctl.loaded = None
+                    target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    previous = self.plist.read_bytes()
+
+                    def bootstrap(stage):
+                        if stage == 'stopped:service' and self.launchctl.loaded is None:
+                            self.assertEqual(self.plist.read_bytes(), previous)
+                            self.launchctl.load()
+                    result = action(checkpoint=bootstrap)
+                    self.assertEqual(result['service'], 'restarted' if loaded else 'not_loaded')
+                    if not loaded:
+                        self.assertIsNone(self.launchctl.loaded)
+                        self.launchctl.load()  # The next login.
+                    self.assertOneRelease(target)
+                    self.assertEqual(self.change('uninstall')['service'], 'removed')
+                    self.assertIsNone(self.launchctl.loaded)
 
     def test_a_broker_neither_ours_stays_loaded_and_refuses(self):
         """Neither the target's nor the previous broker: never booted out, `service_conflict` until it is gone;

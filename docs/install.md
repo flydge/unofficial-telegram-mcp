@@ -382,7 +382,7 @@ Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
 4. `bootstrap.sh` copies the seed to a private stage under `/private/tmp`, checks its sha256 and size,
    with `--seed-team` checks its Developer ID signature, and runs it. The seed authenticates the index
    and every archive member before extraction, and the installer from the extracted tree then does the
-   [bundle installation](#private-bundle-0530dev0) and client registrations above. The stage directory
+   [bundle installation](#private-bundle-0530rc1) and client registrations above. The stage directory
    is not removed by the scripts.
 5. `Install.command` prints the installer's JSON result and accepts exactly the results the installer
    returns for a kit. After a first install it continues only when `status` is `activation_required`
@@ -697,7 +697,11 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   that copy instead; once `receipt.json` names the new release a skill copy no longer stops the repeat, see
   step 3), then repeat the same command:
   it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
-  upgrade may be refused and repeated. Every run before `current.json` switches decides the service from
+  upgrade may be refused and repeated (a refusal's restore starts the next run's Codex write afresh, so our
+  table changed in the instant between that write's record and its replace, run after run, never uses it
+  up), with one exact bound: each skill copy is written at most eight times within one upgrade, so removing
+  or replacing the same copy before each of eight repeats of one unfinished upgrade makes every later repeat
+  refuse `recovery_limit`; `uninstall` still ends that upgrade. Every run before `current.json` switches decides the service from
   what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist
   on disk: the old release's, or after a kill past the plist rewrite the new release's). A run that goes
   on stops an old broker started again meanwhile (gated first), also when none ran as the upgrade began,
@@ -711,6 +715,9 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   `service_conflict` until you resolve them and repeat: a plist changed by hand since the stop (below), and
   a broker loaded under the same label that is neither release's (not started from either plist), which you
   stop with `launchctl bootout gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker`.
+  The old release's broker loaded again from its plist between the stop's bootout and the rewrite (a
+  `connect` or a manual `launchctl bootstrap` running at that moment) is not a conflict either: it is
+  recognised by the plist bytes the upgrade kept, gated and stopped, also by the restart after the switch.
   A plist removed by hand (`rm`, with or without `launchctl bootout`) is not a conflict: the repeat writes
   the new release's plist anew, and after the switch writes it again if it is gone. A broker still loaded
   from that plist's path that runs either release is the installation's own: the repeat gates and stops it
