@@ -293,7 +293,7 @@ Each provider hit is validated, grouped by exact `chat_id`, hydrated with exact 
 
 Only complete coverage and one uniquely strong, mutually corroborated candidate may authorize Codex selection. Competing evidence requires owner clarification. `partial`, `blocked`, `error`, `expired`, or still-incomplete `page` coverage cannot authorize automatic selection. Final `search_correspondence` remains separate and exact-chat only; evidence from global discovery never becomes a global final search.
 
-Text and captions in final search use `searchChatMessages`. File metadata uses bounded `getChatHistory` scans and call-local filtering. With the owner's explicit request or consent, `contains_number=true` uses the same bounded exact-chat history path to find one or more Unicode decimal digits in text or media captions. The scan is transient, returns only matching evidence, never exposes a general transcript, and cannot cross the selected chat or date interval. Combined predicates must match the same message. Every returned match is rehydrated with exact `getMessage` before return; numeric evidence is rechecked after rehydration so edited or deleted content fails closed. Context is bounded to at most four neighboring messages in each direction. Evidence includes the exact resolved `chat_id` and `message_id`; supported HTTPS Telegram links are optional and must be returned complete by Telegram. Unofficial Telegram MCP never synthesizes a `t.me` URL from a username.
+Text and captions in final search use `searchChatMessages`. File metadata uses bounded `getChatHistory` scans and call-local filtering. With the owner's explicit request or consent, `contains_number=true` uses the same bounded exact-chat history path to find one or more Unicode decimal digits in text or media captions. The scan is transient, returns only matching evidence, never exposes a general transcript, and cannot cross the selected chat or date interval. Combined predicates must match the same message. Every returned match is rehydrated with exact `getMessage` before return; numeric evidence is rechecked after rehydration so edited or deleted content fails closed. Context is bounded to at most four neighboring messages in each direction. Evidence includes the exact resolved `chat_id` and `message_id`; supported HTTPS Telegram links are optional and must be returned complete by Telegram and pass the shared link rule (see [Selected message reads](#selected-message-reads)). Unofficial Telegram MCP never synthesizes a `t.me` URL from a username.
 
 ## Memory, persistence, and logging
 
@@ -370,7 +370,9 @@ Media analysis uses `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe`, and
 
 ## Selected message reads
 
-`read_messages` requires its own trusted opt-in capability at both the proxy and broker; missing policy preserves the three legacy capabilities only. The strict request accepts 1–20 unique committed message anchors and no paths/provider arguments. Each chat and message is rehydrated and exact IDs checked before returning content. Sender hydration separately verifies identity. A wrong-chat response is discarded. The reader performs only bounded authorization, getChat, getMessage and getUser requests, with a 30-second aggregate deadline; it never calls viewMessages, follows reply references or writes a private index. Text and names remain untrusted and include explicit sanitation/truncation flags. Per-anchor unavailable, unsupported, malformed and budget outcomes prevent complete coverage. Provider error strings are not returned.
+`read_messages` requires its own trusted opt-in capability at both the proxy and broker; missing policy preserves the three legacy capabilities only. The strict request accepts 1–20 unique committed message anchors and no paths/provider arguments. Each chat and message is rehydrated and exact IDs checked before returning content. Sender hydration separately verifies identity. A wrong-chat response is discarded. The reader performs only bounded authorization, getChat, getMessage, getUser and (since the 0.54 candidate) getMessageLink requests, with a 30-second aggregate deadline; it never calls viewMessages, follows reply references or writes a private index. Text and names remain untrusted and include explicit sanitation/truncation flags. Per-anchor unavailable, unsupported, malformed and budget outcomes prevent complete coverage. Provider error strings are not returned.
+
+Every reader built on this parser (history, topic history, reply chain, plain and Boolean `search_messages`, `search_chats`, verified-target reads and `retain_selection`) issues one already-allowlisted `getMessageLink` per returned row, only after the row validated, with `in_message_thread=false`. Its result reaches `source.telegram_url` only through the one shared rule in `sanitize.safe_telegram_link`: a string of at most 512 characters that sanitization leaves unchanged, scheme `https`, host exactly `t.me` or `telegram.me`, no port or credentials. `SourceEvidence` re-applies that rule as a model validator without changing the published schema, so the proxy rejects a broker response carrying any other link. A provider error, deadline or refused value leaves `null` with no new issue; lost authorization still propagates; the verified-target guard checks the account before and after the call without re-hydrating the chat. The extra serialized request per row is the cost; no link is synthesized.
 
 ## History cursor isolation
 
@@ -626,7 +628,8 @@ Locks cover state transitions/publication only, never provider I/O.
 
 The reader uses the existing selected-message parser through a guarded facade.
 Fresh account observations run before/after exact numeric `getChat` hydration,
-before/after selected `getMessage` and sender hydration, and before output. Native
+before/after selected `getMessage`, sender hydration and the best-effort
+`getMessageLink` (which skips chat re-hydration), and before output. Native
 chat envelopes, numeric identity and type discriminators must agree. No
 `searchPublicChat`, content discovery, history traversal, media download, read
 receipt or mutation is introduced. These checks cannot promise an atomic remote
@@ -2053,7 +2056,13 @@ account and revocation epoch, schema fingerprint, ordered anchors or immutable
 artifact hash/size/metadata, original provenance, target dependency, and fixed wall
 and monotonic expiry. No persisted raw body, entity, filename, local path or token
 registry is created. Capacity is 16 live entries/four active operations including
-pending captures per owner, without eviction or sliding refresh.
+pending captures per owner, without eviction or sliding refresh. Since the 0.54
+candidate the fixed lifetime comes from trusted `selection_ttl_seconds` (strict
+integer 60..1800, default 900, previously a fixed 300 seconds), still capped by the
+artifact or verified-target expiry. The broker's registry takes it from its loaded
+policy; the proxy refuses any issued expiry beyond its own loaded value. The setting
+is part of the configuration fingerprint, so mismatched components report
+`config_mismatch`. A caller cannot change it.
 
 Exact projection hashes the complete bounded raw text/caption, original whole-scalar
 UTF-16 entity coordinates and inert type payloads, identity/date/edit/reply/topic/album
@@ -2064,6 +2073,10 @@ they add no reply rendering, replay, outgoing entity, navigation or send authori
 Serialization above 64 KiB/message or aggregate raw text above 100000 characters
 refuses; no prefix hash or sanitization-equivalent shortcut is used. Titles, sender
 display names, transfer progress, local paths and view/unread counts are excluded.
+The best-effort `getMessageLink` result is excluded too: it is not in the private
+projection, and the proxy's recapture and selected-read comparisons drop only
+`source.telegram_url`, so a link that appears or vanishes neither refuses nor renews
+a selection while every projected fact still must match.
 
 Ownership admission precedes metadata, byte hashing, provider work and extraction.
 Local provenance makes zero provider calls; Telegram/derived provenance is frozen

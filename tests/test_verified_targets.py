@@ -35,6 +35,9 @@ class TargetProvider(Provider):
     def get_sender_identity(self, sender):
         self.hook('sender')
         return super().get_sender_identity(sender)
+    def get_message_link(self, chat_id, message_id):
+        self.hook('link')
+        return super().get_message_link(chat_id, message_id)
     def close(self): pass
 
 class VerifiedTargetTests(unittest.TestCase):
@@ -88,19 +91,25 @@ class VerifiedTargetTests(unittest.TestCase):
             'getMe':[{'@type':'user','id':17} for _ in range(64)],
             'getChat':[copy.deepcopy(self.provider.chat) for _ in range(16)],
             'getMessage':[message(11)],
-            'getUser':[{'@type':'user','id':17,'first_name':'Synthetic','last_name':'Reader'}]})
+            'getUser':[{'@type':'user','id':17,'first_name':'Synthetic','last_name':'Reader'}],
+            # A private chat has no message link; the provider error leaves none.
+            'getMessageLink':[{'@type':'error','code':400,'message':'synthetic link refusal'}]})
         native=TDLibClient(raw=raw)
         reader=self.module.VerifiedTargetReader(client=native,client_id='client_a',broker_generation='broker_a')
         issued=reader.verify(schemas.VerifyTargetRequest(target=7))
         self.assertEqual(issued.status,'verified')
         result=reader.read(schemas.ReadTargetMessagesRequest(target_handle=issued.target_handle,message_ids=[11]))
         self.assertEqual(result.status,'complete')
+        self.assertIsNone(result.messages.results[0].message.source.telegram_url)
+        self.assertEqual([r['@type'] for r in raw.sent].count('getMessageLink'),1)
         for request in raw.sent:
             shape={k:v for k,v in request.items() if k!='@extra'}
             kind=shape['@type']
             expected={'getAuthorizationState':{'@type':'getAuthorizationState'},'getMe':{'@type':'getMe'},
                 'getChat':{'@type':'getChat','chat_id':7},'getMessage':{'@type':'getMessage','chat_id':7,'message_id':11},
-                'getUser':{'@type':'getUser','user_id':17}}
+                'getUser':{'@type':'getUser','user_id':17},
+                'getMessageLink':{'@type':'getMessageLink','chat_id':7,'message_id':11,'media_timestamp':0,
+                    'checklist_task_id':0,'poll_option_id':'','for_album':False,'in_message_thread':False}}
             self.assertIn(kind,expected)
             self.assertEqual(shape,expected[kind])
         before=len(raw.sent)
@@ -165,7 +174,7 @@ class VerifiedTargetTests(unittest.TestCase):
         self.assertNotIn('old_name',repr(self.reader._entries))
         self.assertNotIn('reassigned_name',result.model_dump_json())
     def test_account_drift_at_hydration_content_sender_and_final_discards_entire_batch(self):
-        for event, occurrence in [('chat',1),('message',2),('sender',2),('account',23)]:
+        for event, occurrence in [('chat',1),('message',2),('sender',2),('link',1),('link',2),('account',23)]:
             with self.subTest(event=event):
                 self.provider=TargetProvider()
                 self.reader=self.module.VerifiedTargetReader(client=self.provider,client_id='client_a',broker_generation='broker_a')
@@ -189,6 +198,34 @@ class VerifiedTargetTests(unittest.TestCase):
         self.provider.hook=change
         self.terminal(self.read(issued.target_handle,(11,12)),'invalid_handle')
         self.assertEqual(len([c for c in self.provider.calls if c[0]=='message']),1)
+    def test_guarded_link_is_optional_evidence_checked_for_account_without_rehydration(self):
+        issued=self.issue();self.provider.calls.clear()
+        guarded=self.module._GuardedClient(self.reader,issued.target_handle,next(iter(self.reader._entries.values())))
+        with self.assertRaises(self.module.TargetGuardFailure):guarded.get_message_link(8,11)
+        self.assertEqual(self.provider.calls,[])
+        original=self.reader._hydrate
+        def hydrate(*args,**kwargs):
+            self.provider.calls.append(('hydrate',));return original(*args,**kwargs)
+        with patch.object(self.reader,'_hydrate',side_effect=hydrate):
+            result=self.read(issued.target_handle,(11,12))
+        self.assertEqual(result.status,'complete')
+        self.assertEqual([r.message.source.telegram_url for r in result.messages.results],
+                         ['https://t.me/c/7/11','https://t.me/c/7/12'])
+        # content=False: account checks surround the link call, but no chat re-hydration precedes it.
+        calls=[c for c in self.provider.calls if c[0]!='account']
+        links=[i for i,c in enumerate(calls) if c[0]=='link']
+        self.assertEqual([calls[i] for i in links],[('link',7,11),('link',7,12)])
+        self.assertEqual([calls[i-1][0] for i in links],['sender','sender'])
+        for failure in (TDLibError('private failure'),TimeoutError('slow'),OSError('transport'),'http://t.me/c/7/11'):
+            with self.subTest(failure=repr(failure)):
+                self.provider.links={11:failure}
+                result=self.read(issued.target_handle)
+                self.assertEqual(result.status,'complete')
+                self.assertIsNone(result.messages.results[0].message.source.telegram_url)
+                self.assertEqual(result.messages.results[0].issues,[])
+                self.assertNotIn('private failure',result.model_dump_json())
+        self.provider.links={11:AuthorizationBlocked('lost')}
+        self.terminal(self.read(issued.target_handle),'blocked')
     def test_provider_transport_failure_in_sender_is_fatal_not_partial_success(self):
         issued=self.issue()
         def fail(name):

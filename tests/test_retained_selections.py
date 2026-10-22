@@ -5,6 +5,7 @@ import importlib
 import unittest
 from datetime import datetime, timedelta, timezone
 from telegram_search_mcp.artifact_authority import ArtifactOwner
+from telegram_search_mcp.tdjson import AuthorizationBlocked, TDLibError
 from test_message_reader import message
 
 
@@ -124,9 +125,13 @@ class SelectionRegistryTests(unittest.TestCase):
                 facts=('hash',source), anchors=((7,11),), expires_at=cap)
 
     def test_dedupe_preserves_token_and_original_dual_expiry(self):
+        # Default policy lifetime is 900 s (was a fixed 300 s before 0.54).
+        self.assertEqual(self.registry.ttl_seconds,900)
         first=self.issue();self.now+=20;self.wall+=timedelta(seconds=20)
         again=self.issue();self.assertIs(first,again)
-        self.now=400
+        self.assertEqual((first.expires_monotonic,first.expires_at),(1000.,datetime(2030,1,1,0,15,tzinfo=timezone.utc)))
+        self.now=999.9;self.assertIs(self.registry.get(first.selection_id,self.owner),first)
+        self.now=1000
         with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,self.owner)
         replacement=self.issue();self.assertNotEqual(first.selection_id,replacement.selection_id)
 
@@ -136,10 +141,30 @@ class SelectionRegistryTests(unittest.TestCase):
             with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,owner)
         self.registry.release('client_a')
         with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,self.owner)
-        first=self.issue();self.wall+=timedelta(seconds=300)
+        first=self.issue();self.wall+=timedelta(seconds=900)
         with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,self.owner)
-        self.wall-=timedelta(seconds=300)
+        self.wall-=timedelta(seconds=900)
         with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,self.owner)
+
+    def test_policy_ttl_is_strictly_bounded_fixed_and_never_sliding(self):
+        for value in (59,1801,0,-1,True,False,900.0,'900',None):
+            with self.subTest(value=repr(value)),self.assertRaises(ValueError):
+                self.module.SelectionRegistry(ttl_seconds=value)
+        for ttl in (60,1800):
+            with self.subTest(ttl=ttl):
+                self.now=100.;self.wall=datetime(2030,1,1,tzinfo=timezone.utc)
+                self.registry=self.module.SelectionRegistry(ttl_seconds=ttl,clock=lambda:self.now,wall_clock=lambda:self.wall)
+                first=self.issue()
+                self.assertEqual(first.expires_at,self.wall+timedelta(seconds=ttl))
+                # Use and unchanged recapture never renew the original expiry.
+                self.now+=ttl-1;self.wall+=timedelta(seconds=ttl-1)
+                self.assertIs(self.issue(),first);self.registry.check(first)
+                self.now+=1
+                with self.assertRaises(self.module.SelectionUnavailable):self.registry.get(first.selection_id,self.owner)
+                # A shorter artifact or target expiry still caps the configured lifetime.
+                capped=self.issue('capped',cap=self.wall+timedelta(seconds=5))
+                self.assertEqual(capped.expires_at,self.wall+timedelta(seconds=5))
+                self.assertEqual(capped.expires_monotonic,self.now+5)
 
     def test_capacity_pending_and_active_are_bounded_without_eviction(self):
         for i in range(16):self.issue(str(i))
@@ -219,6 +244,24 @@ class RetainedBrokerTests(unittest.TestCase):
         self.unavailable(self.selected('read_messages',token))
         self.provider.messages[11]['content']['text']['entities']=[]
         self.unavailable(self.selected('read_messages',token))
+
+    def test_capture_carries_validated_links_and_a_link_flip_never_refuses_or_revokes(self):
+        source={'kind':'messages','anchors':[{'chat_id':7,'message_id':12},{'chat_id':7,'message_id':11}]}
+        self.provider.links={11:'https://evil.example/c/7/11'}
+        first=self.retain(source)
+        self.assertEqual(first['status'],'retained')
+        self.assertEqual([r['message']['source']['telegram_url'] for r in first['messages']['results']],['https://t.me/c/7/12',None])
+        # A best-effort link is not a source fact: appearing or vanishing keeps the same token and expiry.
+        self.provider.links={12:TDLibError('private detail')}
+        again=self.retain(source)
+        self.assertEqual((again['selection_id'],again['expires_at']),(first['selection_id'],first['expires_at']))
+        self.assertEqual([r['message']['source']['telegram_url'] for r in again['messages']['results']],[None,'https://t.me/c/7/11'])
+        read=self.selected('read_messages',first['selection_id'])
+        self.assertEqual(read['status'],'complete')
+        self.assertEqual([r['message']['source']['telegram_url'] for r in read['results']],[None,'https://t.me/c/7/11'])
+        self.assertNotIn('evil.example',str((first,again,read)));self.assertNotIn('private detail',str((again,read)))
+        self.provider.links={11:AuthorizationBlocked('lost')}
+        self.unavailable(self.retain(source))
 
     def test_local_file_retention_and_all_local_readers_do_no_provider_work(self):
         from xlsx_fixtures import write_xlsx
@@ -441,7 +484,9 @@ class RetainedBrokerTests(unittest.TestCase):
                 def interrupted(scope,bindings):
                     observed.extend(self.broker._selections._entries)
                     if race=='release':self.broker._artifact_authority.release(A)
-                    elif race=='expiry':self.broker._selections.clock=lambda:time.monotonic()+301
+                    elif race=='expiry':
+                        ttl=self.broker._selections.ttl_seconds
+                        self.broker._selections.clock=lambda:time.monotonic()+ttl+1
                     else:
                         reader=next(iter(self.broker._contexts.values())).service._verified_target_reader
                         reader.close()
@@ -623,6 +668,57 @@ class RetainedBrokerTests(unittest.TestCase):
                         restored=self.retain(source);self.assertEqual(restored['status'],'retained')
                         self.assertNotEqual(restored['selection_id'],first['selection_id'])
                         self.assertEqual(len(self.broker._selections._entries),16)
+
+    def test_broker_issues_with_the_trusted_policy_ttl(self):
+        from dataclasses import replace
+        from functools import partial
+        from unittest.mock import patch
+        from telegram_search_mcp.broker import Broker
+        from telegram_search_mcp.local_upload import LocalUploadRegistry
+        policy=replace(self.broker._policy,selection_ttl_seconds=60)
+        with patch('telegram_search_mcp.broker.LocalUploadRegistry',
+                   side_effect=partial(LocalUploadRegistry,root=self.root/'uploads-ttl')):
+            broker=Broker(socket_path=self.root/'run-ttl'/'broker.sock',artifact_store=self.store,
+                client_factory=lambda:self.provider,policy=policy,verify_peer_uid=False)
+        self.addCleanup(broker.shutdown)
+        self.assertEqual((broker._policy.selection_ttl_seconds,broker._selections.ttl_seconds),(60,60))
+        before=datetime.now(timezone.utc)
+        result=self.dispatch('retain_selection',{'source':{'kind':'messages','anchors':[{'chat_id':7,'message_id':11}]}},broker=broker)
+        self.assertEqual(result['status'],'retained')
+        lifetime=(datetime.fromisoformat(result['expires_at'])-before).total_seconds()
+        self.assertTrue(59<lifetime<=61,lifetime)
+
+
+class SelectionPolicyTests(unittest.TestCase):
+    def test_selection_ttl_is_strict_bounded_trusted_and_fingerprinted(self):
+        import tempfile
+        from pathlib import Path
+        from telegram_search_mcp.config import ConfigurationError, RuntimePolicy, load_runtime_policy
+        from telegram_search_mcp.contract import CompatibilityError, contract_descriptor, fingerprint, require_compatible
+        self.assertEqual(RuntimePolicy().selection_ttl_seconds,900)
+        self.assertEqual(RuntimePolicy().public_settings()['selection_ttl_seconds'],900)
+        for value in (60,1800):self.assertEqual(RuntimePolicy(selection_ttl_seconds=value).selection_ttl_seconds,value)
+        for value in (59,1801,0,-1,True,False,'900',900.0,None):
+            with self.subTest(value=repr(value)),self.assertRaises(ValueError):RuntimePolicy(selection_ttl_seconds=value)
+        # The setting is part of the effective configuration a proxy and broker must share.
+        default=contract_descriptor(RuntimePolicy())
+        changed=contract_descriptor(RuntimePolicy(selection_ttl_seconds=60))
+        self.assertNotEqual(default['config_fingerprint'],changed['config_fingerprint'])
+        legacy={k:v for k,v in RuntimePolicy().public_settings().items() if k!='selection_ttl_seconds'}
+        self.assertNotEqual(default['config_fingerprint'],fingerprint(legacy))
+        with self.assertRaises(CompatibilityError):require_compatible(changed,default)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700);path=root/'runtime.toml'
+            path.write_text('config_version=1\nenabled_capabilities=["retained_selections"]\n');path.chmod(0o600)
+            self.assertEqual(load_runtime_policy(path).selection_ttl_seconds,900)
+            path.write_text('config_version=1\nenabled_capabilities=["retained_selections"]\nselection_ttl_seconds=1800\n')
+            policy=load_runtime_policy(path);self.assertEqual(policy.selection_ttl_seconds,1800)
+            path.write_text('config_version=1\nenabled_capabilities=["retained_selections"]\nselection_ttl_seconds=1799\n')
+            with self.assertRaises(ConfigurationError):policy.require_current()
+            for value in ('true','900.0','"900"','59','1801','0','-60','[900]'):
+                with self.subTest(toml=value):
+                    path.write_text('config_version=1\nenabled_capabilities=[]\nselection_ttl_seconds=%s\n'%value)
+                    with self.assertRaises(ConfigurationError):load_runtime_policy(path)
 
 
 class RetainedSchemaTests(unittest.TestCase):

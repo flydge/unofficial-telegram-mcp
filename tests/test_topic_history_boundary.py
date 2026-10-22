@@ -81,6 +81,9 @@ class HistoryForumProvider(ForumProvider):
         self.calls.append(('message',chat_id,mid));return copy.deepcopy(self.messages[mid])
     def get_sender_identity(self, sender):
         self.calls.append(('sender',));return {'kind':'user','id':17,'display_name':'Reader'}
+    def get_message_link(self, chat_id, mid):
+        # in_message_thread=False: the plain message link, not a topic-thread form.
+        self.calls.append(('link',chat_id,mid));return f'https://t.me/c/{chat_id}/{mid}'
 
 
 class TopicHistoryBoundaryTests(unittest.IsolatedAsyncioTestCase):

@@ -721,6 +721,15 @@ This pin is for 0.51.0 only; a policy written by the 0.52 `connect` pins `0.52.0
 
 The containing directory must be owned by you with mode `0700`; the regular policy file must have mode `0600`. Symlinks are rejected. Preserve existing policy when upgrading rather than overwriting it blindly.
 
+Besides the keys above, the file accepts two optional numeric settings; leave them out to keep the defaults:
+
+| Setting | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `max_draft_ttl_seconds` | integer 1..86400 | 900 | How long an unsent draft revision stays usable |
+| `selection_ttl_seconds` | integer 60..1800 | 900 | How long a retained selection lives from capture (0.54 candidate; 300 before); never renewed and still capped by the file or verified-target expiry |
+
+Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decimal, quoted or out-of-range value makes the whole file invalid. Changing either setting changes the configuration fingerprint, so restart the broker and reconnect the client as for a capability change.
+
 | To enable | Add these capabilities |
 | --- | --- |
 | Selected messages and history | `read_messages`, `read_history`, `read_reply_chain` |

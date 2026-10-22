@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import secrets
 import threading
 import time
+from .config import SELECTION_TTL_DEFAULT, SELECTION_TTL_MAXIMUM, SELECTION_TTL_MINIMUM
 from .selection_projection import SelectionUnavailable
 
 
@@ -32,7 +33,11 @@ class SelectionBinding:
 
 
 class SelectionRegistry:
-    def __init__(self, *, clock=time.monotonic, wall_clock=lambda:datetime.now(timezone.utc)):
+    def __init__(self, *, ttl_seconds=SELECTION_TTL_DEFAULT, clock=time.monotonic, wall_clock=lambda:datetime.now(timezone.utc)):
+        # Trusted policy value; fixed from capture start and never renewed.
+        if type(ttl_seconds) is not int or not SELECTION_TTL_MINIMUM<=ttl_seconds<=SELECTION_TTL_MAXIMUM:
+            raise ValueError('selection TTL is outside the policy bounds')
+        self.ttl_seconds=ttl_seconds
         self.clock,self.wall_clock=clock,wall_clock
         self.lock=threading.RLock()
         self._entries={};self._active={};self._pending={}
@@ -69,8 +74,8 @@ class SelectionRegistry:
                 if not (v.owner==owner and v.source_key==source_key)}
             count=sum(value.owner==owner for value in self._entries.values())
             if count>=16 or (not started[2] and count+self._pending.get(owner,0)>=16):raise SelectionCapacity()
-            wall=min(started[1]+timedelta(seconds=300),expires_at or datetime.max.replace(tzinfo=timezone.utc))
-            monotonic=started[0]+min(300.,(wall-started[1]).total_seconds())
+            wall=min(started[1]+timedelta(seconds=self.ttl_seconds),expires_at or datetime.max.replace(tzinfo=timezone.utc))
+            monotonic=started[0]+min(float(self.ttl_seconds),(wall-started[1]).total_seconds())
             if self.clock()>=monotonic or self.wall_clock()>=wall:raise SelectionUnavailable()
             token='selection_'+secrets.token_hex(32)
             if token in self._entries:raise SelectionUnavailable()

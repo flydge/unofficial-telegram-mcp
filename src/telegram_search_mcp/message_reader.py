@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .sanitize import sanitize_telegram_text
+from .sanitize import safe_telegram_link, sanitize_telegram_text
 from .schemas import (
     EvidenceAnchor, MessageReadResult, ReadMessagesRequest, ReadMessagesResponse,
     SelectedMessage, SelectedMessageReply, SelectedMessageSender, SelectedMessageText,
@@ -100,6 +100,18 @@ def _album(raw: object) -> str | None:
     return str(value) if value else None
 
 
+def _link(client: Any, anchor) -> str | None:
+    # Best effort: a missing or unusable link is never an issue; only lost
+    # authorization propagates. Guard refusals are not provider errors and pass.
+    # Costs one serialized getMessageLink per returned message.
+    try:
+        return safe_telegram_link(client.get_message_link(anchor.chat_id, anchor.message_id))
+    except AuthorizationBlocked:
+        raise
+    except (TDLibError, TimeoutError, OSError):
+        return None
+
+
 def _message(client: Any, raw: dict, anchor, text_budget: int) -> MessageReadResult:
     if raw.get("sending_state") is not None or raw.get("ephemeral_content") is not None:
         return MessageReadResult(anchor=anchor, status="unsupported", coverage_complete=False, issues=["unsupported_content"])
@@ -148,11 +160,14 @@ def _message(client: Any, raw: dict, anchor, text_budget: int) -> MessageReadRes
     # TDLib omits nullable custom objects in native JSON.
     reply = _reply(raw.get("reply_to"), issues)
     topic = _topic(raw.get("topic_id"), issues)
+    album = _album(raw.get("media_album_id"))
+    # Only a row that is otherwise valid spends the extra provider call.
+    link = _link(client, anchor)
     selected = SelectedMessage(content_kind=kind, text_role=role, text=text, sender=identity,
         is_outgoing=outgoing, date_utc=datetime.fromtimestamp(date, tz=timezone.utc) if date else None,
         edit_date_utc=datetime.fromtimestamp(edited, tz=timezone.utc) if edited else None,
-        is_edited=bool(edited), reply_to=reply, topic=topic, media_album_id=_album(raw.get("media_album_id")),
-        source=SourceEvidence(evidence_anchor=EvidenceAnchor(**anchor.model_dump())))
+        is_edited=bool(edited), reply_to=reply, topic=topic, media_album_id=album,
+        source=SourceEvidence(telegram_url=link, evidence_anchor=EvidenceAnchor(**anchor.model_dump())))
     return MessageReadResult(anchor=anchor, status="partial" if issues else "complete",
                              coverage_complete=not issues, message=selected, issues=issues)
 

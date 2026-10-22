@@ -884,7 +884,8 @@ evidence or the user's explicit source selection, then capture once.
    choice or approval.
 
 Selections are memory-only, same-client/session/incarnation scoped and fixed for
-at most 300 seconds, capped by source file/target expiry. Use never renews them.
+the owner's `selection_ttl_seconds` (default 900 seconds, at most 1800), capped by
+source file/target expiry. Use never renews them.
 Any missing source, drift, unsafe state, ownership/release/account change, expiry
 or restart returns only `selection_unavailable` with the fixed recovery detail.
 Choose and retain the source again; do not search automatically, refresh, resolve

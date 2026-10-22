@@ -9,7 +9,6 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
-from urllib.parse import urlparse
 
 from .discovery_state import CatalogPosition, ChatListName, DiscoveryRegistry
 from .verified_targets import VerifiedTargetReader
@@ -19,7 +18,7 @@ from .topic_history_reader import TopicHistoryReader
 from .exact_search_reader import ExactSearchReader
 from .selected_search_reader import SelectedSearchReader
 from .forum_reader import ForumTopicReader
-from .sanitize import normalize_search_text, render_evidence, sanitize_telegram_text
+from .sanitize import normalize_search_text, render_evidence, safe_telegram_link, sanitize_telegram_text
 from .schemas import (
     VerifyTargetRequest, VerifyTargetResponse, ReadTargetMessagesRequest, ReadTargetMessagesResponse,
     ContextEvidence,
@@ -444,7 +443,7 @@ class SearchService:
             if type(request.target) is int and chat_id != request.target:
                 raise TDLibError("TDLib returned a different chat")
             chat_link_candidate = self._client.get_chat_link(chat)
-            chat_url = self._safe_link(chat_link_candidate)
+            chat_url = safe_telegram_link(chat_link_candidate)
             return self._search_chat(request, chat_id, chat_url, deadline)
         except AuthorizationBlocked:
             return self._terminal_response(request, "blocked", "TDLib authorization is not ready")
@@ -837,7 +836,7 @@ class SearchService:
                     continue
             context, context_complete = self._context(request, chat_id, message)
             complete = complete and context_complete
-            link = self._safe_link(self._client.get_message_link(chat_id, message_id))
+            link = safe_telegram_link(self._client.get_message_link(chat_id, message_id))
             try:
                 sender = self._client.get_sender_name(message)
             except AuthorizationBlocked:
@@ -920,13 +919,3 @@ class SearchService:
             )
             for item in selected
         ], True
-
-    @staticmethod
-    def _safe_link(value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = sanitize_telegram_text(value, max_length=512)
-        parsed = urlparse(value)
-        if parsed.scheme != "https" or parsed.hostname not in {"t.me", "telegram.me"}:
-            return None
-        return value

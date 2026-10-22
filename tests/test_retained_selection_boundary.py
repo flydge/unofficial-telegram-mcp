@@ -91,6 +91,56 @@ class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 refused=self.proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id))
                 self.assertEqual(refused.status,'selection_unavailable');self.assertEqual(set(refused.model_dump()),{'status','detail'})
 
+    async def test_policy_ttl_bounds_issuance_in_the_broker_and_independently_in_the_proxy(self):
+        import time
+        from dataclasses import replace
+        from datetime import datetime, timezone
+        from telegram_search_mcp.contract import contract_descriptor
+        from telegram_search_mcp.retained_selections import SelectionRegistry
+        short=replace(self.broker._policy,selection_ttl_seconds=60)
+        self.broker._policy=short;self.broker._contract=contract_descriptor(short)
+        proxy=BrokerClient(socket_path=self.broker._socket_path,policy=short,restart_callback=lambda:None)
+        self.addCleanup(proxy.close)
+        source=self.request({'kind':'messages','anchors':[{'chat_id':7,'message_id':11}]})
+        # A broker still issuing the 900 s default cannot widen the proxy's 60 s policy.
+        self.assertEqual(self.broker._selections.ttl_seconds,900)
+        self.assertEqual(proxy.retain_selection(source).status,'selection_unavailable')
+        self.broker._selections=SelectionRegistry(ttl_seconds=60)
+        started=time.monotonic()
+        issued=proxy.retain_selection(source)
+        self.assertEqual(issued.status,'retained')
+        self.assertTrue(55<(issued.expires_at-datetime.now(timezone.utc)).total_seconds()<=60)
+        self.assertLessEqual(proxy._selection_states[issued.selection_id].expires_monotonic,time.monotonic()+60)
+        self.assertGreaterEqual(proxy._selection_states[issued.selection_id].expires_monotonic,started+55)
+        self.assertEqual(proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id)).status,'complete')
+
+    async def test_proxy_tolerates_link_flips_but_refuses_a_link_outside_the_shared_rule(self):
+        source=self.request({'kind':'messages','anchors':[{'chat_id':7,'message_id':11}]})
+        issued=self.proxy.retain_selection(source)
+        self.assertEqual(issued.messages.results[0].message.source.telegram_url,'https://t.me/c/7/11')
+        # The proxy's independent recapture and selected-read comparisons ignore only the link.
+        self.provider.links={11:None}
+        again=self.proxy.retain_selection(source)
+        self.assertEqual((again.selection_id,again.expires_at),(issued.selection_id,issued.expires_at))
+        self.assertIsNone(again.messages.results[0].message.source.telegram_url)
+        read=self.proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id))
+        self.assertEqual(read.status,'complete');self.assertIsNone(read.results[0].message.source.telegram_url)
+        self.provider.links={}
+        raw=self.helper.dispatch('read_messages',{'selection_id':issued.selection_id},self.proxy.client_id)
+        plain=self.helper.dispatch('read_messages',{'anchors':[{'chat_id':7,'message_id':11}]},self.proxy.client_id)
+        self.assertEqual(raw['results'][0]['message']['source']['telegram_url'],'https://t.me/c/7/11')
+        original=self.proxy._exchange
+        for link in ('https://evil.example/c/7/11','http://t.me/c/7/11','https://t.me:8443/c/7/11','https://t.me/c/7/1 1'):
+            for request,response in ((ReadMessagesRequest(selection_id=issued.selection_id),raw),
+                                     (ReadMessagesRequest(anchors=[{'chat_id':7,'message_id':11}]),plain)):
+                forged=copy.deepcopy(response);forged['results'][0]['message']['source']['telegram_url']=link
+                def exchange(connection,operation,payload,**kwargs):
+                    return original(connection,operation,payload,**kwargs) if operation=='handshake' else forged
+                with self.subTest(link=link,selected=request.selection_id is not None),patch.object(self.proxy,'_exchange',side_effect=exchange):
+                    refused=self.proxy.read_messages(request)
+                    self.assertIn(refused.status,('selection_unavailable','error'))
+                    self.assertNotIn(link,refused.model_dump_json())
+
     def reply_source(self):
         from test_text_replies import target
         from telegram_search_mcp.reply_drafts import source_from_message
