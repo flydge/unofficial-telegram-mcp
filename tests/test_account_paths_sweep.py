@@ -6,8 +6,9 @@ in a function body is how the threaded defaults resolve the default alias, so it
 
 Two sweeps. The AST sweep reads the source, so it sees names. The runtime sweep imports every module
 and reads the values the AST cannot follow (a helper call, a name imported from a re-exporting module,
-getattr, a rebuilt string): every function's __defaults__ and __kwdefaults__, every dataclass field
-default, and every module or class value, against the default alias's locations, labels and names.
+getattr, a rebuilt string, a decorator argument): every function's __defaults__, __kwdefaults__ and
+closure cells, every dataclass field default, and every module or class value, against the default
+alias's locations, labels and names.
 """
 from __future__ import annotations
 
@@ -177,9 +178,9 @@ def package_modules():
 
 
 def runtime_violations(module):
-    """[(owner qualname or '<module>', name)]: a parameter default, a dataclass field default, or a module or
-    class value that binds the default alias. A module or class value may only be config's own object (a
-    re-export) or the product identity's server name; a default may not bind it at all."""
+    """[(owner qualname or '<module>', name)]: a parameter default, a closure cell, a dataclass field default,
+    or a module or class value that binds the default alias. A module or class value may only be config's own
+    object (a re-export) or the product identity's server name; a default or a cell may not bind it at all."""
     from telegram_search_mcp import product_identity
     shared = {id(value) for value in vars(config).values()} | {id(product_identity.MCP_SERVER_NAME)}
     found, pending, visited = [], [], set()
@@ -189,15 +190,24 @@ def runtime_violations(module):
             found.append((owner, name))
 
     def defaults(function):
+        """Defaults, keyword defaults and closure cells (a decorator factory's argument) of a function and of
+        every function it wraps."""
         while function is not None and id(function) not in visited:
             visited.add(id(function))
             if function.__module__ != CONFIG_MODULE:
                 code = function.__code__
                 given = function.__defaults__ or ()
                 positional = code.co_varnames[:code.co_argcount][code.co_argcount - len(given):]
-                for name, held in [*zip(positional, given), *(function.__kwdefaults__ or {}).items()]:
+                cells = []
+                for name, cell in zip(code.co_freevars, function.__closure__ or ()):
+                    try:
+                        cells.append((name, cell.cell_contents))
+                    except ValueError:  # A cell not yet bound holds nothing.
+                        pass
+                for name, held in [*zip(positional, given), *(function.__kwdefaults__ or {}).items(), *cells]:
                     if binds_account(held):
                         found.append((function.__qualname__, name))
+                pending.extend(held for _, held in cells if isinstance(held, types.FunctionType))
             function = getattr(function, '__wrapped__', None)
 
     def member(owner, name, held):
@@ -221,6 +231,9 @@ def runtime_violations(module):
         member('<module>', name, held)
     while pending:
         cls = pending.pop()
+        if isinstance(cls, types.FunctionType):  # A function a closure holds: the one a decorator wrapped.
+            defaults(cls)
+            continue
         if id(cls) in visited:
             continue
         visited.add(id(cls))
@@ -356,6 +369,16 @@ class RuntimeSweepTests(unittest.TestCase):
             @deco
             def g(p=_helper()): pass
             ''': {('g', 'p')},
+            '''
+            def at(root):
+                def deco(function):
+                    def wrapper(*args):
+                        return function(root, *args)
+                    return wrapper
+                return deco
+            @at(_helper())
+            def g(root): pass
+            ''': {('at.<locals>.deco.<locals>.wrapper', 'root')},
             # Allowed: call-time use, unrelated paths, a named alias's server name and a re-exported config object.
             'def f(p=None, home=Path.home(), other=Path("/elsewhere"), name="telegram_search_work"):\n'
             '    return p or CACHE_DIRECTORY': set(),
