@@ -7,8 +7,10 @@ Development of 0.54.0, conversational usability ([spec](docs/plans/0.54-conversa
 normalized annotations and prompts; argument refusals that name only schema parameters; approval statuses
 `declined`, `timeout` and `dialog_unavailable` with one dialog renderer; `capability_disabled` reply results
 and closed `next_action` hints; provider links in the newer readers; the `selection_ttl_seconds` policy
-setting; a lean search skill with a coverage test; a conversation harness and a consumer-matrix harness.
-Technical evidence only; owner-session rows are listed in the task record.
+setting; owner capability profiles switched in Terminal with every MCP client quit (`capabilities show |
+enable | disable`), which a later rollback keeps; one owner dialog at a time; a lean search skill with a
+coverage test; a conversation harness and a consumer-matrix harness. Technical evidence only; owner-session
+rows are listed in the task record.
 
 ## 0.53.0rc1 — release candidate, 2026-10-22 (not published)
 

@@ -1496,6 +1496,8 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
         def prompt(**kw):
             self.approvals.append(kw); gate.wait(5); return True
         self.broker._approval_prompt = prompt
+        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+        self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
         threads = [threading.Thread(target=lambda: results.append(self.send(did))) for _ in range(2)]
         for thread in threads:
             thread.start()
@@ -1518,6 +1520,8 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
                 opened.set(); release.wait(10)
             return True
         self.broker._approval_prompt = prompt
+        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+        self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
         loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
         loser.start(); self.assertTrue(opened.wait(10))
         winner = self.send(did)
@@ -1537,6 +1541,8 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
                 self.raw.source['edit_date'] = 1700000100  # The winner's post-approval revalidation fails.
             return True
         self.broker._approval_prompt = prompt
+        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+        self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
         loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
         loser.start(); self.assertTrue(opened.wait(10))
         self.assertEqual(self.send(did)['status'], 'local_failed')

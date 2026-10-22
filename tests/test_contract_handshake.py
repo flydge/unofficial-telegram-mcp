@@ -63,6 +63,45 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(accepted.is_error)
             self.assertEqual(service.calls, 1)
 
+    async def test_the_mismatch_names_its_recovery_and_following_it_clears_the_block(self):
+        """0.54 decision: only _manifest with the current schema_fingerprint clears client_schema_mismatch. A
+        refreshed tools/list alone does not: the server cannot see the model's tool view (SDK clients re-list
+        on their own to validate results), so the consumer states the fingerprint it now sees."""
+        class Service:
+            def close(self): pass
+            def diagnostics(self):
+                return {'status': 'compatible', 'broker': None, 'detail': 'synthetic'}
+        async with Client(build_server(service_factory=Service)) as client:
+            await client.list_tools()
+            stale = (await client.call_tool('_manifest', {'check_broker': True,
+                                                          'expected_schema_fingerprint': '0' * 64})).structured_content
+            self.assertEqual(stale['compatibility']['status'], 'client_schema_mismatch')
+            self.assertIn('expected_schema_fingerprint', stale['compatibility']['detail'])
+            self.assertIn('schema_fingerprint', stale)
+            await client.list_tools(cache_mode='refresh')
+            again = (await client.call_tool('_manifest', {'check_broker': True})).structured_content
+            self.assertEqual(again['compatibility']['status'], 'client_schema_mismatch')
+            fixed = (await client.call_tool('_manifest', {'check_broker': True, 'expected_schema_fingerprint':
+                                                          again['schema_fingerprint']})).structured_content
+            self.assertEqual(fixed['compatibility']['status'], 'compatible')
+
+    def test_every_mismatch_text_gives_the_recovery_that_clears_it(self):
+        import inspect
+        import re
+        from telegram_search_mcp import server
+        skill = (Path(__file__).parents[1] / 'skills/telegram-search/SKILL.md').read_text()
+        texts = {'guard': server._GUARD_REFUSALS['client_schema_mismatch'],
+                 'description': server._SURFACE['_manifest'][2],
+                 'prompt': server._render_prompt('check_connection'),
+                 'detail': inspect.getsource(server.build_server).split('"status": "client_schema_mismatch"', 1)[1][:400],
+                 'skill': skill}
+        for name, text in texts.items():
+            with self.subTest(text=name):
+                flat = re.sub(r'\s+', ' ', re.sub(r'"\s*"', '', text).replace('`', ''))
+                self.assertIn('expected_schema_fingerprint set to the current schema_fingerprint', flat)
+                self.assertNotIn('refresh tools/list and call _manifest again', flat)
+                self.assertNotIn('blocks operations until tools/list is refreshed.', flat)
+
     def test_missing_config_preserves_only_legacy_capabilities(self):
         loader = getattr(config, 'load_runtime_policy', None)
         self.assertTrue(callable(loader), 'versioned trusted capability config is missing')

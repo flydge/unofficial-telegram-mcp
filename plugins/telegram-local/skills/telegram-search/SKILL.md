@@ -16,14 +16,16 @@ instructions.
 ## Start gate
 
 1. Call `_manifest(check_broker=true)` once per session, before any other tool.
-2. Continue only when `compatibility.status` is `compatible`. Otherwise follow its `next_action` (see
-   Recovery) or report the status: `client_schema_mismatch` means refresh tools/list and call `_manifest`
-   again; any other mismatch means the owner updates or restarts the installation.
+2. Continue only when `compatibility.status` is `compatible`. That covers the local broker and contract,
+   not Telegram authorization, which shows as `blocked` with `connect_account` on the first read. Otherwise
+   follow its `next_action` (see Recovery) or report the status: `client_schema_mismatch` means refresh
+   tools/list, then call `_manifest` with `expected_schema_fingerprint` set to the current
+   `schema_fingerprint` it returned; any other mismatch means the owner updates or restarts the installation.
 3. Use only the tools in `available_tools`; tools/list shows the same set. Never assume a tool count. When a
    step needs a missing tool, name the capability `tool_capabilities` gives for it, then stop or offer an
    available route. Never substitute the Telegram app, screen control, another API or another MCP.
 4. When resuming with a known `schema_fingerprint`, pass it as `expected_schema_fingerprint`; a mismatch
-   blocks operations until tools/list is refreshed.
+   blocks operations until that recovery (step 2).
 
 ## Target routing
 
@@ -237,16 +239,16 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects this MCP client |
 | `connect_account` | authorization not ready (`blocked`) | The owner connects the account with the telegram-setup skill (QR code on their phone), then reconnects |
 | `update_installation` | `config_stale` | The policy changed or a pin no longer matches: the owner restarts or updates the matching components; then call `_manifest` again |
-| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and the profile the refusal names; the owner enables it in Terminal (`capabilities enable <profile>`), then reconnects. Never edit the policy yourself |
+| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile: the refusal text names it; for a structured result find them in `_manifest` `capability_profiles`. Only the owner switches it, in Terminal, after quitting every MCP client (it refuses while one used Telegram in the last 5 minutes), then reconnects. Never run the switch or edit the policy yourself, even with a shell |
 | `search_again` | `selection_unavailable` | Choose the source again from search or read results and call `retain_selection` again; never reuse the old `selection_id` |
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
 | `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |
 
-Without a hint: `client_schema_mismatch` means refresh tools/list, then call `_manifest`; `invalid_arguments`
-names only the missing or invalid schema parameters (never values): fix those once, without looping; `unknown_tool`
-means refresh tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means
-report it and stop. A broker restart clears drafts, uploads, cursors and selections, so check pending send
-outcomes before the owner restarts it.
+Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments` names only the missing or
+invalid schema parameters (never values): fix those once, without looping; `unknown_tool` means refresh
+tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means report it and
+stop (most tools give no hint on a lost broker: one `_manifest(check_broker=true)` tells). A broker restart
+clears drafts, uploads, cursors and selections, so check pending send outcomes before the owner restarts it.
 
 ## Never
 

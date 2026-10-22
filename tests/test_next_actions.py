@@ -180,5 +180,107 @@ class GuardAndManifestTests(unittest.TestCase):
         self.assertNotIn('next_action', local['compatibility'])
 
 
+SELECTION = 'selection_' + 'b' * 64
+
+
+class SelectionRefusalReachesClientsTests(unittest.TestCase):
+    """The documented SelectionRefusal, with next_action search_again, reaches an official SDK client from every
+    attachment reader (read_attachment_page lost it to a stale published output schema before 0.54 fixes)."""
+
+    def test_every_attachment_reader_returns_the_refusal(self):
+        from telegram_search_mcp.selection_refs import SelectionRefusal
+        from tool_listing import FULL_POLICY
+
+        class Service:
+            def close(self):
+                pass
+
+            def __getattr__(self, name):
+                return lambda request: SelectionRefusal()
+
+        async def call(name):
+            async with Client(build_server(service_factory=Service, policy=FULL_POLICY)) as client:
+                return await client.call_tool(name, {'selection_id': SELECTION})
+        for name in ('read_attachment', 'analyze_media', 'read_attachment_page'):
+            with self.subTest(tool=name):
+                result = asyncio.run(call(name))
+                self.assertFalse(result.is_error, result.content)
+                self.assertEqual(result.structured_content, {
+                    'status': 'selection_unavailable', 'detail': 'Selection is unavailable; select the source again.',
+                    'next_action': 'search_again'})
+
+    def test_the_published_output_schema_admits_the_refusal(self):
+        from telegram_search_mcp.selection_refs import SelectionRefusal
+        from tool_listing import FULL_POLICY
+        import jsonschema
+        server = build_server(service_factory=lambda: None, policy=FULL_POLICY)
+        for name in ('read_attachment', 'analyze_media', 'read_attachment_page'):
+            with self.subTest(tool=name):
+                jsonschema.validate(SelectionRefusal().model_dump(mode='json'),
+                                    server._tool_manager.get_tool(name).output_schema)
+
+
+# Tools whose response to a lost broker carries next_action check_connection (docs/reference.md, Recovery hints).
+ANCHOR = {'chat_id': 7, 'message_id': 8}
+CARRY_ON_BROKER_LOSS = {
+    'read_history': {'target': 7, 'mode': 'latest'},
+    'read_messages': {'anchors': [ANCHOR]},
+    'read_reply_chain': {'anchor': ANCHOR},
+    'read_topic_history': {'target': 7, 'topic': {'id': 1}, 'mode': 'latest'},
+    'list_chats': {'scope': 'main'},
+    'list_topics': {'target': 7},
+    'search_messages': {'target': 7, 'query': 'x', 'mode': 'latest'},
+    'search_chats': {'targets': [7], 'query': 'x', 'mode': 'latest'},
+}
+# The core tools named by the 0.54 finding: a plain error or a content-free unavailable, never a hint.
+NO_HINT_ON_BROKER_LOSS = {
+    'resolve_target': {'target': 'me'},
+    'discover_targets': {'hypotheses': ['alpha', 'beta'], 'scope': 'both'},
+    'search_correspondence': {'target': 7, 'query': {'text': 'x'}},
+    'get_message_context': {'anchor': ANCHOR},
+    'get_attachment': {'anchor': ANCHOR},
+    'verify_target': {'target': 7},
+    'prepare_text_send': {'recipient': 7, 'text': 'hi'},
+    'prepare_reply_text_send': {'recipient': 7, 'text': 'hi', 'reply_to': ANCHOR},
+    'list_drafts': {},
+}
+
+
+class BrokerLossHintTests(unittest.TestCase):
+    """Exactly which tools carry check_connection when the broker is gone, through a real BrokerClient pointed at
+    an absent socket and the official SDK client; docs/reference.md names the same set."""
+
+    def test_the_documented_tools_carry_check_connection_and_the_others_carry_none(self):
+        from tool_listing import FULL_POLICY
+
+        async def run():
+            with tempfile.TemporaryDirectory() as parent:
+                def factory():
+                    return BrokerClient(socket_path=Path(parent) / 'absent.sock', policy=FULL_POLICY,
+                                        restart_callback=lambda: None, retry_backoff_seconds=0, request_timeout=5)
+                async with Client(build_server(service_factory=factory, policy=FULL_POLICY)) as client:
+                    return {name: await client.call_tool(name, arguments) for name, arguments in
+                            {**CARRY_ON_BROKER_LOSS, **NO_HINT_ON_BROKER_LOSS}.items()}
+        results = asyncio.run(run())
+        for name, result in results.items():
+            with self.subTest(tool=name):
+                self.assertFalse(result.is_error, result.content)
+                structured = result.structured_content
+                structured = structured.get('result', structured) if set(structured) == {'result'} else structured
+                self.assertIn(structured['status'], ('error', 'unavailable'))
+                self.assertEqual(structured.get('next_action'),
+                                 'check_connection' if name in CARRY_ON_BROKER_LOSS else None)
+
+    def test_the_reference_names_exactly_that_set(self):
+        import re
+        text = (Path(__file__).parents[1] / 'docs/reference.md').read_text()
+        sentence = re.search(r'On a lost broker exactly these tools carry `check_connection`: (.*?)\.', text, re.S)
+        self.assertIsNotNone(sentence)
+        self.assertEqual(set(re.findall(r'`([a-z_]+)`', sentence.group(1))), set(CARRY_ON_BROKER_LOSS) | {'_manifest'})
+        for name in NO_HINT_ON_BROKER_LOSS:
+            with self.subTest(tool=name):
+                self.assertIn(f'`{name}`', text.split('On a lost broker exactly these tools', 1)[1].split('\n## ', 1)[0])
+
+
 if __name__ == '__main__':
     unittest.main()

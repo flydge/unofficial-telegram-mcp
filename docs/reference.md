@@ -72,9 +72,9 @@ Version 0.52.0 adds the tools `prepare_forward_send` and `send_prepared_forward`
 
 The same candidate then adds the tools `prepare_chat_archive` and `apply_prepared_archive` with the default-off capability `archive_chats`, and the tools `prepare_text_edit` and `apply_prepared_text_edit` with the default-off capability `edit_own_text` (fifty-five tools in total, listed after the fifty-one above in this order). Contract 1 and private IPC 2 are unchanged; the four new tools and their closed schemas change the schema fingerprint, so refresh consumer tool lists and deploy matching proxy and broker versions together. The fifty-one earlier tool entries (name, input and output schema, annotations) are byte-identical. `archive_chats` and `edit_own_text` are absent from the legacy defaults, are independent of each other, and each always requires `send` and `read` as well (`read` since the owner's 20.10.2026 decision, because preparation reveals content); with any of them missing the tools are not listed in tools/list and are refused at the SDK guard, the proxy (before it connects) and the broker. These are the first tools that change Telegram state without sending, so one visible runtime text changes: the `forbidden` list returned by `_manifest` no longer says "mutations including edits, deletes, reactions, and moderation operations" but "mutations other than one approved Main/Archive move or one approved plain-text edit of an own text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, bulk and moderation operations". Edits and archive moves are therefore no longer unconditionally forbidden, but only through these four tools and only when their capability is enabled. See [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a). This declaration does not establish release, owner-approved real archive or edit, or consumer acceptance.
 
-Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram. `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
+Before using tools, call `_manifest(check_broker=true)`. It must report `compatibility.status="compatible"`, matching `package_version`, `contract_version`, `schema_fingerprint`, effective configuration, and a `broker_generation`. This handshake does not initialize TDLib or read Telegram, so `compatible` says nothing about Telegram authorization: an account that is not authorized shows up on the first read as `blocked` with `next_action: connect_account` (the `check_broker` field description, the compatible detail, the `check_connection` prompt and the skill say so since the 0.54 candidate). `_manifest({})` remains a local-only inventory and explicitly reports `not_checked`.
 
-The schema fingerprint covers the finalized SDK input/output schemas, permission annotations, and the operation-to-capability mapping. A consumer may send its previously observed fingerprint as `expected_schema_fingerprint`. A mismatch reports `client_schema_mismatch` and blocks subsequent tool operations in that proxy until an explicit matching fingerprint recheck. A manifest without that token cannot detect an unreported consumer cache. Refresh the consumer's tool listing after upgrades; recreating a Codex conversation may be necessary. `package_mismatch`, `contract_mismatch`, `schema_mismatch`, and `config_mismatch` concern loaded runtime components; refreshing a cached tool list alone cannot repair them. `handshake_unavailable_or_legacy_broker` means the handshake was not established, including a legacy broker or transport failure; it is not proof of a particular cause.
+The schema fingerprint covers the finalized SDK input/output schemas, permission annotations, and the operation-to-capability mapping. A consumer may send its previously observed fingerprint as `expected_schema_fingerprint`. A mismatch reports `client_schema_mismatch` and blocks subsequent tool operations in that proxy until an explicit matching fingerprint recheck: refresh the consumer's tool listing, then call `_manifest` with `expected_schema_fingerprint` set to the current `schema_fingerprint` (the mismatch response returns it). Since the 0.54 candidate the mismatch detail, the guard text, the `_manifest` description, the `check_connection` prompt and the skill all say exactly that. A refreshed tools/list or a `_manifest` call without the token never clears it (0.54 decision): the server sees a tools/list request but not the model's tool view, and SDK clients re-list on their own to validate results, so only the consumer can state the fingerprint it now sees. A manifest without that token cannot detect an unreported consumer cache. Refresh the consumer's tool listing after upgrades; recreating a Codex conversation may be necessary. `package_mismatch`, `contract_mismatch`, `schema_mismatch`, and `config_mismatch` concern loaded runtime components; refreshing a cached tool list alone cannot repair them. `handshake_unavailable_or_legacy_broker` means the handshake was not established, including a legacy broker or transport failure; it is not proof of a particular cause.
 
 Capabilities are trusted local policy, not permissions granted by an MCP caller or a consumer's `enabled_tools`. An optional `~/Library/Application Support/TelegramSearchMCP/runtime.toml` must be a regular owner-only file (`0600`) in an owner-only non-symlink directory (`0700`). For example:
 
@@ -104,7 +104,7 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 
 - `Error executing tool <tool>: capability_disabled: <capabilities> (owner enables profile <profile>); next_action: enable_capability`
 - `Error executing tool <tool>: config_stale (restart matching components); next_action: update_installation`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
-- `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
+- `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then call _manifest with expected_schema_fingerprint set to the current schema_fingerprint)`
 
 `<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. Since the 0.54 candidate the parenthesis names the capability profile that turns the missing capabilities on (`owner enables profile <profile>`, or `owner enables profiles <a>, <b>` when two are needed; a profile's dependencies are implied, see [Capability profiles](#capability-profiles)); when a missing capability belongs to no profile (the base `read` or `artifacts`) it reads `owner must enable in runtime.toml`. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner enables profile replies); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
@@ -137,8 +137,18 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
 
-Older tools that report a lost broker as a plain `error` with free-text detail carry no hint, because
-their status alone does not name the condition; `_manifest(check_broker=true)` reports it. The `expired`
+On a lost broker exactly these tools carry `check_connection`: `read_history`, `read_messages`,
+`read_reply_chain`, `read_topic_history`, `list_chats`, `list_topics`, `search_messages`, `search_chats` and
+`_manifest`. Every other tool reports a lost broker without `check_connection`, because no closed field of
+its response names the condition (`get_send_status` still answers `outcome_unknown` with `check_send_status`):
+a plain `error` with free-text detail (among them `resolve_target`, `verify_target`,
+`read_target_messages`, `discover_targets`, `search_correspondence`, `get_message_context`, `get_attachment`,
+the attachment, spreadsheet and presentation readers, `create_local_artifact`, the chunked upload tools and
+`prepare_text_send`) or a content-free `unavailable` (the draft tools such as `list_drafts`, the reply-draft
+tools such as `prepare_reply_text_send`, and the three local upload authority tools). After such an answer
+one `_manifest(check_broker=true)` tells: its `broker_unavailable` carries `check_connection`. A closed reason
+on those responses would change their output schemas and was not added in 0.54
+(`tests/test_next_actions.py` drives both sets through a real `BrokerClient` with no broker). The `expired`
 status of attachment pages, spreadsheets, presentations and drafts means the artifact or draft lapsed,
 not a cursor, and carries no hint. Adding the field changed the output schema of every tool that can
 return one of these statuses.
@@ -350,6 +360,7 @@ statuses, with no send or change:
 | The owner clicked `Cancel` | `declined` | `the owner declined in the local dialog; no attempt was made` |
 | 120 seconds passed without a choice | `timeout` | `the local dialog timed out without a choice; no attempt was made` |
 | No dialog could be shown: `osascript` missing or failing, any error from starting it, a non-zero exit, output other than the three tokens, the outer 125-second limit, or arguments that do not describe exactly one validated preview | `dialog_unavailable` | `the local dialog could not be shown; no attempt was made` |
+| Another owner dialog is open (the broker shows one at a time, across every kind and client; nothing waits behind it) | `dialog_unavailable` | `the local dialog could not be shown; no attempt was made` |
 
 The draft stays pending in all three cases, until it expires, is superseded or is cancelled. Ask the user
 again before another send call; a timeout or an unavailable dialog is never approval. These statuses
@@ -648,7 +659,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
 | `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
 | `rollback_unavailable` | There is no previous release to return to. |
-| `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
+| `rollback_refused` | Newer session state exists (a `runtime.toml` change beyond the version and `enabled_capabilities` lines, or a changed enrollment), or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
@@ -686,13 +697,16 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 ### Capability profiles
 
 Since the 0.54 candidate the owner switches capabilities in named profiles with the installed launcher's
-`capabilities show | enable <profile> | disable <profile>` (see [installation](install.md#enabling-more-capabilities-candidate)):
+`capabilities show | enable <profile> | disable <profile>`, in Terminal, with every MCP client quit or
+disconnected (see [installation](install.md#enabling-more-capabilities-candidate)):
 `readers`, `send`, `replies`, `forward`, `video` and `archive_edit`. Every optional capability belongs to
 exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`
 or `archive_edit` also enables `send`, and disabling `send` disables them. `_manifest` reports the table under
-`capability_profiles` (`profiles`, `dependencies`), and a `capability_disabled` guard refusal names the
-profile that unlocks the missing capabilities. Profiles grant nothing by themselves: the broker still
-enforces the policy file it loaded.
+`capability_profiles` (`profiles`, `dependencies`; the table only, never the switch command), and a
+`capability_disabled` guard refusal names the profile that unlocks the missing capabilities. A typed
+`capability_disabled` result (the reply tools) carries only `missing_capabilities`; the profile is the one
+`capability_profiles.profiles` lists them under. Profiles grant nothing by themselves: the broker still
+enforces the policy file it loaded, and no tool switches a profile.
 
 ### Tool titles, descriptions and annotations
 
@@ -2396,7 +2410,11 @@ release, observed account change or broker restart invalidates the entire select
 The optional `source.telegram_url` is fetched fresh on each read and is not a source
 fact, so a link that appears or disappears neither invalidates nor renews a selection.
 The content-free refusal is exactly
-`{"status":"selection_unavailable","detail":"Selection is unavailable; select the source again."}`.
+`{"status":"selection_unavailable","detail":"Selection is unavailable; select the source again.","next_action":"search_again"}`
+(since the 0.54 candidate it carries the closed `next_action`; before, it was the two keys alone). Every
+tool that accepts a `selection_id` returns it as structured content, `read_attachment_page` included (its
+published output schema dropped the refusal until the 0.54 fixes, so an official SDK client saw only a
+masked tool error).
 Choose and capture the source again; there is no refresh, list, resolve-to-IDs,
 persistent name, sharing or automatic search rescan.
 

@@ -251,7 +251,8 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "Call once per session with check_broker=true; continue only when compatibility.status is "
         "\"compatible\". available_tools lists the usable tools, tool_capabilities what unlocks the rest. "
         "expected_schema_fingerprint (schema_fingerprint from an earlier _manifest) optionally detects a stale "
-        "cached tools/list; a mismatch blocks operations."),
+        "cached tools/list; a mismatch blocks operations until tools/list is refreshed and _manifest gets "
+        "expected_schema_fingerprint set to the current schema_fingerprint."),
     "resolve_target": ("Resolve Saved Messages or @username",
         "Bounded fast path: resolve Saved Messages or one exact @username to a chat.",
         "Send a name, title or remembered context to discover_targets instead. Returned identity data is "
@@ -503,7 +504,8 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
 # Short descriptions of key top-level inputs, attached per parameter (never to shared aliases, which
 # output models reuse). Each changes that tool's input schema; see tests/fixtures/schema_changes/.
 _FIELD_DOCS = {
-    "check_broker": "true to check the broker and account; needed before other operations.",
+    "check_broker": "true to check the local broker and contract (not Telegram authorization); needed before other "
+                    "operations.",
     "expected_schema_fingerprint": "schema_fingerprint from an earlier _manifest, to detect a stale tools/list cache.",
     "resolve_target": "A Saved Messages alias or one exact @username.",
     "hypotheses": "2–5 short names, titles or remembered words you derive from the user's request.",
@@ -726,9 +728,11 @@ _PROMPTS = {
         "1. Call _manifest with check_broker=true.\n"
         "2. If compatibility.status is \"compatible\", report the package version and how many tools "
         "available_tools lists; for a tool the user needs that is missing, name the capability "
-        "tool_capabilities gives for it.\n"
-        "3. Otherwise report the status and the fix: client_schema_mismatch → refresh tools/list and call "
-        "_manifest again; config_stale or another mismatch → the owner restarts or updates the installation; "
+        "tool_capabilities gives for it. compatible covers the local broker and contract only, not Telegram "
+        "authorization: that shows as blocked with next_action connect_account on the first read.\n"
+        "3. Otherwise report the status and the fix: client_schema_mismatch → refresh tools/list, then call "
+        "_manifest with expected_schema_fingerprint set to the current schema_fingerprint it returned; "
+        "config_stale or another mismatch → the owner restarts or updates the installation; "
         "broker or authorization unavailable → the owner runs the telegram-setup connect flow, then reconnects "
         "this MCP client.\n"
         "Follow next_action when a response carries one. Never work around a refusal with other tools.",
@@ -826,7 +830,8 @@ _OVERWRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempoten
 # fixed next_action suffix of the closed recovery map where one applies.
 _GUARD_REFUSALS = {
     "capability_disabled": "capability_disabled: {} ({})" + guard_suffix("capability_disabled"),
-    "client_schema_mismatch": "client_schema_mismatch (refresh tools/list, then recheck _manifest)",
+    "client_schema_mismatch": ("client_schema_mismatch (refresh tools/list, then call _manifest with "
+                               "expected_schema_fingerprint set to the current schema_fingerprint)"),
     "config_stale": "config_stale (restart matching components)" + guard_suffix("config_stale"),
 }
 
@@ -972,8 +977,12 @@ def build_server(
             if expected_schema_fingerprint is not None:
                 consumer_schema_mismatch = expected_schema_fingerprint != descriptor["schema_fingerprint"]
             if consumer_schema_mismatch:
+                # Only the current fingerprint clears it: a tools/list request the server sees proves nothing
+                # about the model's tool view (SDK clients re-list on their own to validate results).
                 compatibility = {"status": "client_schema_mismatch", "broker": None,
-                                 "detail": "consumer-observed schema differs; refresh tools/list and recheck runtime"}
+                                 "detail": "consumer-observed schema differs; refresh tools/list, then call _manifest "
+                                           "with expected_schema_fingerprint set to the current schema_fingerprint "
+                                           "(the one this response returns)"}
             elif check_broker:
                 compatibility = get_service().diagnostics()
         except CompatibilityError as error:
@@ -994,9 +1003,9 @@ def build_server(
             "tools": list(_TOOL_NAMES),
             "available_tools": available_tools(descriptor["enabled_capabilities"]),
             "tool_capabilities": {name: list(needed) for name, needed in _TOOL_CAPABILITIES.items()},
+            # The table only: switching a profile is the owner's own Terminal step (docs/install.md), never a tool's.
             "capability_profiles": {"profiles": {name: list(members) for name, members in CAPABILITY_PROFILES.items()},
-                                    "dependencies": {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()},
-                                    "switch": "launcher.py capabilities enable|disable <profile> (owner, in Terminal)"},
+                                    "dependencies": {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()}},
             "authorization_required": "authorizationStateReady",
             "target_scope": (
                 "direct resolution handles Saved Messages and exact @usernames; account-wide "
@@ -1594,8 +1603,9 @@ def build_server(
         def pre_parse_json(self, data: dict[str, object]) -> dict[str, object]:
             ReadAttachmentPageRequest.model_validate(data)
             return data.copy()
+    # Its published output schema is set below with read_attachment's and analyze_media's (response | SelectionRefusal);
+    # assigning Tool.output_schema here would cache the plain response schema and drop the refusal (0.54 fixes).
     attachment_page_tool.fn_metadata = StrictAttachmentPageMetadata.model_validate(attachment_page_tool.fn_metadata.model_dump())
-    attachment_page_tool.output_schema = ReadAttachmentPageResponse.model_json_schema()
 
     spreadsheet_tool = server._tool_manager.get_tool("read_spreadsheet")
     class StrictSpreadsheetMetadata(metadata_type):

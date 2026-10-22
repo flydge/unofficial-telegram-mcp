@@ -1,10 +1,14 @@
 """The owner's capability profiles: show, enable or disable one named profile in the installed runtime.toml.
 
-Only the `enabled_capabilities` line changes; every other byte stays, unknown keys and comments included. The new
-file is validated as a policy before it replaces the old one (owner-only temporary, fsync, compare-and-swap
-rename), and only after the running broker reports no pending send. Then the receipt-bound broker LaunchAgent
-alone is restarted, and only when it is loaded; connected MCP clients see `config_stale` until they reconnect.
-Refusals are fixed codes; nothing read from the file is echoed.
+Only the `enabled_capabilities` line changes; every other byte stays, comments included (a policy the loader
+refuses, such as one with unknown keys, refuses here too). The new file is validated as a policy before it
+replaces the old one (owner-only temporary, fsync, compare-and-swap rename), and only after two checks: the
+receipt-bound broker LaunchAgent is not loaded or is exactly the installed release's definition (else
+`service_conflict`), and the running broker has no active client context (else `pending_send_unresolved`).
+Every refusal comes before the write. After it, the broker is restarted when loaded; a restart that fails then
+is reported in the `changed` result (`broker: restart_failed` with the manual `restart_command`), never as a
+refusal. Connected MCP clients see `config_stale` until they reconnect. Refusals are fixed codes; nothing read
+from the file is echoed.
 """
 from __future__ import annotations
 
@@ -18,8 +22,9 @@ from .config import (CAPABILITY_PROFILES, ConfigurationError, KNOWN_CAPABILITIES
                      load_runtime_policy)
 
 ACTIONS = ("show", "enable", "disable")
-CODES = frozenset({"policy_unsupported", "policy_conflict", "pending_send_unresolved", "service_restart_failed"})
+CODES = frozenset({"policy_unsupported", "policy_conflict", "pending_send_unresolved", "service_conflict"})
 MAX_POLICY_BYTES = 65536
+LAUNCHCTL = "/bin/launchctl"  # launch_agent.LAUNCHCTL, without importing the broker
 # The one line that changes: a single-line array, optionally followed by a comment, which is kept.
 _LINE = re.compile(rb'^enabled_capabilities[ \t]*=[ \t]*\[[^\]\n]*\][ \t]*(#[^\n]*)?$', re.M)
 
@@ -64,6 +69,16 @@ def rewrite(data: bytes, enabled) -> bytes:
     return data[:match.start()] + value + data[match.end():]
 
 
+def without_capabilities(data: bytes) -> bytes | None:
+    """`data` with its one `enabled_capabilities` line (as `rewrite` finds it) replaced by a fixed marker; None
+    unless there is exactly one. The installer records and compares policies by it, so a profile switch, the
+    only change to that line, never blocks a rollback."""
+    lines = list(_LINE.finditer(data))
+    if len(lines) != 1:
+        return None
+    return data[:lines[0].start()] + b"enabled_capabilities = <profile switch>" + data[lines[0].end():]
+
+
 def _read(path: Path) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -93,10 +108,18 @@ def show(home: Path) -> dict:
             "enabled_capabilities": list(policy.enabled_capabilities)}
 
 
-def apply(home: Path, action: str, profile: str, *, pending: Callable[[], str],
+def restart_command(home: Path) -> list[str]:
+    """The owner's manual restart of the broker LaunchAgent (nonsecret argv)."""
+    return [LAUNCHCTL, "kickstart", "-k", "gui/%d/%s" % (os.getuid(), _owner_paths(Path(home))[2])]
+
+
+def apply(home: Path, action: str, profile: str, *, pending: Callable[[], str], restartable: Callable[[], str],
           restart: Callable[[], str]) -> dict:
-    """Enable or disable one profile; `pending()` answers 'none', 'pending' or 'unknown' for the running broker,
-    `restart()` restarts the receipt-bound broker when it is loaded and answers 'restarted' or 'not_running'."""
+    """Enable or disable one profile. Before the write, `restartable()` answers 'loaded' or 'not_running' only when
+    the receipt-bound broker can be restarted (it raises, or answers anything else, otherwise) and `pending()`
+    answers 'none', 'pending' or 'unknown' for the running broker. After the write, `restart()` restarts the broker
+    when it is loaded and answers 'restarted' or 'not_running'; any other answer or exception there is reported as
+    `broker: restart_failed` with the manual `restart_command`."""
     path = _owner_paths(Path(home))[0] / "runtime.toml"
     before = _read(path)
     current = _policy(path)
@@ -116,23 +139,33 @@ def apply(home: Path, action: str, profile: str, *, pending: Callable[[], str],
         expected = dict(current.public_settings(), enabled_capabilities=list(enabled))
         if after.public_settings() != expected:
             raise ProfileError("policy_unsupported")
+        if restartable() not in ("loaded", "not_running"):
+            raise ProfileError("service_conflict")
         if pending() != "none":
             raise ProfileError("pending_send_unresolved")
         if _read(path) != before:
             raise ProfileError("policy_conflict")
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     finally:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
-    broker = restart()
-    if broker not in ("restarted", "not_running"):
-        raise ProfileError("service_restart_failed")
-    return {"status": "changed", "profiles": states(enabled), "enabled_capabilities": list(enabled),
-            "broker": broker, "clients": "reconnect"}
+    # Written: from here on the result is `changed`, whatever the directory sync or the restart does.
+    try:
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        pass
+    try:
+        broker = restart()
+    except (Exception, KeyboardInterrupt):
+        broker = None
+    result = {"status": "changed", "profiles": states(enabled), "enabled_capabilities": list(enabled),
+              "broker": broker if broker in ("restarted", "not_running") else "restart_failed", "clients": "reconnect"}
+    if result["broker"] == "restart_failed":
+        result["restart_command"] = restart_command(home)
+    return result

@@ -2088,7 +2088,9 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   (`downgrade_refused`); an unparsable version refuses the same way. Going back is only `rollback`.
 - **Rollback only to unchanged state.** It refuses (`rollback_refused`) unless `enrollment.json` is
   byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
-  in the version line, and the previous release's manifest and Codex ownership still match.
+  in the version line and the `enabled_capabilities` line (the one line the owner's profile switch
+  writes; known capabilities only, compared through a digest of the file with that line masked, which the
+  upgrade records), and the previous release's manifest and Codex ownership still match.
 - **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
   plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
@@ -2313,7 +2315,16 @@ Everything else maps to a status that never sends or changes anything:
   125-second process limit, an exception inside the script, any exception from `subprocess.run` itself
   (including a `ValueError` for a NUL byte or an unencodable argument), a timer value outside 1–120 seconds, or
   arguments that do not describe exactly one preview bound to the broker's own draft. Any other value an
-  injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`.
+  injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`. So is a send
+  or apply that arrives while another owner dialog is open (below).
+
+**One dialog at a time.** The broker shows at most one owner dialog, across every send and apply kind and
+every client. A call that arrives while a dialog is open shows none: it answers `dialog_unavailable` at
+once, makes no attempt and leaves its draft pending, and nothing is queued behind the open dialog. Every
+dialog has the same size and position, so stacked dialogs would let a click meant for one draft approve
+another; a client that keeps calling `send_prepared_*` on other drafts while the owner reads a dialog gets
+only refusals. A repeated call on the same draft while its dialog is open is refused the same way; once
+that dialog approved and sent, a repeat replays the receipt.
 
 The dialog runs through `subprocess.run` with a bounded timeout. Details are fixed strings; no input,
 dialog text or provider message is echoed.

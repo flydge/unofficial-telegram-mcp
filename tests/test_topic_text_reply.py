@@ -703,6 +703,8 @@ class TopicReplyTests(unittest.TestCase):
     with Harness() as h:
       h.prepare(); barrier = threading.Barrier(2)
       h.decision = lambda: barrier.wait(timeout=5) is not None
+      # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+      h.broker._owner_dialog = lambda **facts: h.broker._approval_prompt(**facts)
       with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = [f.result(timeout=8) for f in [pool.submit(h.send) for _ in range(2)]]
       self.assertEqual(sum(r['status'] == 'sent' for r in outcomes), 1)

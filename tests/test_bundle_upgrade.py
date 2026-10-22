@@ -623,20 +623,55 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                 self.assertEqual(self.install(new)['status'], 'upgraded')
                 self.selection_check()
 
+    def switch(self, *steps):
+        """The owner's profile switch (capability_profiles.apply) with a stopped broker, step by step."""
+        from telegram_search_mcp import capability_profiles
+        for action, profile in steps:
+            result = capability_profiles.apply(self.home, action, profile, pending=lambda: 'none',
+                                               restartable=lambda: 'not_running', restart=lambda: 'not_running')
+            self.assertEqual(result['status'], 'changed')
+
+    def test_a_profile_switch_never_blocks_a_later_rollback(self):
+        """Only the enabled_capabilities line differs from the state the upgrade recorded: the rollback goes back
+        and keeps the owner's switch; enabling and disabling again (sorted bytes) is no different."""
+        for steps in ((('enable', 'video'),), (('enable', 'send'), ('disable', 'send')),
+                      (('enable', 'replies'), ('enable', 'readers'), ('disable', 'send'))):
+            with self.subTest(steps=steps):
+                self.setUp()
+                _, old, new, _ = self.upgraded()
+                self.switch(*steps)
+                path = self.session_root / 'runtime.toml'
+                switched = path.read_bytes()
+                result = self.change('rollback')
+                self.assertEqual((result['status'], result['release_root']), ('rolled_back', old['release_root']))
+                self.assertEqual(path.read_bytes(), switched.replace(b'0.54.0.dev0', OLD_VERSION.encode()))
+                # Forward again over the switched policy: the kept release is verified and reused.
+                self.assertEqual(self.install(new)['status'], 'upgraded')
+                self.assertEqual(path.read_bytes(), switched)
+
     def test_rollback_refuses_newer_state_or_a_first_install(self):
         self.full()
         with self.assertRaises(self.module().InstallError) as caught:
             self.change('rollback')
         self.assertEqual(str(caught.exception), 'rollback_unavailable')
-        for kind in ('enrollment', 'capabilities'):
+        for kind in ('enrollment', 'other_line', 'switch_and_other_line', 'unrecorded'):
             with self.subTest(kind=kind):
                 self.setUp()
                 self.upgraded()
+                path = self.session_root / 'runtime.toml'
                 if kind == 'enrollment':
                     (self.session_root / 'enrollment.json').write_bytes(b'{"written": "by the newer release"}\n')
-                else:
-                    path = self.session_root / 'runtime.toml'
-                    path.write_bytes(path.read_bytes().replace(b'"send"]', b'"send", "edit_own_text"]'))
+                elif kind == 'other_line':  # A key the older release may not accept.
+                    path.write_bytes(path.read_bytes() + b'selection_ttl_seconds = 1200\n')
+                elif kind == 'switch_and_other_line':
+                    self.switch(('enable', 'video'))
+                    path.write_bytes(path.read_bytes() + b'selection_ttl_seconds = 1200\n')
+                else:  # A transaction recorded without the capability-line digest keeps the whole-file rule.
+                    journal = self.runtime / 'transactions' / self.receipt()['transaction'] / 'journal.json'
+                    value = json.loads(journal.read_bytes())
+                    value['state'] = {k: v for k, v in value['state'].items() if k in ('enrollment.json', 'runtime.toml')}
+                    journal.write_bytes(self.module().encoded(value))
+                    self.switch(('enable', 'video'))
                 snapshot = self.receipt()
                 with self.assertRaises(self.module().InstallError) as caught:
                     self.change('rollback')

@@ -1108,14 +1108,37 @@ def _policy_back(j, session_root, new):
         j.write('policy_restore',policy,back,data,existed=True,maximum=MAX_POLICY_BYTES)
 
 
+_POLICY_BODY = 'runtime.toml without enabled_capabilities'
+
+
 def _state(session_root):
-    """Hashes of the session state an older release must accept: enrollment.json and runtime.toml."""
+    """Hashes of the session state an older release must accept: enrollment.json and runtime.toml, plus runtime.toml
+    with its enabled_capabilities line masked (`_POLICY_BODY`), so a rollback tolerates an owner's profile switch."""
+    from .capability_profiles import without_capabilities
     out={}
     for name in ('enrollment.json','runtime.toml'):
         if not os.path.lexists(session_root):out[name]=None;continue
         data,exists=_read_file(session_root/name,65536)
         out[name]=digest(data) if exists else None
+        if name=='runtime.toml':
+            body=without_capabilities(data) if exists else None
+            out[_POLICY_BODY]=digest(body) if body is not None else None
     return out
+
+
+def _same_policy(back, state):
+    """Whether `back` (runtime.toml with its version line set back) is the policy the change recorded in `state`:
+    the same bytes, or the same bytes except the enabled_capabilities line, the one line a profile switch writes,
+    naming only known capabilities. A state recorded without the masked digest keeps the whole-file rule."""
+    from .capability_profiles import without_capabilities
+    from .config import KNOWN_CAPABILITIES
+    if back is None:return False
+    if digest(back)==state.get('runtime.toml'):return True
+    recorded,body=state.get(_POLICY_BODY),without_capabilities(back)
+    if type(recorded) is not str or body is None or digest(body)!=recorded:return False
+    try:enabled=tomllib.loads(back.decode()).get('enabled_capabilities')
+    except (tomllib.TOMLDecodeError,UnicodeError):return False
+    return type(enabled) is list and all(type(name) is str and name in KNOWN_CAPABILITIES for name in enabled)
 
 
 def _commands(installed):
@@ -1877,7 +1900,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 if now['runtime.toml']!=state.get('runtime.toml'):
                     data,exists=_read_file(session_root/'runtime.toml',MAX_POLICY_BYTES)
                     back=_policy_candidate(data,current['package_version'],target['package_version']) if exists else None
-                    if back is None or digest(back)!=state.get('runtime.toml'):raise InstallError('rollback_refused')
+                    if not _same_policy(back,state):raise InstallError('rollback_refused')
                 require_object_binding(to_root,target['publication_objects']['release']['object'])
             adopted={}
             source_bytes,existed=_config(config)
@@ -2529,10 +2552,11 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
         raise InstallError('installation_refused') from None
 
 
-def restart_receipt_broker(release_root, user_home, runner=subprocess.run):
+def restart_receipt_broker(release_root, user_home, runner=subprocess.run, kickstart=True):
     """Restart the broker LaunchAgent so it reads a changed policy: 'not_running' when it is not loaded; otherwise
     only when both its plist on disk and the loaded registration are exactly `release_root`'s broker definition
-    (else `service_conflict`), with `kickstart -k`, answering 'restarted'."""
+    (else `service_conflict`), with `kickstart -k`, answering 'restarted'. With kickstart=False only the check
+    runs (before a policy write): 'not_running' or 'loaded', never a kickstart."""
     from .config import _owner_paths
     from .launch_agent import LAUNCHCTL
     _,_,label,plist=_owner_paths(Path(user_home))
@@ -2542,6 +2566,7 @@ def restart_receipt_broker(release_root, user_home, runner=subprocess.run):
     try:actual=plistlib.loads(read(plist,1024*1024,mode=0o600))
     except (ValueError,TypeError,plistlib.InvalidFileException,BundleError):raise InstallError('service_conflict') from None
     if actual!=expected or not _matches_live(text,plist,expected):raise InstallError('service_conflict')
+    if not kickstart:return 'loaded'
     if _launchctl(runner,[LAUNCHCTL,'kickstart','-k','gui/%d/%s'%(os.getuid(),label)]).returncode!=0:
         raise InstallError('service_restart_failed')
     return 'restarted'
