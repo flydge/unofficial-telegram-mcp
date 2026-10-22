@@ -3,7 +3,7 @@
 
   python packaging/release_consumer_matrix.py run --commit <sha> --receipt <path> [--wheelhouse <dir>]
                                                   [--workdir <dir>] [--real-dialog]
-  python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>]
+  python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>]
 
 Spec: docs/plans/0.54-consumer-matrix-spec.md (0.54 item E, criterion 11). acceptance is always false:
 the harness runs only synthetic cells and never marks an owner or real-account cell passed.
@@ -18,11 +18,17 @@ bytes) and, where the cell needs one, a synthetic broker: the installed Broker c
 tdjson transport serving one fixed synthetic account. Nothing reaches Telegram, the Keychain, launchd
 state or the live runtime tree. Approval denial is scripted by default (the bound dialog document is
 rendered, then declined); --real-dialog shows the real JXA dialog with a 5-second timer and expects
-`timeout`. The receipt is bound to the commit, the wheel sha256 and the schema fingerprint.
+`timeout`. The receipt is bound to the commit, the wheel sha256 and the schema fingerprint. run refuses
+when this file or packaging/release_gate.py (which builds, installs and takes the census) differs from the
+commit's copy, and records both hashes.
 
-check re-derives the bindings: it rebuilds the wheel from `git archive <receipt commit>` and takes the
-census of that tree with the running interpreter; any difference (a deliberate schema change, another
-wheel) refuses. Refusals print one fixed code and never echo inputs.
+check re-derives the bindings with the receipt commit's own harness and gate (a working-tree copy that
+differs refuses): it rebuilds the wheel from `git archive <receipt commit>`, takes the census of that tree
+with the running interpreter, reinstalls the pinned closure (downloaded unless --wheelhouse names one) and
+lists the tools through the reinstalled proxy. Any difference refuses: another wheel or size, schema, tool
+set, closure, install facts or listing, or a field check_receipt and check_fields name. Per-cell check
+counts and surface counts are frozen in this file (CELL_CHECKS, SURFACE_COUNTS), so a weakened cell must
+change them too. Refusals print one fixed code and never echo inputs.
 
 The `broker` and `drive` subcommands are internal: run starts them inside the temporary venv.
 """
@@ -48,7 +54,7 @@ import threading
 import time
 import zlib
 
-SCHEMA = "tgmcp-consumer-matrix/v1"
+SCHEMA = "tgmcp-consumer-matrix/v2"
 PROJECT = "telegram-search-mcp"
 HARNESS = Path(__file__).resolve()
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -101,6 +107,23 @@ CELLS = (
      "dispatches"),
 )
 CELL_IDS = tuple(cell for cell, _, _ in CELLS)
+# How many checks each cell makes when it passes, in CELLS order; check refuses any other count, so a cell
+# weakened in the driver also has to be weakened here. The real dialog adds the approval timer check.
+CELL_CHECKS = {
+    **{f"handshake.{revision}": 6 for revision in REVISIONS},
+    "census.tools": 4, "census.fingerprint": 7, "census.prompts": 12, "output_schemas": 2,
+    "refusal.invalid_arguments": 10, "refusal.invalid_arguments_hook": 2, "refusal.unknown_tool": 1,
+    "refusal.prompt_unavailable": 1, "refusal.prompt_arguments": 2, "refusal.client_schema_mismatch": 4,
+    "refusal.capability_disabled": 5, "refusal.prompt_policy": 2, "refusal.config_stale": 3,
+    "image.png": 6, "image.pdf_page": 5, "cursor.list_chats": 4,
+    "recovery.restart_listing": 4, "recovery.search_again": 2, "recovery.check_send_status": 8,
+    "recovery.enable_capability": 5, "recovery.update_installation": 3, "recovery.check_connection": 4,
+    "recovery.connect_account": 3, "caps.manifest": 8, "caps.input_bounds": 6,
+    "approval.declined_flag": 5, "approval.denial": 8,
+}
+REAL_DIALOG_CHECKS = {"approval.denial": 1}
+# Structured results every session validates in a passing run, and the tools they came from.
+SURFACE_COUNTS = {"structured_results_validated": 34, "tools_with_validated_results": 10}
 # Owner or real-account cells: listed so the receipt shows them, never run or passed by this harness.
 OWNER_CELLS = (
     ("official_sdk.real_account", "official SDK", "real account"),
@@ -126,10 +149,12 @@ CODES = frozenset({
     "install_failed", "census_failed", "broker_failed", "drive_failed", "cells_failed", "receipt_invalid",
     "acceptance_claimed", "owner_cell_passed", "cell_set_mismatch", "commit_mismatch", "wheel_mismatch",
     "schema_mismatch", "tools_mismatch", "version_mismatch", "workdir_invalid", "wheelhouse_invalid",
-    "harness_mismatch", "tree_mismatch", "field_mismatch"})
-RECEIPT_KEYS = frozenset({"schema", "acceptance", "harness", "commit", "tree", "version", "wheel", "build",
+    "harness_mismatch", "gate_mismatch", "tree_mismatch", "field_mismatch", "checks_mismatch"})
+RECEIPT_KEYS = frozenset({"schema", "acceptance", "harness", "gate", "commit", "tree", "version", "wheel", "build",
                           "install", "sdk", "schema_fingerprint", "census", "surface", "approval", "cells",
                           "owner_cells", "summary"})
+HARNESS_PATH, GATE_PATH = "packaging/release_consumer_matrix.py", "packaging/release_gate.py"
+APPROVALS = ({"mode": "scripted", "outcome": "declined"}, {"mode": "real_dialog", "outcome": "timeout"})
 MAX_RECEIPT_BYTES = 1 << 20
 BROKER_START_SECONDS, DRIVE_SECONDS, CENSUS_SECONDS, BUILD_SECONDS = 30, 900, 180, 900
 REAL_DIALOG_SECONDS = 5
@@ -470,6 +495,15 @@ class Consumer:
         return await self._listing("list_prompts", "prompts")
 
 
+def listing_digest(tools) -> str:
+    """sha256 of the consumer-observed tool listing: every field a client reads, in name order."""
+    return _sha(json.dumps([
+        {"name": tool.name, "title": tool.title, "description": tool.description,
+         "inputSchema": tool.input_schema, "outputSchema": tool.output_schema,
+         "annotations": tool.annotations.model_dump(mode="json", exclude_none=True) if tool.annotations else None}
+        for tool in sorted(tools, key=lambda t: t.name)], sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
 def error_text(result) -> str | None:
     """The single text block of an error result, else None."""
     content = getattr(result, "content", None) or []
@@ -604,11 +638,7 @@ class Driver:
         cell.expect("names", sorted(names) == self.census["tools"])
         cell.expect("titles", all(isinstance(tool.title, str) and tool.title.strip() for tool in tools))
         cell.expect("input_schemas", all(tool.input_schema.get("type") == "object" for tool in tools))
-        self.observed["listing_sha256"] = _sha(json.dumps([
-            {"name": tool.name, "title": tool.title, "description": tool.description,
-             "inputSchema": tool.input_schema, "outputSchema": tool.output_schema,
-             "annotations": tool.annotations.model_dump(mode="json", exclude_none=True) if tool.annotations else None}
-            for tool in sorted(tools, key=lambda t: t.name)], sort_keys=True, ensure_ascii=False).encode("utf-8"))
+        self.observed["listing_sha256"] = listing_digest(tools)
 
     async def cell_census_fingerprint(self, cell, consumer, tools) -> None:
         manifest = structured(await consumer.call("_manifest", {"check_broker": True}))
@@ -913,6 +943,12 @@ class Driver:
 
             await self.run_cell("recovery.connect_account", connect_account)
 
+    async def listing(self) -> None:
+        """No cell: the full policy's tool listing without a broker, which check re-derives from its own
+        reinstall and compares with the full session's recorded listing_sha256."""
+        async with self.client(mode="legacy") as client:
+            self.observed["listing_sha256"] = listing_digest(await Consumer(client, self.ledger).tools())
+
     async def run(self) -> dict:
         await getattr(self, self.plan["session"])()
         import importlib.metadata
@@ -955,15 +991,20 @@ def merge_cells(sessions: list[dict]) -> list[dict]:
     return [found[cell_id] for cell_id in CELL_IDS]
 
 
+def owner_cells() -> list[dict]:
+    return [{"id": cell, "client": client, "provider": provider, "status": "pending"}
+            for cell, client, provider in OWNER_CELLS]
+
+
 def build_receipt(*, commit: str, tree: str, version: str, wheel: dict, build: dict, install: dict,
-                  census: dict, sessions: list[dict], harness_sha256: str) -> dict:
+                  census: dict, sessions: list[dict], harness_sha256: str, gate_sha256: str) -> dict:
     cells = merge_cells(sessions)
     full = next(session for session in sessions if session["session"] == "full")
     schemas = [session["schemas"] for session in sessions]
     sdk = {"distribution": SDK_DISTRIBUTION, "version": full["sdk"]["version"], "revisions": list(REVISIONS)}
     return {
         "schema": SCHEMA, "acceptance": False,
-        "harness": {"path": "packaging/release_consumer_matrix.py", "sha256": harness_sha256},
+        "harness": {"path": HARNESS_PATH, "sha256": harness_sha256}, "gate": {"path": GATE_PATH, "sha256": gate_sha256},
         "commit": commit, "tree": tree, "version": version, "wheel": wheel, "build": build, "install": install,
         "sdk": sdk, "schema_fingerprint": census["schema_fingerprint"],
         "census": {"tool_count": len(census["tools"]), "tools_sha256": tools_sha256(census["tools"]),
@@ -974,16 +1015,21 @@ def build_receipt(*, commit: str, tree: str, version: str, wheel: dict, build: d
                     "unschematized_tools": sorted({tool for item in schemas for tool in item["unschematized"]})},
         "approval": full["observed"].get("approval"),
         "cells": cells,
-        "owner_cells": [{"id": cell, "client": client, "provider": provider, "status": "pending"}
-                        for cell, client, provider in OWNER_CELLS],
+        "owner_cells": owner_cells(),
         "summary": {"synthetic": len(cells), "passed": sum(cell["status"] == "pass" for cell in cells),
                     "failed": sum(cell["status"] != "pass" for cell in cells), "owner_pending": len(OWNER_CELLS)},
     }
 
 
 def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: str | None = None,
-                  census: dict | None = None, committed: dict | None = None) -> None:
-    """Every structural rule, then each binding that is given; refuses with one fixed code."""
+                  census: dict | None = None, committed: dict | None = None, derived: dict | None = None) -> None:
+    """Every rule the harness fixes on its own, then each binding that is given; refuses with one fixed code.
+
+    On its own: the closed keys and schema, no acceptance, the closed cell and owner-cell sets, owner cells
+    exactly as OWNER_CELLS lists them and pending, every cell passed with exactly {id, status, checks} and its
+    CELL_CHECKS count (REAL_DIALOG_CHECKS added under the real dialog), the approval one of APPROVALS, the
+    SURFACE_COUNTS and the summary. Bindings: the commit, the wheel sha256, the census (version, fingerprint,
+    tools and counts), and check_fields for every other field."""
     need(isinstance(receipt, dict) and set(receipt) == RECEIPT_KEYS and receipt["schema"] == SCHEMA,
          "receipt_invalid")
     need(receipt["acceptance"] is False, "acceptance_claimed")
@@ -999,9 +1045,18 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
         need(isinstance(items, list) and all(isinstance(item, dict) for item in items)
              and [item.get("id") for item in items] == list(ids), "cell_set_mismatch")
     need(all(item.get("status") == "pending" for item in owner), "owner_cell_passed")
-    need(all(item.get("status") == "pass" and type(item.get("checks")) is int and item["checks"] > 0
-             for item in cells), "cells_failed", {"failed": [item.get("id") for item in cells
-                                                            if item.get("status") != "pass"]})
+    need(owner == owner_cells(), "field_mismatch")
+    need(all(item.get("status") == "pass" for item in cells), "cells_failed",
+         {"failed": [item.get("id") for item in cells if item.get("status") != "pass"]})
+    approval = receipt["approval"]
+    need(approval in APPROVALS, "field_mismatch")
+    extra = REAL_DIALOG_CHECKS if approval["mode"] == "real_dialog" else {}
+    need(all(set(item) == {"id", "status", "checks"} and type(item["checks"]) is int
+             and item["checks"] == CELL_CHECKS[item["id"]] + extra.get(item["id"], 0) for item in cells),
+         "checks_mismatch")
+    surface = receipt["surface"]
+    need(isinstance(surface, dict) and all(type(surface.get(key)) is int and surface[key] == count
+                                           for key, count in SURFACE_COUNTS.items()), "field_mismatch")
     summary = receipt["summary"]
     need(summary == {"synthetic": len(CELL_IDS), "passed": len(CELL_IDS), "failed": 0,
                      "owner_pending": len(OWNER_IDS)}, "receipt_invalid")
@@ -1017,55 +1072,85 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
                                    "tools_sha256": tools_sha256(census.get("tools") or []),
                                    "capabilities": len(census.get("capabilities") or [])}, "field_mismatch")
     if committed is not None:
-        check_fields(receipt, committed)
+        check_fields(receipt, committed, derived)
 
 
-def check_fields(receipt: dict, committed: dict) -> None:
-    """Every remaining receipt field against what the recorded commit's own harness and tree require: a
-    receipt from another harness, tree, closure or approval mode, or with an edited count, refuses."""
-    need(receipt["harness"] == {"path": "packaging/release_consumer_matrix.py", "sha256": committed["harness_sha256"]},
-         "harness_mismatch")
+INSTALL_KEYS = frozenset({"constraints", "constraints_sha256", "wheelhouse", "distributions", "freeze", "pip_check",
+                          "record_entries"})
+
+
+def check_fields(receipt: dict, committed: dict, derived: dict | None = None) -> None:
+    """Every other field against what the recorded commit fixes (committed_facts) and what check re-derived
+    from it (`derived`: a reinstall's facts and a fresh listing); an edited field refuses:
+
+    - harness and gate: path and sha256 of the commit's own files (harness_mismatch, gate_mismatch);
+    - tree: the commit's tree id (tree_mismatch);
+    - wheel: exactly file, sha256 and bytes, the file named for the version, the size of the rebuilt wheel;
+    - build: exactly build, python, setuptools and source_date_epoch; the build and setuptools that rebuilt
+      the same wheel, an X.Y.Z interpreter of the constraints' target minor version, the commit time;
+    - install: exactly its seven keys; the commit's constraints file and sha256, its distribution count, the
+      exact freeze its pins give, pip check clean, wheelhouse provided or downloaded, a positive RECORD count;
+      with `derived`, every install fact but the wheelhouse equal to the reinstall's;
+    - sdk: exactly the distribution, the version the constraints pin and every revision;
+    - surface: exactly its four keys, a sha256 listing (with `derived`, the fresh listing's), no tool without
+      an output schema.
+    Every other field is fixed by the harness or bound to the census (check_receipt); anything else refuses
+    field_mismatch."""
+    need(receipt["harness"] == {"path": HARNESS_PATH, "sha256": committed["harness_sha256"]}, "harness_mismatch")
+    need(receipt["gate"] == {"path": GATE_PATH, "sha256": committed["gate_sha256"]}, "gate_mismatch")
     need(receipt["tree"] == committed["tree_id"], "tree_mismatch")
     version = receipt["version"]
-    wheel, build, install = receipt["wheel"], receipt["build"], receipt["install"]
+    wheel, build, install, sdk, surface = (receipt[key] for key in ("wheel", "build", "install", "sdk", "surface"))
     need(set(wheel) == {"file", "sha256", "bytes"} and wheel["file"] == f"{PROJECT.replace('-', '_')}-{version}"
-         f"-py3-none-any.whl" and type(wheel["bytes"]) is int and wheel["bytes"] > 0, "field_mismatch")
-    need(set(build) == {"build", "python", "setuptools", "source_date_epoch"}
-         and build["source_date_epoch"] == committed["epoch"], "field_mismatch")
-    freeze = install.get("freeze")
-    need(set(install) == {"constraints", "constraints_sha256", "wheelhouse", "distributions", "freeze", "pip_check",
-                          "record_entries"}
+         f"-py3-none-any.whl" and type(wheel["bytes"]) is int and wheel["bytes"] == committed["wheel_bytes"],
+         "field_mismatch")
+    python = build.get("python") if isinstance(build, dict) else None
+    need(isinstance(build, dict) and set(build) == {"build", "python", "setuptools", "source_date_epoch"}
+         and build["build"] == committed["build_tools"]["build"]
+         and build["setuptools"] == committed["build_tools"]["setuptools"]
+         and isinstance(python, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", python)
+         and python.rsplit(".", 1)[0] == committed["python_target"]
+         and type(build["source_date_epoch"]) is int and build["source_date_epoch"] == committed["epoch"],
+         "field_mismatch")
+    need(isinstance(install, dict) and set(install) == INSTALL_KEYS
          and install["constraints"] == committed["constraints"]
          and install["constraints_sha256"] == committed["constraints_sha256"]
          and install["wheelhouse"] in ("provided", "downloaded") and install["pip_check"] == "clean"
          and type(install["distributions"]) is int and install["distributions"] == committed["distributions"]
-         and isinstance(freeze, list) and len(freeze) == install["distributions"] + 1
+         and install["freeze"] == committed["freeze"]
          and type(install["record_entries"]) is int and install["record_entries"] > 0, "field_mismatch")
-    sdk = receipt["sdk"]
-    need(set(sdk) == {"distribution", "version", "revisions"} and sdk["distribution"] == SDK_DISTRIBUTION
-         and sdk["revisions"] == list(REVISIONS) and f"{SDK_DISTRIBUTION}=={sdk['version']}" in freeze,
+    need(sdk == {"distribution": SDK_DISTRIBUTION, "version": committed["sdk_version"], "revisions": list(REVISIONS)},
          "field_mismatch")
-    surface = receipt["surface"]
     need(set(surface) == {"listing_sha256", "structured_results_validated", "tools_with_validated_results",
                           "unschematized_tools"}
          and isinstance(surface["listing_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", surface["listing_sha256"])
-         and type(surface["structured_results_validated"]) is int and surface["structured_results_validated"] > 0
-         and type(surface["tools_with_validated_results"]) is int and surface["tools_with_validated_results"] > 0
          and surface["unschematized_tools"] == [], "field_mismatch")
-    need(receipt["approval"] in ({"mode": "scripted", "outcome": "declined"},
-                                 {"mode": "real_dialog", "outcome": "timeout"}), "field_mismatch")
+    if derived is not None:
+        def facts(value: dict) -> dict:
+            return {key: item for key, item in value.items() if key != "wheelhouse"}
+        need(facts(install) == facts(derived["install"]), "field_mismatch")
+        need(surface["listing_sha256"] == derived["listing_sha256"], "field_mismatch")
 
 
 def committed_facts(gate, built: dict) -> dict:
-    """What the recorded commit's own tree fixes: its harness, tree id, epoch and pinned closure."""
+    """What rebuilding the recorded commit fixes: its own harness and gate, tree id and epoch, the rebuilt
+    wheel's size and the build tools that made it, and its pinned closure (target, freeze, SDK version)."""
     tree = built["tree"]
     release = re.match(r"[0-9]+\.[0-9]+\.[0-9]+", built["version"])
     need(release, "build_failed")
     constraints = f"packaging/constraints-{release.group(0)}.txt"
-    _, pins = _gate_call(gate, "install_failed", gate.parse_constraints, (tree / constraints).read_text(encoding="utf-8"))
-    return {"harness_sha256": gate.sha256_file(tree / "packaging/release_consumer_matrix.py"),
-            "tree_id": built["tree_id"], "epoch": built["epoch"], "constraints": constraints,
-            "constraints_sha256": gate.sha256_file(tree / constraints), "distributions": len(pins)}
+    target, pins = _gate_call(gate, "install_failed", gate.parse_constraints,
+                              (tree / constraints).read_text(encoding="utf-8"))
+    return {"harness_sha256": _sha((tree / HARNESS_PATH).read_bytes()),
+            "gate_sha256": _sha((tree / GATE_PATH).read_bytes()),
+            "tree_id": built["tree_id"], "epoch": built["epoch"], "wheel_bytes": built["wheel"].stat().st_size,
+            "build_tools": {name: built["build"][name] for name in ("build", "setuptools")},
+            "python_target": target, "constraints": constraints,
+            "constraints_sha256": gate.sha256_file(tree / constraints), "distributions": len(pins),
+            # install_closure's own expectation: every pin, plus the project at the built version.
+            "freeze": sorted([f"{name}=={pinned}" for name, (pinned, _) in pins.items()]
+                             + [f"{PROJECT}=={built['version']}"]),
+            "sdk_version": pins[SDK_DISTRIBUTION][0] if SDK_DISTRIBUTION in pins else None}
 
 
 def load_receipt(path: Path) -> dict:
@@ -1094,10 +1179,20 @@ def write_receipt(path: Path, receipt: dict) -> None:
 # --- build, install, census (the running interpreter; release_gate helpers) ----------------------------
 
 def load_gate():
-    spec = importlib.util.spec_from_file_location("release_gate_for_matrix", HARNESS.parent / "release_gate.py")
+    """The working tree's release_gate.py, executed from exactly the bytes whose sha256 it carries as
+    `matrix_loaded_sha256`; run and check refuse (gate_mismatch) when that is not the recorded commit's."""
+    path = HARNESS.parent / "release_gate.py"
+    source = path.read_bytes()
+    spec = importlib.util.spec_from_file_location("release_gate_for_matrix", path)
     gate = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gate)
+    exec(compile(source, str(path), "exec"), gate.__dict__)
+    gate.matrix_loaded_sha256 = _sha(source)
     return gate
+
+
+def harness_digest() -> str:
+    """sha256 of this harness file; run and check refuse (harness_mismatch) unless it is the commit's."""
+    return _sha(HARNESS.read_bytes())
 
 
 def _gate_call(gate, matrix_code: str, function, *args, **kwargs):
@@ -1183,6 +1278,24 @@ def install(gate, built: dict, scratch: Path, wheelhouse: Path | None) -> tuple[
                   "record_entries": record["record_entries"]}
 
 
+def installed_runtime(gate, built: dict, scratch: Path, wheelhouse: Path | None) -> tuple["Runtime", dict]:
+    """install(), then the installed proxy, broker and driver as a Runtime, with the install facts."""
+    venv, installed = install(gate, built, scratch, wheelhouse)
+    python = venv / "bin" / "python"
+    site = Path(_run([python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                     "install_failed", timeout=60, env={"PATH": SYSTEM_PATH}).stdout.decode().strip())
+    return Runtime(python=python, proxy=[venv / "bin" / PROJECT], package_root=site, sdk_root=site), installed
+
+
+def observed_listing(runtime: "Runtime", census: dict, work: Path) -> str:
+    """The listing session against `runtime`: the sha256 of the tool listing a consumer sees under the full
+    policy (no broker is needed to list), as check re-derives the receipt's surface.listing_sha256."""
+    (result,) = run_sessions(runtime, census, _fresh(work), approval="scripted", sessions=("listing",))
+    digest = result.get("observed", {}).get("listing_sha256")
+    need(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest), "drive_failed")
+    return digest
+
+
 def source_census(gate, python: Path, src: Path, scratch: Path) -> dict:
     """The release gate's census of a source tree: version, capabilities, tools and schema fingerprint."""
     home = Path(tempfile.mkdtemp(prefix="census-home-", dir=scratch))
@@ -1219,13 +1332,15 @@ def write_policy(home: Path, capabilities: list[str], *, stale: bool = False) ->
 
 
 def session_layout(name: str, census: dict) -> tuple[list[str], bool, str | None]:
-    """(capabilities, stale pin, broker profile or None) of each session in the closed SESSIONS set."""
+    """(capabilities, stale pin, broker profile or None) of each session in the closed SESSIONS set, and of
+    the cell-less listing session check runs."""
     everything = list(census["capabilities"])
     return {"full": (everything, False, "authorized"),
             "restricted": (list(RESTRICTED_CAPABILITIES), False, "authorized"),
             "stale": (everything, True, None),
             "offline": (everything, False, None),
-            "unauthorized": (everything, False, "unauthorized")}[name]
+            "unauthorized": (everything, False, "unauthorized"),
+            "listing": (everything, False, None)}[name]
 
 
 class Runtime:
@@ -1278,13 +1393,14 @@ def stop_broker(process, stream) -> None:
         stream.close()
 
 
-def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str) -> list[dict]:
+def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
+                 sessions: tuple[str, ...] = SESSIONS) -> list[dict]:
     """Every session at once, each with its own short HOME (a socket path holds at most 104 bytes), its
-    own broker where it needs one and its own driver; results in SESSIONS order."""
+    own broker where it needs one and its own driver; results in `sessions` order."""
     base = Path(os.path.realpath(tempfile.mkdtemp(prefix="tgcm.", dir="/private/tmp")))
     brokers, drivers, outputs = [], [], []
     try:
-        for index, name in enumerate(SESSIONS):
+        for index, name in enumerate(sessions):
             # The name feeds the proxy's derived LaunchAgent label: distinctive, so the offline session's
             # restart attempt (`launchctl kickstart` of that label) can only find nothing.
             home = base / f"tgcm{index}"
@@ -1363,14 +1479,12 @@ def run(args: argparse.Namespace) -> int:
     try:
         built = build_wheel(gate, git, commit, work / "build")
         committed = committed_facts(gate, built)
-        need(gate.sha256_file(HARNESS) == committed["harness_sha256"], "harness_mismatch")
-        venv, installed = install(gate, built, work / "install", wheelhouse)
-        python = venv / "bin" / "python"
-        census = source_census(gate, python, built["tree"] / "src", work)
+        # The receipt is the commit's harness and gate at work: a working-tree edit of either refuses.
+        need(harness_digest() == committed["harness_sha256"], "harness_mismatch")
+        need(gate.matrix_loaded_sha256 == committed["gate_sha256"], "gate_mismatch")
+        runtime, installed = installed_runtime(gate, built, work / "install", wheelhouse)
+        census = source_census(gate, runtime.python, built["tree"] / "src", work)
         need(census.get("version") == built["version"], "version_mismatch")
-        site = Path(_run([python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-                         "install_failed", timeout=60, env={"PATH": SYSTEM_PATH}).stdout.decode().strip())
-        runtime = Runtime(python=python, proxy=[venv / "bin" / PROJECT], package_root=site, sdk_root=site)
         sessions = run_sessions(runtime, census, _fresh(work / "sessions"),
                                 approval="real_dialog" if args.real_dialog else "scripted")
         wheel = built["wheel"]
@@ -1378,12 +1492,13 @@ def run(args: argparse.Namespace) -> int:
             commit=commit, tree=built["tree_id"], version=built["version"],
             wheel={"file": wheel.name, "sha256": gate.sha256_file(wheel), "bytes": wheel.stat().st_size},
             build=built["build"], install=installed, census=census, sessions=sessions,
-            harness_sha256=gate.sha256_file(HARNESS))
+            harness_sha256=committed["harness_sha256"], gate_sha256=committed["gate_sha256"])
         for cell in receipt["cells"]:
             if cell["status"] != "pass":  # Harness-defined labels only, never observed values.
                 print(f"cell {cell['id']}: {cell['failed_check']}", file=sys.stderr)
         check_receipt(receipt, commit=commit, wheel_sha256=receipt["wheel"]["sha256"], census=census,
-                      committed=committed)
+                      committed=committed, derived={"install": installed,
+                                                    "listing_sha256": receipt["surface"]["listing_sha256"]})
         write_receipt(receipt_path, receipt)
     finally:
         if temporary:
@@ -1401,6 +1516,8 @@ def _fresh(path: Path) -> Path:
 def check(args: argparse.Namespace) -> int:
     receipt = load_receipt(Path(args.receipt))
     check_receipt(receipt)
+    wheelhouse = Path(args.wheelhouse).resolve() if args.wheelhouse else None
+    need(wheelhouse is None or wheelhouse.is_dir(), "wheelhouse_invalid")
     gate = load_gate()
     repo = _gate_call(gate, "repo_unavailable", gate.toplevel, args.repo)
     git = gate.Git(repo)
@@ -1410,9 +1527,15 @@ def check(args: argparse.Namespace) -> int:
     work = Path(tempfile.mkdtemp(prefix="tgmcp-matrix-check-")).resolve()
     try:
         built = build_wheel(gate, git, commit, work / "build")
+        committed = committed_facts(gate, built)
+        # Re-derived with the receipt commit's own harness and gate, never a working-tree edit of them.
+        need(harness_digest() == committed["harness_sha256"], "harness_mismatch")
+        need(gate.matrix_loaded_sha256 == committed["gate_sha256"], "gate_mismatch")
         census = source_census(gate, Path(sys.executable), built["tree"] / "src", work)
+        runtime, installed = installed_runtime(gate, built, work / "install", wheelhouse)
+        listing = observed_listing(runtime, census, work / "listing")
         check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census,
-                      committed=committed_facts(gate, built))
+                      committed=committed, derived={"install": installed, "listing_sha256": listing})
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print("consumer matrix receipt verified")
@@ -1438,6 +1561,7 @@ def parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--receipt", required=True)
     check_parser.add_argument("--repo", type=Path, default=Path.cwd())
     check_parser.add_argument("--commit")
+    check_parser.add_argument("--wheelhouse")
     broker_parser = commands.add_parser("broker", add_help=False)
     broker_parser.add_argument("--profile", choices=("authorized", "unauthorized"), required=True)
     broker_parser.add_argument("--approval", choices=("scripted", "real_dialog"), required=True)
