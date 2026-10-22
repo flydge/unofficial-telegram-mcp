@@ -135,6 +135,9 @@ class Codex:
         }
         command = [self.binary, "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check",
                    "--sandbox", "read-only", "--cd", str(workdir), "--json", "--color", "never",
+                   # Only the demo server's tools: no shell, browser, computer use or connectors.
+                   "--disable", "shell_tool", "--disable", "browser_use", "--disable", "computer_use",
+                   "--disable", "apps",
                    "--output-last-message", str(workdir / "answer.txt")]
         for key, value in overrides.items():
             command += ["-c", f"{key}={toml(value)}"]
@@ -244,8 +247,9 @@ def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
         time.sleep(30 * attempt)
     result = rubrics.score(scenario, run, answer)
     observed = agent.observations(events)
-    result["checks"].append({"name": "no_shell", "passed": observed["shell_commands"] == 0, "required": False,
+    result["checks"].append({"name": "no_shell", "passed": observed["shell_commands"] == 0, "required": True,
                              "detail": f"{observed['shell_commands']} shell command(s)"})
+    result["passed"] = result["passed"] and observed["shell_commands"] == 0
     if observed.get("other_mcp_servers"):
         result["checks"].append({"name": "only_demo_server", "passed": False, "required": True,
                                  "detail": ", ".join(observed["other_mcp_servers"])})

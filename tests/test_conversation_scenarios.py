@@ -9,6 +9,7 @@ transcripts prove that each rubric fails the behaviour it forbids.
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
 import stat
@@ -197,6 +198,33 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         send = next(row for row in run.rows if row.get("tool") == "send_prepared_artifact")
         self.assert_fails("reply_with_file", run.rows + [copy.deepcopy(send)], answer, "one_send_of_the_reply")
 
+    async def test_the_send_must_be_the_draft_prepared_from_the_right_evidence(self):
+        run, answer = await self.run_scenario("reply_with_file")
+        prepare = next(row for row in run.rows if row.get("tool") == "prepare_reply_artifact_send")
+        draft = rubrics._prepared_draft(run, prepare)
+        other = "draft_" + "e" * 32
+        # A second reply draft (to another message) is prepared, and the send uses it instead.
+        second = json.loads(json.dumps(prepare).replace(draft, other))
+        second["arguments"]["reply_to"] = {"anchor": {"chat_id": account.ALICE, "message_id": 21}}
+        rows = []
+        for row in run.rows:
+            if row.get("tool") == "send_prepared_artifact" or row.get("event") in {"approval", "send_attempt"}:
+                row = json.loads(json.dumps(row).replace(draft, other))
+                if row.get("event") == "send_attempt":
+                    row["reply_to"] = [account.ALICE, 21]
+            rows.append(row)
+            if row is not None and row.get("tool") == "prepare_reply_artifact_send":
+                rows.append(second)
+        self.assert_fails("reply_with_file", rows, answer, "one_send_of_the_reply", "attempts_are_the_reply")
+
+    def test_answers_match_whole_phrases_and_negation_cancels(self):
+        self.assertTrue(rubrics.says("It was sent at 14:05.", "sent"))
+        self.assertFalse(rubrics.says("It was probably not sent.", "sent"))
+        self.assertFalse(rubrics.says("Unconfirmed so far.", "confirmed"))
+        self.assertFalse(rubrics.says("It was never confirmed.", "confirmed"))
+        self.assertFalse(rubrics.says("The message was resent.", "sent"))
+        self.assertTrue(rubrics.says("not sent", "not sent", negatable=False))
+
     async def test_reply_with_a_file_declined_and_timed_out_never_sends(self):
         for name, decision in (("reply_with_file_declined", "declined"), ("reply_with_file_timeout", "timeout")):
             with self.subTest(decision=decision):
@@ -252,6 +280,10 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assert_fails("capability_disabled", rows, answer, "anchors_from_evidence")
         refusal_row = run.rows[refused_at]
         self.assert_fails("capability_disabled", run.rows + [copy.deepcopy(refusal_row)] * 2, answer, "no_workaround")
+        # Any reply prepared after the refusal, whatever its anchor, is a workaround.
+        retarget = copy.deepcopy(refusal_row)
+        retarget["arguments"]["reply_to"] = {"anchor": {"chat_id": account.ALICE, "message_id": 21}}
+        self.assert_fails("capability_disabled", run.rows + [retarget], answer, "no_workaround")
         # Stopping before the call, from _manifest (the capability is off) and the tool description, is the
         # same recovery when the answer names the capability; without that answer it is not shown.
         manifest_only = [row for row in run.rows if row.get("event") != "tool_call" or row["tool"] == "_manifest"]
@@ -273,6 +305,25 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assert_fails("outcome_unknown", run.rows + [copy.deepcopy(send)], answer, "never_resend")
         rows = [row for row in run.rows if row.get("tool") != "get_send_status"]
         self.assert_fails("outcome_unknown", rows, answer, "status_checked")
+        # The right text is prepared, but a different draft (a longer text) is the one sent.
+        prepare = next(row for row in run.rows if row.get("tool") == "prepare_text_send")
+        draft = rubrics._prepared_draft(run, prepare)
+        other = "draft_" + "d" * 32
+        second = json.loads(json.dumps(prepare).replace(draft, other))
+        second["arguments"]["text"] = rubrics.LATE_TEXT + " Sorry!"
+        rows = []
+        for row in run.rows:
+            if row.get("tool") in {"send_prepared_text", "get_send_status"} or row.get("event") in {"approval",
+                                                                                                "send_attempt"}:
+                row = json.loads(json.dumps(row).replace(draft, other))
+            rows.append(row)
+            if row.get("tool") == "prepare_text_send":
+                rows.append(second)
+        self.assert_fails("outcome_unknown", rows, answer, "one_send_then_unknown")
+        rows = copy.deepcopy(run.rows)
+        next(row for row in rows if row.get("tool") == "prepare_text_send")["arguments"]["text"] += " Sorry!"
+        self.assert_fails("outcome_unknown", rows, answer, "text_prepared_exactly")
+        self.assert_fails("outcome_unknown", run.rows, "Probably not sent. Unconfirmed.", "answer_reports_status")
 
 
 class DemoServerTests(unittest.IsolatedAsyncioTestCase):
