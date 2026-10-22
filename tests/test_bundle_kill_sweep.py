@@ -410,6 +410,16 @@ def _one_release(h):
     return ['%s does not name %s' % (k, h.target.name) for k, ok in named.items() if not ok]
 
 
+def _nothing_left(h):
+    """After an uninstall: no root, no plist, no loaded broker and no telegram_search entry in any client."""
+    left = {'root': h.runtime.exists(), 'plist': h.plist.exists(), 'loaded broker': h.launchctl.loaded is not None,
+            'codex entry': b'telegram_search' in (h.codex / 'config.toml').read_bytes(),
+            'claude code entry': 'telegram_search' in h.claude().document().get('mcpServers', {}),
+            'claude desktop entry': 'telegram_search' in json.loads(h.desktop_config.read_text())['mcpServers'],
+            'codex neighbours': not (h.codex / 'config.toml').read_bytes().startswith(NEIGHBOUR_CODEX)}
+    return ['%s left' % k for k, bad in left.items() if bad]
+
+
 def _late_codex(h, action, ours, changed, code):
     """A late refusal from our Codex table changed during the copy, then the table put back: the change is parked."""
     h.assertEqual(_refusal(h, lambda: action(checkpoint=_at_copy(h, lambda d: d.replace(ours, changed))))['refused'], code)
@@ -459,6 +469,34 @@ def _many_refusals_prepare(h):
     skill.rmdir()
 
 
+def _parked_after_receipt(h, action):
+    """Parked after every client names the target: receipt.json changed at the policy step, then put back."""
+    receipt = h.runtime / 'receipt.json'
+    saved = receipt.read_bytes()
+
+    def checkpoint(stage):
+        if stage == 'policy' and receipt.read_bytes() == saved:
+            receipt.write_bytes(saved + b' ')
+    h.assertEqual(_refusal(h, lambda: action(checkpoint=checkpoint))['refused'], 'metadata_conflict')
+    receipt.write_bytes(saved)
+
+
+def _uninstall_parked_upgrade_prepare(h):
+    _upgrade_prepare(h)
+    _parked_after_receipt(h, lambda **kwargs: h.install(h.new, **kwargs))
+
+
+def _uninstall_parked_rollback_prepare(h):
+    _rollback_prepare(h)
+    _parked_after_receipt(h, lambda **kwargs: h.change('rollback', **kwargs))
+
+
+def _uninstall_parked_check(h, result):
+    h.assertEqual((result['status'], result['service'], result['codex'], result['claude_code'], result['claude_desktop'],
+                   sorted(set(result['skills'].values()))), ('uninstalled', 'removed', 'removed', 'removed', 'removed', ['removed']))
+    h.assertEqual(_nothing_left(h), [])
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -494,6 +532,10 @@ SCENARIOS = {
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl), _adopt_first_check, final=_one_release),
     'repeat_after_many_late_refusals': Scenario(_many_refusals_prepare, lambda h, lc, cl: h.install(
         h.new, launchctl=lc, claude_runner=cl), _upgrade_check, final=_one_release),
+    'uninstall_over_a_parked_upgrade': Scenario(_uninstall_parked_upgrade_prepare, lambda h, lc, cl: h.change(
+        'uninstall', launchctl=lc, claude_runner=cl), _uninstall_parked_check, write_ahead=False, final=_nothing_left),
+    'uninstall_over_a_parked_rollback': Scenario(_uninstall_parked_rollback_prepare, lambda h, lc, cl: h.change(
+        'uninstall', launchctl=lc, claude_runner=cl), _uninstall_parked_check, write_ahead=False, final=_nothing_left),
 }
 
 
@@ -746,6 +788,12 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_repeat_after_more_late_refusals_than_any_bound_finishes(self):
         self.sweep('repeat_after_many_late_refusals')
+
+    def test_uninstall_over_a_parked_upgrade_removes_what_it_wrote(self):
+        self.sweep('uninstall_over_a_parked_upgrade')
+
+    def test_uninstall_over_a_parked_rollback_removes_what_it_wrote(self):
+        self.sweep('uninstall_over_a_parked_rollback')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

@@ -204,10 +204,11 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                 self.assertEqual(self.metadata(), metadata)
                 self.assertEqual({k: v for k, v in self.client_files().items() if k in others}, others)
                 self.assertEqual(self.temporaries(), [])
-                # A repeat meets the same conflict and leaves the same service; other actions name the open change.
+                # A repeat meets the same conflict and leaves the same service; another kit names the open change
+                # (uninstall would go over it: `NoDeadEndTests`).
                 self.assertEqual(self.refused(action), 'target_conflict')
                 self.assertEqual(self.service_state(), service)
-                self.assertPending(lambda: self.change('uninstall'), kind)
+                self.assertPending(lambda: self.install(self.build('c', launcher=b'# third release\n')), kind)
                 # Our entry put back: the same command stops the broker again and finishes.
                 self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
                 result = action()
@@ -522,6 +523,153 @@ class RepeatStopTests(ParkedHarness, unittest.TestCase):
         self.assertEqual(self.refused(lambda: self.install(new)), 'service_conflict')
         self.assertNotIn('bootstrap', self.launchctl.verbs()[verbs:])
         self.assertIsNone(self.launchctl.loaded)
+
+
+class NoDeadEndTests(ParkedHarness, unittest.TestCase):
+    """From any parked late-refusal state the repeat finishes once the conflict is resolved, and uninstall
+    removes everything the installation owns, the parked change's entries included (by journal ownership)."""
+
+    def test_the_reviewers_late_refusals_after_client_writes_then_repeat_or_uninstall(self):
+        """Nine `skill_conflict` refusals after the Codex write: no `recovery_limit`; rollback names the parked
+        upgrade; the repeat finishes once the skill copy is removed, and uninstall removes Codex's new entry."""
+        for follow in ('repeat', 'uninstall'):
+            with self.subTest(follow=follow):
+                self.setUp()
+                action, target = self.parked('upgrade', cause='skill')
+                for _ in range(8):
+                    self.assertEqual(self.refused(action), 'skill_conflict')
+                    self.assertEqual(self.service_state(), self.served)
+                command, _ = self.commands(target)
+                self.assertIn(command.encode(), self.config.read_bytes())
+                self.assertNotEqual(self.pointer()['release_root'], str(target))
+                self.assertPending(lambda: self.change('rollback'), 'upgrade')
+                if follow == 'repeat':
+                    skill = self.skills / 'telegram-search'
+                    (skill / 'SKILL.md').unlink()
+                    skill.rmdir()
+                    self.assertEqual(action()['status'], 'upgraded')
+                    self.assertOneRelease(target)
+                    self.assertRemoved(self.change('uninstall'))
+                else:
+                    self.assertRemoved(self.change('uninstall'), kept_skill='telegram-search')
+                    self.assertEqual((self.skills / 'telegram-search' / 'SKILL.md').read_bytes(), b'mine')
+
+    def test_a_kill_during_a_restore_after_many_refusals_then_repeat_and_uninstall(self):
+        for follow in ('repeat', 'uninstall'):
+            with self.subTest(follow=follow):
+                self.setUp()
+                self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                served = self.service_state()
+                edit = self.at_copy(lambda data: data.replace(OURS, CHANGED))
+                for _ in range(9):
+                    self.assertEqual(self.refused(lambda: self.install(new, checkpoint=edit)), 'target_conflict')
+
+                def die(checkpoint):
+                    def both(value):
+                        edit(value)
+                        checkpoint(value)
+                    self.install(new, checkpoint=both)
+                self.die(die, at='recorded:plist_restore')
+                self.assertIsNone(self.launchctl.loaded)
+                self.assertPending(lambda: self.change('uninstall'), 'upgrade')  # Not parked until the restore ends.
+                self.assertEqual(self.refused(lambda: self.install(new)), 'target_conflict')
+                self.assertEqual(self.service_state(), served)
+                if follow == 'repeat':
+                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                    self.assertEqual(self.install(new)['status'], 'upgraded')
+                    self.assertOneRelease(self.runtime / 'releases' / new[3])
+                result = self.change('uninstall')
+                # Never resolved, our table is still the user's changed one: not ours, so it is kept.
+                self.assertEqual((result['status'], result['service'], result['codex']),
+                                 ('uninstalled', 'removed', 'removed' if follow == 'repeat' else 'kept'))
+                self.assertFalse(self.runtime.exists() or self.plist.exists())
+                self.assertIsNone(self.launchctl.loaded)
+
+    def test_uninstall_over_a_parked_change_removes_what_the_change_wrote(self):
+        """Parked after every client already names the target: uninstall removes those entries and skill copies
+        as the change's own, the broker and plist the restore put back, and the root with both releases."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, target = self.parked(kind, cause='receipt')
+                command, args = self.commands(target)
+                self.assertEqual(self.claude().entry, {'type': 'stdio', 'command': command, 'args': args})
+                self.assertEqual(json.loads(self.desktop_config.read_text())['mcpServers']['telegram_search'],
+                                 {'command': command, 'args': args})
+                self.assertIn(command.encode(), self.config.read_bytes())
+                if kind == 'upgrade':
+                    self.assertPending(lambda: self.change('rollback'), 'upgrade')
+                self.assertRemoved(self.change('uninstall'))
+                self.assertEqual(self.change('uninstall'), {'status': 'uninstalled', 'installation': 'absent'})
+
+    def test_uninstall_over_a_change_refused_before_its_stop_and_never_over_a_running_one(self):
+        """A pending send at the stop gate parks the change with nothing written: uninstall completes. A change
+        interrupted with its broker stopped is not parked: uninstall names it, and its repeat finishes."""
+        self.full()
+        new = self.build('b', launcher=b'# second release\n')
+        self.answers = ['none', 'none', 'pending']
+        self.assertEqual(self.refused(lambda: self.install(new)), 'pending_send_unresolved')
+        self.assertRemoved(self.change('uninstall'))
+        self.setUp()
+        self.full()
+        new = self.build('b', launcher=b'# second release\n')
+        self.die(lambda checkpoint: self.install(new, checkpoint=checkpoint), at='registration')
+        self.assertPending(lambda: self.change('uninstall'), 'upgrade')
+        self.assertEqual(self.install(new)['status'], 'upgraded')
+        self.assertRemoved(self.change('uninstall'))
+
+    def test_a_refusal_at_the_pointer_switch_is_left_by_the_repeat_or_by_uninstall(self):
+        """A disk error while staging current.json comes after receipt.json names the new release: the service is
+        restored and the change parked; the repeat switches the pointer, and uninstall accepts the change's own
+        receipt.json beside the unchanged pointer."""
+        for follow in ('repeat', 'uninstall'):
+            with self.subTest(follow=follow):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                served, pointer = self.service_state(), (self.runtime / 'current.json').read_bytes()
+
+                def fail(stage):
+                    if stage == 'created:packet:pointer':
+                        raise OSError('disk full')
+                self.assertEqual(self.refused(lambda: self.install(new, checkpoint=fail)), 'installation_refused')
+                self.assertEqual((self.service_state(), (self.runtime / 'current.json').read_bytes()), (served, pointer))
+                self.assertEqual(self.receipt()['release_root'], str(self.runtime / 'releases' / new[3]))
+                if follow == 'repeat':
+                    self.assertEqual(self.install(new)['status'], 'upgraded')
+                    self.assertOneRelease(self.runtime / 'releases' / new[3])
+                self.assertRemoved(self.change('uninstall'))
+
+    def test_an_object_the_change_wrote_and_the_user_removed_is_written_again(self):
+        """Parked after every client names the target, then the user removes an object the change already wrote:
+        the repeat writes it again and finishes."""
+        for removed in ('skill',):
+            with self.subTest(removed=removed):
+                self.setUp()
+                action, target = self.parked('upgrade', cause='receipt')
+                if removed == 'skill':
+                    skill = self.skills / 'telegram-search'
+                    self.assertEqual((skill / 'SKILL.md').read_bytes(), b'search-skill-2')
+                    (skill / 'SKILL.md').unlink()
+                    skill.rmdir()
+                else:
+                    self.assertIn(self.commands(target)[0].encode(), self.config.read_bytes())
+                    self.config.write_bytes(NEIGHBOUR_CODEX)
+                self.assertEqual(action()['status'], 'upgraded')
+                self.assertOneRelease(target)
+                self.assertEqual((self.skills / 'telegram-search' / 'SKILL.md').read_bytes(), b'search-skill-2')
+                self.assertIn(self.commands(target)[0].encode(), self.config.read_bytes())
+                self.assertTrue(self.config.read_bytes().startswith(NEIGHBOUR_CODEX))
+
+    def test_a_killed_uninstall_over_a_parked_change_is_finished_by_its_retry(self):
+        for stage in ('stopped:service', 'registration', 'claude_code', 'claude_desktop', 'skills', 'retired'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.parked('upgrade', cause='receipt')
+                self.die(lambda checkpoint: self.change('uninstall', checkpoint=checkpoint), at=stage)
+                self.assertPending(lambda: self.install(self.build('c', launcher=b'# third\n')), 'uninstall')
+                self.assertRemoved(self.change('uninstall'))
 
 
 if __name__ == '__main__':

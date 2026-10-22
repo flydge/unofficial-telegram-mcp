@@ -576,8 +576,29 @@ class _Journal:
         if type(records) is not list or len(records)!=1 or type(records[0]) is not dict:raise InstallError('transaction_conflict')
         return records[0]
 
+    def _holds(self, bound, child):
+        """Whether the bound packet still holds its staged object, unpublished. Once published (renamed or swapped
+        into place) it does not, so a target removed or changed since is staged afresh."""
+        staged=bound.get('staged')
+        if staged is None:return False  # A reused existing object (an earlier upgrade's release tree) has no packet.
+        if type(staged) is not str or not Path(staged).is_relative_to(self.tx):raise InstallError('transaction_conflict')
+        try:
+            require_object_binding(Path(staged),bound['object'])
+            if child:require_object_binding(Path(staged)/'SKILL.md',bound['child'])
+        except ChangedRuntimePath:raise
+        except (RuntimePathError,KeyError):return False
+        return True
+
     def _stage(self, name, target, build, validate, directory, child):
+        """The bound staged object of `name`: the packet an earlier run left while it still holds that object and
+        `validate` accepts it, else a fresh packet (the bound one was published since, or holds what an earlier
+        cycle built from other data, such as a receipt naming a skill copy written again since)."""
         bound=self.proof(name)
+        if bound is not None and self._holds(bound,child):
+            staged=Path(bound['staged'])
+            try:validate(staged);return bound,staged
+            except (InstallError,BundleError):bound=None
+        else:bound=None
         if bound is None:
             packet=_fresh_packet(self.tx,'failed-release' if name=='release' else 'skill-packet-'+name if child else 'metadata-packet-'+name)
             self.checkpoint('created:packet:'+name)
@@ -1088,7 +1109,7 @@ def _owned_desktop(value, command, arguments):
     return value if owned.client=='claude-desktop' and owned.post_subtree_hash==expected else None
 
 
-def _client_owners(root, below=None):
+def _client_owners(root, below=None, parked=None):
     """The Claude Code and Claude Desktop entries the installation owns: {client: (command, arguments, record)}.
 
     For each client, the entry written by the newest finished transaction whose step for that client ended
@@ -1096,7 +1117,9 @@ def _client_owners(root, below=None):
     step ended otherwise (a CLI failure, no CLI, an unreadable config, a kill in a write-ahead window, `reused`)
     replaced nothing of ours, so the earlier entry stays ours while it is still exactly that entry. Read newest
     first from the journals: the finished changes numbered below `below` (the one being run does not count yet),
-    then the first install. A client missing from the result owns nothing. The same for v1 and v2 receipts.
+    then the first install. `parked` names an unfinished change an uninstall goes over (`_parked`): its recorded
+    outcomes count like a finished one's. A client missing from the result owns nothing. The same for v1 and v2
+    receipts.
     """
     paths=[root/'transactions'/('change_%d'%n)/'journal.json' for n in reversed(_changes(root)) if below is None or n<below]
     found=_install_transactions(root)
@@ -1106,7 +1129,7 @@ def _client_owners(root, below=None):
         if len(decided)==2:break
         journal=unique_json(read(path,mode=0o600))
         if path.parent.name.startswith('change_') and (journal.get('kind') not in ('upgrade','rollback')
-                                                      or journal.get('stage')!='finished'):
+                                                      or journal.get('stage')!='finished' and path.parent.name!=parked):
             raise InstallError('transaction_conflict')
         if type(journal.get('release_root')) is not str:raise InstallError('transaction_conflict')
         command,arguments=_commands(Path(journal['release_root']))
@@ -1682,7 +1705,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     one) refuses (`_codex_write`; Claude Code and Claude Desktop are planned over the current file). Any refusal
     after the stop and short of the commit first restores the previous definition and broker
     (`_Service.restore`), so the old release keeps serving; the copied release, the open transaction and the
-    client entries already written stay, and the same command stops the broker again and resumes.
+    client entries already written stay. The change is then parked (`_parked`): the same command stops the
+    broker again and resumes, as often as it is repeated, and `uninstall` goes over it, removing what it wrote;
+    another kit or a rollback names it (`transaction_pending`).
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
@@ -2105,24 +2130,83 @@ def _retired_origin(path):
     return origin if intent is not None and path.name in _retired_names(origin,intent) else None
 
 
-def _codex_removal(config, owner):
-    """('remove', source, candidate) for our exact Codex subtree, else ('absent'|'kept', source, None)."""
+def _codex_removal(config, owners):
+    """('remove', source, candidate) for our exact Codex subtree (any of `owners`), else ('absent'|'kept', source, None)."""
     source,exists=_config(config)
     subtree=owned_subtree(source) if exists else None
     if subtree is None:return 'absent',source,None
-    if digest(subtree)!=owner.post_subtree_hash:return 'kept',source,None
+    owner=next((o for o in owners if digest(subtree)==o.post_subtree_hash),None)
+    if owner is None:return 'kept',source,None
     plan=rollback_registration(source,Receipt(owner.installation_id,owner.transaction_id,None,owner.post_subtree_hash,None))
     return 'remove',source,plan.candidate
 
 
-def _adoption_backups(root, receipt):
-    """Every recorded `--adopt-legacy` backup: adopted.json plus a v2 receipt's own records, sorted."""
+def _adoption_backups(root, receipt, parked=None):
+    """Every recorded `--adopt-legacy` backup: adopted.json plus a v2 receipt's own records, and those a parked
+    change (`(name, journal)`) recorded, sorted."""
     _,records=_adopted_file(root)
     out={(r['transaction'],r['client']):r for r in records}
     if receipt['schema_version']==2:
         for client,value in receipt['adopted'].items():
             out.setdefault((value['transaction'],client),{'client':client,**value})
+    if parked is not None:
+        for client,value in _check_adopted(_record(parked[1],'adopted')).items():
+            out.setdefault((parked[0],client),{'client':client,'transaction':parked[0],**value})
     return [out[k] for k in sorted(out)]
+
+
+def _parked(journal):
+    """Whether an unfinished upgrade or rollback is parked: short of its commit with its service as it was before
+    it, either never stopped (refused or interrupted before the stop, so no client was written) or put back by a
+    late refusal's finished restore. The client entries and skill copies it wrote stay, owned through its journal:
+    its repeat resumes it, and an uninstall goes over it."""
+    stage=journal.get('stage')
+    if journal.get('kind') not in ('upgrade','rollback') or stage not in _CHANGE_STEPS or stage in ('complete','finished'):
+        return False
+    cycle=_record(journal,'service_cycle')
+    if cycle is None:return _CHANGE_STEPS.index(stage)<_CHANGE_STEPS.index('service')
+    return cycle.get('state')=='restored'
+
+
+def _bound(path, binding):
+    """Whether `path` is the exact object `binding` records."""
+    try:require_object_binding(path,binding)
+    except ChangedRuntimePath:raise
+    except RuntimePathError:return False
+    return True
+
+
+def _parked_receipt(root, name, journal):
+    """The installation a parked change leaves serving: its `receipt.previous`, while current.json is still that
+    receipt's pointer and receipt.json that receipt or the one the change published at its receipt step."""
+    previous=read(root/'transactions'/name/'receipt.previous',mode=0o600)
+    receipt=_receipt_shape(unique_json(previous),root)
+    if read(root/'current.json',mode=0o600)!=_pointer(receipt):raise InstallError('metadata_conflict')
+    if read(root/'receipt.json',mode=0o600)!=previous:
+        attempts=journal['publications'].get('receipt',[])
+        if type(attempts) is not list or not any(type(a) is dict and type(a.get('object')) is dict
+                                                 and _bound(root/'receipt.json',a['object']) for a in attempts):
+            raise InstallError('metadata_conflict')
+    return receipt
+
+
+def _parked_objects(root, name, journal, receipt):
+    """(Codex owners, {skill: [bindings]}) a parked change adds to what `receipt` owns: its Codex ownership once one
+    of its writes was journaled with its flushed object, and every skill copy it staged (only the object it
+    published can still be in place)."""
+    publications=journal['publications']
+    if type(publications) is not dict:raise InstallError('transaction_conflict')
+    codex=[]
+    if any(type(a) is dict and 'object' in a for a in publications.get('registration',[])):
+        tx=root/'transactions'/name
+        codex.append(Receipt.from_bytes(read(tx/'registration.json',mode=0o600)) if journal['kind']=='upgrade'
+                     else _codex_ownership(root,_receipt_shape(unique_json(read(tx/'receipt.target',mode=0o600)),root)))
+    skills={}
+    for skill_name in receipt['publication_objects']:
+        attempts=publications.get(skill_name,[]) if skill_name!='release' else []
+        if type(attempts) is not list:raise InstallError('transaction_conflict')
+        skills[skill_name]=[a for a in attempts if type(a) is dict and 'object' in a and 'child' in a]
+    return codex,skills
 
 
 def _backup_path(root, value):
@@ -2147,6 +2231,9 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     Every refusal, the pending-send gate included, comes before the transaction exists. After a write-ahead
     removal attempt of a Claude Code or Claude Desktop entry the receipt and root stay until the entry is
     confirmed gone (or no longer ours): a still exact entry is removed again, otherwise `uninstall_incomplete`.
+    Over a parked upgrade or rollback (`_parked`) it removes the installation its `receipt.previous` names plus
+    what the change's journal binds (its Codex entry once written, its skill copies, its Claude Code and Claude
+    Desktop outcomes, its adoption backups, which are kept); any other unfinished change is named for its repeat.
     An unfinished first install (published or not) refuses as `transaction_pending` (`install`) and is kept; the
     install intent the closing sweep reads is checked before any client removal or the retiring rename, so a
     lookalike at its recorded staged name never stops an uninstall halfway. Repeated with the root absent (or from
@@ -2173,18 +2260,31 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             intent=_read_intent(root)
             if intent is not None and _staged_ours(intent):raise InstallError('transaction_pending',pending_action='install')
             name,journal=_latest_change(root)
-            if journal is not None and journal.get('stage') not in ('finished',) and journal.get('kind')!='uninstall':
-                raise InstallError('transaction_pending',pending_action=journal.get('kind'))
+            # A parked change (`_parked`): an uninstall goes over it, owning what it wrote through its journal; any
+            # other unfinished change is named for its repeat. Resumed, the uninstall finds it just below itself.
+            parked=None
+            if journal is not None and journal.get('kind')=='uninstall':
+                below=[n for n in _changes(root) if n<int(name[7:])]
+                if below:
+                    previous=unique_json(read(root/'transactions'/('change_%d'%below[-1])/'journal.json',mode=0o600))
+                    if previous.get('stage')!='finished':
+                        if not _parked(previous):raise InstallError('transaction_conflict')
+                        parked=('change_%d'%below[-1],previous)
+            elif journal is not None and journal.get('stage')!='finished':
+                if not _parked(journal):raise InstallError('transaction_pending',pending_action=journal.get('kind'))
+                parked=(name,journal)
             if (journal is None or journal.get('kind')!='uninstall') and _install_pending(root):
                 raise InstallError('transaction_pending',pending_action='install')
-            receipt,_=_installation(root)
+            receipt=_parked_receipt(root,*parked) if parked else _installation(root)[0]
             if str(home)!=receipt['user_home']:raise InstallError('upgrade_conflict')
             installed=Path(receipt['release_root'])
             command,arguments=_commands(installed)
             config=Path(receipt['codex_home'])/'config.toml'
-            owner=_codex_ownership(root,receipt)
-            owners=_client_owners(root,int(name[7:]) if journal is not None and journal.get('kind')=='uninstall' else None)
-            backups=_adoption_backups(root,receipt)
+            codex_owners,parked_skills=_parked_objects(root,*parked,receipt) if parked else ([],{})
+            codex_owners=[_codex_ownership(root,receipt),*codex_owners]
+            owners=_client_owners(root,int(name[7:]) if journal is not None and journal.get('kind')=='uninstall' else None,
+                                  parked[0] if parked else None)
+            backups=_adoption_backups(root,receipt,parked)
             service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
             observed=None
             if journal is None or journal.get('kind')!='uninstall':
@@ -2193,7 +2293,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 for value in backups:
                     if digest(read(_backup_path(root,value),MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:
                         raise InstallError('transaction_conflict')
-                _codex_removal(config,owner)
+                _codex_removal(config,codex_owners)
                 observed=_uninstall_service(service)
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
@@ -2224,7 +2324,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             # Codex: our subtree removed only while it is exactly what our ownership receipt records.
             if j.recorded('registration') is None:
                 j.discard('codex',config)
-                status,source,candidate=_codex_removal(config,owner)
+                status,source,candidate=_codex_removal(config,codex_owners)
                 if status=='remove':
                     j.write('codex',config,candidate,source,existed=True,maximum=MAX_CONFIG_BYTES)
                     status='removed'
@@ -2285,7 +2385,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     else:raise InstallError('uninstall_incomplete')
             else:status=None
             out['claude_desktop']=done('claude_desktop',status)
-            # Skill copies: only the exact directories the receipt binds; moved into the retiring root.
+            # Skill copies: only the exact directories the receipt (or a parked change's journal) binds; moved into the
+            # retiring root.
             if j.recorded('skills') is None:
                 statuses={}
                 for skill_name,bound in sorted(receipt['publication_objects'].items()):
@@ -2295,9 +2396,11 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     path,retired=base/sid,tx/('removed-'+skill_name)
                     if retired.exists():statuses[skill_name]='removed';continue
                     if not path.exists() and not path.is_symlink():statuses[skill_name]='absent';continue
-                    try:
-                        require_object_binding(path,bound['object']);require_object_binding(path/'SKILL.md',bound['child'])
-                    except (RuntimePathError,TypeError,KeyError):statuses[skill_name]='kept';continue
+                    def ours(binding):
+                        try:require_object_binding(path,binding['object']);require_object_binding(path/'SKILL.md',binding['child'])
+                        except (RuntimePathError,TypeError,KeyError):return False
+                        return True
+                    if not any(ours(b) for b in [bound,*parked_skills.get(skill_name,())]):statuses[skill_name]='kept';continue
                     _rename(path,retired);checkpoint('removed:'+skill_name)
                     statuses[skill_name]='removed'
                 j.update(single=('skills',{'status':statuses}))

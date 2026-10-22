@@ -212,14 +212,14 @@ class PendingActionTests(SafetyHarness, unittest.TestCase):
         self.answers = ['none', 'pending']  # The upgrade journal exists; its first gate refuses.
         with self.assertRaises(self.module().InstallError):
             self.install(new)
-        for action in (lambda: self.change('rollback'), lambda: self.change('uninstall'),
-                       lambda: self.install(self.build('c', launcher=b'# third release\n'))):
+        # Refused before its stop, the change is parked: an uninstall would go over it (`test_bundle_late_refusal`).
+        for action in (lambda: self.change('rollback'), lambda: self.install(self.build('c', launcher=b'# third release\n'))):
             self.assertPending(action, 'upgrade')
         self.assertEqual(self.install(new)['status'], 'upgraded')
         self.answers = ['none', 'pending']
         with self.assertRaises(self.module().InstallError):
             self.change('rollback')
-        for action in (lambda: self.change('uninstall'), lambda: self.install(self.build('d', launcher=b'# fourth release\n'))):
+        for action in (lambda: self.install(self.build('d', launcher=b'# fourth release\n')),):
             self.assertPending(action, 'rollback')
         self.assertEqual(self.change('rollback')['status'], 'rolled_back')
         self.launchctl.fail = {'bootout'}
