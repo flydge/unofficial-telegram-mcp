@@ -40,6 +40,9 @@ def styled_source():
         entity('textEntityTypeHashtag', len(SENTINEL) + 7, 4)]}})
 
 
+STYLED_REQUEST = {'outgoing_entities': [{'offset': 0, 'length': 5, 'type': {'@type': 'textEntityTypeBold'}}]}
+
+
 def disabled(*missing):
     return {'status': 'capability_disabled', 'reply': None, 'detail': CAPABILITY_DISABLED,
             'missing_capabilities': list(missing), 'next_action': 'enable_capability'}
@@ -123,6 +126,60 @@ class TextReplyCapabilityTests(ReplyFixture, unittest.TestCase):
         did = self.prepare_raw()['reply']['draft']['draft_id']
         self.raw.source = styled_source()
         self.assertEqual(self.dispatch('refresh_reply_draft', {'draft_id': did}), revised_disabled(*STYLED_FAMILIES))
+
+    def reads(self):
+        return sum(r['@type'] == 'getMessage' for r in self.raw.sent)
+
+    def test_prepare_get_update_and_refresh_name_the_same_capabilities_on_one_policy(self):
+        # The documented order: the tool, send, the request's or draft's options, then the source's families.
+        self.policy('formatted_text_send', *STYLED_FAMILIES)
+        did = self.prepare_raw(**STYLED_REQUEST)['reply']['draft']['draft_id']
+        for enabled, missing in ((('reply_formatted_targets',), ('formatted_text_send',)),
+                                 ((), ('formatted_text_send',)),
+                                 (('formatted_text_send', 'reply_formatted_targets'), STYLED_FAMILIES[1:]),
+                                 (('formatted_text_send', 'reply_lexical_targets'),
+                                  ('reply_formatted_targets', 'reply_identity_targets'))):
+            with self.subTest(enabled=enabled):
+                self.policy(*enabled)
+                self.assertEqual(self.prepare_raw(**STYLED_REQUEST), disabled(*missing))
+                self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did}), disabled(*missing))
+                self.assertEqual(self.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Final reply',
+                                                                      **STYLED_REQUEST}), revised_disabled(*missing))
+                self.assertEqual(self.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Final reply'}),
+                                 revised_disabled(*missing))
+                self.assertEqual(self.dispatch('refresh_reply_draft', {'draft_id': did}), revised_disabled(*missing))
+        self.policy('formatted_text_send', *STYLED_FAMILIES)
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
+        self.assertEqual((self.sends(), self.approvals), ([], []))
+
+    def test_formatting_asks_for_send_before_its_option(self):
+        self.broker._policy = RuntimePolicy(enabled_capabilities=('reply_text_send',))
+        with self.assertRaises(CapabilityDisabled) as caught:
+            self.broker._require_formatting_capability()
+        self.assertEqual(caught.exception.missing, ('send', 'formatted_text_send'))
+
+    def test_a_disabled_requested_option_wins_before_the_draft_or_recipient_is_checked(self):
+        self.policy(*STYLED_FAMILIES)
+        did = self.prepare_raw()['reply']['draft']['draft_id']
+        reads = self.reads()
+        option = revised_disabled('formatted_text_send')
+
+        def update(draft_id, client=CLIENT, **extra):
+            return self.dispatch('update_reply_draft', {'draft_id': draft_id, 'text': 'Final reply', **extra}, client=client)
+        # Identical for an existing, an unknown and a foreign draft, so the result reveals nothing about it.
+        for draft_id, client in ((did, CLIENT), ('draft_' + 'f' * 32, CLIENT), (did, FOREIGN)):
+            with self.subTest(draft_id=draft_id, client=client):
+                self.assertEqual(update(draft_id, client, **STYLED_REQUEST), option)
+        self.assertEqual(self.dispatch('prepare_reply_text_send', {'recipient': 124, 'text': 'Final reply',
+                                                                   'reply_to': ANCHOR, **STYLED_REQUEST}),
+                         disabled('formatted_text_send'))
+        self.assertEqual(self.reads(), reads)
+        # Without a disabled option the same requests keep their fixed unavailable result.
+        plain = {'status': 'unavailable', 'previous_draft_id': None, 'reply': None, 'detail': UNAVAILABLE}
+        self.assertEqual(update('draft_' + 'f' * 32), plain)
+        self.assertEqual(update(did, FOREIGN), plain)
+        self.assertEqual(self.dispatch('prepare_reply_text_send', {'recipient': 124, 'text': 'x', 'reply_to': ANCHOR}),
+                         {'status': 'unavailable', 'reply': None, 'detail': UNAVAILABLE})
 
     def test_non_capability_refusals_stay_unavailable_with_their_fixed_detail(self):
         self.policy(*STYLED_FAMILIES)

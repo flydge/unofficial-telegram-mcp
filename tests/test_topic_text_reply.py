@@ -352,6 +352,23 @@ class TopicReplyTests(unittest.TestCase):
       self.assertEqual((result['status'], result['reply']), ('unavailable', None))
       self.assertEqual((len(h.broker._drafts._entries), h.sends()), (0, []))
 
+  def test_stored_topic_drafts_name_the_topic_option_before_source_families_like_prepare(self):
+    # The documented order: the tool, send, the draft's options (topic_text_send), then the source's families.
+    with Harness(styled=True) as h:
+      h.prepare(); did = h.current_id
+      for missing, expected in ((('topic_text_send', 'reply_formatted_targets'), ['topic_text_send']),
+                                (('reply_formatted_targets',), ['reply_formatted_targets'])):
+        with self.subTest(missing=missing):
+          h.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPS if c not in missing))
+          results = (h.prepare_result(), h.dispatch('get_reply_draft', {'draft_id': did}),
+                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Revision'}),
+                     h.dispatch('refresh_reply_draft', {'draft_id': did}))
+          self.assertEqual([(r['status'], r.get('missing_capabilities')) for r in results],
+                           [('capability_disabled', expected)] * 4)
+      h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
+      self.assertEqual(h.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
   def test_topic_reply_and_source_capabilities_form_one_current_union(self):
     from telegram_search_mcp.contract import CompatibilityError
     for capability in CAPS:

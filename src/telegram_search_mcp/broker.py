@@ -1084,7 +1084,17 @@ class Broker(SelectionBrokerMixin):
             raise CapabilityDisabled(missing)
 
     def _require_formatting_capability(self):
-        self._require_capabilities('formatted_text_send', 'send')
+        self._require_capabilities('send', 'formatted_text_send')
+
+    @staticmethod
+    def _reply_options(*, formatted: bool, topic: bool) -> tuple[str, ...]:
+        """A text reply's own options in the documented order: outgoing styles, then a selected topic."""
+        return (*(('formatted_text_send',) if formatted else ()), *(('topic_text_send',) if topic else ()))
+
+    def _require_reply_draft_options(self, draft) -> None:
+        """A stored text reply: the tool, send, then the draft's own options, before any source family."""
+        self._require_capabilities('reply_text_send', 'send', *self._reply_options(
+            formatted=bool(draft.outgoing_entities), topic=draft.topic is not None))
 
     @staticmethod
     def _draft_entity_rows(draft):
@@ -1370,6 +1380,7 @@ class Broker(SelectionBrokerMixin):
 
     def _reply_artifact_preview(self,draft,owner):
         if draft.reply_source is None or draft.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
+        self._require_capabilities('reply_artifact_send','send')
         self._require_reply_source_policy(draft.reply_source)
         return ReplyArtifactDraftPreview.create(self._plain_draft_preview(draft,owner),draft.reply_source)
 
@@ -1463,6 +1474,8 @@ class Broker(SelectionBrokerMixin):
     def _reply_preview(self, draft, owner: DraftOwner) -> ReplyDraftPreview:
         if draft.reply_source is None or draft.kind != "text":
             raise DraftError("reply draft is unavailable")
+        # The documented order: the tool, send, the draft's options, then the source's families.
+        self._require_reply_draft_options(draft)
         self._require_reply_source_policy(draft.reply_source)
         self._require_topic_policy(draft.draft_id, owner)
         content = ReplyTextDraftPreview(**self._draft_summary(draft, owner).model_dump(),
@@ -1481,8 +1494,7 @@ class Broker(SelectionBrokerMixin):
         try:
             from .outgoing_entity_models import caller_outgoing_entities
             # The request's own options are checked together, before Telegram is read.
-            options = (*(('formatted_text_send',) if request.outgoing_entities else ()),
-                       *(('topic_text_send',) if request.topic is not None else ()))
+            options = self._reply_options(formatted=bool(request.outgoing_entities), topic=request.topic is not None)
             if options:
                 self._require_capabilities('reply_text_send', 'send', *options)
             owner=self._reply_owner(client_id)
@@ -1536,14 +1548,16 @@ class Broker(SelectionBrokerMixin):
     def _revise_reply_draft(self, request: UpdateReplyDraftRequest | RefreshReplyDraftRequest, *, client_id: str) -> ReviseReplyDraftResponse:
         try:
             from .outgoing_entity_models import caller_outgoing_entities
-            if isinstance(request, UpdateReplyDraftRequest) and request.outgoing_entities:
-                self._require_formatting_capability()
+            refresh = isinstance(request, RefreshReplyDraftRequest)
+            if not refresh and request.outgoing_entities:
+                # The request's own option, before the draft is looked up: the same for any draft ID.
+                self._require_capabilities('reply_text_send', 'send', 'formatted_text_send')
             owner=self._reply_owner(client_id)
             old=self._drafts.peek(request.draft_id,owner=owner)
             self._reply_preview(old,owner)
             provider=self._shared_client()
             epoch = provider.send_observation_epoch
-            if isinstance(request,RefreshReplyDraftRequest):
+            if refresh:
                 if old.topic is not None:
                     raise DraftError('topic reply refresh is unavailable')
                 chat=provider.resolve_target(old.recipient)
