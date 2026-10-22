@@ -50,6 +50,8 @@ SERVER = HERE / "conversation_demo_server.py"
 SERVER_NAME = "telegram_search"
 UNAVAILABLE_MARKERS = ("invalid api key", "please run /login", "not logged in", "authentication_error",
                        "oauth token", "login required", "credit balance")
+TRANSIENT_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable")
+ATTEMPTS = 3
 
 
 def toml(value) -> str:
@@ -222,15 +224,23 @@ class ClaudeCode:
 
 
 def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
-    workdir = base / f"{agent.name}-{scenario.name}"
-    workdir.mkdir(mode=0o700)
-    transcript = workdir / "transcript.jsonl"
-    events = workdir / "events.jsonl"
-    command, environment = agent.command(scenario, transcript, workdir)
+    scenario_dir = base / f"{agent.name}-{scenario.name}"
+    scenario_dir.mkdir(mode=0o700)
     started = time.monotonic()
-    code, timed_out = run_bounded(command, cwd=workdir, env=environment, timeout=timeout, stdout=events)
-    answer = agent.answer(workdir, events)
-    run = rubrics.Run.load(transcript)
+    for attempt in range(1, ATTEMPTS + 1):
+        # A provider-side failure before any tool call says nothing about the agent: retry it.
+        workdir = scenario_dir / f"attempt-{attempt}"
+        workdir.mkdir(mode=0o700)
+        transcript = workdir / "transcript.jsonl"
+        events = workdir / "events.jsonl"
+        command, environment = agent.command(scenario, transcript, workdir)
+        code, timed_out = run_bounded(command, cwd=workdir, env=environment, timeout=timeout, stdout=events)
+        answer = agent.answer(workdir, events)
+        run = rubrics.Run.load(transcript)
+        stream = events.read_text("utf-8", errors="replace").casefold()
+        if run.calls or not any(marker in stream for marker in TRANSIENT_MARKERS) or attempt == ATTEMPTS:
+            break
+        time.sleep(30 * attempt)
     result = rubrics.score(scenario, run, answer)
     observed = agent.observations(events)
     result["checks"].append({"name": "no_shell", "passed": observed["shell_commands"] == 0, "required": False,
@@ -239,10 +249,9 @@ def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
         result["checks"].append({"name": "only_demo_server", "passed": False, "required": True,
                                  "detail": ", ".join(observed["other_mcp_servers"])})
         result["passed"] = False
-    stream = events.read_text("utf-8", errors="replace").casefold()
     unavailable = not run.calls and any(marker in stream for marker in UNAVAILABLE_MARKERS)
     return {**result, "agent": agent.name, "exit": code, "timed_out": timed_out, "unavailable": unavailable,
-            "seconds": round(time.monotonic() - started, 1), "answer": (answer or "")[:2000],
+            "attempts": attempt, "seconds": round(time.monotonic() - started, 1), "answer": (answer or "")[:2000],
             "observed": observed, "directory": str(workdir)}
 
 

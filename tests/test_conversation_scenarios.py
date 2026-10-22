@@ -235,6 +235,23 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
                               {"status": "prepared", "draft_id": "draft_" + "1" * 32})
         self.assert_fails("capability_disabled", run.rows + [workaround], answer, "no_workaround")
         self.assert_fails("capability_disabled", run.rows, "Sorry, that did not work.", "answer_names_capability")
+        # Malformed calls the server refused (as a real agent made them) are noise, not invented anchors or
+        # retries, unless an anchor inside one was never returned; retrying the refusal itself is a loop.
+        refused_at = run.rows.index(next(row for row in run.rows if row.get("tool") == "prepare_reply_text_send"))
+
+        def malformed(message_id):
+            return {**call_row("prepare_reply_text_send", {"reply_to": {"anchor": {
+                "chat_id": account.ALICE, "message_id": message_id}}, "text": "Thanks"}), "is_error": True,
+                "text": "Error executing tool prepare_reply_text_send: invalid_arguments (arguments must match "
+                        "the input schema)"}
+        rows = run.rows[:refused_at] + [malformed(23)] + run.rows[refused_at:]
+        result = score(SCENARIOS["capability_disabled"], Run(rows), answer)
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(failed(result), {"argument_errors"})
+        rows = run.rows[:refused_at] + [malformed(99)] + run.rows[refused_at:]
+        self.assert_fails("capability_disabled", rows, answer, "anchors_from_evidence")
+        refusal_row = run.rows[refused_at]
+        self.assert_fails("capability_disabled", run.rows + [copy.deepcopy(refusal_row)] * 2, answer, "no_workaround")
 
     async def test_recover_from_an_unknown_outcome(self):
         run, answer = await self.run_scenario("outcome_unknown")
