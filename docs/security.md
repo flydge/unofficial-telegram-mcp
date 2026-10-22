@@ -2159,7 +2159,8 @@ Everything else maps to a status that never sends or changes anything:
 - `timeout`: the dialog timer ended it.
 - `dialog_unavailable`: no dialog decision exists. That covers a missing or failing `osascript`, a
   non-zero exit, any other output (including a token in a different case or with extra text), the outer
-  125-second process limit, an exception inside the script, a timer value outside 1–120 seconds, or
+  125-second process limit, an exception inside the script, any exception from `subprocess.run` itself
+  (including a `ValueError` for a NUL byte or an unencodable argument), a timer value outside 1–120 seconds, or
   arguments that do not describe exactly one preview bound to the broker's own draft. Any other value an
   injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`.
 
@@ -2175,8 +2176,12 @@ native video, archive move and own text edit. Untrusted strings are rendered und
   `│ `, and `«` and `»` mark its exact ends.
 - Short strings (titles, names, URLs, covered spans) are inline `« »` spans, where every line break is
   marked.
-- Rows are split at 96 columns (wide characters count two) onto rows that start with `┆ `. A split
-  before a space leaves the space visible after `┆ `.
+- Rows are split at 96 columns (wide characters count two) onto rows that start with the marker `┆`
+  plus exactly one space. Any further space after the marker is text: a split before a space leaves it
+  visible (`┆  word`), while a long word or URL split at the width continues directly (`┆ xxxx`).
+- The reply target is the bound rendering of the message replied to, not Telegram's raw text. When
+  cleaning changed it, its label says `(cleaned rendering, not exact)`, and its sanitized flag always
+  sits directly under it.
 
 No untrusted string can begin a row that looks like a dialog line. The topic, reply and artifact
 dialogs no longer print raw Telegram text, as they did in 0.53. Each preview is revalidated by its

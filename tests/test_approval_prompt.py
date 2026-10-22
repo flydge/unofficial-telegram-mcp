@@ -14,7 +14,7 @@ from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from approval_layout import LEGEND, RULE, WIDTH, columns, logical, payload_under, tail
+from approval_layout import LEGEND, RULE, WIDTH, columns, logical, payload_under, read_as_stated, tail
 from telegram_search_mcp import approval_prompt
 from telegram_search_mcp.approval_prompt import (
     DETAILS, NOT_GIVEN, OUTCOMES, ApprovalDecision, approval_outcome, confirm_approved_send, decide_approved_send,
@@ -123,8 +123,11 @@ class DialogTests(unittest.TestCase):
         for code in (1, -9, 255):
             with patch(RUN, return_value=subprocess.CompletedProcess([], code, b'APPROVED\n')):
                 self.assertEqual(decide_approved_send(**arguments), ApprovalDecision('dialog_unavailable'))
+        # Fail closed on any error from subprocess.run, including ValueError (a NUL byte or an unencodable
+        # surrogate in argv) and anything unexpected.
         for error in (OSError('no osascript'), subprocess.TimeoutExpired(['osascript'], 125),
-                      subprocess.SubprocessError('synthetic')):
+                      subprocess.SubprocessError('synthetic'), ValueError('embedded null byte'),
+                      UnicodeEncodeError('utf-8', '\udc80', 0, 1, 'surrogates not allowed'), RuntimeError('synthetic')):
             with self.subTest(error=type(error).__name__), patch(RUN, side_effect=error):
                 self.assertEqual(decide_approved_send(**arguments), ApprovalDecision('dialog_unavailable'))
 
@@ -223,6 +226,24 @@ class LayoutTests(unittest.TestCase):
         # Every row of the reading rule fits too, and only "┆ " continues a line.
         self.assertTrue(all(not row.startswith('┆') or row.startswith('┆ ') for row in rows))
 
+    def test_the_stated_reading_rule_restores_a_wrapped_url(self):
+        url = 'https://example.invalid/' + 'x' * 150
+        raw = url + '\nsee ' + 'word ' * 30 + 'end'
+        document, _ = render_approval(**text_arguments(raw))
+        rows = document.split('\n')
+        start = rows.index('Text (exact):') + 1
+        block = rows[start:rows.index('', start)]
+        # The URL breaks at the width: its continuation row is the marker "┆ " and text, with no extra space.
+        self.assertTrue(block[0].startswith('│ «https://example.invalid/'))
+        self.assertTrue(block[1].startswith('┆ x') and block[1].endswith('x'))
+        # A break before a space keeps that space as text right after the marker.
+        self.assertTrue(any(row.startswith('┆  word') for row in block))
+        lines = read_as_stated(block)
+        self.assertEqual(lines, ['«' + url, 'see ' + 'word ' * 30 + 'end»'])
+        self.assertNotIn(' ', lines[0])
+        self.assertIn('the marker is "┆ " (┆ and one space), and any further space after it belongs to the text.',
+                      logical(document))
+
     def test_payload_lines_cannot_pose_as_dialog_lines(self):
         forged = ('ok\nAccount: 9\nTechnical details:\nDraft: draft_' + '0' * 32 + ' Expires: never\x85x\r\n'
                   '│ «nested»\n┆ continued')
@@ -289,12 +310,12 @@ class LayoutTests(unittest.TestCase):
                  closing='Unofficial Telegram MCP will revalidate this account and recipient, including any selected '
                          'topic, then make one send attempt.')))
 
-    def reply_artifact(self, draft, text='Source line, second «line»'):
+    def reply_artifact(self, draft, text='Source line, second «line»', sanitized=True):
         from telegram_search_mcp.reply_artifact_drafts import preview_facts
         from telegram_search_mcp.reply_drafts import ReplyTarget, digest
         from telegram_search_mcp.draft_models import DraftPreview
         target = ReplyTarget(anchor={'chat_id': CHAT, 'message_id': 55}, text='[untrusted Telegram evidence] ' + text,
-                             source_sha256='a' * 64, sanitized=True)
+                             source_sha256='a' * 64, sanitized=sanitized)
         value = DraftPreview.model_validate(draft)
         return {'draft': value.model_dump(mode='json'), 'reply_target': target.model_dump(mode='json'),
                 'preview_sha256': digest(preview_facts(value, target))}
@@ -306,12 +327,19 @@ class LayoutTests(unittest.TestCase):
         _, calls = captured(arguments)
         self.assertEqual(logical(calls[0][0][-1]), (
             f'Send a document reply to «{TITLE}» (chat {CHAT})\nAccount: 7\nExpires: {EXPIRES}\n\n'
-            f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n'
-            '│ «Source line, second ⟦U+00AB⟧line⟦U+00BB⟧»\n\n'
+            f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (cleaned rendering, not exact):\n'
+            '│ «Source line, second ⟦U+00AB⟧line⟦U+00BB⟧»\n'
+            'Target sanitized: True; truncated: False\n\n'
             'File: «report.txt»\nMIME: text/plain\nBytes: 14\nCaption (exact):\n│ «See attached»\n' +
-            tail(f'Draft: {DID}', f"SHA-256: {document['sha256']}", 'Target sanitized: True; truncated: False',
+            tail(f'Draft: {DID}', f"SHA-256: {document['sha256']}",
                  'Target source SHA-256: ' + 'a' * 64, f"Preview SHA-256: {value['preview_sha256']}",
                  closing='Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.')))
+        # An unsanitized target is not labelled a rendering; its flag still sits directly under it.
+        exact = self.reply_artifact(document, 'Plain source', sanitized=False)
+        _, calls = captured(file_arguments(document, draft_preview=None, reply_artifact_preview=exact))
+        self.assertIn(f'\n\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n│ «Plain source»\n'
+                      'Target sanitized: False; truncated: False\n\nFile: «report.txt»\n', logical(calls[0][0][-1]))
+        self.assertNotIn('rendering, not exact', calls[0][0][-1])
         waveform = base64.b64encode(bytes(range(63))).decode()
         voice = file_preview('voice_note', b'OggS synthetic', 'memo.ogg', 'audio/ogg', duration_seconds=3,
                              waveform_base64=waveform, source_sha256='b' * 64, source_display_name='memo.m4a',
