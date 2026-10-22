@@ -1943,8 +1943,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
               claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None):
     """Remove only owned objects: the broker plist (exact label booted out first), the Codex entry the receipt owns,
     the Claude Code and Claude Desktop entries the installation owns (`_client_owners`), the owned skill copies and
-    the installation root with its releases. The Telegram session, enrollment and Keychain are never touched; `--adopt-legacy` backups
-    (adopted.json and a v2 receipt's records) are kept beside the removed root.
+    the installation root with its releases. The Telegram session, enrollment and Keychain are never touched;
+    `--adopt-legacy` backups (adopted.json and a v2 receipt's records) are kept beside the removed root.
 
     Every refusal, the pending-send gate included, comes before the transaction exists. After a write-ahead
     removal attempt of a Claude Code or Claude Desktop entry the receipt and root stay until the entry is
