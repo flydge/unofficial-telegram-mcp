@@ -193,8 +193,10 @@ class BrokerWiringTests(Fixture):
         from telegram_search_mcp import tdjson
         loader = mock.Mock(return_value=BUNDLED)
         with mock.patch('telegram_search_mcp.credential_identity.session_credential_loader',
-                        return_value=(b'k' * 32, loader)), mock.patch.object(tdjson, 'LegacyTDJson'):
+                        return_value=(b'k' * 32, loader)), mock.patch.object(tdjson, 'LegacyTDJson'), \
+                mock.patch.object(tdjson.os, 'umask') as umask:  # The real call would outlive this test.
             client = tdjson.TDLibClient.from_defaults()
+        umask.assert_called_once_with(0o077)
         self.assertIs(client._credential_loader, loader)
         self.assertEqual(client._database_key_loader(), b'k' * 32)
 
