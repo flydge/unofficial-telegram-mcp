@@ -614,15 +614,17 @@ class LauncherVersionTests(unittest.TestCase):
         generated = PP.generate_launcher(template, '9.9.9.dev1').decode()
         self.assertEqual(launcher_versions(generated), [['9.9.9.dev1'], ['9.9.9.dev1']])
         self.assertEqual(generated.replace('9.9.9.dev1', __version__), template.decode())
-        admitted, helper = b"value['release_version']!='1.0'\n", b"print('1.0: mcp |')\n"
+        admitted, helper = b"value['release_version']!='1.0.0'\n", b"print('1.0.0: mcp |')\n"
         for label, (data, version) in {
-                'no sites': (b'print(1)\n', '1.0'), 'help site missing': (admitted, '1.0'),
-                'admitted site missing': (helper, '1.0'), 'duplicate site': (admitted * 2 + helper, '1.0'),
-                'sites disagree': (admitted + helper.replace(b'1.0', b'2.0'), '1.0'),
-                'quote in version': (template, "1.0'"), 'empty version': (template, '')}.items():
+                'no sites': (b'print(1)\n', '1.0.0'), 'help site missing': (admitted, '1.0.0'),
+                'admitted site missing': (helper, '1.0.0'), 'duplicate site': (admitted * 2 + helper, '1.0.0'),
+                'sites disagree': (admitted + helper.replace(b'1.0.0', b'2.0.0'), '1.0.0'),
+                'quote in version': (template, "1.0.0'"), 'empty version': (template, ''),
+                'outside the release grammar': (template, '3.0'), 'post-release': (template, '3.0.0.post1')}.items():
             with self.subTest(label), self.assertRaises(PP.PayloadError):
                 PP.generate_launcher(data, version)
-        self.assertEqual(launcher_versions(PP.generate_launcher(admitted + helper, '3.0').decode()), [['3.0'], ['3.0']])
+        self.assertEqual(launcher_versions(PP.generate_launcher(admitted + helper, '3.0.0rc1').decode()),
+                         [['3.0.0rc1'], ['3.0.0rc1']])
 
 
 class CommittedPayloadLockTests(unittest.TestCase):

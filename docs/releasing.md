@@ -46,6 +46,20 @@ listed in `pyproject.toml` (`[tool.setuptools.data-files]`) and `MANIFEST.in`, a
 `packaging/release_gate.py` are; the gate refuses an sdist that misses a tracked public file. To
 find stragglers: `git grep -n -F '<previous dev version>'`.
 
+### Versions
+
+Every version is one grammar: `X.Y.Z`, optionally followed by `aN`, `bN` or `rcN`, optionally
+followed by `.devN`, where each number is `0` or has no leading zero and at most six digits
+(`0.53.0`, `0.53.0rc2`, `0.53.0.dev0`, `0.53.0rc1.dev2`; never `0.53`, `0.53.0.post1` or
+`0.53.0rc01`). The installer orders versions as PEP 440 does. Every site that admits a version holds
+exactly this grammar: the native seed (`packaging/bootstrap_verifier.c`), the plugin's `bin/install`,
+`packaging/release_pins.py`, the archive index (`release_archive.py`), the installer's order
+(`bundle_install.py`), the launcher generator (`packaging/prepare_payload.py`) and the gate's project
+version (`packaging/release_gate.py`). A release tag is `v` and a release or `rcN` candidate version
+(`v0.53.0`, `v0.53.0rc2`): the gate and `packaging/release_build.py` refuse `aN`, `bN` and `.devN`
+tags. `tests/test_version_grammar.py` holds every site, the compiled seed included, to one table of
+admitted and refused versions (`tests/version_grammar.py`).
+
 `expected_package_version` in a user's `runtime.toml` is a per-installation pin, not a version
 site; see section 9. The tests of the frozen 0.51.0 harness (`tests/test_release_*.py`) keep their
 0.51.0 fixtures on purpose and are not version sites.
@@ -170,8 +184,9 @@ the archive they pin records that commit.
 2. **Ad hoc dry run and the signed build** on the build commit, from a clean checkout, by the owner
    ([owner checklist](plans/0.53-signing-owner-checklist.md), section 5): `release_build.py build
    --dry-run` and `check`, then the Developer ID build without `--tag` (the tag is not on this commit)
-   and its `check`. The build signs the payload and the seed, checks every Mach-O in the kit,
-   notarizes the payload zip and the DMG and staples the DMG; the output directory holds `kit/`,
+   and its `check`. The build signs the payload and the seed, runs the kit's own seed `prepare` on the
+   kit's own index and archive as `bootstrap.sh` runs it (`kit_failed` unless it answers verified for
+   every indexed file; the unpacked copy is removed), checks every Mach-O in the kit, notarizes the payload zip and the DMG and staples the DMG; the output directory holds `kit/`,
    `assets/` and `release-build.json`. Its `kit/release-pins.json` has the one schema the plugin's
    `bin/install` reads (`packaging/release_pins.py`).
 3. **Release commit.** Copy the file and commit only it, with the public identity:

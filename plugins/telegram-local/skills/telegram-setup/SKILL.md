@@ -110,12 +110,13 @@ Installer results:
 ## Upgrade, rollback and uninstall
 
 Only when the user asks, and best in the user's own native Terminal. Before it stops the broker, and
-before it changes any client entry, the installer asks the broker whether any client context is
-connected, and an open MCP client can count as one. It then refuses with `pending_send_unresolved`: no
+before it changes any client entry, the installer asks the broker whether a send is in flight, an
+approval dialog is open, a send outcome is not yet settled, or any client context is connected (an open
+MCP client can count as one). It then refuses with `pending_send_unresolved`: no
 client entry, broker or session has changed, but an upgrade or rollback may stay unfinished, and then
-other actions refuse with `transaction_pending` until the same command runs again. Ask the user to quit
-every MCP client (or leave the Telegram tools unused for about five minutes) and run the same command
-again; stop after two refusals and tell the user that this same command finishes it later.
+other actions refuse with `transaction_pending` until the same command runs again. Ask the user to settle
+any open dialog and any `outcome_unknown` send (`get_send_status`), quit every MCP client (or leave the
+Telegram tools unused for about five minutes) and run the same command again; stop after two refusals and tell the user that this same command finishes it later.
 
 - **Upgrade:** the user runs the newer kit's `Install.command`, the same `bootstrap.sh` command with the
   newer pins (without `--claude-code`, or with the installed mode), or in plugin mode a newer plugin's
@@ -165,8 +166,9 @@ revoked from here. The default policy (written by `connect`) enables only `read`
 owner turns more on, in their own Terminal, with the installed launcher's `capabilities enable <profile>`
 (`readers`, `send`, `replies`, `forward`, `video`, `archive_edit`; `show` lists them, `disable` turns one
 off; docs/install.md, "Enabling more capabilities"). Never run it yourself, even with a shell, and never
-present it as a step in the middle of a session: it refuses (`pending_send_unresolved`) while any MCP client
-context is active, up to 300 s after the last Telegram call. Tell the owner to quit or disconnect every MCP
+present it as a step in the middle of a session: it refuses (`pending_send_unresolved`) while a send is in
+flight, an approval dialog is open, a send outcome is not yet settled, or any MCP client context is active (up
+to 300 s after the last Telegram call). Tell the owner to settle pending sends, quit or disconnect every MCP
 client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
 `policy_unsupported` change nothing: stop and report the code. `status: changed` with
 `broker: restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the

@@ -110,4 +110,4 @@ of `plugins/telegram-local/release-pins.json` at the release tag and with the DM
   source/redistribution review.
 
 Details of the 0.54.0.dev0 candidate and the shared-API-identity risk:
-[the private bundle](docs/install.md#private-bundle-0530dev0).
+[the private bundle](docs/install.md#private-bundle-0540dev0).

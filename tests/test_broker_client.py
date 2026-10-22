@@ -273,6 +273,7 @@ class BrokerClientTests(unittest.TestCase):
             "error_count": 0,
             "peak_overlap": 2,
             "serialization_wait_count": 1,
+            "pending_sends": {"in_flight": 1, "approval_dialogs": 1, "unreconciled_receipts": 2},
         }
 
         health, observed = self._round_trip(
@@ -283,6 +284,20 @@ class BrokerClientTests(unittest.TestCase):
 
         self.assertEqual(health, result)
         self.assertEqual(observed["payload"], {})
+
+    def test_health_refuses_a_malformed_pending_send_count(self) -> None:
+        module = importlib.import_module("telegram_search_mcp.broker_client")
+        base = {"uptime_seconds": 1.0, "queue_depth": 0, "active_clients": 0, "completed_requests": 0,
+                "error_count": 0, "peak_overlap": 0, "serialization_wait_count": 0}
+        good = {"in_flight": 0, "approval_dialogs": 0, "unreconciled_receipts": 0}
+        for label, pending in {"absent": None, "list": [0, 0, 0], "missing key": {"in_flight": 0},
+                               "extra key": {**good, "drafts": 0}, "negative": {**good, "in_flight": -1},
+                               "boolean": {**good, "approval_dialogs": True},
+                               "float": {**good, "unreconciled_receipts": 1.0}}.items():
+            with self.subTest(label):
+                result = dict(base) if pending is None else {**base, "pending_sends": pending}
+                with self.assertRaises(module.BrokerUnavailable):
+                    self._round_trip(operation="health", result=result, invoke=lambda client: client.health())
 
     def test_check_returns_only_a_fixed_readiness_status(self) -> None:
         status, observed = self._round_trip(

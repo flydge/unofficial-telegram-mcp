@@ -187,8 +187,13 @@ class HeadLockTests(unittest.TestCase):
             with self.assertRaises(RN.RepinError) as caught:
                 RN.head_lock(checkout)
             self.assertEqual(str(caught.exception), 'lock_invalid')
-        # The default checkout is this one (the release gate runs the suite in an archive with no .git).
+        # The default checkout is this one. In a git checkout its default read is HEAD's committed lock; the release
+        # gate runs the suite in an archive tree with no .git, where only the default path itself is checked.
         self.assertEqual(RN.ROOT, ROOT)
+        if (ROOT / '.git').exists():
+            self.assertEqual(RN.head_lock(), subprocess.run(
+                ['/usr/bin/git', '-C', str(ROOT), 'show', 'HEAD:packaging/tdlib-lock.json'],
+                check=True, capture_output=True, timeout=60).stdout)
 
 
 if __name__ == '__main__':

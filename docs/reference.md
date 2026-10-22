@@ -653,7 +653,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `runtime_conflict`, `initialization_conflict`, `overlapping_paths` | The installation root or install intent is not in the expected state, or the roots overlap. |
 | `metadata_conflict`, `transaction_conflict` | A receipt, pointer, adoption record or journal is inconsistent. |
 | `recovery_limit` | A bounded number of recovery attempts or packets is used up. |
-| `pending_send_unresolved` | The running broker reports a connected client context, or the question could not be answered. |
+| `pending_send_unresolved` | The running broker reports a send in flight, an approval dialog open, a send outcome not yet settled, or a connected client context, or the question could not be answered. |
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
 | `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |

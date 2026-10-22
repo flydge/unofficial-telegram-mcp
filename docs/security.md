@@ -2077,8 +2077,12 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
   right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
   through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
-  whether any client context is connected. A context may hold a draft or an unresolved send outcome.
-  Anything but "none" (including an unknown answer) refuses (`pending_send_unresolved`). The bootout
+  whether a send is pending: health's `pending_sends` counts the send and apply requests in flight, the
+  approval dialogs open and the attempts `get_send_status` could still settle (claimed and unfinished, or
+  `outcome_unknown`, within the 900-second receipt retention), all of which a restart would cut off or lose,
+  and any connected client context counts as well. A 0.51 or 0.52 broker has no such count, so there any
+  context is an unknown answer. Anything but "none" (including an unknown answer) refuses
+  (`pending_send_unresolved`). The bootout
   follows the last check directly and precedes every client write, so a refusal leaves every client
   entry, the plist and the session unchanged; after the first check, the copied release tree and the
   unfinished transaction stay until the same command is repeated. Only the exact label is
@@ -2111,7 +2115,10 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   temporaries killed client writes left beside the Codex config, the Claude Desktop config, the plist and
   `runtime.toml`, each only by the name journaled before its creation (and, once journaled, its inode);
   uninstall and the commit do the same for a change parked with one. A plist changed since the stop is
-  never overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
+  never overwritten (`service_conflict`). A plist removed since the stop (by hand or a cleanup) is restored
+  from `service.previous`; with none kept yet (the stop had not rewritten it) there is nothing to restore and
+  no broker is bootstrapped from a missing plist, and a target's plist the stop wrote over such a removal is
+  removed again. What stays: the copied release, the unfinished transaction and every
   client entry written before the refusal, which already names the new release and so cannot start the
   server until the repeat commits (only a refusal at the switch of `current.json` itself comes after
   `receipt.json` names the new release, and then neither release starts until the repeat or an uninstall).
@@ -2121,15 +2128,21 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **The service step is idempotent by state.** Every run before the commit, whatever stage the journal
   records, makes the service the target's: a previous definition that was loaded again after the stop is
   gated and booted out again (also when no broker ran as the change began; then none is started after the
-  commit), and the plist is rewritten until it is the target's. After the commit only the target's plist
-  is bootstrapped, and only if a broker ran as the change began; any other definition refuses
-  (`service_conflict`) and nothing is started. A kill anywhere in a repeat's stop, or a login after it,
+  commit), and the plist is rewritten until it is the target's. Once the plist is the target's, the
+  definition it replaced loaded again from the same path (a login or a concurrent bootstrap between the
+  bootout and the rewrite) is recognised by the kept `service.previous` bytes and gated and booted out the
+  same way, by every run before the commit and by the restart after it; a plist removed since the change began is
+  nothing to stop, and the target's is written anew. After the commit only the target's plist is
+  bootstrapped (written again first if it was removed), and only if a broker ran as the change began; any
+  other definition refuses (`service_conflict`) and nothing is started. A registration still loaded from the
+  plist's path after the file was removed counts as the release whose definition it runs, if it runs either. A kill anywhere in a repeat's stop, or a login after it,
   therefore cannot leave the old broker running on the new pin.
 - **A parked change has two ways out.** An upgrade or rollback refused before its stop, or after a late
   refusal's finished restore, is parked: its repeat resumes it once the named object is put back or
   removed, and `uninstall` goes over it, removing what the receipt the change started from owns plus what
   the change's journal binds (its Codex entry once written, its skill copies, the Claude Code and Claude
-  Desktop entries it recorded `registered`), each only while it is exactly that object; its adoption
+  Desktop entries it recorded `registered`, or wrote under its write-ahead record before an interruption cut
+  off the outcome record), each only while it is exactly that object; its adoption
   backups are kept. `rollback` and another kit refuse (`transaction_pending`). A change interrupted with
   its broker stopped or its restore unfinished is not parked: uninstall names it too. A parked adopting
   first install has no installed release yet, so only its repeat ends it.
@@ -2141,7 +2154,11 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   one this transaction already wrote, is written again before the commit. A skill copy this transaction
   published, edited and then put back in place is its own again only while it is the very object an attempt
   published (the binding its journal records) and holds exactly the target's bytes; an edit that keeps the
-  binding but not the bytes still refuses (`skill_conflict`). Claude Code entries are
+  binding but not the bytes still refuses (`skill_conflict`). Once receipt.json is the receipt the
+  transaction published, its skill copies are done: the receipt records the ones it wrote, a repeat
+  neither writes nor checks them again, and a copy edited, replaced or removed after that is left as it
+  is (`kept` by uninstall while edited) instead of refusing for good; after an upgrade's or rollback's
+  commit the same holds for its Codex entry. Claude Code entries are
   written only by its CLI, which keeps its neighbours.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
   receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,

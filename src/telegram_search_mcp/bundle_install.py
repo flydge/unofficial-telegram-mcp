@@ -546,6 +546,7 @@ class _Journal:
             # write: a record kept per cycle, so the journal stays the same size however many cycles there are.
             name,value=put
             next_value['publications']={**{k:v for k,v in next_value['publications'].items() if k not in clear},name:[value]}
+        elif clear:next_value['publications']={k:v for k,v in next_value['publications'].items() if k not in clear}
         write(self.tx/'journal.json',encoded(next_value),expected=encoded(self.value),existed=True)
         self.value=next_value
 
@@ -724,6 +725,17 @@ def _client_temporaries(publications, home, config, plist, session_root):
         _discard_journaled(publications,name,paths[key],desktop if key=='desktop' else discard_temporary)
 
 
+def _settle_codex_attempts(j):
+    """In a late refusal's restore, once its `undo` discarded their temporaries: the Codex write's attempts shrink to
+    the one that proves this transaction's own write (the last with its flushed object), so attempts never pile up
+    across cycles and every run the user starts has fresh ones (no `recovery_limit` from repeated refusals)."""
+    attempts=j.attempts('registration')
+    proof=[a for a in attempts if 'object' in a][-1:]
+    if len(attempts)>len(proof):
+        if proof:j.update(put=('registration',proof[0]))
+        else:j.update(clear=('registration',))
+
+
 def _desktop_write(j, home, plan):
     """One journaled compare-before-replace attempt; the confirming read decides its outcome."""
     def write(temporary, admit):
@@ -759,16 +771,24 @@ MAX_POLICY_BYTES = 16384
 MAX_PLIST_BYTES = 1024 * 1024
 MAX_CHANGES = 999
 # Run under the interpreter of the broker it asks: only that release's own client passes the
-# broker's version handshake. Any client context may hold a draft or an unresolved send outcome.
-# It uses only what every broker this installer adopts or upgrades ships, a 0.51 or 0.52 source
-# venv included: config.BROKER_SOCKET_PATH and load_runtime_policy, broker_client.BrokerClient,
-# its health() and close().
+# broker's version handshake. It uses only what every broker this installer adopts or upgrades
+# ships, a 0.51 or 0.52 source venv included: config.BROKER_SOCKET_PATH and load_runtime_policy,
+# broker_client.BrokerClient, its health() and close(). From 0.53.0rc2 health counts the pending
+# sends (`pending_sends`: sends in flight, approval dialogs open, outcomes get_send_status could
+# still settle): any of them, or a client context, is 'pending'. A 0.51 or 0.52 broker counts only
+# client contexts, which never show a send: there any context is 'unknown'.
 _PENDING_PROBE = ("import sys\nsys.path[:0]=[p for p in sys.argv[1:2] if p]\n"
                   "from telegram_search_mcp.config import BROKER_SOCKET_PATH,load_runtime_policy\n"
                   "from telegram_search_mcp.broker_client import BrokerClient\n"
                   "c=BrokerClient(socket_path=BROKER_SOCKET_PATH,policy=load_runtime_policy(),request_timeout=5,\n"
                   " restart_callback=lambda:None,retry_backoff_seconds=0)\ntry:\n h=c.health()\n"
-                  " print('none' if type(h.get('active_clients')) is int and h['active_clients']==0 else 'pending')\n"
+                  " a=h.get('active_clients');p=h.get('pending_sends',False)\n"
+                  " k=('in_flight','approval_dialogs','unreconciled_receipts')\n"
+                  " if type(a) is not int or a<0:print('unknown')\n"
+                  " elif p is False:print('none' if a==0 else 'unknown')\n"
+                  " elif type(p) is not dict or sorted(p)!=sorted(k) or any(type(p[n]) is not int or p[n]<0 for n in k):"
+                  "print('unknown')\n"
+                  " else:print('pending' if a or any(p[n] for n in k) else 'none')\n"
                   "finally:\n c.close()\n")
 
 
@@ -892,13 +912,23 @@ class _Service:
         if data is not None and self.adopted is not None and digest(data)==self.adopted:return 'adopted',data,payload
         raise InstallError('service_conflict')
 
+    def _loaded_payload(self, live, kind, payload):
+        """The payload a loaded registration runs when it is ours: started from the definition on disk, or, once that
+        plist was removed (by hand or a cleanup), still loaded from its path running the target's or a known
+        definition. Anything else refuses `service_conflict`."""
+        if kind=='absent':
+            for value in (self.target,*self.known.values()):
+                if value is not None and _matches_live(live,self.plist,value):return value
+            raise InstallError('service_conflict')
+        if kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
+        return payload
+
     def check(self):
         """Pre-mutation gate: a known definition, an exactly matching live registration and no pending send."""
         kind,_,payload=self.kind()
         live=_live(self.runner,self.label)
         if live is None:return kind,False
-        if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
-        self.gate(payload)
+        self.gate(self._loaded_payload(live,kind,payload))
         return kind,True
 
     def gate(self, payload):
@@ -917,9 +947,36 @@ class _Service:
         live=_live(self.runner,self.label)
         if live is None:return False
         kind,_,payload=self.kind()
-        if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
-        self.gate(payload)
+        self.gate(self._loaded_payload(live,kind,payload))
         return True
+
+    def _previous_loaded(self, j):
+        """Whether a definition other than the target's is loaded, gated first (True: the caller boots it out).
+
+        Before the rewrite as `_recheck`. Once the plist is the target's, the definition it replaced may be loaded
+        again from the same path: a login, a concurrent `connect` or a manual bootstrap between the stop's bootout
+        and the rewrite. It is recognised by the kept previous bytes (or a known definition). The target's loaded
+        broker is False, and so is one that is neither: the restore and the restart refuse it (`service_conflict`)."""
+        if self.kind()[0]!='to':return self._recheck()
+        live=_live(self.runner,self.label)
+        if live is None or _matches_live(live,self.plist,self.target):return False
+        previous=self._previous_payload(j,live)
+        if previous is None:return False
+        self.gate(previous)
+        return True
+
+    def _previous_payload(self, j, live):
+        """The definition a live registration from our plist path runs when it is the one the stop replaced (the
+        kept `service.previous` bytes) or a known one; else None."""
+        candidates=list(self.known.values())
+        if j.recorded('service_previous') is not None:
+            try:candidates.insert(0,plistlib.loads(self._kept(j)))
+            except (ValueError,TypeError,plistlib.InvalidFileException):pass
+        for value in candidates:
+            if (type(value) is dict and type(value.get('ProgramArguments')) is list and value['ProgramArguments']
+                    and _matches_live(live,self.plist,value)):
+                return value
+        return None
 
     def cycle(self, j):
         """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
@@ -954,7 +1011,8 @@ class _Service:
         plist on disk) is gated and booted out again. Both by state, not by the observation: a broker a login
         started in a change that found none running is stopped too (and, as none ran before, `restart` starts
         none), so the previous broker never runs on the target's plist and pin. Then the plist is rewritten, its
-        exact previous bytes kept first, until it is the target's."""
+        exact previous bytes kept first, until it is the target's. A definition removed since the change began
+        (by hand or a cleanup) is nothing to keep or stop: the target's is written anew."""
         observed=self._observed(j)
         number,state,_=self.cycle(j)
         if state=='restoring':raise InstallError('transaction_conflict')  # `restore` finishes it first.
@@ -962,14 +1020,14 @@ class _Service:
             if self._recheck():
                 self.stopping=True;_bootout(self.runner,self.label)
             j.update(put=('service_cycle',{'cycle':number+1,'state':'stopped'}));j.checkpoint('stopped:service')
-        elif self.kind()[0]!='to' and self._recheck():
+        elif self._previous_loaded(j):
             self.stopping=True;_bootout(self.runner,self.label)
         if observed['plist']!='absent':
             j.discard('plist',self.plist)
             kind,data,_=self.kind()
             if kind!='to':
-                self._keep(j,data)
-                j.write('plist',self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
+                if kind!='absent':self._keep(j,data)
+                j.write('plist',self.plist,_plist_bytes(self.target),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
 
     def _keep(self, j, data):
@@ -1006,7 +1064,9 @@ class _Service:
         be loaded: it is booted out first (no pending-send gate: short of the commit its release is not admitted,
         `current.json` not naming it, so it serves no session). The previous broker loaded again (a login after
         the definition is back) stays. A loaded broker that is neither stays as well and refuses
-        `service_conflict`, as does a definition changed since the stop, which is never overwritten. A cycle
+        `service_conflict`, as does a definition changed since the stop, which is never overwritten. A definition
+        removed since the stop (by hand or a cleanup) comes back from its kept copy; with none kept (the stop had
+        not rewritten it yet) there is nothing to restore, and no broker is started from a missing plist. A cycle
         whose stop changed nothing restores nothing. The closing record drops the cycle's write records, whose
         temporaries the restore has discarded."""
         number,state,_=self.cycle(j)
@@ -1024,28 +1084,47 @@ class _Service:
         if observed['plist']!='absent':
             j.discard('plist',self.plist);j.discard('plist_restore',self.plist)
             kind,data,_=self.kind()
-            if kind=='to' and observed['plist']!='to':
-                j.write('plist_restore',self.plist,self._kept(j),data,existed=True,maximum=MAX_PLIST_BYTES)
+            kept=j.recorded('service_previous') is not None
+            if kind=='to' and observed['plist']!='to' and not kept:
+                # The stop wrote the target's over a definition removed meanwhile: there was none to keep, so the
+                # previous state is no plist.
+                _unlink_exact(self.plist,data)
+            elif kind=='to' and observed['plist']!='to' or kind=='absent' and kept:
+                j.write('plist_restore',self.plist,self._kept(j),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
         if live is None:
-            if observed['loaded']:_bootstrap(self.runner,self.plist)
+            if observed['loaded'] and self.kind()[0]!='absent':_bootstrap(self.runner,self.plist)
         else:
             kind,_,payload=self.kind()
-            if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):
-                raise InstallError('service_conflict')
+            self._loaded_payload(live,kind,payload)
         j.update(put=('service_cycle',{'cycle':number,'state':'restored'}),clear=_CYCLE_WRITES)
         j.checkpoint('restored:service')
 
     def restart(self, j):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
-        while the plist is the target's (the stop made it so before the commit); any other definition refuses."""
+        while the plist is the target's (the stop made it so before the commit); a plist removed since (by hand
+        or a cleanup) is written again first, as the stop writes it; any other definition refuses. The definition
+        the stop replaced, loaded again between its bootout and the rewrite (`_previous_loaded`), is gated and
+        booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
         observed=j.recorded('service')
-        if observed is None or not observed['loaded']:return 'not_loaded'
+        if observed is None:return 'not_loaded'
+        if not observed['loaded']:
+            if observed['plist']!='absent':
+                try:on_disk=self.kind()[0]
+                except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Not read before: as before.
+                if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
+            return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
+            if self.kind()[0]=='absent':
+                j.discard('plist',self.plist)
+                j.write('plist',self.plist,_plist_bytes(self.target),b'',existed=False,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
             live=_live(self.runner,self.label)
+            if live is not None and not _matches_live(live,self.plist,self.target):
+                previous=self._previous_payload(j,live)
+                if previous is None:raise InstallError('service_conflict')
+                self.gate(previous);_bootout(self.runner,self.label);live=None
             if live is None:_bootstrap(self.runner,self.plist)
-            elif not _matches_live(live,self.plist,self.target):raise InstallError('service_conflict')
             j.update(single=('service_restarted',{'attempt':1}));j.checkpoint('restarted')
         return 'restarted'
 
@@ -1192,7 +1271,7 @@ def _owned_desktop(value, command, arguments):
     return value if owned.client=='claude-desktop' and owned.post_subtree_hash==expected else None
 
 
-def _client_owners(root, below=None, parked=None):
+def _client_owners(root, below=None, parked=None, home=None):
     """The Claude Code and Claude Desktop entries the installation owns: {client: (command, arguments, record)}.
 
     For each client, the entry written by the newest finished transaction whose step for that client ended
@@ -1201,8 +1280,10 @@ def _client_owners(root, below=None, parked=None):
     replaced nothing of ours, so the earlier entry stays ours while it is still exactly that entry. Read newest
     first from the journals: the finished changes numbered below `below` (the one being run does not count yet),
     then the first install. `parked` names an unfinished change an uninstall goes over (`_parked`): its recorded
-    outcomes count like a finished one's. A client missing from the result owns nothing. The same for v1 and v2
-    receipts.
+    outcomes count like a finished one's, and a client whose outcome it never recorded (killed between its write
+    and that record) is its own by the write-ahead record (`claude_add`, or `claude_desktop_add` with its
+    ownership) while the entry in `home` is exactly the one it wrote; otherwise the older owner stands. A client
+    missing from the result owns nothing. The same for v1 and v2 receipts.
     """
     paths=[root/'transactions'/('change_%d'%n)/'journal.json' for n in reversed(_changes(root)) if below is None or n<below]
     found=_install_transactions(root)
@@ -1217,7 +1298,15 @@ def _client_owners(root, below=None, parked=None):
         if type(journal.get('release_root')) is not str:raise InstallError('transaction_conflict')
         command,arguments=_commands(Path(journal['release_root']))
         for client in ('claude_code','claude_desktop'):
-            if client in decided or (_record(journal,client) or {}).get('status')!='registered':continue
+            if client in decided:continue
+            if (_record(journal,client) or {}).get('status')!='registered':
+                if path.parent.name!=parked or home is None or _record(journal,client) is not None:continue
+                # The parked change's write-ahead record, while the entry is exactly what it wrote.
+                if client=='claude_code':
+                    if _record(journal,'claude_add') is None or claude_registration.state(home,command,arguments)!='exact':continue
+                else:
+                    value=_owned_desktop((_record(journal,'claude_desktop_add') or {}).get('ownership'),command,arguments)
+                    if value is None or claude_desktop_registration.state(home,command,arguments)!='exact':continue
             decided.add(client)
             if client=='claude_code':owners[client]=(command,arguments,None);continue
             value=_owned_desktop((_record(journal,'claude_desktop_add') or {}).get('ownership'),command,arguments)
@@ -1552,6 +1641,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             unfinished=service.unfinished(j) if service is not None else None
             def undo():
                 _client_temporaries(j.value['publications'],home,config,plist,session_root)
+                _settle_codex_attempts(j)
                 _policy_back(j,session_root,manifest['package_version'])
             if unfinished is not None:
                 service.restore(j,unfinished,undo);raise InstallError(unfinished)
@@ -1583,12 +1673,15 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     update(single=('claude_skills',{'status':'installed' if present else 'skipped'}))
                 claude_skills_status=recorded('claude_skills').get('status')
                 if claude_skills_status not in CLAUDE_SKILLS:raise InstallError('transaction_conflict')
+                # Once receipt.json is the receipt this install published, the skill copies are done: it records them,
+                # and a copy the user edited, replaced or removed since stays as it is and never blocks the repeat.
+                published=_published_receipt(j,root)
                 for prefix,base in (('',skills),('claude-',claude_skills)):
                     for skill in manifest['skills']:
                         sid,expected=skill['id'],skill['sha256'];name=prefix+sid;target=base/sid
                         if not reached(name+'_pending'):update(name+'_pending')
                         # An external client directory the user may wipe: published once, never re-verified later.
-                        if prefix and (claude_skills_status=='skipped' or reached(name)):
+                        if published is not None or prefix and (claude_skills_status=='skipped' or reached(name)):
                             if not reached(name):update(name)
                             checkpoint(name);continue
                         if prefix:ensure_owned_private_directory(claude_skills,private_leaf=False)
@@ -1708,7 +1801,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                         _client_temporaries(j.value['publications'],home,config,plist,session_root)
                     names=['release','telegram-search','telegram-setup']
                     if claude_skills_status=='installed':names+=['claude-telegram-search','claude-telegram-setup']
-                    objects={name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names}
+                    objects=({name:published['publication_objects'][name] for name in names} if published is not None
+                             else {name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names})
                     add=recorded('claude_desktop_add')
                     receipt={**identity,'schema_version':2,'registration_sha256':digest(ownership.to_bytes()),'skills':manifest['skills'],
                              'publication_objects':objects,'claude_code':claude_status,'claude_skills':claude_skills_status,
@@ -1746,22 +1840,21 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         raise InstallError('installation_refused') from None
 
 
-_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})((?:\.(?:0|[1-9][0-9]{0,5})){0,4})(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?'
-                      r'(?:\.post(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
+# The one release version grammar (docs/releasing.md, Versions), as release_archive and the native seed admit it.
+_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                      r'(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
 _INF = float('inf')
 
 
 def _version_key(value):
-    """PEP 440 order of a public release version (N[.N]*[{a|b|rc}N][.postN][.devN]); anything else refuses."""
+    """PEP 440 order of a release version (X.Y.Z[{a|b|rc}N][.devN]); anything else refuses."""
     match=_VERSION.fullmatch(value) if type(value) is str else None
     if match is None:raise InstallError('downgrade_refused')
-    head,rest,letter,number,post,dev=match.groups()
-    release=[int(head),*(int(p) for p in rest.split('.')[1:])]
-    while len(release)>1 and release[-1]==0:release.pop()
+    major,minor,micro,letter,number,dev=match.groups()
     if letter is not None:pre=(('a','b','rc').index(letter),int(number))
-    elif dev is not None and post is None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
+    elif dev is not None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
     else:pre=(_INF,0)
-    return (tuple(release),pre,-_INF if post is None else int(post),_INF if dev is None else int(dev))
+    return ((int(major),int(minor),int(micro)),pre,_INF if dev is None else int(dev))
 
 
 def _changing(root, index_sha256):
@@ -1998,6 +2091,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         unfinished=service.unfinished(j)
         def undo():
             _client_temporaries(j.value['publications'],home,config,plist,session_root)
+            _settle_codex_attempts(j)
             _policy_back(j,session_root,to_manifest['package_version'])
         if unfinished is not None:
             service.restore(j,unfinished,undo);raise InstallError(unfinished)
@@ -2012,7 +2106,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 j.advance('service_pending');service.stop(j);j.advance('service')
             checkpoint('service')
             # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`); until the commit
-            # every run writes it again if it was removed since.
+            # every run writes it again if it was removed since and checks it. After the commit it is done: a table
+            # the user changed or removed since stays as it is (`kept` by uninstall while changed), and the repeat
+            # finishes.
             if not j.reached('complete'):
                 j.advance('registration_pending')
                 ensure_owned_private_directory(codex,private_leaf=False)
@@ -2021,12 +2117,23 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                     return _codex_change(source,to_registration,ownership)
                 _codex_write(j,config,before,j['config_existed'],candidate,new_ownership.post_subtree_hash,replan,'target_conflict')
                 j.advance('registration')
-            _codex_check(config,to_registration,new_ownership,'target_conflict')
+                _codex_check(config,to_registration,new_ownership,'target_conflict')
             checkpoint('registration')
+            # Once receipt.json is the receipt this change published, the skill copies are done: it records them, and
+            # they are not written or checked again. One the user edited, replaced or removed since stays as it is
+            # (`kept` by uninstall while edited); the repeat finishes, and the next upgrade decides it as usual.
+            published=_published_receipt(j,root)
             objects={}
             to_skills={s['id']:s['sha256'] for s in to_manifest['skills']}
             for skill_name in SKILL_NAMES:
                 if skill_name not in names:
+                    j.advance(skill_name+'_pending');j.advance(skill_name);checkpoint(skill_name);continue
+                if published is not None:
+                    # The binding the published receipt records: the copy this change wrote, owned while it is that copy.
+                    bound=published['publication_objects'].get(skill_name)
+                    if type(bound) is not dict or type(bound.get('object')) is not dict or type(bound.get('child')) is not dict:
+                        raise InstallError('transaction_conflict')
+                    objects[skill_name]={'object':bound['object'],'child':bound['child']}
                     j.advance(skill_name+'_pending');j.advance(skill_name);checkpoint(skill_name);continue
                 base,sid=(claude_skills,skill_name[7:]) if skill_name.startswith('claude-') else (skills,skill_name)
                 path=base/sid;old=current['publication_objects'].get(skill_name);expected=to_skills[sid]
@@ -2165,6 +2272,18 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         if adopted:result['adopted']=sorted(adopted)
         _plugin_note(result,mode,home)
         return _result_extras(result,claude_status,desktop_status,to_command,to_arguments)
+
+
+def _published_receipt(j, root):
+    """The receipt value an attempt of this change's `receipt` step published, while receipt.json is still that
+    exact object; else None (not published yet, or changed by hand since, which the receipt step refuses)."""
+    path=root/'receipt.json'
+    for attempt in j.attempts('receipt'):
+        if type(attempt.get('object')) is dict and _bound(path,attempt['object']):
+            value=unique_json(read(path,mode=0o600))
+            if type(value.get('publication_objects')) is not dict:raise InstallError('transaction_conflict')
+            return value
+    return None
 
 
 def _exact(expected):
@@ -2398,7 +2517,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             codex_owners,parked_skills=_parked_objects(root,*parked,receipt) if parked else ([],{})
             codex_owners=[_codex_ownership(root,receipt),*codex_owners]
             owners=_client_owners(root,int(name[7:]) if journal is not None and journal.get('kind')=='uninstall' else None,
-                                  parked[0] if parked else None)
+                                  parked[0] if parked else None,home)
             backups=_adoption_backups(root,receipt,parked)
             service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
             observed=None
@@ -2435,6 +2554,12 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if loaded and _live(launchctl,label) is not None:_bootout(launchctl,label)
                     checkpoint('stopped:service')
                     status='removed' if _unlink_exact(plist,service.kind()[1]) else 'kept'
+                elif kind=='absent' and loaded:
+                    # Our registration still loaded from the path of a plist removed by hand: booted out by label.
+                    if j.recorded('service_owned') is None:j.update(single=('service_owned',{'plist':'absent'}))
+                    if _live(launchctl,label) is not None:_bootout(launchctl,label)
+                    checkpoint('stopped:service')
+                    status='removed'
                 elif kind=='absent' and j.recorded('service_owned') is not None:status='removed'
                 else:status='absent' if kind=='absent' else 'kept'
             else:status=None

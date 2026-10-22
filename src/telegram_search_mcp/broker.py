@@ -95,6 +95,9 @@ from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditS
     REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
+# The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
+SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
+                             'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit'})
 
 
 class BrokerStartupError(RuntimeError):
@@ -251,6 +254,19 @@ class Broker(SelectionBrokerMixin):
         self._peak_overlap = 0
         self._completed = 0
         self._errors = 0
+        # Pending sends a restart would cut off or lose (health `pending_sends`; the installer's gate reads them).
+        self._sends_in_flight = 0
+        self._approval_dialogs = 0
+
+    def _prompt_approval(self, **kwargs) -> ApprovalDecision | bool:
+        """The owner's approval dialog, counted as open while it runs."""
+        with self._state_lock:
+            self._approval_dialogs += 1
+        try:
+            return self._approval_prompt(**kwargs)
+        finally:
+            with self._state_lock:
+                self._approval_dialogs -= 1
 
     def _acquire_owner_lock(self) -> int:
         from .session_owner import acquire_owner_lock, OwnerLeaseError
@@ -357,6 +373,7 @@ class Broker(SelectionBrokerMixin):
 
     def _health(self) -> dict[str, Any]:
         self._expire_contexts()
+        unsettled = self._drafts.unsettled_attempts()  # Its own lock, never nested in the state lock.
         with self._state_lock:
             wait_count = getattr(self._client, "serialization_wait_count", 0)
             if type(wait_count) is not int or wait_count < 0:
@@ -369,6 +386,14 @@ class Broker(SelectionBrokerMixin):
                 "error_count": self._errors,
                 "peak_overlap": self._peak_overlap,
                 "serialization_wait_count": wait_count,
+                # Counts only: a send or apply request being handled, an approval dialog open, and an attempt whose
+                # outcome get_send_status could still settle (claimed and unfinished, or outcome_unknown, within
+                # receipt retention). A restart cuts the first two off and loses the third.
+                "pending_sends": {
+                    "in_flight": self._sends_in_flight,
+                    "approval_dialogs": self._approval_dialogs,
+                    "unreconciled_receipts": unsettled,
+                },
             }
 
     def _artifact_account(self):
@@ -547,7 +572,7 @@ class Broker(SelectionBrokerMixin):
         if not self._dialog_lock.acquire(blocking=False):
             return DIALOG_UNAVAILABLE
         try:
-            return self._approval_prompt(**facts)
+            return self._prompt_approval(**facts)  # counted as an open dialog for the installer's gate
         finally:
             self._dialog_lock.release()
 
@@ -2731,7 +2756,16 @@ class Broker(SelectionBrokerMixin):
                             "request_id": request["request_id"], "ok": True, "result": result},
                             max_bytes=MAX_RESPONSE_BYTES)
                         response_sent = True
-                    result = self._dispatch(request, publish=publish)
+                    sending = request["operation"] in SEND_OPERATIONS
+                    if sending:
+                        with self._state_lock:
+                            self._sends_in_flight += 1
+                    try:
+                        result = self._dispatch(request, publish=publish)
+                    finally:
+                        if sending:
+                            with self._state_lock:
+                                self._sends_in_flight -= 1
                     response = {
                         "version": PROTOCOL_VERSION,
                         "request_id": request["request_id"],
