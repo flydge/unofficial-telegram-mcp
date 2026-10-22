@@ -6,7 +6,7 @@ import json
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import ConfigDict, Field, field_validator, model_validator, model_serializer
 from .draft_models import _Closed, AccountId, DraftId, DraftPreview, DraftText, Hash
@@ -18,6 +18,7 @@ from .sanitize import sanitize_telegram_text
 
 EVIDENCE_MARKER = '[untrusted Telegram evidence] '
 UNAVAILABLE = 'reply draft is unavailable'
+CAPABILITY_DISABLED = 'reply needs capabilities the owner has not enabled: missing_capabilities'
 PREPARED = 'immutable reply draft prepared; inspect full evidence and obtain fresh approval'
 PENDING = 'exact pending reply snapshot; inspection is not approval'
 REVISED = 'new immutable reply revision; prior draft invalidated; fresh approval required'
@@ -598,6 +599,8 @@ class ReplyDraftPreview(_Closed):
 
 
 from .selection_refs import SelectedInput, SelectionId
+from .contract import CapabilityName
+from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 
 class PrepareReplyTextSendRequest(SelectedInput):
     recipient: ChatId
@@ -649,36 +652,63 @@ class UpdateReplyDraftRequest(GetReplyDraftRequest):
 class RefreshReplyDraftRequest(GetReplyDraftRequest):
     pass
 
-class PrepareReplyTextSendResponse(_Closed):
-    status: Literal['prepared','unavailable']
+MissingCapabilities = Annotated[list[CapabilityName], Field(min_length=1, max_length=len(get_args(CapabilityName)),
+    description='Only the capabilities the refused check needs and the policy lacks, in requirement order.')]
+
+
+class ReplyRefusal(NextActionHint, _Closed):
+    """The refusal half of every reply result: `unavailable` reveals nothing; `capability_disabled`
+    names only the missing capabilities, which come from the closed set, never from input."""
+
+    def refused(self) -> bool:
+        if self.status == 'capability_disabled':
+            names = self.missing_capabilities
+            return self.detail == CAPABILITY_DISABLED and names is not None and len(set(names)) == len(names)
+        return self.status == 'unavailable' and self.detail == UNAVAILABLE and self.missing_capabilities is None
+
+
+class PrepareReplyTextSendResponse(ReplyRefusal):
+    status: Literal['prepared','unavailable','capability_disabled']
     reply: ReplyDraftPreview | None=None
-    detail: Literal['immutable reply draft prepared; inspect full evidence and obtain fresh approval','reply draft is unavailable']
+    detail: Literal['immutable reply draft prepared; inspect full evidence and obtain fresh approval','reply draft is unavailable',
+        'reply needs capabilities the owner has not enabled: missing_capabilities']
+    missing_capabilities: MissingCapabilities | None = optional_field()
+    next_action: NextAction | None = next_action_field()
     @model_validator(mode='after')
     def shape(self):
-        if (self.status=='prepared')!=(self.reply is not None) or self.detail!=(PREPARED if self.status=='prepared' else UNAVAILABLE):
+        if (self.status=='prepared')!=(self.reply is not None) or not (
+                self.detail==PREPARED and self.missing_capabilities is None if self.status=='prepared' else self.refused()):
             raise ValueError('invalid reply preparation response')
         return self
 
-class GetReplyDraftResponse(_Closed):
-    status: Literal['pending','unavailable']
+class GetReplyDraftResponse(ReplyRefusal):
+    status: Literal['pending','unavailable','capability_disabled']
     reply: ReplyDraftPreview | None=None
-    detail: Literal['exact pending reply snapshot; inspection is not approval','reply draft is unavailable']
+    detail: Literal['exact pending reply snapshot; inspection is not approval','reply draft is unavailable',
+        'reply needs capabilities the owner has not enabled: missing_capabilities']
+    missing_capabilities: MissingCapabilities | None = optional_field()
+    next_action: NextAction | None = next_action_field()
     @model_validator(mode='after')
     def shape(self):
-        if (self.status=='pending')!=(self.reply is not None) or self.detail!=(PENDING if self.status=='pending' else UNAVAILABLE):
+        if (self.status=='pending')!=(self.reply is not None) or not (
+                self.detail==PENDING and self.missing_capabilities is None if self.status=='pending' else self.refused()):
             raise ValueError('invalid reply inspection response')
         return self
 
-class ReviseReplyDraftResponse(_Closed):
-    status: Literal['revised','unavailable']
+class ReviseReplyDraftResponse(ReplyRefusal):
+    status: Literal['revised','unavailable','capability_disabled']
     previous_draft_id: DraftId | None=None
     reply: ReplyDraftPreview | None=None
-    detail: Literal['new immutable reply revision; prior draft invalidated; fresh approval required','reply draft is unavailable']
+    detail: Literal['new immutable reply revision; prior draft invalidated; fresh approval required','reply draft is unavailable',
+        'reply needs capabilities the owner has not enabled: missing_capabilities']
+    missing_capabilities: MissingCapabilities | None = optional_field()
+    next_action: NextAction | None = next_action_field()
     @model_validator(mode='after')
     def shape(self):
         if self.status=='revised':
-            if self.reply is None or self.previous_draft_id is None or self.reply.draft.draft_id==self.previous_draft_id or self.detail!=REVISED:
+            if (self.reply is None or self.previous_draft_id is None or self.reply.draft.draft_id==self.previous_draft_id
+                    or self.detail!=REVISED or self.missing_capabilities is not None):
                 raise ValueError('invalid reply revision response')
-        elif self.reply is not None or self.previous_draft_id is not None or self.detail!=UNAVAILABLE:
+        elif self.reply is not None or self.previous_draft_id is not None or not self.refused():
             raise ValueError('unavailable reply revision contains evidence')
         return self

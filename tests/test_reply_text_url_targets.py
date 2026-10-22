@@ -32,7 +32,7 @@ from telegram_search_mcp.reply_formatted_sources import (
 )
 from telegram_search_mcp.sanitize import sanitize_telegram_text
 from telegram_search_mcp.tdjson import TDLibClient
-from test_reply_phone_targets import absolute, entity as old_entity, media, message as old_message
+from test_reply_phone_targets import absolute, entity as old_entity, media, message as old_message, disabled
 
 CHAT, MESSAGE, ACCOUNT = 123, 55, 7
 CLIENT = 'client_' + 'c' * 24
@@ -716,14 +716,14 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.raw.source = mixed()
             for capability in CAPS:
                 self.broker._policy = self.denied(capability); before = len(self.registrations)
-                self.assertEqual(self.prepare(family)['status'], 'unavailable')
+                self.assertEqual(disabled(self.prepare(family)),('capability_disabled',[capability]))
                 self.assertEqual(len(self.registrations), before)
                 self.broker._policy = POLICY; did = self.prepared(family)['draft']['draft_id']
                 self.broker._policy = self.denied(capability)
                 reads = sum(r['@type'] == 'getMessage' for r in self.raw.requests)
-                self.assertEqual(self.dispatch(self.operation('get', family), {'draft_id': did})['status'], 'unavailable')
-                self.assertEqual(self.revise(did, family)['status'], 'unavailable')
-                self.assertEqual(self.revise(did, family, True)['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.operation('get', family), {'draft_id': did})),('capability_disabled',[capability]))
+                self.assertEqual(disabled(self.revise(did, family)),('capability_disabled',[capability]))
+                self.assertEqual(disabled(self.revise(did, family, True)),('capability_disabled',[capability]))
                 self.assertEqual(self.send(did, family)['status'], 'expired')
                 self.assertEqual(sum(r['@type'] == 'getMessage' for r in self.raw.requests), reads)
         self.assertEqual(self.dialogs, []); self.assertEqual(self.history, []); self.no_effects()
@@ -791,7 +791,7 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.assertEqual(sum(r['@type'] == 'getMessage' for r in self.raw.requests), reads)
             self.assertEqual(self.send(did, family)['status'], 'expired')
             self.broker._policy = legacy_policy
-            self.assertEqual(self.revise(updated['draft']['draft_id'], family, True)['status'], 'unavailable')
+            self.assertEqual(disabled(self.revise(updated['draft']['draft_id'], family, True)),('capability_disabled',list(CAPS)))
             self.broker._policy = POLICY
             legacy = self.revise(updated['draft']['draft_id'], family, True)['reply']
             self.assertNotEqual(legacy['reply_target']['source_sha256'], original['reply_target']['source_sha256'])
@@ -800,7 +800,7 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.raw.source = mixed()
             for capability in CAPS:
                 self.broker._policy = self.denied(capability)
-                self.assertEqual(self.revise(legacy['draft']['draft_id'], family, True)['status'], 'unavailable')
+                self.assertEqual(disabled(self.revise(legacy['draft']['draft_id'], family, True)),('capability_disabled',[capability]))
             self.broker._policy = POLICY
             fresh = self.revise(legacy['draft']['draft_id'], family, True)['reply']
             self.assertEqual(fresh['reply_target'], original['reply_target'])

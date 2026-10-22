@@ -12,7 +12,7 @@ from unittest.mock import patch
 from telegram_search_mcp.config import RuntimePolicy
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
-from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR
+from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR, disabled
 from test_artifact_replies import ArtifactSendFixture, content_fixture
 
 MARKER = '[untrusted Telegram evidence] '
@@ -273,10 +273,10 @@ class CaptionLifecycleRisks:
         op,payload=self.preparation()
         for missing in CAPS:
             policy=RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c!=missing))
-            self.broker._policy=policy;self.assertEqual(self.dispatch(op,payload)['status'],'unavailable')
+            self.broker._policy=policy;self.assertEqual(disabled(self.dispatch(op,payload)),('capability_disabled',[missing]))
             self.broker._policy=POLICY;did=self.prepare()['draft']['draft_id'];self.broker._policy=policy
             for operation,extra in [(self.ops[0],{}),(self.ops[1],self.extra()),(self.ops[2],{})]:
-                self.assertEqual(self.dispatch(operation,dict(draft_id=did,**extra))['status'],'unavailable')
+                self.assertEqual(disabled(self.dispatch(operation,dict(draft_id=did,**extra))),('capability_disabled',[missing]))
             self.assertEqual(self.send(did)['status'],'expired');self.assertEqual(self.sends(),[])
         for mode,want in [('sent','sent'),('caption' if self.artifact_path else 'wrong','outcome_unknown'),('properties','failed')]:
             self.broker._policy=POLICY;self.raw.mode='sent' if mode=='properties' else mode;self.raw.can_reply=mode!='properties'
@@ -316,11 +316,11 @@ class CaptionLifecycleRisks:
         self.assertEqual(revision['reply_target'],preview['reply_target']);self.assertEqual(self.send(did)['status'],'expired')
         did=revision['draft']['draft_id'];self.raw.source=raw_caption(entities=[])
         self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_media_targets',))
-        self.assertEqual(self.dispatch(self.ops[2],{'draft_id':did})['status'],'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=POLICY;plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
         self.assertNotEqual(plain['reply_target']['source_sha256'],preview['reply_target']['source_sha256'])
         self.raw.source=raw_caption();self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_media_targets',))
-        self.assertEqual(self.dispatch(self.ops[2],{'draft_id':did})['status'],'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=POLICY;styled=self.dispatch(self.ops[2],{'draft_id':did})['reply']
         self.assertEqual(styled['reply_target']['text'],display());self.assertEqual(self.sends(),[])
 

@@ -33,7 +33,7 @@ from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityE
 from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
-                       required_capabilities)
+                       missing_capabilities, required_capabilities)
 from .next_actions import NEXT_ACTIONS, guard_suffix
 from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPageResponse,
     PageSelection, AttachmentCursor)
@@ -236,7 +236,8 @@ _REPLY = (
     "OGG voice note reply_media_targets; styled text or captions reply_formatted_targets plus one per entity "
     "family present ("
     + "; ".join(f"{family} {capability}" for family, capability in _REPLY_FAMILIES)
-    + "); a forum topic topic_text_send. Without them the source is refused without content. " + _UNTRUSTED
+    + "); a forum topic topic_text_send. Without them the result is capability_disabled, naming only "
+    "missing_capabilities and no source content. " + _UNTRUSTED
 )
 _SELECTION = ("A selection from retain_selection (also needs retained_selections) may replace the raw source; it "
               "expires after a bounded time set by the owner's policy, and selection_unavailable means retain the "
@@ -1764,7 +1765,7 @@ def build_server(
                     required = required_capabilities(_capability)
                     if kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None:
                         required += ('retained_selections',)
-                    missing = [name for name in required if name not in runtime_policy.enabled_capabilities]
+                    missing = missing_capabilities(runtime_policy, *required)
                     if missing:
                         raise CompatibilityError("capability_disabled")
                 except CompatibilityError as error:

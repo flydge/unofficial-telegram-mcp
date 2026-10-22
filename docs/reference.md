@@ -126,7 +126,7 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
 | `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
 | `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
-| `enable_capability` | `capability_disabled` | the guard text |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools |
 | `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
@@ -1503,6 +1503,42 @@ ordinary message. Never automatically retry. Only exact late evidence may refine
 the original attempt through `get_send_status`, within the existing 900-second
 observation retention. Controlled transport tests establish technical behavior;
 actual Telegram delivery and the owner dialog require their own live verification.
+
+### Disabled source capabilities (0.54 candidate)
+
+When a reply needs a capability the trusted policy does not enable, the eight reply
+tools (`prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft`,
+`refresh_reply_draft` and their four artifact counterparts) return a typed result
+instead of `unavailable`:
+
+```json
+{"status": "capability_disabled", "reply": null,
+ "detail": "reply needs capabilities the owner has not enabled: missing_capabilities",
+ "missing_capabilities": ["reply_identity_targets", "reply_lexical_targets"],
+ "next_action": "enable_capability"}
+```
+
+(The revision tools add `"previous_draft_id": null`.) `missing_capabilities` holds only
+names from the closed capability set, never input or source text, each once, in the
+order the refused check requires them, extending the guard's rule: the tool's own
+capability, then `send`, then the request's own options (`formatted_text_send` for
+outgoing styles, `topic_text_send` for a selected topic), which are checked together
+before Telegram is read; then what the selected source needs, in its family order
+(`reply_media_targets`, `reply_formatted_targets`, the family that selected the
+source's version, then every other present family in the order bank card, phone,
+email, URL, DateTime, lexical, identity), with `topic_text_send` last for a source in
+a forum topic. The guard and the broker refuse the tool's own capability and `send`
+first, so in practice the list names options and source families. A refresh names
+what the newly read source needs. Naming the families reveals which entity kinds the
+chosen message contains; the client chose that message and already has read access.
+
+Only capability-driven refusals change. A foreign or unknown draft, an account or
+session switch, expiry, a recipient that differs from the anchor and every
+unsupported or malformed source still return `unavailable` with the fixed
+`reply draft is unavailable`. A send of a reply draft whose capability was disabled
+keeps the existing `expired` result. `missing_capabilities` and `next_action` are
+omitted from every other result, so those results are unchanged. The output schemas
+of the eight tools changed.
 
 
 ## Artifact replies

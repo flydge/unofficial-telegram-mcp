@@ -84,11 +84,11 @@ class ClosedMapTests(unittest.TestCase):
                             shell = model.model_construct(status=status, stop_reason=reason)
                             condition = shell.next_action_condition()
                             self.assertTrue(condition is None or condition in NEXT_ACTIONS)
-        # Every spec condition except the guard-only ones is reachable from a structured response.
+        # Every spec condition except the guard-only config_stale is reachable from a structured response.
         reachable = {condition for model in carriers.values()
                      for condition in (*model.NEXT_ACTION_STATUSES.values(), *model.NEXT_ACTION_STOP_REASONS.values())}
-        self.assertEqual(reachable, set(NEXT_ACTIONS) - {'config_stale', 'capability_disabled'})
-        self.assertGreaterEqual(len(carriers), 28)
+        self.assertEqual(reachable, set(NEXT_ACTIONS) - {'config_stale'})
+        self.assertGreaterEqual(len(carriers), 30)
 
     def test_only_discovery_maps_its_own_expired_status(self):
         expired = {name for name, models in response_models().items() for model in models

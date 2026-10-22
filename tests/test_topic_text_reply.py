@@ -36,6 +36,7 @@ NATIVE_TOPIC = {'@type': 'messageTopicForum', 'forum_topic_id': 41}
 ANCHOR = {'chat_id': CHAT, 'message_id': 55}
 BODY = 'Exact topic reply 🙂'
 CAPS = ('send', 'reply_text_send', 'topic_text_send', 'reply_formatted_targets')
+self_capabilities = ('topic_text_send', 'reply_text_send')
 SEND_OPTIONS = {'@type': 'messageSendOptions', 'suggested_post_info': None,
   'disable_notification': False, 'from_background': False, 'protect_content': False,
   'allow_paid_broadcast': False, 'paid_message_star_count': 0,
@@ -372,7 +373,8 @@ class TopicReplyTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'capability_disabled')
           else:
             result = h.dispatch(operation, {'draft_id': did, **extra})
-            self.assertEqual((result['status'], result.get('reply')), ('unavailable', None))
+            self.assertEqual((result['status'], result.get('reply'), result['missing_capabilities']),
+                             ('capability_disabled', None, [capability]))
         if capability == 'send':
           with self.assertRaises(CompatibilityError) as caught:
             h.send()
@@ -388,7 +390,8 @@ class TopicReplyTests(unittest.TestCase):
             h.prepare_result()
           self.assertEqual(caught.exception.code, 'capability_disabled')
         else:
-          self.assertEqual(h.prepare_result()['status'], 'unavailable')
+          created = h.prepare_result()
+          self.assertEqual((created['status'], created['missing_capabilities']), ('capability_disabled', [capability]))
         self.assertEqual(h.broker._drafts.known_ids(), ids)
         self.assertIs(h.broker._drafts._entries[did], entry)
         self.assertEqual(entry.state, 'pending'); self.assertIs(entry.draft, original_draft)
@@ -401,7 +404,10 @@ class TopicReplyTests(unittest.TestCase):
           h.prepare(); count = len(h.broker._drafts._entries)
           hook = h.arm_read(native_kind, lambda: h.mutate(change))
           result = h.prepare_result()
-          self.assertEqual((result['status'], result['reply']), ('unavailable', None))
+          # A capability withdrawn mid-preparation is named; any other change reveals nothing (0.54).
+          expected = ('capability_disabled', [change]) if change in self_capabilities else ('unavailable', None)
+          self.assertEqual((result['status'], result.get('missing_capabilities')), expected)
+          self.assertIsNone(result['reply'])
           self.assertEqual(len(h.broker._drafts._entries), count)
           self.assertEqual(hook['fired'], 1, 'the selected preparation boundary must be reached')
           self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
@@ -875,7 +881,10 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
               diagnostic = ' '.join(getattr(block, 'text', '') for block in result.content).lower()
               self.assertIn('capability', diagnostic)
             else:
-              self.assertEqual((result.structured_content['result']['status'], result.structured_content['result']['reply']), ('unavailable', None))
+              # The selected topic needs topic_text_send: named before any Telegram read (0.54).
+              self.assertEqual(result.structured_content['result'], {'status': 'capability_disabled', 'reply': None,
+                'detail': 'reply needs capabilities the owner has not enabled: missing_capabilities',
+                'missing_capabilities': ['topic_text_send'], 'next_action': 'enable_capability'})
             self.assertEqual((h.raw.sent, h.approvals, h.register_count, len(h.broker._drafts._entries)), ([], [], 0, 0))
 
 

@@ -46,6 +46,13 @@ def outgoing(identifier=-10, **changes):
         'reply_to':reply_meta(),**changes}
 
 
+def disabled(result):
+    """(status, missing_capabilities) of a reply result; a capability refusal names the missing ones (0.54)."""
+    if not isinstance(result, dict):
+        result = result.model_dump(mode='json')
+    return result['status'], result.get('missing_capabilities')
+
+
 class Raw:
     def __init__(self):
         self.sent=[]; self.events=deque(); self.source=target(); self.account=7

@@ -17,7 +17,7 @@ from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.reply_media_sources import media_content, render_content, validate_content
-from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR
+from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR, disabled
 from test_artifact_replies import ArtifactSendFixture, content_fixture
 
 MARKER = '[untrusted Telegram evidence] '
@@ -416,10 +416,10 @@ class LexicalMediaLifecycleRisks:
             for enabled in itertools.combinations(CAPS, count):
                 missing = tuple(c for c in CAPS if c not in enabled)
                 self.restore(); self.deny(*missing)
-                self.assertEqual(self.dispatch(op, payload)['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(op, payload)),('capability_disabled',list(missing)))
                 self.restore(); did = self.prepare()['draft']['draft_id']; self.deny(*missing)
                 for operation, extra in ((self.ops[0], {}), (self.ops[1], self.extra()), (self.ops[2], {})):
-                    self.assertEqual(self.dispatch(operation, dict(draft_id=did, **extra))['status'], 'unavailable')
+                    self.assertEqual(disabled(self.dispatch(operation, dict(draft_id=did, **extra))),('capability_disabled',list(missing)))
                 self.assertEqual(self.send(did)['status'], 'expired')
                 self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
@@ -487,7 +487,7 @@ class LexicalMediaLifecycleRisks:
                 # v6 -> v2 needs old triple; v1 -> v6 needs new triple.
                 if old_kind == 'v2' and missing != 'reply_media_targets': continue
                 self.deny(missing)
-                self.assertEqual(self.dispatch(self.ops[2], {'draft_id': did})['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[missing]))
                 self.broker._policy = POLICY
             refreshed = self.dispatch(self.ops[2], {'draft_id': did})['reply']
             self.assertEqual(self.send(did)['status'], 'expired')

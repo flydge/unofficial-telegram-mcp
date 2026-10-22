@@ -21,6 +21,7 @@ from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner
 from telegram_search_mcp.outgoing_stage import stage_approved_document, retire_staged_document
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.tdjson import TDLibClient
+from test_text_replies import disabled
 
 CLIENT = 'client_' + 'a' * 24
 FOREIGN = 'client_' + 'b' * 24
@@ -350,10 +351,10 @@ class IdentityLifecycle:
                 if lexical: self.raw.source['content']['text']['entities'].append(entity('Hashtag', 12, 4))
                 allowed = RuntimePolicy(enabled_capabilities=tuple(cap for cap in POLICY.enabled_capabilities if cap != missing))
                 self.broker._policy = allowed
-                self.assertEqual(self.dispatch(self.preparation, self.prepare_payload())['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.preparation, self.prepare_payload())),('capability_disabled',[missing]))
                 self.broker._policy = POLICY; did = self.prepare()['draft']['draft_id']; self.broker._policy = allowed
                 for op, extra in ((self.operations[0], {}), (self.operations[1], self.revision), (self.operations[2], {})):
-                    self.assertEqual(self.dispatch(op, {'draft_id': did, **extra})['status'], 'unavailable')
+                    self.assertEqual(disabled(self.dispatch(op, {'draft_id': did, **extra})),('capability_disabled',[missing]))
                 self.assertEqual(self.send(did)['status'], 'expired')
                 self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
@@ -409,12 +410,12 @@ class IdentityLifecycle:
     def test_refresh_requires_old_identity_authority_and_new_lexical_authority(self):
         did = self.prepare()['draft']['draft_id']; self.raw.source = target('abc', [entity('Bold')])
         self.broker._policy = RuntimePolicy(enabled_capabilities=BASE + ('reply_formatted_targets',))
-        self.assertEqual(self.dispatch(self.operations[2], {'draft_id': did})['status'], 'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': did})),('capability_disabled',['reply_identity_targets']))
         self.broker._policy = POLICY
         styled = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.raw.source = target()
         self.raw.source['content']['text']['entities'].append(entity('Hashtag', 12, 4))
         self.broker._policy = RuntimePolicy(enabled_capabilities=BASE + CAPS)
-        self.assertEqual(self.dispatch(self.operations[2], {'draft_id': styled['draft']['draft_id']})['status'], 'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': styled['draft']['draft_id']})),('capability_disabled',['reply_lexical_targets']))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
 
     def test_owner_denial_false_approval_and_foreign_owner_have_no_transport(self):

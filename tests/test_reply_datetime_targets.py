@@ -40,6 +40,7 @@ from telegram_search_mcp.reply_drafts import (
 from telegram_search_mcp.schemas import SendPreparedArtifactRequest, SendPreparedTextRequest
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
 from telegram_search_mcp.tdjson import TDLibClient, ForbiddenTDLibRequest, _validate_bounded_request
+from test_text_replies import disabled
 
 CHAT = -10071
 MESSAGE = 901
@@ -447,7 +448,9 @@ class LifecycleTests(unittest.TestCase):
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
                 with self.subTest(family=family, missing=missing):
                     refused = self.prepare(family)
-                    self.assertEqual(refused.model_dump(mode="json"), {"status": "unavailable", "reply": None, "detail": "reply draft is unavailable"})
+                    self.assertEqual(refused.model_dump(mode="json"), {"status": "capability_disabled", "reply": None,
+                        "detail": "reply needs capabilities the owner has not enabled: missing_capabilities",
+                        "missing_capabilities": [missing], "next_action": "enable_capability"})
             self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
             self.assertEqual(self.prepare(family).status, "prepared")
         self.assertEqual(self.effects(), [])
@@ -494,11 +497,11 @@ class LifecycleTests(unittest.TestCase):
                     lambda: self.broker._revise_reply_artifact_draft(RefreshReplyArtifactDraftRequest(draft_id=old), client_id=CLIENT))
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_datetime_targets"))
                 before = len(self.raw.requests)
-                self.assertEqual(refresh().status, "unavailable")
+                self.assertEqual(disabled(refresh()),('capability_disabled',['reply_datetime_targets']))
                 self.assertFalse(any(r["@type"] == "getMessage" for r in self.raw.requests[before:]))
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_identity_targets"))
                 self.raw.source = message("Date@user", [entity(), entity("textEntityTypeMention", offset=4, length=5)])
-                self.assertEqual(refresh().status, "unavailable")
+                self.assertEqual(disabled(refresh()),('capability_disabled',['reply_identity_targets']))
                 self.assertEqual(self.inspect(old, family).reply, prepared.reply)
                 self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
                 revised = refresh()

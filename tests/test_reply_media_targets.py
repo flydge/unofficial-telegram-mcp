@@ -4,12 +4,13 @@ import hashlib
 import json
 import unittest
 from unittest.mock import patch
-from test_text_replies import ReplyFixture, target, ANCHOR, CLIENT, FOREIGN
+from test_text_replies import ReplyFixture, target, ANCHOR, CLIENT, FOREIGN, disabled
 from test_artifact_replies import content_fixture, file_fixture, ArtifactSendFixture
 from telegram_search_mcp.config import RuntimePolicy
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message, EVIDENCE_MARKER
 
 MEDIA_POLICY = RuntimePolicy(enabled_capabilities=('send','reply_text_send','reply_artifact_send','reply_media_targets'))
+MEDIA_OFF = ('capability_disabled', ['reply_media_targets'])
 
 class MediaReplyFixture(ReplyFixture):
     def setUp(self):
@@ -160,8 +161,8 @@ class MediaLifecycleTests(MediaReplyFixture, unittest.TestCase):
         self.broker._policy=MEDIA_POLICY;did=self.prepare()['draft']['draft_id']
         self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_text_send'))
         for op,extra in [('get_reply_draft',{}),('update_reply_draft',{'text':'new'}),('refresh_reply_draft',{})]:
-            self.assertEqual(self.dispatch(op,dict(draft_id=did,**extra))['status'],'unavailable')
-        self.assertEqual(self.dispatch('prepare_reply_text_send',{'recipient':123,'text':'x','reply_to':ANCHOR})['status'],'unavailable')
+            self.assertEqual(disabled(self.dispatch(op,dict(draft_id=did,**extra))),MEDIA_OFF)
+        self.assertEqual(disabled(self.dispatch('prepare_reply_text_send',{'recipient':123,'text':'x','reply_to':ANCHOR})),MEDIA_OFF)
         self.raw.source=target();self.assertEqual(self.dispatch('prepare_reply_text_send',{'recipient':123,'text':'x','reply_to':ANCHOR})['status'],'prepared')
     def test_refresh_checks_old_and_new_media_and_revision_ownership(self):
         did=self.prepare()['draft']['draft_id']
@@ -170,11 +171,11 @@ class MediaLifecycleTests(MediaReplyFixture, unittest.TestCase):
         revised=self.dispatch('update_reply_draft',{'draft_id':did,'text':'New reply'})['reply']
         self.assertEqual(old['reply_target'],revised['reply_target']);self.assertNotEqual(did,revised['draft']['draft_id'])
         self.raw.source=target();self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_text_send'))
-        rid=revised['draft']['draft_id'];self.assertEqual(self.dispatch('refresh_reply_draft',{'draft_id':rid})['status'],'unavailable')
+        rid=revised['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_draft',{'draft_id':rid})),MEDIA_OFF)
         self.broker._policy=MEDIA_POLICY;plain=self.dispatch('refresh_reply_draft',{'draft_id':rid})['reply']
         self.assertEqual(plain['reply_target']['text'],EVIDENCE_MARKER+'Source full text')
         self.raw.source=target(content=content_fixture('photo'));self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_text_send'))
-        pid=plain['draft']['draft_id'];self.assertEqual(self.dispatch('refresh_reply_draft',{'draft_id':pid})['status'],'unavailable')
+        pid=plain['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_draft',{'draft_id':pid})),MEDIA_OFF)
         self.broker._policy=MEDIA_POLICY;self.assertEqual(self.dispatch('refresh_reply_draft',{'draft_id':pid})['status'],'revised')
     def test_all_media_kinds_send_exact_text_with_volatile_mutations_and_no_retry(self):
         for kind in ('document','photo','voice_note'):
@@ -220,7 +221,7 @@ class MediaArtifactTests(ArtifactSendFixture, unittest.TestCase):
         self.broker._policy=MEDIA_POLICY;did=self.prepare()['draft']['draft_id']
         self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_artifact_send'))
         for op,extra in [('get_reply_artifact_draft',{}),('update_reply_artifact_draft',{'caption':'new'}),('refresh_reply_artifact_draft',{})]:
-            self.assertEqual(self.dispatch(op,dict(draft_id=did,**extra))['status'],'unavailable')
+            self.assertEqual(disabled(self.dispatch(op,dict(draft_id=did,**extra))),MEDIA_OFF)
     def test_artifact_revocation_and_raising_guard_after_registration_no_transport(self):
         for mode in ('revoke','raise'):
             self.broker._policy=MEDIA_POLICY;self.raw.source=target(content=content_fixture('document'));did=self.prepare()['draft']['draft_id']
@@ -316,11 +317,11 @@ class AdditionalMediaArtifactTests(ArtifactSendFixture, unittest.TestCase):
         self.assertEqual(update['reply_target'],preview['reply_target']);self.assertNotEqual(update['draft']['draft_id'],did)
         self.assertEqual(self.send(did)['status'],'expired')
         self.raw.source=target();self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_artifact_send'))
-        new=update['draft']['draft_id'];self.assertEqual(self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})['status'],'unavailable')
+        new=update['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})),MEDIA_OFF)
         self.broker._policy=MEDIA_POLICY;plain=self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})['reply']
         self.assertEqual(plain['draft']['sha256'],preview['draft']['sha256'])
         self.raw.source=target(content=content_fixture('voice_note'));self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_artifact_send'))
-        pid=plain['draft']['draft_id'];self.assertEqual(self.dispatch('refresh_reply_artifact_draft',{'draft_id':pid})['status'],'unavailable')
+        pid=plain['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_artifact_draft',{'draft_id':pid})),MEDIA_OFF)
         self.broker._policy=MEDIA_POLICY;self.assertEqual(self.dispatch('refresh_reply_artifact_draft',{'draft_id':pid})['status'],'revised')
     def test_failed_media_receipt_replay_requires_capability_on_both_paths(self):
         for op in ('send_prepared_artifact','send_prepared_text'):

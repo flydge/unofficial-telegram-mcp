@@ -14,7 +14,7 @@ from unittest.mock import patch
 from telegram_search_mcp.config import RuntimePolicy, load_runtime_policy
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message, EVIDENCE_MARKER
-from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR
+from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR, disabled
 from test_artifact_replies import ArtifactSendFixture, content_fixture
 
 STYLE_POLICY = RuntimePolicy(enabled_capabilities=('send','reply_text_send','reply_artifact_send','reply_formatted_targets'))
@@ -230,10 +230,10 @@ class FormattedLifecycleRisks:
         self.broker._policy=BASE_POLICY
         op='prepare_reply_artifact_send' if self.artifact_path else 'prepare_reply_text_send'
         payload=dict(recipient=123,reply_to=ANCHOR,**(dict(artifact_id=self.artifact.artifact_id,display_name='evidence.txt',mime_type='text/plain',caption='Caption',kind='document') if self.artifact_path else {'text':'Final reply'}))
-        self.assertEqual(self.dispatch(op,payload)['status'],'unavailable')
+        self.assertEqual(disabled(self.dispatch(op,payload)),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=STYLE_POLICY;did=self.prepare()['draft']['draft_id'];self.broker._policy=BASE_POLICY
         for op,extra in [(self.ops[0],{}),(self.ops[1],self.revision_extra()),(self.ops[2],{})]:
-            self.assertEqual(self.dispatch(op,dict(draft_id=did,**extra))['status'],'unavailable')
+            self.assertEqual(disabled(self.dispatch(op,dict(draft_id=did,**extra))),('capability_disabled',['reply_formatted_targets']))
         self.assertEqual(self.send(did)['status'],'expired');self.assertEqual(self.sends(),[])
         for mode,want in [('sent','sent'),('caption' if self.artifact_path else 'wrong','outcome_unknown'),('properties','failed')]:
             self.broker._policy=STYLE_POLICY;self.raw.mode='sent' if mode=='properties' else mode;self.raw.can_reply=mode!='properties'
@@ -302,10 +302,10 @@ class FormattedLifecycleRisks:
         self.assertEqual(revised['reply_target'],preview['reply_target']);self.assertNotEqual(revised['preview_sha256'],preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'],'expired')
         did=revised['draft']['draft_id'];self.raw.source=target();self.broker._policy=BASE_POLICY
-        self.assertEqual(self.dispatch(self.ops[2],{'draft_id':did})['status'],'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=STYLE_POLICY;plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
         self.raw.source=styled();self.broker._policy=BASE_POLICY
-        self.assertEqual(self.dispatch(self.ops[2],{'draft_id':did})['status'],'unavailable')
+        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=STYLE_POLICY;new=self.dispatch(self.ops[2],{'draft_id':did})['reply']
         self.assertNotEqual(new['reply_target']['source_sha256'],plain['reply_target']['source_sha256']);self.assertEqual(self.sends(),[])
     def test_range_language_quote_and_unsafe_source_drift_during_owner_decision(self):

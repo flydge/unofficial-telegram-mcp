@@ -22,6 +22,7 @@ from telegram_search_mcp.outgoing_stage import stage_approved_document, retire_s
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.reply_formatted_sources import formatted_text
 from telegram_search_mcp.tdjson import TDLibClient
+from test_text_replies import disabled
 
 CHAT = 123
 MESSAGE = 55
@@ -395,12 +396,12 @@ class EmailAddressLifecycleTests(unittest.TestCase):
         for family in ('text','artifact'):
             for missing in SOURCE_CAPS:
                 denied=RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c!=missing))
-                self.broker._policy=denied; self.assertEqual(self.prepare(family)['status'],'unavailable')
+                self.broker._policy=denied; self.assertEqual(disabled(self.prepare(family)),('capability_disabled',[missing]))
                 self.broker._policy=POLICY; did=self.prepared(family)['draft']['draft_id']; self.broker._policy=denied
                 reads=sum(r['@type']=='getMessage' for r in self.raw.requests)
-                self.assertEqual(self.dispatch(self.operation('get',family),{'draft_id':did})['status'],'unavailable')
-                self.assertEqual(self.revise(did,family)['status'],'unavailable')
-                self.assertEqual(self.revise(did,family,True)['status'],'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.operation('get',family),{'draft_id':did})),('capability_disabled',[missing]))
+                self.assertEqual(disabled(self.revise(did,family)),('capability_disabled',[missing]))
+                self.assertEqual(disabled(self.revise(did,family,True)),('capability_disabled',[missing]))
                 self.assertEqual(self.send(did,family)['status'],'expired')
                 self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
         self.assertEqual(self.dialogs,[])
@@ -477,13 +478,13 @@ class EmailAddressLifecycleTests(unittest.TestCase):
             self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
             self.assertEqual(self.send(did,family)['status'],'expired')
             self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_formatted_targets','reply_url_targets'))
-            self.assertEqual(self.revise(revised['draft']['draft_id'],family,True)['status'],'unavailable')
+            self.assertEqual(disabled(self.revise(revised['draft']['draft_id'],family,True)),('capability_disabled',['reply_email_targets','reply_datetime_targets','reply_lexical_targets','reply_identity_targets']))
             self.broker._policy=POLICY
             older=self.revise(revised['draft']['draft_id'],family,True)['reply']
             self.assertNotEqual(older['reply_target']['source_sha256'],original['reply_target']['source_sha256'])
             self.assertEqual(self.send(revised['draft']['draft_id'],family)['status'],'expired')
             self.raw.source=mixed(); self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_formatted_targets','reply_url_targets'))
-            self.assertEqual(self.revise(older['draft']['draft_id'],family,True)['status'],'unavailable')
+            self.assertEqual(disabled(self.revise(older['draft']['draft_id'],family,True)),('capability_disabled',['reply_email_targets','reply_datetime_targets','reply_lexical_targets','reply_identity_targets']))
             self.broker._policy=POLICY
             newest=self.revise(older['draft']['draft_id'],family,True)['reply']
             self.assertEqual(newest['reply_target'],original['reply_target'])
