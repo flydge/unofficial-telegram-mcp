@@ -421,11 +421,12 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `claude_desktop_registration_conflict` | Claude Desktop has a different `telegram_search` entry. |
 | `claude_desktop_config_unsupported` | The Claude Desktop config cannot be rewritten while keeping every neighbour exactly. |
 | `registration_conflict` | The Codex `telegram_search` subtree is not one the installer owns, or its own keys and values changed (comments after it do not count). |
-| `foreign_registration` | The Codex config changed after the transaction prepared its edit. |
+| `foreign_registration` | During a first install, the Codex `telegram_search` entry changed (or one appeared) after the transaction prepared its edit; edits elsewhere in the file are merged. |
 | `service_conflict` | The broker plist or its live registration is not an exactly known definition. |
 | `skill_conflict` | A skill directory exists that this installation did not publish, or its content differs from the release's. |
 | `foreign_release`, `foreign_receipt`, `foreign_pointer`, `foreign_telegram-search`, `foreign_telegram-setup`, `foreign_claude-telegram-search`, `foreign_claude-telegram-setup` | That path exists and is not the object this transaction recorded. |
-| `runtime_conflict`, `initialization_conflict`, `target_conflict`, `overlapping_paths` | The installation root, install intent or a target is not in the expected state, or the roots overlap. |
+| `target_conflict` | During an upgrade or rollback, the Codex `telegram_search` entry changed after the transaction prepared its edit (edits elsewhere are merged), or another target is not in the expected state. |
+| `runtime_conflict`, `initialization_conflict`, `overlapping_paths` | The installation root or install intent is not in the expected state, or the roots overlap. |
 | `metadata_conflict`, `transaction_conflict` | A receipt, pointer, adoption record or journal is inconsistent. |
 | `recovery_limit` | A bounded number of recovery attempts or packets is used up. |
 | `pending_send_unresolved` | The running broker reports a connected client context, or the question could not be answered. |
@@ -438,6 +439,11 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
+
+A refusal raised after an upgrade's, a rollback's or an adopting first install's broker stop, and before
+`current.json` switches, first writes the previous broker plist back byte for byte and bootstraps that
+broker again if it was running; the transaction stays unfinished until the same command is repeated
+([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under
 [DMG path](install.md#dmg-path); the plugin's `bin/install` codes are listed under

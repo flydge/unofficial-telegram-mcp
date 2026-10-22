@@ -1,7 +1,9 @@
 """Kill sweep (CLIENTS-13): a hard kill (a forked child, `os._exit`) right after every filesystem create,
 rename, unlink, mkdir and rmdir and after every launchctl or claude CLI call of an upgrade, a rollback, an
-uninstall, `--adopt-legacy` on upgrade and on first install, and an uninstall that keeps adoption backups; the
-parent then resumes the same action.
+uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, and a
+late refusal (our Codex entry, or the adopted one, changed while the release is copied) whose journaled
+service restore runs after the broker stop of an upgrade or of an adopting first install; the parent then
+resumes the same action. A late refusal's resume refuses with the same code and leaves the same restored state.
 
 The resumed final state must equal the uninterrupted run's: a normalised tree of the whole synthetic base, every
 publication binding resolved to the path that now holds that inode. Nothing may be left anywhere (no staging
@@ -294,6 +296,56 @@ def _kept_check(h, result):
     h.assertEqual(found, sorted(h.backups))
 
 
+def _late_edit(h, old, new):
+    """A checkpoint that changes the Codex entry by hand once the release is copied (once: a resume finds it done)."""
+    config = h.codex / 'config.toml'
+
+    def checkpoint(stage):
+        if stage == 'release' and old in config.read_bytes():
+            config.write_bytes(config.read_bytes().replace(old, new))
+    return checkpoint
+
+
+def _refusal(action):
+    try:
+        return action()
+    except bundle_install.InstallError as error:
+        return {'refused': str(error), 'pending_action': error.pending_action}
+
+
+OURS, CHANGED = b'tool_timeout_sec = 600', b'tool_timeout_sec = 601'
+LEGACY, LEGACY_CHANGED = b'"telegram_search_mcp.server"]', b'"telegram_search_mcp.server", "--changed"]'
+
+
+def _late_upgrade_prepare(h):
+    _upgrade_prepare(h)
+    h.served = (h.plist.read_bytes(), h.launchctl.loaded)
+
+
+def _late_upgrade_check(h, result):
+    h.assertEqual(result, {'refused': 'target_conflict', 'pending_action': None})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)  # The old release keeps serving.
+    h.assertEqual(h.launchctl.verbs()[-2:], ['print', 'bootstrap'])
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+    _upgrade_check(h, h.install(h.new))
+
+
+def _late_adopt_prepare(h):
+    _adopt_first_prepare(h)
+    h.served = (h.plist.read_bytes(), h.launchctl.loaded)
+
+
+def _late_adopt_check(h, result):
+    h.assertEqual(result, {'refused': 'foreign_registration', 'pending_action': None})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)
+    h.assertEqual(h.plist.read_bytes(), h.backups['service'])
+    h.assertFalse((h.runtime / 'current.json').exists())
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(LEGACY_CHANGED, LEGACY))
+    _adopt_first_check(h, h.install(h.packet, adopt_legacy=True))
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -309,6 +361,12 @@ SCENARIOS = {
     'uninstall_keeps_backups': Scenario(_kept_prepare,
                                         lambda h, lc, cl: h.change('uninstall', launchctl=lc, claude_runner=cl),
                                         _kept_check, write_ahead=False),
+    'late_refusal_upgrade': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_late_edit(h, OURS, CHANGED))), _late_upgrade_check,
+        write_ahead=False),
+    'late_refusal_adopt_first_install': Scenario(_late_adopt_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
+        h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_late_edit(h, LEGACY, LEGACY_CHANGED))),
+        _late_adopt_check, write_ahead=False),
 }
 
 
@@ -533,6 +591,12 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_uninstall_keeps_adoption_backups(self):
         self.sweep('uninstall_keeps_backups')
+
+    def test_late_refusal_restores_the_service_of_an_upgrade(self):
+        self.sweep('late_refusal_upgrade')
+
+    def test_late_refusal_restores_the_adopted_broker_of_a_first_install(self):
+        self.sweep('late_refusal_adopt_first_install')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

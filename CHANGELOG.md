@@ -67,7 +67,10 @@ wait for the owner session; no signed DMG or public release asset exists yet.
     one, owned registrations and skills are re-registered, the broker plist is rewritten, only the
     `expected_package_version` line of `runtime.toml` changes, and `current.json` switches last. A running
     broker with a connected client context refuses first (`pending_send_unresolved`), and a lower
-    version refuses (`downgrade_refused`).
+    version refuses (`downgrade_refused`). A client file edited while a change runs is merged; only a
+    change of our own entry refuses. A refusal after the broker stop first writes the previous plist back
+    byte for byte and starts that broker again if it ran, so the installed release keeps serving until
+    the same command finishes the change.
   - `launcher.py rollback` returns to the previous release while no newer state exists, and
     `launcher.py uninstall` removes only owned objects. The Telegram session, enrollment and Keychain are
     never written. The receipt moves to schema 2 and `status` reports Claude Desktop drift.

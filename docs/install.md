@@ -597,7 +597,12 @@ journaled so that an interruption resumes by repeating the command:
    Claude Desktop entry are replaced. Only entries the installation owns are replaced (see
    [owned client entries](#owned-client-entries)); an entry you removed is added back, and a different
    entry refuses (`registration_conflict`, `claude_registration_conflict`,
-   `claude_desktop_registration_conflict`).
+   `claude_desktop_registration_conflict`). Each client file is written over its bytes as they are at
+   that moment: an edit you make while the upgrade runs (another server, a profile, a setting) is kept
+   byte for byte, and our entry removed meanwhile is added back. Only our own Codex table or skill copy
+   changed since the upgrade started stops it there (`target_conflict`, `skill_conflict`; see
+   [a refusal after the broker stop](#a-refusal-after-the-broker-stop)); a changed Claude Code or Claude
+   Desktop entry is left alone and reported `failed`.
 4. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
    `policy_conflict`.
@@ -619,8 +624,37 @@ session unchanged. A refusal at the first check changes nothing at all; at a lat
 tree is already copied and the upgrade stays unfinished, so `rollback`, `uninstall` and another kit
 refuse as `transaction_pending` (`pending_action: upgrade`) until the same command is repeated. Quit the
 MCP clients, wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send
-is never retried by an upgrade. From the broker stop until the upgrade finishes, running MCP clients
-cannot reach the broker.
+is never retried by an upgrade. From the broker stop until the upgrade finishes, or until a refusal
+restores the broker (below), running MCP clients cannot reach the broker.
+
+#### A refusal after the broker stop
+
+A refusal raised after the broker stop and before `current.json` switches first restores the service,
+then refuses. Examples: `target_conflict` when you changed the `telegram_search` table in
+`~/.codex/config.toml` while the release was copied, `skill_conflict` for an edited skill copy,
+`policy_conflict` for a changed `expected_package_version` line. The restore writes the previous
+LaunchAgent plist back byte for byte (its bytes are kept in the transaction before the rewrite) and
+bootstraps the previous broker again if it was running, so the installed release keeps serving.
+A late refusal leaves exactly this:
+
+- `current.json` and `receipt.json` still name the installed release, and its broker and plist are as
+  they were before the upgrade.
+- The new release tree and the unfinished transaction stay.
+- Every client entry written before the refusal stays and already names the new release. In step order
+  that is the Codex subtree, then the skill copies, the Claude Code entry and the Claude Desktop entry,
+  then the `runtime.toml` line; a Codex refusal comes before any of them. Those clients cannot start the
+  server until the upgrade commits, because the launcher starts only the release the receipt names.
+- `rollback`, `uninstall` and another kit refuse as `transaction_pending` (`pending_action: upgrade`).
+
+Put back or remove the object the code names (a removed `telegram_search` table or skill copy is written
+again), then repeat the same command: it passes the pending-send gate, stops the broker again and
+resumes. The same holds for a rollback (`pending_action: rollback`) and for an adopting first install
+(`pending_action: install`, repeated with `--adopt-legacy`), where the foreign plist and broker come
+back. A restore never overwrites a plist changed since the stop: then the refusal is
+`service_conflict` (or `service_restart_failed` when the bootstrap fails) and the broker stays stopped
+until a repeat succeeds. A repeat after a kill during the restore finishes the restore and refuses with
+the same code. After eight late refusals in one transaction the next repeat refuses as `recovery_limit`
+before it stops the broker.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
@@ -644,7 +678,9 @@ RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
 
 It re-registers the previous release's entries by the same owned-entry rules, rewrites the broker plist,
 passes the same pending-send gate, restores the `runtime.toml` version line and switches `current.json`
-back. The restored receipt keeps the previous release's schema but records the rollback's own
+back. Client edits made meanwhile are kept as for an upgrade, and a refusal after its broker stop restores
+the current release's broker first ([a refusal after the broker stop](#a-refusal-after-the-broker-stop)).
+The restored receipt keeps the previous release's schema but records the rollback's own
 `claude_code` and `claude_desktop` outcomes, and the entries the rollback wrote are owned like an
 upgrade's, so a later upgrade replaces them and `uninstall` removes them. The result is `status: rolled_back` with `next_action: restart_mcp_clients`. Repeating the
 rollback, or running the kit of the release it went back to again (its `Install.command`, the same
@@ -733,7 +769,13 @@ then the printed activation command. It applies to a first install and to an upg
   transaction and listed in `adopted.json` in the installation root and in the receipt. The result
   lists the adopted clients in `adopted`.
 - A foreign broker is stopped only after the pending-send gate, and its plist is replaced by the new
-  definition. The `expected_package_version` line of `runtime.toml` follows, whatever its old value.
+  definition. The `expected_package_version` line of `runtime.toml` follows, whatever its old value. A
+  refusal after that stop and before the install commits writes the foreign plist back byte for byte and
+  starts that broker again if it was running; the install stays unfinished (`transaction_pending`,
+  `pending_action: install`) until the same command, with `--adopt-legacy`, is repeated
+  ([a refusal after the broker stop](#a-refusal-after-the-broker-stop)).
+- A Codex config edited while the install runs is merged; only a change of the adopted
+  `telegram_search` table itself refuses (`foreign_registration`).
 - `uninstall` keeps every backup, moved beside the removed root as
   `~/Library/Application Support/.TelegramSearch-adopted-<random>`; the result names it in
   `legacy_backups`.

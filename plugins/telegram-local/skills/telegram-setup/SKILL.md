@@ -136,6 +136,15 @@ again; stop after two refusals and tell the user that this same command finishes
   installation folder is repeated with the launcher inside
   `~/Library/Application Support/.TelegramSearch-removed-<random>/releases/<sha256>/`. Never edit
   `runtime.toml`, the broker plist or a registration to get past a refusal.
+- `target_conflict`, `skill_conflict`, `policy_conflict` or `foreign_registration` from an upgrade, a
+  rollback or a first install that adopts an older installation: the installer's own `telegram_search`
+  entry, skill copy or `runtime.toml` version line changed while it ran. When that comes after the broker
+  stop, the installer has already put the old broker back (its plist byte for byte, started again if it
+  was running), so the installed release keeps serving; the change stays unfinished
+  (`transaction_pending` for other actions), and clients whose entry was already switched start the
+  server only once the same command finishes. Tell the user which object changed; the user puts it back
+  or removes it themselves (a removed `telegram_search` table or skill copy is written again), then runs
+  the same command. Edits elsewhere in those files are kept and need nothing.
 
 ## Terminal fallback
 

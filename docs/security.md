@@ -1767,10 +1767,13 @@ controlling the same OS UID or make arbitrary editors participate in the lease.
 Initialization uses an inode-bound durable intent before root publication.
 Release, skills and local metadata retain staged-object publication records;
 pending recovery requires that exact object, not merely matching content. The
-owned Codex subtree still permits unrelated neighbor edits after its completed
-publication: its ownership hash covers only the table's own keys and values, not the comments and
+owned Codex subtree permits unrelated neighbor edits, after its completed publication and while a
+transaction runs: its ownership hash covers only the table's own keys and values, not the comments and
 blank lines tomlkit attaches after its last key (a comment above the next table), and a replacement or
-removal splices only the table's own lines, located exactly, so every other byte stays. Interrupted unbound packets are preserved without adoption, and
+removal splices only the table's own lines, located exactly, so every other byte stays. A config that
+changed after the transaction recorded its preimage is written over its current bytes while the
+`telegram_search` entry is still the preimage's (or was removed); any other entry refuses, even one equal
+to ours, because only the object the transaction wrote is ever taken as its own. Interrupted unbound packets are preserved without adoption, and
 recovery attempts are bounded.
 Current pointer publication occurs last; interrupted installations fail closed
 until exact checked recovery. A first install stops no active broker and adopts no foreign data.
@@ -1873,9 +1876,10 @@ install adds only an absent entry. An identical entry is `reused` and not owned.
 entry refuses the whole install before anything is created (`claude_desktop_registration_conflict`);
 only `--adopt-legacy` replaces one, after its exact bytes are backed up. An upgrade or rollback replaces
 the entry only while it still equals the owned one, and an uninstall removes it only while it is exactly
-that, so an entry you changed is kept. After an interruption the same write is repeated only over a file
-still byte-identical to the journaled preimage, at most 8 attempts, and a killed attempt's temporary is
-unlinked only while it is the journaled inode.
+that, so an entry you changed is kept. After an interruption the write is made again, planned over the
+file as it is then, only while our entry is still absent, the owned one or the adopted one, at most 8
+attempts, so a neighbour written meanwhile is kept; a killed attempt's temporary is unlinked only while it
+is the journaled inode.
 
 **Limits.** Claude Desktop may rewrite its configuration from memory while it runs; the read-only
 `status` action reports `drift` and the manual entry, and the install asks for a restart. The entry
@@ -2064,6 +2068,23 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
   plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
+- **A late refusal restores the service first.** Any refusal after the broker stop and before
+  `current.json` switches (the same for a rollback, and for an adopting first install before
+  `current.json` exists) first writes the previous plist back byte for byte, from a copy kept in the
+  transaction (`service.previous`, its hash journaled) before the first rewrite, and bootstraps the
+  previous broker again only if it was loaded. The restore is journaled: a write-ahead record carrying the
+  refusal's fixed code precedes its effects and a closing record follows them, every effect is decided
+  from the plist and launchd, and a run that finds the write-ahead record without the closing one
+  finishes the restore and refuses with the recorded code. A plist changed since the stop is never
+  overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
+  client entry written before the refusal, which already names the new release and so cannot start the
+  server until the repeat commits. The same command stops the broker again (gated again) and resumes; at
+  most eight stop cycles per transaction, after which it refuses (`recovery_limit`) before any bootout.
+- **Client edits made meanwhile are merged.** Each client file is written over its current bytes. Only a
+  change of our own Codex entry or skill copy (or, when adopting, of the adopted foreign Codex entry)
+  after the transaction recorded it refuses; a changed Claude Code or Claude Desktop entry is left alone
+  and reported `failed`, and an entry removed meanwhile is written again. Claude Code entries are
+  written only by its CLI, which keeps its neighbours.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
   receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,
   by the inode the install intent binds, with whatever else was put inside it; install, upgrade and
