@@ -1525,18 +1525,30 @@ order the refused check requires them, extending the guard's rule: the tool's ow
 capability, then `send`, then the reply's own options (`formatted_text_send` for
 outgoing styles, `topic_text_send` for a selected topic: those the request asks for
 and, for a stored draft, those the draft carries), which are checked together before
-Telegram is read; then what the source needs, in its family order
+Telegram is read (one exception for a styled update is noted below); then what the source needs, in its family order
 (`reply_media_targets`, `reply_formatted_targets`, the family that selected the
 source's version, then every other present family in the order bank card, phone,
 email, URL, DateTime, lexical, identity), with `topic_text_send` last for a source in
 a forum topic. The guard and the broker refuse the tool's own capability and `send`
 first, so in practice the list names options and source families. Stored drafts ask
 in the same order, so on one policy `get_reply_draft`, `update_reply_draft` and
-`refresh_reply_draft` name what `prepare_reply_text_send` names for the same options
-and source (a topic reply has no refresh). A refresh asks for the draft's own options
-before Telegram is read, then names what the newly read source needs; it no longer asks for the stored source it replaces, which it never
-shows again, so a refresh from a styled source to a plain one needs no family at all.
-Get and update keep asking for the stored source's families. Naming the families
+`prepare_reply_text_send` name the same list for the same options and source, with
+one exception: `update_reply_draft` with `outgoing_entities` checks the option the
+request itself asks for before the draft is looked up (see below), and the draft's
+topic is unknown until then. On a topic draft with styles and both
+`formatted_text_send` and `topic_text_send` off, that update therefore names only
+`formatted_text_send`, where `prepare_reply_text_send`, `get_reply_draft` and an
+update without styles name both. A topic reply has no refresh: `refresh_reply_draft`
+returns the fixed `unavailable` result for it before any option is named, so it
+never suggests `enable_capability`. For any other draft a refresh asks for the
+draft's own options before Telegram is read, then names only what the newly read
+source needs. It does not ask for the stored source it replaces, which it never shows
+again, and it builds the draft from the new source alone, so a refresh from a styled
+source to a plain one needs no family at all. Get and update keep asking for the
+stored source's families. Status, list and cancel stay send-only for a plain reply
+draft: `list_drafts` lists it and `cancel_draft` cancels it with its source's
+families off. A reply draft with a selected topic or outgoing styles stays bound to
+its own option and its source's families for them. Naming the families
 reveals which entity kinds the chosen message contains; the client chose that
 message and already has read access.
 
@@ -1701,9 +1713,9 @@ and unknown/open DateTime formats remain unsupported. Exact fieldless Relative
 uses text v11 or caption v12; explicitly specified Absolute uses text v13 or
 caption v14 below. Null-only DateTime captions retain private v10.
 
-Opt-in remains required for preparation, stored inspection/update, both stored
-and refreshed source types, owner confirmation, final guards and terminal receipt
-replay. Gated media and styled-source terminal replay additionally requires the
+Opt-in remains required for preparation, stored inspection/update, a refresh whose
+newly read source needs it (the stored source it replaces is not asked), owner
+confirmation, final guards and terminal receipt replay. Gated media and styled-source terminal replay additionally requires the
 original provider instance and observation epoch; restart or epoch change makes
 replay unavailable. Pending expiry uses wall time; attempted replay expires at the
 inclusive monotonic 900-second retention boundary. Plain-source behavior is

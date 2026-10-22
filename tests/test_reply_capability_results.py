@@ -185,6 +185,21 @@ class TextReplyCapabilityTests(ReplyFixture, unittest.TestCase):
         self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
         self.assertEqual((self.sends(), self.approvals), ([], []))
 
+    def test_list_status_and_cancel_stay_send_only_for_a_plain_reply_draft(self):
+        # Spec decision (0.54): only get, update and send ask for the stored source's families.
+        self.policy(*STYLED_FAMILIES)
+        did = self.prepare_raw()['reply']['draft']['draft_id']
+        self.policy()  # every source family off, send and the reply tool on
+        listed = self.dispatch('list_drafts', {})
+        self.assertEqual((listed['status'], [d['draft_id'] for d in listed['drafts']]), ('listed', [did]))
+        self.assertEqual(self.dispatch('get_send_status', {'draft_id': did})['evidence'], 'local_pending')
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did}), disabled(*STYLED_FAMILIES))
+        self.assertEqual(self.send(did)['status'], 'expired')
+        cancelled = self.dispatch('cancel_draft', {'draft_id': did})
+        self.assertEqual((cancelled['status'], cancelled['draft_id']), ('cancelled', did))
+        self.assertEqual(self.dispatch('list_drafts', {})['drafts'], [])
+        self.assertEqual((self.sends(), self.approvals), ([], []))
+
     def test_formatting_asks_for_send_before_its_option(self):
         self.broker._policy = RuntimePolicy(enabled_capabilities=('reply_text_send',))
         with self.assertRaises(CapabilityDisabled) as caught:

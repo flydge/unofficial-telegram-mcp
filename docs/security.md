@@ -1006,8 +1006,9 @@ absent from legacy defaults. All 43 public argument/result schemas (at that slic
 and operation mappings stay unchanged; only eight reply-tool descriptions change.
 Broker policy derives media classification from validated private projections v2/v4/v6,
 never display strings or proxy inference. Owner/TTL/lock-bound classification
-includes terminal receipts. Pending inspection/revision, preparation, both sides
-of refresh, pre/post owner decision and final rawsend guards enforce opt-in.
+includes terminal receipts. Pending inspection/revision, preparation, the freshly
+read refresh source (the stored source it replaces is not asked), pre/post owner
+decision and final rawsend guards enforce opt-in.
 Metadata-only status/list/cancel remain send-only.
 
 The canonical closed v2 projection binds the unchanged ordinary null-topic shell,
@@ -1129,7 +1130,8 @@ retains owner/account, pending wall expiry, attempted monotonic retention and
 original provider/epoch checks. Stored inspection and update require the stored
 source's complete tuple; a refresh requires the freshly read source's complete
 tuple and, since the 0.54 candidate, no longer asks for the stored source it
-replaces and never shows again. Revoking a source capability blocks preparation,
+replaces and never shows again; the new draft is built from the new source alone,
+so revoked authority cannot be carried over. Revoking a source capability blocks preparation,
 inspection/update, a refresh whose new source needs it, owner confirmation, final
 transport guards and terminal replay. Send/status metadata rules and all public schemas remain
 unchanged. No source attachment is downloaded or styling copied. Explicit text styles

@@ -809,8 +809,9 @@ MP3/M4A, longer voice notes, unknown identity/size, formatted/linked/embedded or
 unsafe targets remain unavailable. No source download is required. Full media
 display including its marker caps at 4096 characters and is never truncated.
 
-Media opt-in also applies to stored inspection/update/refresh and sent/failed/
-unknown receipt replay. Refresh requires it for both stored and new media sources.
+Media opt-in also applies to stored inspection/update and sent/failed/
+unknown receipt replay. A refresh requires it only when the newly read source
+is media, not for the stored source it replaces.
 Status/list/cancel remain send-only metadata operations. Obtain fresh approval for
 new IDs; send guards revalidate stable source facts. Cache progress, thumbnails,
 waveform and listening-state changes are not content verification. Pretransport

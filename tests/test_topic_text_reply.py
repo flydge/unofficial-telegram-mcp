@@ -373,6 +373,47 @@ class TopicReplyTests(unittest.TestCase):
       self.assertEqual(h.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
       self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
 
+  def test_update_with_styles_names_only_the_requested_option_before_the_topic_draft_is_found(self):
+    # The one exception to "stored drafts name what prepare names": update_reply_draft with outgoing_entities
+    # checks the option the request itself asks for before the draft is looked up, and the draft's topic is
+    # unknown until then. A topic draft with styles and both options off therefore gets formatted_text_send alone.
+    bold = {'outgoing_entities': [{'offset': 0, 'length': 5, 'type': {'@type': 'textEntityTypeBold'}}]}
+    with Harness(capabilities=(*CAPS, 'formatted_text_send')) as h:
+      did = h.prepare_result(**bold)['reply']['draft']['draft_id']
+      self.assertIsNotNone(h.broker._drafts._entries[did].draft.topic)
+      self.assertTrue(h.broker._drafts._entries[did].draft.outgoing_entities)
+      h.broker._policy = RuntimePolicy(enabled_capabilities=tuple(
+        c for c in CAPS if c != 'topic_text_send'))
+      both = ['formatted_text_send', 'topic_text_send']
+      for result in (h.prepare_result(**bold), h.dispatch('get_reply_draft', {'draft_id': did}),
+                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': BODY})):
+        self.assertEqual((result['status'], result['missing_capabilities']), ('capability_disabled', both))
+      styled = h.dispatch('update_reply_draft', {'draft_id': did, 'text': BODY, **bold})
+      self.assertEqual((styled['status'], styled['missing_capabilities'], styled['next_action']),
+                       ('capability_disabled', ['formatted_text_send'], 'enable_capability'))
+      # The same answer for an unknown draft: it reveals nothing about the draft or its topic.
+      unknown = h.dispatch('update_reply_draft', {'draft_id': 'draft_' + 'f' * 32, 'text': BODY, **bold})
+      self.assertEqual((unknown['status'], unknown['missing_capabilities']), ('capability_disabled', ['formatted_text_send']))
+      # A topic reply has no refresh.
+      refreshed = h.dispatch('refresh_reply_draft', {'draft_id': did})
+      self.assertEqual((refreshed['status'], refreshed.get('missing_capabilities')), ('unavailable', None))
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
+  def test_list_and_cancel_of_a_topic_reply_stay_bound_to_its_options_and_source_families(self):
+    # Unlike a plain reply draft (test_reply_capability_results), a topic reply draft keeps the
+    # draft-level policy for list and cancel: its own option and, with it, its source's families.
+    with Harness(styled=True) as h:
+      h.prepare(); did = h.current_id
+      for missing in ('topic_text_send', 'reply_formatted_targets'):
+        with self.subTest(missing=missing):
+          h.policy_without(missing)
+          self.assertEqual(h.dispatch('list_drafts', {})['status'], 'unavailable')
+          self.assertEqual(h.dispatch('cancel_draft', {'draft_id': did})['status'], 'unavailable')
+      h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
+      self.assertEqual([d['draft_id'] for d in h.dispatch('list_drafts', {})['drafts']], [did])
+      self.assertEqual(h.dispatch('cancel_draft', {'draft_id': did})['status'], 'cancelled')
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
   def test_topic_reply_and_source_capabilities_form_one_current_union(self):
     from telegram_search_mcp.contract import CompatibilityError
     for capability in CAPS:
