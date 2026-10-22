@@ -1,0 +1,16 @@
+{
+  "structure": {
+    "analyze_media": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "get_attachment": "input: top-level allOf/oneOf (exactly one of anchor or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "get_message_context": "input: top-level allOf/oneOf (exactly one of anchor or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "prepare_artifact_send": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "prepare_reply_artifact_send": "input: top-level allOf with two oneOf (exactly one of artifact_id or selection_id, and of reply_to or reply_selection_id) removed; both rules are checked at runtime and stated in the description, so the published input schema is a plain object",
+    "prepare_reply_text_send": "input: top-level allOf/oneOf (exactly one of reply_to or reply_selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_attachment": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_attachment_page": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_messages": "input: top-level allOf/oneOf (exactly one of anchors or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_presentation": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_reply_chain": "input: top-level allOf/oneOf (exactly one of anchor or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object",
+    "read_spreadsheet": "input: top-level allOf/oneOf (exactly one of artifact_id or selection_id) removed; the rule is checked at runtime and stated in the description, so the published input schema is a plain object"
+  }
+}

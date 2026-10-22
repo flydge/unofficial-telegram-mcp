@@ -14,24 +14,16 @@ class SelectionRefusal(NextActionHint):
 
 
 class SelectedInput(BaseModel):
+    """Exactly one raw source or retained selection per source_pairs rule. The rule is checked here, at
+    runtime, and stated in the tool description; the published input schema stays a plain object, since a
+    top-level allOf/oneOf is something some MCP clients mishandle."""
     model_config=ConfigDict(extra='forbid',hide_input_in_errors=True)
-
-    @classmethod
-    def __get_pydantic_json_schema__(cls, core_schema, handler):
-        schema=handler(core_schema)
-        if 'selection_id' in cls.model_fields:
-            raw=next(key for key in ('artifact_id','anchors','anchor') if key in cls.model_fields)
-            source_schema(schema,raw)
-        if 'reply_selection_id' in cls.model_fields:source_schema(schema,'reply_to','reply_selection_id')
-        return schema
 
     @model_validator(mode='after')
     def exactly_one_source(self):
-        for selected,raw in [('selection_id',next((key for key in ('artifact_id','anchors','anchor') if key in type(self).model_fields),None)),
-                             ('reply_selection_id','reply_to')]:
-            if selected in type(self).model_fields:
-                if (getattr(self,selected) is None)==(getattr(self,raw) is None):
-                    raise ValueError('provide exactly one raw source or retained selection')
+        for raw,selected in source_pairs(type(self)):
+            if (getattr(self,selected) is None)==(getattr(self,raw) is None):
+                raise ValueError('provide exactly one raw source or retained selection')
         return self
 
     @model_serializer(mode='wrap')
@@ -42,8 +34,11 @@ class SelectedInput(BaseModel):
         return result
 
 
-def source_schema(schema, raw, selected='selection_id'):
-    """JSON-schema equivalent of the strict runtime alternative."""
-    schema.setdefault('allOf',[]).append({'oneOf':[
-        {'required':[raw], 'properties':{raw:{'not':{'type':'null'}},selected:{'type':'null'}}},
-        {'required':[selected], 'properties':{selected:{'not':{'type':'null'}},raw:{'type':'null'}}}]})
+def source_pairs(model):
+    """The (raw, selected) exactly-one source rules of a selected request model, in a fixed order."""
+    fields=model.model_fields
+    pairs=[]
+    if 'selection_id' in fields:
+        pairs.append((next(key for key in ('artifact_id','anchors','anchor') if key in fields),'selection_id'))
+    if 'reply_selection_id' in fields:pairs.append(('reply_to','reply_selection_id'))
+    return tuple(pairs)

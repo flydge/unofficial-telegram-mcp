@@ -551,25 +551,24 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_tool_rejects_sdk_preparsed_query_and_timestamp_string(self) -> None:
         invalid_arguments = (
-            {
+            ({
                 "target": -1001,
                 "query": '{"text":"needle"}',
-            },
-            {
+            }, "query"),
+            ({
                 "target": -1001,
                 "query": {"text": "needle"},
                 "date_from": "1750000000",
-            },
+            }, "date_from"),
         )
         async with Client(self.server) as client:
-            for arguments in invalid_arguments:
+            for arguments, named in invalid_arguments:
                 with self.subTest(arguments=arguments):
                     result = await client.call_tool("search_correspondence", arguments)
                     self.assertTrue(result.is_error)
                     self.assertEqual(
                         result.content[0].text,
-                        "Error executing tool search_correspondence: invalid_arguments "
-                        "(arguments must match the input schema)",
+                        f"Error executing tool search_correspondence: invalid_arguments: invalid {named}",
                     )
 
         self.assertIsNone(self.service.last_request)

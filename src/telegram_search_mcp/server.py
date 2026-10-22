@@ -25,7 +25,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS, CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .selection_refs import SelectionId, SelectionRefusal, source_schema
+from .selection_refs import SelectedInput, SelectionId, SelectionRefusal, source_pairs
 from .retained_selection_models import RetainSelectionRequest, RetainSelectionSource, RetainSelectionResponse
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
@@ -239,9 +239,9 @@ _REPLY = (
     + "); a forum topic topic_text_send. Without them the result is capability_disabled, naming only "
     "missing_capabilities and no source content. " + _UNTRUSTED
 )
-_SELECTION = ("A selection from retain_selection (also needs retained_selections) may replace the raw source; it "
-              "expires after a bounded time set by the owner's policy, and selection_unavailable means retain the "
-              "source again.")
+# Follows the generated exactly-one source rule (_source_rule) on every tool that accepts a retained selection.
+_SELECTION = ("A selection (from retain_selection; also needs retained_selections) expires after a bounded time set "
+              "by the owner's policy; selection_unavailable means retain the source again.")
 # name -> (title, what it does, rules); the capability sentence goes between the last two.
 _SURFACE: dict[str, tuple[str, str, str]] = {
     "_manifest": ("Check connection and contract",
@@ -563,13 +563,19 @@ def _needs(name: str) -> str:
     return f"Needs: {', '.join(needed)}." if needed else "Needs no capability."
 
 
-def _describe(name: str, *, selection: bool = False) -> str:
+def _source_rule(pairs: tuple[tuple[str, str], ...]) -> str:
+    """The exactly-one source rule the runtime checks, stated here because the published input schema is a
+    plain object without a top-level allOf/oneOf."""
+    return "Give exactly one of " + ", and one of ".join(f"{raw} or {selected}" for raw, selected in pairs) + "."
+
+
+def _describe(name: str, *, sources: tuple[tuple[str, str], ...] = ()) -> str:
     _, what, rules = _SURFACE[name]
-    return " ".join((what, _needs(name), rules) + ((_SELECTION,) if selection else ()))
+    return " ".join((what, _needs(name), rules) + ((_source_rule(sources), _SELECTION) if sources else ()))
 
 
 # SDK 2.2.0 reports an argument failure as pydantic text (loc, caller-chosen keys, documentation URLs)
-# and echoes an unknown tool name. Both reach the client as one fixed, input-free text instead.
+# and echoes an unknown tool name. Both reach the client as closed texts instead (see _argument_refusal).
 _INPUT_REFUSALS = {
     "invalid_arguments": "Error executing tool {}: invalid_arguments (arguments must match the input schema)",
     "unknown_tool": "unknown_tool (refresh tools/list)",
@@ -577,10 +583,69 @@ _INPUT_REFUSALS = {
 # Request models a tool body builds from already-validated arguments; their refusals are argument refusals.
 _REQUEST_MODELS = frozenset(name for name, value in tuple(globals().items())
                             if name.endswith("Request") and isinstance(value, type) and issubclass(value, BaseModel))
+# Whole-request rules: a request model checks them after every field passed, so their failure has no location.
+# A refusal names an exactly-one pair only when the raw arguments break it (both or neither given, null counting
+# as absent), otherwise every parameter the model's other rules read. Keys are request model names.
+_EXACTLY_ONE: dict[str, tuple[tuple[str, str], ...]] = {
+    **{name: source_pairs(globals()[name]) for name in sorted(_REQUEST_MODELS)
+       if issubclass(globals()[name], SelectedInput)},
+    "CreateLocalArtifactRequest": (("content", "content_base64"),),
+    "UpdateDraftRequest": (("text", "caption"),),
+}
+_RULE_PARAMETERS: dict[str, tuple[str, ...]] = {
+    "DiscoverTargetsRequest": ("hypotheses",),
+    "ReadMessagesRequest": ("anchors",),
+    "ReadTargetMessagesRequest": ("message_ids",),
+    "SearchRequest": ("date_from", "date_to"),
+    "ReadHistoryRequest": ("date_from", "date_to", "mode"),
+    "ReadTopicHistoryRequest": ("date_from", "date_to", "mode"),
+    "SearchMessagesRequest": ("date_from", "date_to", "mode"),
+    "SearchChatsRequest": ("date_from", "date_to", "mode", "targets"),
+    "PrepareForwardSendRequest": ("mode", "remove_caption"),
+    "PrepareTextSendRequest": ("outgoing_entities",),
+    "PrepareReplyTextSendRequest": ("outgoing_entities",),
+    "UpdateReplyDraftRequest": ("outgoing_entities",),
+    "UpdateDraftRequest": ("outgoing_entities",),
+}
 
 
 class _InvalidArguments(ValueError):
-    """A strict pre-parse hook refused the raw arguments."""
+    """A strict pre-parse hook refused the raw arguments; it carries parameter names only, never values."""
+
+    def __init__(self, *parameters: object):
+        super().__init__("invalid_arguments")
+        self.parameters = parameters
+
+
+def _rule_parameters(title: str, arguments: dict[str, object]) -> tuple[str, ...]:
+    broken = tuple(name for pair in _EXACTLY_ONE.get(title, ())
+                   if (arguments.get(pair[0]) is None) == (arguments.get(pair[1]) is None) for name in pair)
+    return broken or _RULE_PARAMETERS.get(title, ())
+
+
+def _argument_refusal(name: str, schema: dict[str, object], arguments: dict[str, object],
+                      cause: BaseException | None) -> str:
+    """One closed text: `invalid_arguments: missing <names>; invalid <names>; <n> unexpected argument(s)`, the
+    clauses in this order and each only when it applies. Names come only from the tool's published input
+    schema, sorted: required parameters absent from the arguments, then declared parameters whose value or
+    whole-request rule failed. Undeclared keys are only counted. No value, nested path, caller-chosen key,
+    validator or pydantic text. A failure nothing can be attributed to keeps the bare fixed text."""
+    declared = frozenset(schema.get("properties", ()))
+    missing = sorted(frozenset(schema.get("required", ())) - frozenset(arguments))
+    named: set[object] = set()
+    if isinstance(cause, _InvalidArguments):
+        named.update(cause.parameters)
+    elif isinstance(cause, ValidationError):
+        for error in cause.errors(include_url=False, include_context=False, include_input=False):
+            named.update(error["loc"][:1] or _rule_parameters(cause.title, arguments))
+    invalid = sorted(parameter for parameter in declared & named if parameter not in missing)
+    unexpected = sum(1 for key in arguments if key not in declared)
+    clauses = ([f"missing {', '.join(missing)}"] if missing else []) + (
+        [f"invalid {', '.join(invalid)}"] if invalid else []) + (
+        [f"{unexpected} unexpected argument(s)"] if unexpected else [])
+    if not clauses:
+        return _INPUT_REFUSALS["invalid_arguments"].format(name)
+    return f"Error executing tool {name}: invalid_arguments: " + "; ".join(clauses)
 
 
 def _invalid_arguments(error: ToolError) -> bool:
@@ -714,13 +779,15 @@ class _PolicyServer(MCPServer):
         return [tool for tool in await super().list_tools() if tool.name in listed]
 
     async def call_tool(self, name, arguments, context=None):
-        if self._tool_manager.get_tool(name) is None:
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:
             raise ToolError(_INPUT_REFUSALS["unknown_tool"])
         try:
             return await super().call_tool(name, arguments, context)
         except ToolError as error:
             if _invalid_arguments(error):
-                raise ToolError(_INPUT_REFUSALS["invalid_arguments"].format(name)) from None
+                raw = arguments if type(arguments) is dict else {}
+                raise ToolError(_argument_refusal(name, tool.parameters, raw, error.__cause__)) from None
             raise
 
     def _listed_prompt(self, name: object) -> _Prompt | None:
@@ -764,19 +831,20 @@ _GUARD_REFUSALS = {
 _MANIFEST_NEXT_ACTIONS = {code: NEXT_ACTIONS[code] for code in ("broker_unavailable", "config_stale")}
 
 
-def _validate_raw_search_arguments(arguments: dict[str, object]) -> None:
-    if "query" in arguments and not isinstance(arguments["query"], dict):
-        raise _InvalidArguments
+def _raw_search_problems(arguments: dict[str, object]) -> tuple[str, ...]:
+    """search_correspondence parameters whose raw value the SDK's JSON pre-parse must not reinterpret."""
+    invalid = ("query",) if "query" in arguments and not isinstance(arguments["query"], dict) else ()
     for name in ("date_from", "date_to"):
         value = arguments.get(name)
         if value is None:
             continue
-        if not isinstance(value, str):
-            raise _InvalidArguments
         try:
+            if not isinstance(value, str):
+                raise ValueError(name)
             validate_search_datetime(value)
         except ValueError:
-            raise _InvalidArguments from None
+            invalid += (name,)
+    return invalid
 
 
 def _default_service() -> SearchService:
@@ -1426,7 +1494,15 @@ def build_server(
 
     class StrictSearchMetadata(metadata_type):
         def pre_parse_json(self, data: dict[str, object]) -> dict[str, object]:
-            _validate_raw_search_arguments(data)
+            invalid = _raw_search_problems(data)
+            if invalid:
+                # Name the other failing parameters too, so one refusal lists every one.
+                try:
+                    self.arg_model.model_validate(super().pre_parse_json(data))
+                except ValidationError as error:
+                    invalid += tuple(item["loc"][0] for item in error.errors(
+                        include_url=False, include_context=False, include_input=False) if item["loc"])
+                raise _InvalidArguments(*invalid)
             return super().pre_parse_json(data)
 
     search_tool.fn_metadata = StrictSearchMetadata.model_validate(
@@ -1735,22 +1811,18 @@ def build_server(
         registered = server._tool_manager.get_tool(tool_name)
         if registered is None:  # pragma: no cover - registration above is deterministic
             raise RuntimeError("required MCP tool registration is missing")
+        selection_model = selection_models.get(tool_name)
         registered.title = _SURFACE[tool_name][0]
-        registered.description = _describe(tool_name, selection=tool_name in selection_models)
+        registered.description = _describe(tool_name, sources=source_pairs(selection_model) if selection_model else ())
         registered.fn_metadata.arg_model.model_config = ConfigDict(
             arbitrary_types_allowed=True,
             extra="forbid",
             hide_input_in_errors=True,
         )
         registered.fn_metadata.arg_model.model_rebuild(force=True)
+        # A plain object: the exactly-one source rule is checked at runtime by the strict selection hook and
+        # stated in the description, never published as a top-level allOf/oneOf that some clients mishandle.
         registered.parameters = registered.fn_metadata.arg_model.model_json_schema(by_alias=True)
-        selection_model = selection_models.get(tool_name)
-        if selection_model is not None:
-            if 'selection_id' in selection_model.model_fields:
-                raw = next(key for key in ('artifact_id','anchors','anchor') if key in selection_model.model_fields)
-                source_schema(registered.parameters, raw)
-            if 'reply_selection_id' in selection_model.model_fields:
-                source_schema(registered.parameters, 'reply_to', 'reply_selection_id')
         if tool_name in TOOL_OPERATIONS:
             operation = TOOL_OPERATIONS[tool_name]
             capability = OPERATION_CAPABILITIES[operation]
