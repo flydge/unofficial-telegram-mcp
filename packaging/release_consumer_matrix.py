@@ -1148,8 +1148,8 @@ def write_policy(home: Path, capabilities: list[str], *, stale: bool = False) ->
         stream.write(body)
 
 
-def session_layout(name: str, census: dict) -> dict:
-    """(capabilities, stale pin, broker profile) of each session; the closed SESSIONS set."""
+def session_layout(name: str, census: dict) -> tuple[list[str], bool, str | None]:
+    """(capabilities, stale pin, broker profile or None) of each session in the closed SESSIONS set."""
     everything = list(census["capabilities"])
     return {"full": (everything, False, "authorized"),
             "restricted": (list(RESTRICTED_CAPABILITIES), False, "authorized"),
