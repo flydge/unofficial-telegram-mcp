@@ -1,0 +1,8 @@
+{
+  "structure": {
+    "read_attachment_page": "output: the published schema is ReadAttachmentPageResponse | SelectionRefusal like read_attachment and analyze_media (a cached plain schema had dropped the refusal, so SDK clients saw a masked tool error)"
+  },
+  "descriptions": {
+    "_manifest": "input field description of check_broker: the local broker and contract, not Telegram authorization"
+  }
+}

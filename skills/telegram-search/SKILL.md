@@ -244,11 +244,11 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
 | `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |
 
-Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments`
-names only the missing or invalid schema parameters (never values): fix those once, without looping; `unknown_tool`
-means refresh tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means
-report it and stop. A broker restart clears drafts, uploads, cursors and selections, so check pending send
-outcomes before the owner restarts it.
+Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments` names only the missing or
+invalid schema parameters (never values): fix those once, without looping; `unknown_tool` means refresh
+tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means report it and
+stop (most tools give no hint on a lost broker: one `_manifest(check_broker=true)` tells). A broker restart
+clears drafts, uploads, cursors and selections, so check pending send outcomes before the owner restarts it.
 
 ## Never
 

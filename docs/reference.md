@@ -137,8 +137,17 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
 
-Older tools that report a lost broker as a plain `error` with free-text detail carry no hint, because
-their status alone does not name the condition; `_manifest(check_broker=true)` reports it. The `expired`
+On a lost broker exactly these tools carry `check_connection`: `read_history`, `read_messages`,
+`read_reply_chain`, `read_topic_history`, `list_chats`, `list_topics`, `search_messages`, `search_chats` and
+`_manifest`. Every other tool reports a lost broker without a hint, because no closed field of its response
+names the condition: a plain `error` with free-text detail (among them `resolve_target`, `verify_target`,
+`read_target_messages`, `discover_targets`, `search_correspondence`, `get_message_context`, `get_attachment`,
+the attachment, spreadsheet and presentation readers, `create_local_artifact`, the chunked upload tools and
+`prepare_text_send`) or a content-free `unavailable` (the draft tools such as `list_drafts`, the reply-draft
+tools such as `prepare_reply_text_send`, and the three local upload authority tools). After such an answer
+one `_manifest(check_broker=true)` tells: its `broker_unavailable` carries `check_connection`. A closed reason
+on those responses would change their output schemas and was not added in 0.54
+(`tests/test_next_actions.py` drives both sets through a real `BrokerClient` with no broker). The `expired`
 status of attachment pages, spreadsheets, presentations and drafts means the artifact or draft lapsed,
 not a cursor, and carries no hint. Adding the field changed the output schema of every tool that can
 return one of these statuses.
@@ -2400,7 +2409,11 @@ release, observed account change or broker restart invalidates the entire select
 The optional `source.telegram_url` is fetched fresh on each read and is not a source
 fact, so a link that appears or disappears neither invalidates nor renews a selection.
 The content-free refusal is exactly
-`{"status":"selection_unavailable","detail":"Selection is unavailable; select the source again."}`.
+`{"status":"selection_unavailable","detail":"Selection is unavailable; select the source again.","next_action":"search_again"}`
+(since the 0.54 candidate it carries the closed `next_action`; before, it was the two keys alone). Every
+tool that accepts a `selection_id` returns it as structured content, `read_attachment_page` included (its
+published output schema dropped the refusal until the 0.54 fixes, so an official SDK client saw only a
+masked tool error).
 Choose and capture the source again; there is no refresh, list, resolve-to-IDs,
 persistent name, sharing or automatic search rescan.
 

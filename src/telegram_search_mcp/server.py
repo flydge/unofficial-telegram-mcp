@@ -1603,8 +1603,9 @@ def build_server(
         def pre_parse_json(self, data: dict[str, object]) -> dict[str, object]:
             ReadAttachmentPageRequest.model_validate(data)
             return data.copy()
+    # Its published output schema is set below with read_attachment's and analyze_media's (response | SelectionRefusal);
+    # assigning Tool.output_schema here would cache the plain response schema and drop the refusal (0.54 fixes).
     attachment_page_tool.fn_metadata = StrictAttachmentPageMetadata.model_validate(attachment_page_tool.fn_metadata.model_dump())
-    attachment_page_tool.output_schema = ReadAttachmentPageResponse.model_json_schema()
 
     spreadsheet_tool = server._tool_manager.get_tool("read_spreadsheet")
     class StrictSpreadsheetMetadata(metadata_type):
