@@ -869,5 +869,35 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
         self.assertFinishes(action, target)
 
 
+class ParkedTemporaryTests(ParkedHarness, unittest.TestCase):
+    """0.53 critic round 4: a kill during the Claude Desktop write leaves our temporary beside the user's config;
+    a repeat refused before the Desktop step parks the change with it. Uninstall over the parked change removes
+    every temporary the change's journal binds beside each client file it touches (the reviewer's `R4e`)."""
+
+    def test_uninstall_over_a_parked_change_removes_its_client_temporaries(self):
+        for kind in ('upgrade', 'rollback'):
+            for where in ('desktop', 'session', 'plist'):
+                with self.subTest(kind=kind, where=where):
+                    self.setUp()
+                    _, old = self.full()
+                    new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+                    if kind == 'rollback':
+                        self.install(new)
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    self.claude()
+                    directory = {'desktop': self.desktop_config.parent, 'session': self.session_root,
+                                 'plist': self.plist.parent}[where]
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), directory=directory)
+                    self.assertEqual([Path(p).parent for p in self.temporaries()], [directory.relative_to(self.base)])
+
+                    def edit(stage):
+                        if stage == 'service':
+                            self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'target_conflict')
+                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                    self.assertRemoved(self.change('uninstall'))
+
+
 if __name__ == '__main__':
     unittest.main()

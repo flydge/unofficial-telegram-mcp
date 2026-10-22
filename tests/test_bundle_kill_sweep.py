@@ -640,6 +640,19 @@ def _legacy_served(h):
     return [] if (h.plist.read_bytes(), h.launchctl.loaded) == (plist, loaded) else ['the legacy service is not back']
 
 
+def _parked_desktop_temporary_prepare(h):
+    """0.53 critic round 4: an upgrade killed right after our Claude Desktop temporary is created, then a repeat
+    refused at the Codex step (before the Desktop step), our table put back: parked with the temporary."""
+    _upgrade_prepare(h)
+    _die(h, lambda checkpoint: h.install(h.new, checkpoint=checkpoint),
+         effect=lambda kind, where: kind == 'create' and '/Claude/.telegram-search-' in '/' + where)
+    h.assertEqual(len(list(h.desktop_config.parent.glob('.telegram-search-*'))), 1)
+    h.assertEqual(_refusal(h, lambda: h.install(h.new, checkpoint=_at_stage(h, 'service', OURS, CHANGED)))['refused'],
+                  'target_conflict')
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -683,7 +696,7 @@ SCENARIOS = {
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_after_codex_write(h))), _codex_write_refusal_check,
         write_ahead=False, final=_one_release),
     # 0.53 critic round 5: a late refusal after a kill past the plist rewrite and a login (the target's broker
-    # loaded).
+    # loaded), and an uninstall over a change parked with our Claude Desktop temporary beside the user's config.
     'restore_after_a_login_upgrade': Scenario(_login_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))), _login_upgrade_check,
         write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
@@ -693,6 +706,9 @@ SCENARIOS = {
     'restore_after_a_login_adopt_first_install': Scenario(_login_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_user_skill(h))), _login_adopt_check,
         write_ahead=False, final=_legacy_served, effects=RESTORE_EFFECTS),
+    'uninstall_over_a_change_parked_with_a_desktop_temporary': Scenario(
+        _parked_desktop_temporary_prepare, lambda h, lc, cl: h.change('uninstall', launchctl=lc, claude_runner=cl),
+        _uninstall_parked_check, write_ahead=False, final=_nothing_left),
 }
 
 
@@ -964,6 +980,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_restore_after_a_login_puts_the_legacy_broker_back_for_an_adopting_first_install(self):
         self.sweep('restore_after_a_login_adopt_first_install')
+
+    def test_uninstall_over_a_change_parked_with_a_desktop_temporary_removes_it(self):
+        self.sweep('uninstall_over_a_change_parked_with_a_desktop_temporary')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

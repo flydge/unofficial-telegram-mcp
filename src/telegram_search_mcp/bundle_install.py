@@ -480,6 +480,17 @@ def _packet_entry(kind):
                                                                     or is_temporary(path[0]))
 
 
+def _discard_journaled(publications, name, path, discard=discard_temporary):
+    """Unlink every temporary the journaled attempts of `name` (in a journal's `publications`) left beside `path`:
+    only a name recorded before its creation, and once its inode was journaled only that inode
+    (`discard_temporary`). Anything else beside the file is never touched."""
+    attempts=publications.get(name,[])
+    if type(attempts) is not list or len(attempts)>8 or any(type(a) is not dict for a in attempts):
+        raise InstallError('transaction_conflict')
+    if attempts and os.path.lexists(Path(path).parent):
+        for record in attempts:discard(path,record)
+
+
 class _Journal:
     """One transaction's journal under the installer lease; each update is compare-before-replace.
 
@@ -556,9 +567,7 @@ class _Journal:
 
     def discard(self, name, path, discard=discard_temporary):
         """Unlink every temporary a killed attempt of `name` left beside `path` (see `attempt`)."""
-        attempts=self.attempts(name)
-        if attempts and os.path.lexists(Path(path).parent):
-            for record in attempts:discard(path,record)
+        _discard_journaled(self.value['publications'],name,path,discard)
 
     def attempt(self, name, write):
         """One journaled atomic write: its temporary's name is recorded before `write(temporary, admit)`
@@ -675,6 +684,24 @@ def _desktop_discard(j, home):
     for name in ('claude_desktop_write','claude_desktop_restore'):
         j.discard(name,claude_desktop_registration.config_path(home),
                   lambda _,record:claude_desktop_registration.discard_temporary(home,record))
+
+
+# Every journaled write beside a file outside the installation root: (record name, file).
+_CLIENT_WRITES = (('registration', 'codex'), ('codex', 'codex'), ('claude_desktop_write', 'desktop'),
+                  ('claude_desktop_restore', 'desktop'), ('plist', 'plist'), ('plist_restore', 'plist'),
+                  ('policy', 'policy'), ('policy_restore', 'policy'))
+
+
+def _client_temporaries(publications, home, config, plist, session_root):
+    """Before a finishing action ends: every temporary a transaction's journaled writes left beside the files it
+    touches outside the root (the Codex config, the Claude Desktop config, the broker plist and runtime.toml), each
+    provably ours (`_discard_journaled`). A step skipped since (its outcome recorded, or a parked change an
+    uninstall goes over) would otherwise leave a copy of a client file there for good."""
+    paths={'codex':config,'desktop':claude_desktop_registration.config_path(home),'plist':plist,
+           'policy':session_root/'runtime.toml'}
+    def desktop(_, record):claude_desktop_registration.discard_temporary(home,record)
+    for name,key in _CLIENT_WRITES:
+        _discard_journaled(publications,name,paths[key],desktop if key=='desktop' else discard_temporary)
 
 
 def _desktop_write(j, home, plan):
@@ -1630,6 +1657,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                         # every run before the commit, since a late refusal's restore puts the old line back.
                         if 'service' in adopted:_policy_step(j,session_root,None,manifest['package_version'])
                         j.advance('policy')
+                        _client_temporaries(j.value['publications'],home,config,plist,session_root)
                     names=['release','telegram-search','telegram-setup']
                     if claude_skills_status=='installed':names+=['claude-telegram-search','claude-telegram-setup']
                     objects={name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names}
@@ -2042,6 +2070,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 j.advance('policy_pending')
                 _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
                 j.advance('policy')
+                _client_temporaries(j.value['publications'],home,config,plist,session_root)
             checkpoint('policy')
             # Ownership follows the entry: the one this transaction wrote, else the one it left in place (`_client_owners`).
             add=j.recorded('claude_desktop_add')
@@ -2338,6 +2367,9 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             tx=root/'transactions'/name
             j=_Journal(tx,lease,_UNINSTALL_STEPS,checkpoint)
             if j['index_sha256']!=receipt['index_sha256'] or j['installation_root']!=str(root):raise InstallError('transaction_conflict')
+            # A parked change's temporaries beside the client files (a kill in its Claude Desktop write, then a
+            # repeat refused before that step): its journal goes with the root, so they are removed first.
+            if parked:_client_temporaries(parked[1]['publications'],home,config,plist,session_root)
             def done(step,status):
                 if j.recorded(step) is None:j.update(single=(step,{'status':status}))
                 j.advance(step);checkpoint(step)
@@ -2457,6 +2489,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if not kept.exists():
                         if digest(read(origin,MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:raise InstallError('transaction_conflict')
                         _rename(origin,kept)
+            _client_temporaries(j.value['publications'],home,config,plist,session_root)
             j.advance('retired');checkpoint('retired')
             retired=root.parent/('.'+root.name+'-removed-'+uuid.uuid4().hex)
             _rename(root,retired);checkpoint('published:retired')
