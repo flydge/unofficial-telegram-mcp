@@ -1124,6 +1124,27 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
                     self.assertEqual(self.change('uninstall')['service'], 'removed')
                     self.assertIsNone(self.launchctl.loaded)
 
+    def test_with_no_broker_before_the_change_the_restart_reads_no_plist(self):
+        """The previous-broker check after the commit never turns a change that found no broker running into a
+        refusal: a plist changed by hand after a kill at `complete` is not read (`not_loaded`, as before)."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full(loaded=False)
+                new = self.build('b', launcher=b'# second release\n')
+                if kind == 'rollback':
+                    self.install(new)
+                    self.launchctl.loaded = None
+                action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                    lambda **kwargs: self.change('rollback', **kwargs))
+                self.claude()
+                self.die(lambda checkpoint: action(checkpoint=checkpoint), at='complete')
+                payload = plistlib.loads(self.plist.read_bytes())
+                payload['ProcessType'] = 'Interactive'
+                self.plist.write_bytes(plistlib.dumps(payload))
+                self.assertEqual(action()['service'], 'not_loaded')
+                self.assertIsNone(self.launchctl.loaded)
+
     def test_a_broker_neither_ours_stays_loaded_and_refuses(self):
         """Neither the target's nor the previous broker: never booted out, `service_conflict` until it is gone;
         then the repeat finishes the restore with the recorded code, and the next one the change."""

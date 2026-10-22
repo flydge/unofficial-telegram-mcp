@@ -370,6 +370,7 @@ class Broker(SelectionBrokerMixin):
 
     def _health(self) -> dict[str, Any]:
         self._expire_contexts()
+        unsettled = self._drafts.unsettled_attempts()  # Its own lock, never nested in the state lock.
         with self._state_lock:
             wait_count = getattr(self._client, "serialization_wait_count", 0)
             if type(wait_count) is not int or wait_count < 0:
@@ -388,7 +389,7 @@ class Broker(SelectionBrokerMixin):
                 "pending_sends": {
                     "in_flight": self._sends_in_flight,
                     "approval_dialogs": self._approval_dialogs,
-                    "unreconciled_receipts": self._drafts.unsettled_attempts(),
+                    "unreconciled_receipts": unsettled,
                 },
             }
 

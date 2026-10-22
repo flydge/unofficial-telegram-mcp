@@ -1100,7 +1100,10 @@ class _Service:
         booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
         observed=j.recorded('service')
         if observed is None:return 'not_loaded'
-        if observed['plist']!='absent' and self.kind()[0]=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
+        if observed['plist']!='absent':
+            try:on_disk=self.kind()[0]
+            except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Decided below, as before.
+            if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
         if not observed['loaded']:return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
