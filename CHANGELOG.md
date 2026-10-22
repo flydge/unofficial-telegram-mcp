@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.53.0.dev0 — unreleased
+## 0.53.0rc1 — release candidate, 2026-10-22 (not published)
 
-Development of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md)).
+Release candidate of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md), [release notes](docs/release-notes-0.53.0rc1.md)).
 Every item below has unit-test or ad hoc dry-run evidence only. The owner provisioned the Developer ID
 identity and notary profile on 21.10.2026 (preflight ok). The signed and notarized build and its
 Gatekeeper observation, the clean-user install, the owner's migration, the product name and publication

@@ -4,7 +4,7 @@
 
 **Existing installations:** the product was renamed from TelegramSearch. Keep your current installation folder and MCP configuration. The package, commands, skill identifier and local data paths retain their existing names for compatibility; new checkouts use `unofficial-telegram-mcp`.
 
-## Private bundle 0.53.0.dev0
+## Private bundle 0.53.0rc1
 
 **Current behavior versus the 0.52 target:** the approved
 [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this
@@ -187,7 +187,7 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
 a `0700` directory) with `expected_package_version` set to the running package version
-(`"0.53.0.dev0"` for this candidate),
+(`"0.53.0rc1"` for this candidate),
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
 `forward_send`, `video_send`, `archive_chats`, `edit_own_text` and every extended reader are off. To enable more, edit that file
 yourself. Keep the pins as written and add only the capabilities you need from the

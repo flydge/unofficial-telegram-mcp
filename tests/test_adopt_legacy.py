@@ -99,7 +99,7 @@ class AdoptLegacyTests(AdoptionHarness, unittest.TestCase):
         self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
         self.assertEqual([p for p, _ in self.probes], [Path(LEGACY_PYTHON)] * 3)
         self.assertEqual([a for _, a in self.probes], [None, None, None])
-        self.assertIn(b'expected_package_version = "0.53.0.dev0"', (self.session_root / 'runtime.toml').read_bytes())
+        self.assertIn(b'expected_package_version = "0.53.0rc1"', (self.session_root / 'runtime.toml').read_bytes())
         self.assertEqual(self.session_hashes(), before)
         receipt = self.receipt()
         tx = self.tx(packet)
