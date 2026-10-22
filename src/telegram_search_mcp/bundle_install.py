@@ -682,10 +682,14 @@ MAX_PLIST_BYTES = 1024 * 1024
 MAX_CHANGES = 999
 # Run under the interpreter of the broker it asks: only that release's own client passes the
 # broker's version handshake. Any client context may hold a draft or an unresolved send outcome.
+# It uses only what every broker this installer adopts or upgrades ships, a 0.51 or 0.52 source
+# venv included: config.BROKER_SOCKET_PATH and load_runtime_policy, broker_client.BrokerClient,
+# its health() and close().
 _PENDING_PROBE = ("import sys\nsys.path[:0]=[p for p in sys.argv[1:2] if p]\n"
-                  "from telegram_search_mcp.enrollment import SetupPaths\n"
-                  "from telegram_search_mcp.setup_cli import _client\n"
-                  "c=_client(SetupPaths(),5)\ntry:\n h=c.health()\n"
+                  "from telegram_search_mcp.config import BROKER_SOCKET_PATH,load_runtime_policy\n"
+                  "from telegram_search_mcp.broker_client import BrokerClient\n"
+                  "c=BrokerClient(socket_path=BROKER_SOCKET_PATH,policy=load_runtime_policy(),request_timeout=5,\n"
+                  " restart_callback=lambda:None,retry_backoff_seconds=0)\ntry:\n h=c.health()\n"
                   " print('none' if type(h.get('active_clients')) is int and h['active_clients']==0 else 'pending')\n"
                   "finally:\n c.close()\n")
 
