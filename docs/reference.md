@@ -1778,8 +1778,9 @@ The existing 1–32-span, whole-scalar UTF-16, closed-shape, int32, nonblank raw
 4096-character display bounds apply with no truncation. Lexical pairs and
 lexical/quote overlaps are refused; simple styles may contain, be contained by or
 coincide with lexical spans. Code/Pre/PreCode remain disjoint from all entities.
-Both source capabilities are required at preparation, inspection/update, both
-sides of refresh, owner confirmation, final transport guards and terminal replay.
+Both source capabilities are required at preparation, inspection/update, a refresh
+whose newly read source needs them, owner confirmation, final transport guards and
+terminal replay.
 Refresh or source edits require fresh approval; uncertain attempts are never
 resent. Topics, TextUrl captions and custom emoji remain unsupported; TextUrl messageText uses v23 below;
 fieldless URL text uses v15 and supported URL captions v16 below, identity text uses the
