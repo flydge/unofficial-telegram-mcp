@@ -42,7 +42,6 @@ REPOSITORY = SOURCE.parents[1]
 # word (`TelegramSearch` is not found inside `TelegramSearchMCP`).
 SHIPPED = {
     'DISPLAY_NAME': {'.claude-plugin/marketplace.json', 'plugins/telegram-local/.claude-plugin/plugin.json',
-                     'plugins/telegram-local/skills/telegram-search/SKILL.md',
                      'plugins/telegram-local/skills/telegram-setup/SKILL.md'},
     'BUNDLE_ROOT_NAME': {'packaging/bootstrap.sh', 'plugins/telegram-local/bin/mcp-entry',
                          'plugins/telegram-local/skills/telegram-setup/SKILL.md'},
@@ -53,7 +52,9 @@ SHIPPED = {
     'CODESIGN_ID_PREFIX': set(),
 }
 # The internal support directory (not renamed) as packaging/ and plugins/ spell it.
-SHIPPED_SUPPORT = {'packaging/release_gate.py', 'plugins/telegram-local/skills/telegram-setup/SKILL.md'}
+# The consumer-matrix harness lays out the same directory in its synthetic homes.
+SHIPPED_SUPPORT = {'packaging/release_gate.py', 'packaging/release_consumer_matrix.py',
+                   'plugins/telegram-local/skills/telegram-setup/SKILL.md'}
 # The two scripts that spell the installation root: bootstrap.sh's default and the plugin shim's pointer path.
 ROOT_LINES = {'packaging/bootstrap.sh': 'bootstrap_root="$bootstrap_account/Library/Application Support/{}"',
               'plugins/telegram-local/bin/mcp-entry': 'tg_root="$tg_home/Library/Application Support/{}"'}
