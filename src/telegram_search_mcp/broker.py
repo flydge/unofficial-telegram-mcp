@@ -1563,7 +1563,8 @@ class Broker(SelectionBrokerMixin):
             if refresh:
                 # A refresh names what the newly read source needs: the draft's options now, the new
                 # source's families once it is read; the stored source it replaces is never asked.
-                if old.reply_source is None or old.kind != "text":
+                # A topic reply has no refresh, so it is refused before any option is named.
+                if old.reply_source is None or old.kind != "text" or old.topic is not None:
                     raise DraftError("reply draft is unavailable")
                 self._require_reply_draft_options(old)
                 self._require_topic_policy(old.draft_id, owner, stored_source=False)
@@ -1572,8 +1573,6 @@ class Broker(SelectionBrokerMixin):
             provider=self._shared_client()
             epoch = provider.send_observation_epoch
             if refresh:
-                if old.topic is not None:
-                    raise DraftError('topic reply refresh is unavailable')
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get("title"),max_length=255) or str(old.recipient)
                 if old.outgoing_entities and title != old.recipient_title:

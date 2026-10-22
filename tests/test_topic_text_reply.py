@@ -364,10 +364,11 @@ class TopicReplyTests(unittest.TestCase):
                      h.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Revision'}))
           self.assertEqual([(r['status'], r.get('missing_capabilities')) for r in results],
                            [('capability_disabled', expected)] * 3)
-          # A topic reply has no refresh: only its own option is named, never the stored source's families.
+          # A topic reply has no refresh: the fixed unavailable result, checked before any option is named,
+          # so it never suggests enabling a capability that cannot make the refresh work.
           refreshed = h.dispatch('refresh_reply_draft', {'draft_id': did})
-          self.assertEqual((refreshed['status'], refreshed.get('missing_capabilities')),
-                           ('capability_disabled', expected) if 'topic_text_send' in missing else ('unavailable', None))
+          self.assertEqual((refreshed['status'], refreshed.get('reply'), refreshed.get('missing_capabilities'),
+                            refreshed.get('next_action')), ('unavailable', None, None, None))
       h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
       self.assertEqual(h.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
       self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
@@ -391,11 +392,11 @@ class TopicReplyTests(unittest.TestCase):
             with self.assertRaises(CompatibilityError) as caught:
               h.dispatch(operation, {'draft_id': did, **extra})
             self.assertEqual(caught.exception.code, 'capability_disabled')
-          elif operation == 'refresh_reply_draft' and capability == 'reply_formatted_targets':
-            # A refresh never asks for the stored source's families, and a topic reply has no refresh (0.54).
+          elif operation == 'refresh_reply_draft':
+            # A topic reply has no refresh: unavailable whatever is off, never an enable_capability hint (0.54).
             result = h.dispatch(operation, {'draft_id': did, **extra})
-            self.assertEqual((result['status'], result.get('reply'), result.get('missing_capabilities')),
-                             ('unavailable', None, None))
+            self.assertEqual((result['status'], result.get('reply'), result.get('missing_capabilities'),
+                              result.get('next_action')), ('unavailable', None, None, None))
           else:
             result = h.dispatch(operation, {'draft_id': did, **extra})
             self.assertEqual((result['status'], result.get('reply'), result['missing_capabilities']),
