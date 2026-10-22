@@ -635,8 +635,25 @@ class _Journal:
         _rename(staged,target);self.checkpoint('published:'+name)
         require_object_binding(target,bound['object']);validate(target)
 
+    def _published(self, name, target, validate, child):
+        """Whether `target` is the exact object an attempt of `name` staged (and so this transaction published),
+        holding what `validate` accepts: its own copy, even when a later attempt staged another since (the user
+        edited it in place, then put it back exactly). An edit in place that kept the binding is not."""
+        for attempt in self.attempts(name):
+            try:
+                require_object_binding(target,attempt['object'])
+                if child:require_object_binding(target/'SKILL.md',attempt['child'])
+            except ChangedRuntimePath:raise
+            except (RuntimePathError,KeyError):continue
+            try:validate(target)
+            except ChangedRuntimePath:raise
+            except (InstallError,BundleError,RuntimePathError):return False
+            return True
+        return False
+
     def replace(self, name, target, build, validate, replaceable, *, directory=False, child=False):
-        """Atomically exchange `target` (accepted by `replaceable`) with a bound staged object.
+        """Atomically exchange `target` (accepted by `replaceable`, or an object an earlier attempt of `name`
+        published) with a bound staged object.
 
         A missing target is created; the replaced object stays in the transaction packet.
         """
@@ -649,7 +666,8 @@ class _Journal:
             except RuntimePathError:pass
         bound,staged=self._stage(name,target,build,validate,directory,child)
         if target.exists() or target.is_symlink():
-            replaceable(target);_swap(staged,target)
+            if not self._published(name,target,validate,child):replaceable(target)
+            _swap(staged,target)
         else:_rename(staged,target)
         self.checkpoint('published:'+name)
         require_object_binding(target,bound['object'])

@@ -666,6 +666,48 @@ class NoDeadEndTests(ParkedHarness, unittest.TestCase):
                 self.assertIn(self.commands(target)[0].encode(), self.config.read_bytes())
                 self.assertTrue(self.config.read_bytes().startswith(NEIGHBOUR_CODEX))
 
+    def test_a_skill_copy_the_change_published_and_the_user_put_back_is_its_own_again(self):
+        """Round 5 (a longer run of the seeded sequences, seed 863): killed after its skill step with our new search
+        skill copy edited in place; the repeat refuses `skill_conflict` and stages a fresh copy. Put back exactly
+        (same file, same bytes and mode), the copy is still the one an earlier attempt of the change published: the
+        next repeat replaces it and finishes, instead of refusing for good. An edit in place that keeps the file's
+        size and mode is not that copy: it still refuses."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+                if kind == 'rollback':
+                    self.install(new)
+                action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                    lambda **kwargs: self.change('rollback', **kwargs))
+                target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                skill = self.skills / 'telegram-search' / 'SKILL.md'
+                saved = self.base / 'saved-skill'
+
+                def die(checkpoint):
+                    def both(value):
+                        if value == 'claude_code' and not saved.exists():
+                            saved.write_text(json.dumps([skill.read_bytes().hex(), skill.stat().st_mode & 0o777]))
+                            skill.chmod(0o600)
+                            skill.write_bytes(b'mine')
+                        checkpoint(value)
+                    action(checkpoint=both)
+                self.die(die, at='claude_code')
+                self.assertEqual(self.refused(action), 'skill_conflict')
+                data, mode = json.loads(saved.read_text())
+                data = bytes.fromhex(data)
+                skill.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))  # Same file, size and mode; other bytes.
+                skill.chmod(mode)
+                self.assertEqual(self.refused(action), 'skill_conflict')
+                skill.chmod(0o600)
+                skill.write_bytes(data)  # In place: the very file the change published.
+                skill.chmod(mode)
+                self.assertEqual(action()['service'], 'restarted')
+                self.assertOneRelease(target)
+                self.assertEqual(skill.read_bytes(), (target / 'skills/telegram-search/SKILL.md').read_bytes())
+                self.assertRemoved(self.change('uninstall'))
+
     def test_a_killed_uninstall_over_a_parked_change_is_finished_by_its_retry(self):
         for stage in ('stopped:service', 'registration', 'claude_code', 'claude_desktop', 'skills', 'retired'):
             with self.subTest(stage=stage):

@@ -688,6 +688,30 @@ def _not_running_check(h, result):
     h.assertEqual(_one_release(h), [])
 
 
+def _put_back_prepare(h):
+    """0.53 round 5 (a longer run of the seeded sequences): an upgrade killed after its skill step with our new
+    search skill copy edited in place, a repeat refused `skill_conflict` (it staged a fresh copy), then the copy
+    put back exactly, in place: the very file an earlier attempt of the change published."""
+    _upgrade_prepare(h)
+    h.target = h.runtime / 'releases' / h.new[3]
+    skill, saved = h.skills / 'telegram-search' / 'SKILL.md', h.base / 'saved-skill'
+
+    def edited(checkpoint):
+        def both(value):
+            if value == 'claude_code':
+                saved.write_text(json.dumps([skill.read_bytes().hex(), stat.S_IMODE(skill.stat().st_mode)]))
+                skill.chmod(0o600)
+                skill.write_bytes(b'mine')
+            checkpoint(value)
+        h.install(h.new, checkpoint=both)
+    _die(h, edited, at='claude_code')
+    h.assertEqual(_refusal(h, lambda: h.install(h.new))['refused'], 'skill_conflict')
+    data, mode = json.loads(saved.read_text())
+    saved.unlink()
+    skill.write_bytes(bytes.fromhex(data))
+    skill.chmod(mode)
+
+
 def _stopped_on_target(h):
     """current.json, the pin and the plist name `h.target`, and no broker runs (none did when the change began)."""
     out = [p for p in _one_release(h) if not p.startswith('loaded broker')]
@@ -757,6 +781,10 @@ SCENARIOS = {
     'uninstall_over_a_change_parked_with_a_desktop_temporary': Scenario(
         _parked_desktop_temporary_prepare, lambda h, lc, cl: h.change('uninstall', launchctl=lc, claude_runner=cl),
         _uninstall_parked_check, write_ahead=False, final=_nothing_left),
+    # 0.53 round 5 (the seeded sequences): a skill copy the change published, edited and put back exactly.
+    'repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back': Scenario(
+        _put_back_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check,
+        write_ahead=False, final=_one_release),
 }
 
 
@@ -1037,6 +1065,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_uninstall_over_a_change_parked_with_a_desktop_temporary_removes_it(self):
         self.sweep('uninstall_over_a_change_parked_with_a_desktop_temporary')
+
+    def test_repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back(self):
+        self.sweep('repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""
