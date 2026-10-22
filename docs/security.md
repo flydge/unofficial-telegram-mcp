@@ -1906,8 +1906,14 @@ environment. Any failure prints one fixed line, `{"schema_version":1,"error_code
 and exits 1.
 
 The shim only chooses a candidate path. The launcher then re-admits the receipt, the index and every
-file of that release tree by hash before importing anything, and it admits only the release the
-receipt names, so a pointer to any other tree fails there.
+file of that release tree by hash before it imports any of the package's own code, and it admits only the
+release the receipt names, so a pointer to any other tree fails there. What runs before that check comes
+from the same candidate tree and is verified only afterwards: the interpreter (`python/bin/python3`,
+started with `-I -S -B`, so no site directory, no user path and no `PYTHON*` variables) and the
+standard-library modules it loads at startup, `launcher.py` itself, and the standard-library modules the
+launcher imports before admitting (`ctypes`, `hashlib`, `json`, `os`, `pathlib`, `platform`, `stat`,
+`sys`, and what they import). Until then only the shim's pointer and path checks and the tree's owner-only
+modes bind that candidate; a process that can write as the same user is outside these checks.
 
 **What the plugin trusts.** Every plugin file, `bin/install`, `bin/mcp-entry`, `.mcp.json` and
 `release-pins.json` alike, comes from one commit: whatever commit of this repository's branch the user's

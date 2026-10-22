@@ -380,7 +380,7 @@ First install fields:
 | `activation_arguments`, `activation_command` | The installed `python3 -I -S -B launcher.py connect`, as an argument list and as one shell-quoted string. |
 | `adopted` | Present with `--adopt-legacy`: the sorted clients adopted, from `codex`, `claude_code`, `claude_desktop` and `service`. |
 | `service` | Present only when a foreign broker was adopted: `restarted` or `not_loaded`. |
-| `claude_code_user_entry` | `present` in `plugin` mode when a user-scope entry exists. It is a read-only note. |
+| `claude_code_user_entry` | `present` in `plugin` mode when a user-scope entry exists, in every result (also an upgrade's, a rollback's and their repeats'). It is a read-only note. |
 | `claude_registration_command` | A nonsecret argument list to run yourself, when `claude_code` is `failed`, `unavailable` or `not_found`. |
 | `claude_desktop_next_action` | `restart_claude_desktop`, when `claude_desktop` is `registered`. |
 | `claude_desktop_manual_entry` | `{"mcpServers": {"telegram_search": {"command": …, "args": […]}}}`, when `claude_desktop` is `failed` or `unavailable`. |

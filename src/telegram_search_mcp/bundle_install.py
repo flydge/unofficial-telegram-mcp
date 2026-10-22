@@ -1151,6 +1151,13 @@ def _open_change(root, journal):
     return name
 
 
+def _plugin_note(result, mode, home):
+    """Read-only, in every plugin-mode result: a user-scope entry beside the plugin would duplicate the tool
+    set (`claude_code_user_entry: present`); it is never removed here."""
+    if mode=='plugin' and claude_registration.present(home)=='present':result['claude_code_user_entry']='present'
+    return result
+
+
 def _result_extras(result, claude_status, desktop_status, command, arguments):
     if claude_status in _MANUAL:
         result['claude_registration_command']=claude_registration.manual_command(command,arguments)
@@ -1536,9 +1543,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                             'activation_arguments':activation,'activation_command':shlex.join(activation)}
                     if adopted:result['adopted']=sorted(adopted)
                     if restarted is not None:result['service']=restarted
-                    if claude_code=='plugin' and claude_registration.present(home)=='present':
-                        # Read-only note: plugin and user scope would duplicate the tool set; never removed here.
-                        result['claude_code_user_entry']='present'
+                    _plugin_note(result,claude_code,home)
                     return _result_extras(result,claude_status,desktop_status,command,arguments)
                 except _REFUSALS:
                     rollback_claude()
@@ -1961,6 +1966,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 'claude_code':claude_status,'claude_skills':claude_skills_status,'claude_desktop':desktop_status,
                 'service':restarted,'next_action':'restart_mcp_clients'}
         if adopted:result['adopted']=sorted(adopted)
+        _plugin_note(result,mode,home)
         return _result_extras(result,claude_status,desktop_status,to_command,to_arguments)
 
 
@@ -1993,7 +1999,7 @@ def _reused(root, receipt, name=None, journal=None):
     if _finished(receipt,journal,'upgrade') and receipt_transaction(receipt)==name:
         adopted=_check_adopted(_record(journal,'adopted'))
         if adopted:result['adopted']=sorted(adopted)
-    return result
+    return _plugin_note(result,receipt['claude_code_mode'],Path(receipt['user_home']))
 
 
 def _rolled_back(receipt, journal):
@@ -2007,6 +2013,7 @@ def _rolled_back(receipt, journal):
     result={'status':'rolled_back','installation':'reused','release_root':receipt['release_root'],
             'package_version':receipt['package_version'],'previous_release_root':previous,'claude_code':claude_status,
             'claude_skills':receipt['claude_skills'],'claude_desktop':desktop_status,'next_action':'restart_mcp_clients'}
+    _plugin_note(result,receipt['claude_code_mode'],Path(receipt['user_home']))
     return _result_extras(result,claude_status,desktop_status,command,arguments)
 
 
