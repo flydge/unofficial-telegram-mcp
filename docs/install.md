@@ -43,7 +43,10 @@ separate from the preserved default session in `TelegramSearchMCP/tdlib`.
 The installer registers, with ownership receipts:
 
 - Codex: only its owned `mcp_servers.telegram_search` subtree in `~/.codex/config.toml`;
-  neighboring TOML is preserved.
+  neighboring TOML is preserved. Ownership covers that table's own keys and values (and comments
+  between or on them); comments and blank lines after its last key, such as a comment you write above a
+  later table, stay yours: they neither make the entry foreign nor change when the installer replaces
+  or removes its lines.
 - Claude Code (the default `--claude-code user`; `plugin` and `skip` are described in
   [the 0.53 section](#claude-code-user-scope-plugin-or-skip)): a user-scope server `telegram_search`. Its state is read only from the
   `mcpServers` object of `~/.claude.json` (a bounded, no-follow, strict-JSON read that never

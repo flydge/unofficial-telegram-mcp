@@ -420,7 +420,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `claude_registration_conflict` | Claude Code user scope has a different `telegram_search` entry. |
 | `claude_desktop_registration_conflict` | Claude Desktop has a different `telegram_search` entry. |
 | `claude_desktop_config_unsupported` | The Claude Desktop config cannot be rewritten while keeping every neighbour exactly. |
-| `registration_conflict` | The Codex `telegram_search` subtree is not one the installer owns, or it changed. |
+| `registration_conflict` | The Codex `telegram_search` subtree is not one the installer owns, or its own keys and values changed (comments after it do not count). |
 | `foreign_registration` | The Codex config changed after the transaction prepared its edit. |
 | `service_conflict` | The broker plist or its live registration is not an exactly known definition. |
 | `skill_conflict` | A skill directory exists that this installation did not publish, or its content differs from the release's. |

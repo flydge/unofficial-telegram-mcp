@@ -1768,7 +1768,9 @@ Initialization uses an inode-bound durable intent before root publication.
 Release, skills and local metadata retain staged-object publication records;
 pending recovery requires that exact object, not merely matching content. The
 owned Codex subtree still permits unrelated neighbor edits after its completed
-publication. Interrupted unbound packets are preserved without adoption, and
+publication: its ownership hash covers only the table's own keys and values, not the comments and
+blank lines tomlkit attaches after its last key (a comment above the next table), and a replacement or
+removal splices only the table's own lines, located exactly, so every other byte stays. Interrupted unbound packets are preserved without adoption, and
 recovery attempts are bounded.
 Current pointer publication occurs last; interrupted installations fail closed
 until exact checked recovery. A first install stops no active broker and adopts no foreign data.
