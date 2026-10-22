@@ -2102,7 +2102,10 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   temporaries killed client writes left beside the Codex config, the Claude Desktop config, the plist and
   `runtime.toml`, each only by the name journaled before its creation (and, once journaled, its inode);
   uninstall and the commit do the same for a change parked with one. A plist changed since the stop is
-  never overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
+  never overwritten (`service_conflict`). A plist removed since the stop (by hand or a cleanup) is restored
+  from `service.previous`; with none kept yet (the stop had not rewritten it) there is nothing to restore and
+  no broker is bootstrapped from a missing plist, and a target's plist the stop wrote over such a removal is
+  removed again. What stays: the copied release, the unfinished transaction and every
   client entry written before the refusal, which already names the new release and so cannot start the
   server until the repeat commits (only a refusal at the switch of `current.json` itself comes after
   `receipt.json` names the new release, and then neither release starts until the repeat or an uninstall).
@@ -2112,9 +2115,11 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **The service step is idempotent by state.** Every run before the commit, whatever stage the journal
   records, makes the service the target's: a previous definition that was loaded again after the stop is
   gated and booted out again (also when no broker ran as the change began; then none is started after the
-  commit), and the plist is rewritten until it is the target's. After the commit only the target's plist
-  is bootstrapped, and only if a broker ran as the change began; any other definition refuses
-  (`service_conflict`) and nothing is started. A kill anywhere in a repeat's stop, or a login after it,
+  commit), and the plist is rewritten until it is the target's; a plist removed since the change began is
+  nothing to stop, and the target's is written anew. After the commit only the target's plist is
+  bootstrapped (written again first if it was removed), and only if a broker ran as the change began; any
+  other definition refuses (`service_conflict`) and nothing is started. A registration still loaded from the
+  plist's path after the file was removed counts as the release whose definition it runs, if it runs either. A kill anywhere in a repeat's stop, or a login after it,
   therefore cannot leave the old broker running on the new pin.
 - **A parked change has two ways out.** An upgrade or rollback refused before its stop, or after a late
   refusal's finished restore, is parked: its repeat resumes it once the named object is put back or

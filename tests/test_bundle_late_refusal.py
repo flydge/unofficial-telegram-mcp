@@ -1097,5 +1097,103 @@ class ParkedTemporaryTests(ParkedHarness, unittest.TestCase):
         self.assertEqual(self.temporaries(), [])
 
 
+class RemovedPlistTests(ParkedHarness, unittest.TestCase):
+    """0.53.0rc1 re-review (R5f, R5g; reproduced on 05fee70): the broker plist removed by hand while a change is
+    unfinished after its stop. Every repeat refused `service_restart_failed` (the stop expected the plist to exist,
+    the restore bootstrapped a plist that was gone) and uninstall named the change, for good. A missing plist is
+    now nothing to stop: the stop writes the target's definition anew; the restore brings the previous one back
+    from its journaled copy (or, with none kept, starts nothing); after the commit the restart writes the target's
+    again. A registration still loaded from the removed plist's path that runs one of the two releases is ours."""
+
+    def kinds(self, kind, *, loaded=True):
+        _, old = self.full(loaded=loaded)
+        new = self.build('b', launcher=b'# second release\n')
+        if kind == 'rollback':
+            self.install(new)
+        action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+            lambda **kwargs: self.change('rollback', **kwargs))
+        target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+        previous = Path(old['release_root']) if kind == 'upgrade' else self.runtime / 'releases' / new[3]
+        self.claude()
+        return action, target, previous
+
+    def late(self, value):
+        if value == 'service':
+            self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+
+    def put_back(self):
+        self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+
+    def test_a_parked_change_whose_launchagent_was_removed_by_hand_finishes(self):
+        for kind in ('upgrade', 'rollback'):
+            for cleanup in ('bootout and remove', 'remove only'):
+                for follow in ('repeat', 'uninstall'):
+                    with self.subTest(kind=kind, cleanup=cleanup, follow=follow):
+                        self.setUp()
+                        action, target, _ = self.kinds(kind)
+                        self.assertEqual(self.refused(lambda: action(checkpoint=self.late)), 'target_conflict')
+                        self.put_back()
+                        if cleanup == 'bootout and remove':
+                            self.launchctl.loaded = None
+                        self.plist.unlink()
+                        if follow == 'repeat':
+                            result = action()
+                            self.assertEqual((result['status'], result['service']),
+                                             ('upgraded' if kind == 'upgrade' else 'rolled_back', 'restarted'))
+                            self.assertOneRelease(target)
+                        removed = self.change('uninstall')
+                        self.assertEqual(removed['status'], 'uninstalled')
+                        self.assertEqual(removed['service'], 'removed' if follow == 'repeat' or
+                                         cleanup == 'remove only' else 'absent')
+                        self.assertFalse(self.runtime.exists() or self.plist.exists())
+                        self.assertIsNone(self.launchctl.loaded)
+
+    def test_a_plist_removed_after_a_kill_past_the_stop_is_written_anew_by_the_repeat(self):
+        for kind in ('upgrade', 'rollback'):
+            for at in ('stopped:service', 'service', 'policy', 'complete'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    action, target, _ = self.kinds(kind)
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                    self.plist.unlink()
+                    result = action()
+                    self.assertEqual(result['service'], 'restarted')
+                    self.assertOneRelease(target)
+                    self.assertEqual(self.change('uninstall')['service'], 'removed')
+                    self.assertFalse(self.runtime.exists() or self.plist.exists())
+
+    def test_a_plist_removed_after_a_kill_then_a_late_refusal_restores_the_kept_copy(self):
+        """Killed past the stop, the plist removed, then a repeat refused late: the restore writes the previous
+        definition back from the transaction's copy when the stop had kept one (and starts its broker, which ran
+        before), else it starts nothing; either way the change is parked, and its repeat or uninstall finishes."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('stopped:service', 'service', 'policy'):
+                for follow in ('repeat', 'uninstall'):
+                    with self.subTest(kind=kind, at=at, follow=follow):
+                        self.setUp()
+                        action, target, previous = self.kinds(kind)
+                        before = self.plist.read_bytes()
+                        self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                        kept = (self.runtime / 'transactions').glob('change_*/service.previous')
+                        kept = [p for p in kept if p.read_bytes() == before]
+                        self.plist.unlink()
+                        self.assertEqual(self.refused(lambda: action(checkpoint=self.late)), 'target_conflict')
+                        if kept:
+                            self.assertEqual(self.plist.read_bytes(), before)
+                            self.assertEqual(self.launchctl.loaded[4], str(previous / 'launcher.py'))
+                        else:
+                            self.assertFalse(self.plist.exists())
+                            self.assertIsNone(self.launchctl.loaded)
+                        self.put_back()
+                        if follow == 'repeat':
+                            self.assertEqual(action()['service'], 'restarted')
+                            self.assertOneRelease(target)
+                        removed = self.change('uninstall')
+                        self.assertEqual((removed['status'], removed['service']),
+                                         ('uninstalled', 'removed' if kept or follow == 'repeat' else 'absent'))
+                        self.assertFalse(self.runtime.exists() or self.plist.exists())
+                        self.assertIsNone(self.launchctl.loaded)
+
+
 if __name__ == '__main__':
     unittest.main()

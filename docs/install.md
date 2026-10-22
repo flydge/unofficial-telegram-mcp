@@ -707,6 +707,10 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   `service_conflict` until you resolve them and repeat: a plist changed by hand since the stop (below), and
   a broker loaded under the same label that is neither release's (not started from either plist), which you
   stop with `launchctl bootout gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker`.
+  A plist removed by hand (`rm`, with or without `launchctl bootout`) is not a conflict: the repeat writes
+  the new release's plist anew, and after the switch writes it again if it is gone. A broker still loaded
+  from that plist's path that runs either release is the installation's own: the repeat gates and stops it
+  like any other, and `uninstall` boots it out.
 - **`uninstall`.** It goes over the parked upgrade: it removes what the installed release owns and
   everything the upgrade already wrote (the Codex entry, skill copies, and Claude Code and Claude Desktop
   entries that name the new release), each only while it is exactly what was written, then the broker,
@@ -718,7 +722,10 @@ The same holds for a rollback (`pending_action: rollback`). For an adopting firs
 the repeat is the way out, since there is no installed release for `uninstall` to remove yet (it refuses
 as `transaction_pending`). A restore never overwrites a plist changed since the stop: then the refusal is
 `service_conflict` (or `service_restart_failed` when the bootstrap fails) and the broker stays stopped
-until a repeat succeeds. A broker loaded under the label that is neither release's also refuses the
+until a repeat succeeds; remove that changed plist and repeat, and the restore writes the previous one back.
+A plist removed since the stop comes back from the copy the transaction kept before its first rewrite (with
+the previous broker started again if it ran); removed before that copy existed, there is nothing to put back,
+so the restore leaves no plist and starts no broker. A broker loaded under the label that is neither release's also refuses the
 restore as `service_conflict` and keeps running; once you stop it, the repeat finishes the restore. A repeat
 after a kill during the restore, or after one of these refusals, finishes the restore and refuses with the
 first refusal's code; until that repeat has run, `uninstall` also refuses as `transaction_pending`. The
@@ -783,7 +790,8 @@ journals, the same way for every receipt schema.
 
 `uninstall` removes only objects the receipt owns. Run it the same way as `rollback`, with `uninstall`
 in place of `rollback`. In order it removes: the broker plist (the exact LaunchAgent label is booted out
-first, after the pending-send gate); the Codex subtree, only while it is exactly what the receipt
+first, after the pending-send gate; a broker of the installed release still loaded after you removed its
+plist by hand is booted out too, `removed`); the Codex subtree, only while it is exactly what the receipt
 recorded; the Claude Code user-scope entry (through the `claude` CLI, `user` mode only); the Claude
 Desktop entry, leaving its neighbours and the file's mode; the skill copies the receipt binds; and
 finally the installation root with all releases.

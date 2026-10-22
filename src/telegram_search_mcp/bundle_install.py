@@ -892,13 +892,23 @@ class _Service:
         if data is not None and self.adopted is not None and digest(data)==self.adopted:return 'adopted',data,payload
         raise InstallError('service_conflict')
 
+    def _loaded_payload(self, live, kind, payload):
+        """The payload a loaded registration runs when it is ours: started from the definition on disk, or, once that
+        plist was removed (by hand or a cleanup), still loaded from its path running the target's or a known
+        definition. Anything else refuses `service_conflict`."""
+        if kind=='absent':
+            for value in (self.target,*self.known.values()):
+                if value is not None and _matches_live(live,self.plist,value):return value
+            raise InstallError('service_conflict')
+        if kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
+        return payload
+
     def check(self):
         """Pre-mutation gate: a known definition, an exactly matching live registration and no pending send."""
         kind,_,payload=self.kind()
         live=_live(self.runner,self.label)
         if live is None:return kind,False
-        if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
-        self.gate(payload)
+        self.gate(self._loaded_payload(live,kind,payload))
         return kind,True
 
     def gate(self, payload):
@@ -917,8 +927,7 @@ class _Service:
         live=_live(self.runner,self.label)
         if live is None:return False
         kind,_,payload=self.kind()
-        if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
-        self.gate(payload)
+        self.gate(self._loaded_payload(live,kind,payload))
         return True
 
     def cycle(self, j):
@@ -954,7 +963,8 @@ class _Service:
         plist on disk) is gated and booted out again. Both by state, not by the observation: a broker a login
         started in a change that found none running is stopped too (and, as none ran before, `restart` starts
         none), so the previous broker never runs on the target's plist and pin. Then the plist is rewritten, its
-        exact previous bytes kept first, until it is the target's."""
+        exact previous bytes kept first, until it is the target's. A definition removed since the change began
+        (by hand or a cleanup) is nothing to keep or stop: the target's is written anew."""
         observed=self._observed(j)
         number,state,_=self.cycle(j)
         if state=='restoring':raise InstallError('transaction_conflict')  # `restore` finishes it first.
@@ -968,8 +978,8 @@ class _Service:
             j.discard('plist',self.plist)
             kind,data,_=self.kind()
             if kind!='to':
-                self._keep(j,data)
-                j.write('plist',self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
+                if kind!='absent':self._keep(j,data)
+                j.write('plist',self.plist,_plist_bytes(self.target),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
 
     def _keep(self, j, data):
@@ -1006,7 +1016,9 @@ class _Service:
         be loaded: it is booted out first (no pending-send gate: short of the commit its release is not admitted,
         `current.json` not naming it, so it serves no session). The previous broker loaded again (a login after
         the definition is back) stays. A loaded broker that is neither stays as well and refuses
-        `service_conflict`, as does a definition changed since the stop, which is never overwritten. A cycle
+        `service_conflict`, as does a definition changed since the stop, which is never overwritten. A definition
+        removed since the stop (by hand or a cleanup) comes back from its kept copy; with none kept (the stop had
+        not rewritten it yet) there is nothing to restore, and no broker is started from a missing plist. A cycle
         whose stop changed nothing restores nothing. The closing record drops the cycle's write records, whose
         temporaries the restore has discarded."""
         number,state,_=self.cycle(j)
@@ -1024,24 +1036,32 @@ class _Service:
         if observed['plist']!='absent':
             j.discard('plist',self.plist);j.discard('plist_restore',self.plist)
             kind,data,_=self.kind()
-            if kind=='to' and observed['plist']!='to':
-                j.write('plist_restore',self.plist,self._kept(j),data,existed=True,maximum=MAX_PLIST_BYTES)
+            kept=j.recorded('service_previous') is not None
+            if kind=='to' and observed['plist']!='to' and not kept:
+                # The stop wrote the target's over a definition removed meanwhile: there was none to keep, so the
+                # previous state is no plist.
+                _unlink_exact(self.plist,data)
+            elif kind=='to' and observed['plist']!='to' or kind=='absent' and kept:
+                j.write('plist_restore',self.plist,self._kept(j),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
         if live is None:
-            if observed['loaded']:_bootstrap(self.runner,self.plist)
+            if observed['loaded'] and self.kind()[0]!='absent':_bootstrap(self.runner,self.plist)
         else:
             kind,_,payload=self.kind()
-            if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):
-                raise InstallError('service_conflict')
+            self._loaded_payload(live,kind,payload)
         j.update(put=('service_cycle',{'cycle':number,'state':'restored'}),clear=_CYCLE_WRITES)
         j.checkpoint('restored:service')
 
     def restart(self, j):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
-        while the plist is the target's (the stop made it so before the commit); any other definition refuses."""
+        while the plist is the target's (the stop made it so before the commit); a plist removed since (by hand
+        or a cleanup) is written again first, as the stop writes it; any other definition refuses."""
         observed=j.recorded('service')
         if observed is None or not observed['loaded']:return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
+            if self.kind()[0]=='absent':
+                j.discard('plist',self.plist)
+                j.write('plist',self.plist,_plist_bytes(self.target),b'',existed=False,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
             live=_live(self.runner,self.label)
             if live is None:_bootstrap(self.runner,self.plist)
@@ -2440,6 +2460,12 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if loaded and _live(launchctl,label) is not None:_bootout(launchctl,label)
                     checkpoint('stopped:service')
                     status='removed' if _unlink_exact(plist,service.kind()[1]) else 'kept'
+                elif kind=='absent' and loaded:
+                    # Our registration still loaded from the path of a plist removed by hand: booted out by label.
+                    if j.recorded('service_owned') is None:j.update(single=('service_owned',{'plist':'absent'}))
+                    if _live(launchctl,label) is not None:_bootout(launchctl,label)
+                    checkpoint('stopped:service')
+                    status='removed'
                 elif kind=='absent' and j.recorded('service_owned') is not None:status='removed'
                 else:status='absent' if kind=='absent' else 'kept'
             else:status=None
