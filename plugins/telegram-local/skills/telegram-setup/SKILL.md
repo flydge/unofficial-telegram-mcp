@@ -141,10 +141,13 @@ again; stop after two refusals and tell the user that this same command finishes
   entry, skill copy or `runtime.toml` version line changed while it ran. When that comes after the broker
   stop, the installer has already put the old broker back (its `runtime.toml` version line and plist as
   they were, started again if it was running), so the installed release keeps serving; the change stays
-  unfinished (`transaction_pending` for other actions), and clients whose entry was already switched
-  start the server only once the same command finishes. Tell the user which object changed; the user
-  puts it back or removes it themselves (a removed `telegram_search` table or skill copy is written
-  again), then runs the same command. Edits elsewhere in those files are kept and need nothing.
+  unfinished, and clients whose entry was already switched start the server only once the same command
+  finishes. Tell the user which object changed; the user puts it back or removes it themselves (a
+  removed `telegram_search` table or skill copy is written again), then runs the same command, as often
+  as needed. Edits elsewhere in those files are kept and need nothing. For an upgrade or rollback the
+  other way out is `uninstall`, which also removes what the change already wrote; `rollback` and another
+  kit refuse with `transaction_pending` until the same command or `uninstall` has run. An adopting first
+  install ends only with its own repeat.
 
 ## Terminal fallback
 

@@ -433,7 +433,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
 | `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
-| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first. |
+| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
 | `rollback_unavailable` | There is no previous release to return to. |
 | `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
@@ -442,7 +442,8 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 
 A refusal raised after an upgrade's, a rollback's or an adopting first install's broker stop, and before
 `current.json` switches, first puts the `runtime.toml` version line back if it was rewritten, writes the
-previous broker plist back byte for byte and bootstraps that broker again if it was running; the transaction stays unfinished until the same command is repeated
+previous broker plist back byte for byte and bootstraps that broker again if it was running; the transaction stays unfinished until the same command is repeated,
+as often as needed, or, for an upgrade or rollback, until `uninstall` removes the installation together with what the change wrote
 ([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under

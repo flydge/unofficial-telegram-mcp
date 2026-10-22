@@ -2097,12 +2097,31 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   write-ahead record without the closing one finishes the restore and refuses with the recorded code. A plist changed since the stop is never
   overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
   client entry written before the refusal, which already names the new release and so cannot start the
-  server until the repeat commits. The same command stops the broker again (gated again) and resumes; at
-  most eight stop cycles per transaction, after which it refuses (`recovery_limit`) before any bootout.
+  server until the repeat commits (only a refusal at the switch of `current.json` itself comes after
+  `receipt.json` names the new release, and then neither release starts until the repeat or an uninstall).
+  The same command stops the broker again (gated again) and resumes. Cycles are not limited, since each
+  is a run the user starts; the cycle lives in one journal record replaced in place, and a finished
+  restore drops its cycle's write records, so the journal does not grow with their number.
+- **The service step is idempotent by state.** Every run before the commit, whatever stage the journal
+  records, makes the service the target's: a previous definition that was loaded again after the stop is
+  gated and booted out again, and the plist is rewritten until it is the target's. After the commit only
+  the target's plist is bootstrapped; any other definition refuses (`service_conflict`) and nothing is
+  started. A kill anywhere in a repeat's stop therefore cannot leave the old broker running on the new
+  pin.
+- **A parked change has two ways out.** An upgrade or rollback refused before its stop, or after a late
+  refusal's finished restore, is parked: its repeat resumes it once the named object is put back or
+  removed, and `uninstall` goes over it, removing what the receipt the change started from owns plus what
+  the change's journal binds (its Codex entry once written, its skill copies, the Claude Code and Claude
+  Desktop entries it recorded `registered`), each only while it is exactly that object; its adoption
+  backups are kept. `rollback` and another kit refuse (`transaction_pending`). A change interrupted with
+  its broker stopped or its restore unfinished is not parked: uninstall names it too. A parked adopting
+  first install has no installed release yet, so only its repeat ends it.
 - **Client edits made meanwhile are merged.** Each client file is written over its current bytes. Only a
   change of our own Codex entry or skill copy (or, when adopting, of the adopted foreign Codex entry)
-  after the transaction recorded it refuses; a changed Claude Code or Claude Desktop entry is left alone
-  and reported `failed`, and an entry removed meanwhile is written again. Claude Code entries are
+  after the transaction recorded it refuses, with the same fixed code before or right after our write
+  (`target_conflict`, or `foreign_registration` on a first install); a changed Claude Code or Claude
+  Desktop entry is left alone and reported `failed`, and an entry or skill copy removed meanwhile, also
+  one this transaction already wrote, is written again before the commit. Claude Code entries are
   written only by its CLI, which keeps its neighbours.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
   receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,

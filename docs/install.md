@@ -623,9 +623,9 @@ that an interruption resumes by repeating the command:
    `claude_desktop_registration_conflict`). Each client file is written over its bytes as they are at
    that moment: an edit you make while the upgrade runs (another server, a profile, a setting) is kept
    byte for byte, and our entry removed meanwhile is added back. Only our own Codex table or skill copy
-   changed since the upgrade started stops it there (`target_conflict`, `skill_conflict`; see
-   [a refusal after the broker stop](#a-refusal-after-the-broker-stop)); a changed Claude Code or Claude
-   Desktop entry is left alone and reported `failed`.
+   changed since the upgrade started (or right after the upgrade wrote it) stops it there
+   (`target_conflict`, `skill_conflict`; see [a refusal after the broker stop](#a-refusal-after-the-broker-stop));
+   a changed Claude Code or Claude Desktop entry is left alone and reported `failed`.
 4. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
    `policy_conflict`.
@@ -644,8 +644,9 @@ counts as pending. It asks before the transaction exists, again once the new rel
 last time right before the broker is stopped, which comes before any client file is written. Any such
 answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
 session unchanged. A refusal at the first check changes nothing at all; at a later one the new release
-tree is already copied and the upgrade stays unfinished, so `rollback`, `uninstall` and another kit
-refuse as `transaction_pending` (`pending_action: upgrade`) until the same command is repeated. Quit the
+tree is already copied and the upgrade stays unfinished, so `rollback` and another kit refuse as
+`transaction_pending` (`pending_action: upgrade`) until the same command is repeated (or `uninstall`,
+which goes over the unfinished upgrade, removes the installation). Quit the
 MCP clients, wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send
 is never retried by an upgrade. From the broker stop until the upgrade finishes, or until a refusal
 restores the broker (below), running MCP clients cannot reach the broker.
@@ -663,23 +664,42 @@ broker again if it was running, so the installed release keeps serving. A late r
 this:
 
 - `current.json` and `receipt.json` still name the installed release; its broker, its plist and the
-  `runtime.toml` version line are as they were before the upgrade.
+  `runtime.toml` version line are as they were before the upgrade. Only a refusal at the very last step,
+  the switch of `current.json` itself (a `current.json` changed by hand, or a disk error), comes after
+  `receipt.json` already names the new release: then neither release starts until the repeat or an
+  uninstall finishes.
 - The new release tree and the unfinished transaction stay.
 - Every client entry and skill copy written before the refusal stays: in step order the Codex subtree,
   the skill copies, the Claude Code entry and the Claude Desktop entry (a Codex refusal comes before any
   of them). The entries already name the new release, so those clients cannot start the server until the
   upgrade commits: the launcher starts only the release the receipt names.
-- `rollback`, `uninstall` and another kit refuse as `transaction_pending` (`pending_action: upgrade`).
+- `rollback` and another kit refuse as `transaction_pending` (`pending_action: upgrade`); `uninstall`
+  does not (below).
 
-Put back or remove the object the code names (a removed `telegram_search` table or skill copy is written
-again), then repeat the same command: it passes the pending-send gate, stops the broker again and
-resumes. The same holds for a rollback (`pending_action: rollback`) and for an adopting first install
-(`pending_action: install`, repeated with `--adopt-legacy`), where the foreign plist and broker come
-back. A restore never overwrites a plist changed since the stop: then the refusal is
+The upgrade is now parked, and two commands end it; `rollback` keeps refusing until one of them has run:
+
+- **The repeat.** Put back or remove the object the code names (a removed `telegram_search` table or
+  skill copy is written again, also one the upgrade had already written), then repeat the same command:
+  it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
+  upgrade may be refused and repeated. Every run before `current.json` switches makes the broker the new
+  release's whatever an earlier run left: an old broker started again meanwhile (a login loads the plist
+  on disk) is gated and stopped again, and the plist is rewritten until it is the new release's. After the
+  switch only the new release's plist is bootstrapped. So a repeat killed anywhere, its broker stop
+  included, still ends with `current.json`, the `runtime.toml` version line, the plist and the running
+  broker on the same release once it is repeated again.
+- **`uninstall`.** It goes over the parked upgrade: it removes what the installed release owns and
+  everything the upgrade already wrote (the Codex entry, skill copies, and Claude Code and Claude Desktop
+  entries that name the new release), each only while it is exactly what was written, then the broker,
+  its plist and the installation root with both release trees. Adoption backups are kept as usual, and an
+  entry or skill copy you changed is kept (`kept`).
+
+The same holds for a rollback (`pending_action: rollback`). For an adopting first install
+(`pending_action: install`, repeated with `--adopt-legacy`) the foreign plist and broker come back; there
+the repeat is the way out, since there is no installed release for `uninstall` to remove yet (it refuses
+as `transaction_pending`). A restore never overwrites a plist changed since the stop: then the refusal is
 `service_conflict` (or `service_restart_failed` when the bootstrap fails) and the broker stays stopped
 until a repeat succeeds. A repeat after a kill during the restore finishes the restore and refuses with
-the same code. After eight late refusals in one transaction the next repeat refuses as `recovery_limit`
-before it stops the broker.
+the same code; until that repeat has run, `uninstall` also refuses as `transaction_pending`.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
@@ -687,7 +707,8 @@ or an explicitly given `--claude-code` mode other than the installed one, refuse
 also when the kit is the installed release's own (a repeat).
 Another install, upgrade, rollback or uninstall started while one is unfinished refuses as
 `transaction_pending`, and the refusal's `pending_action` (`install`, `upgrade`, `rollback` or
-`uninstall`) names the command to repeat first.
+`uninstall`) names the command to repeat first. The one exception is an `uninstall` over a parked upgrade
+or rollback (above).
 
 ### Rollback
 
@@ -751,7 +772,11 @@ Each part reports `removed`, `absent`, `kept` (not an entry the installation own
 was written, so left alone), or for a client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
 `claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
 present after its removal attempt; repeat the command. An unfinished first install refuses as
-`transaction_pending` with `pending_action: install` and is left as it is; repeat the install first.
+`transaction_pending` with `pending_action: install` and is left as it is; repeat the install first. An
+upgrade or rollback parked by a refusal (before its broker stop, or after a late refusal's restore; see
+[a refusal after the broker stop](#a-refusal-after-the-broker-stop)) does not block it: the entries and
+skill copies that change already wrote are removed as the installation's own. A change interrupted with
+its broker stopped, or whose restore has not finished, refuses as `transaction_pending`; repeat it first.
 That check, and the read of the install intent the last step needs, come before anything is removed:
 an unreadable intent refuses as `initialization_conflict` with nothing changed, and only the exact
 staged folder the intent records counts as an unfinished first install, so something else that later
