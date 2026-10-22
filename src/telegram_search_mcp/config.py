@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import platform
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import re
 import stat
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -16,6 +19,10 @@ class ConfigurationError(RuntimeError):
 
 
 DEFAULT_ALIAS = "default"
+# A named alias is a closed token; `default` matches it but is reserved for today's single account.
+ALIAS_GRAMMAR = re.compile(r"[a-z][a-z0-9]{0,11}")
+# Set only by named_aliases_for_tests until the phase B registry admits named aliases.
+_NAMED_ALIASES_ADMITTED: ContextVar[bool] = ContextVar("telegram_search_mcp_named_aliases", default=False)
 
 
 class AccountPathsError(ConfigurationError):
@@ -26,14 +33,30 @@ class AccountPathsError(ConfigurationError):
         super().__init__(self.code)
 
 
+@contextmanager
+def named_aliases_for_tests() -> Iterator[None]:
+    """The explicit test hook: inside it, and only there, an AccountPaths may hold a named alias.
+
+    Nothing in src or packaging enters it (tests/test_account_paths.py checks); phase B's registry becomes
+    the only other way in.
+    """
+    token = _NAMED_ALIASES_ADMITTED.set(True)
+    try:
+        yield
+    finally:
+        _NAMED_ALIASES_ADMITTED.reset(token)
+
+
 @dataclass(frozen=True)
 class AccountPaths:
     """Every per-account location and name; the default alias is today's single account in today's paths.
 
     `for_alias(DEFAULT_ALIAS, home)` is the only public constructor until the alias registry exists
-    (0.55 phase B); any other alias refuses with `alias_unavailable`. The Keychain service is the one
-    name every alias shares (spec decision 6); the Whisper model stays shared outside (WHISPER_MODEL_PATH).
-    Call sites take `account=None` for the default alias, which keeps every 0.54 call and constant.
+    (0.55 phase B); any other alias refuses with `alias_unavailable`. Every construction, the generated
+    __init__, dataclasses.replace and `relocated` included, refuses a named alias outside
+    named_aliases_for_tests. The Keychain service is the one name every alias shares (spec decision 6);
+    the Whisper model stays shared outside (WHISPER_MODEL_PATH). Call sites take `account=None` for the
+    default alias, which keeps every 0.54 call and constant.
     """
     alias: str
     root: Path
@@ -59,6 +82,11 @@ class AccountPaths:
     broker_plist: Path
     connect_label: str
 
+    def __post_init__(self) -> None:
+        if type(self.alias) is not str or (self.alias != DEFAULT_ALIAS and (
+                not _NAMED_ALIASES_ADMITTED.get() or ALIAS_GRAMMAR.fullmatch(self.alias) is None)):
+            raise AccountPathsError()
+
     @property
     def server_name(self) -> str:
         """The MCP server name, read through the product identity at call time like every product name."""
@@ -69,22 +97,25 @@ class AccountPaths:
     def for_alias(cls, alias: str, home: Path) -> AccountPaths:
         if type(alias) is not str or alias != DEFAULT_ALIAS:
             raise AccountPathsError()
-        return cls._derive(alias, home)
+        return cls._home_layout(DEFAULT_ALIAS, Path(home), ("TelegramSearchMCP",), "")
 
     @classmethod
     def _derive(cls, alias: str, home: Path) -> AccountPaths:
-        """Any alias's layout. Private: only the registry (phase B) may admit another alias; tests use it."""
-        if type(alias) is not str or re.fullmatch(r"[a-z][a-z0-9]*", alias) is None:
+        """A named alias's layout: a sibling of the legacy tree, never inside it (spec decision 6).
+
+        Private, and `default` is reserved: it never takes this layout. Building the result needs the
+        explicit test hook until the registry (phase B) admits named aliases.
+        """
+        if type(alias) is not str or alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is None:
             raise AccountPathsError()
-        home = Path(home)
+        return cls._home_layout(alias, Path(home), ("TelegramSearchMCP-accounts", alias), f".a.{alias}")
+
+    @classmethod
+    def _home_layout(cls, alias: str, home: Path, root: tuple[str, ...], job_suffix: str) -> AccountPaths:
         service = f"com.{home.name}.telegram-search-mcp"
-        support = home / "Library" / "Application Support"
-        if alias == DEFAULT_ALIAS:
-            root, job = support / "TelegramSearchMCP", service
-        else:  # A sibling of the legacy tree, never inside it (spec decision 6).
-            root, job = support / "TelegramSearchMCP-accounts" / alias, f"{service}.a.{alias}"
+        job = service + job_suffix
         broker_label = f"{job}.broker"
-        return cls._layout(alias, root, service, broker_label,
+        return cls._layout(alias, home.joinpath("Library", "Application Support", *root), service, broker_label,
                            home / "Library" / "LaunchAgents" / f"{broker_label}.plist", f"{job}.connect")
 
     def relocated(self, root: Path) -> AccountPaths:

@@ -38,7 +38,8 @@ class Fixture(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name).resolve() / 'home'
-        self.work = AccountPaths._derive('work', self.home)
+        with config.named_aliases_for_tests():
+            self.work = AccountPaths._derive('work', self.home)
 
 
 class DefaultsStayTests(Fixture):
