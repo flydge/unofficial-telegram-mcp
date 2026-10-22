@@ -39,8 +39,8 @@ from .broker_protocol import (
     send_frame,
 )
 from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, RuntimePolicy, load_runtime_policy
-from .contract import (CompatibilityError, contract_descriptor, require_compatible, require_current, OPERATION_CAPABILITIES,
-                       required_capabilities)
+from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
+                       require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
 from .media_analyzer import analyze_media
 from .local_upload import LocalUploadRegistry, UploadError
@@ -69,7 +69,7 @@ from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareRepl
 from .reply_drafts import (ReplyDraftPreview, ReplyTextDraftPreview, PrepareReplyTextSendRequest, PrepareReplyTextSendResponse,
     GetReplyDraftRequest, GetReplyDraftResponse, UpdateReplyDraftRequest, RefreshReplyDraftRequest,
     ReviseReplyDraftResponse, PREPARED as REPLY_PREPARED, PENDING as REPLY_PENDING,
-    REVISED as REPLY_REVISED, UNAVAILABLE as REPLY_UNAVAILABLE)
+    REVISED as REPLY_REVISED, UNAVAILABLE as REPLY_UNAVAILABLE, CAPABILITY_DISABLED as REPLY_CAPABILITY_DISABLED)
 
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftPreview, DraftSummary,
@@ -1059,7 +1059,7 @@ class Broker(SelectionBrokerMixin):
             topic=draft.topic,
         )
 
-    def _require_topic_policy(self, draft_id: str, owner: DraftOwner) -> None:
+    def _require_topic_policy(self, draft_id: str, owner: DraftOwner, *, stored_source: bool = True) -> None:
         kind = self._drafts.kind(draft_id, owner=owner)
         if kind == 'forward':
             self._require_forward_policy()  # Status and receipts stay bound to forward_send.
@@ -1071,19 +1071,30 @@ class Broker(SelectionBrokerMixin):
             self._require_change_policy('edit_own_text')  # Status and receipts stay bound to edit_own_text.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
-        require_current(self._policy)
-        if 'send' not in self._policy.enabled_capabilities:
-            raise CompatibilityError('capability_disabled')
+        self._require_capabilities('send')
         provider = self._shared_client()
-        capabilities = self._drafts.source_required_capabilities(draft_id, owner=owner,
-            provider=provider, provider_epoch=provider.send_observation_epoch)
-        if any(capability not in self._policy.enabled_capabilities for capability in capabilities):
-            raise CompatibilityError('capability_disabled')
+        self._require_capabilities(*self._drafts.source_required_capabilities(draft_id, owner=owner,
+            provider=provider, provider_epoch=provider.send_observation_epoch, stored_source=stored_source))
+
+    def _require_capabilities(self, *required: str) -> None:
+        """Refuse with only the missing names, in requirement order; reply tools return them typed."""
+        require_current(self._policy)
+        missing = missing_capabilities(self._policy, *required)
+        if missing:
+            raise CapabilityDisabled(missing)
 
     def _require_formatting_capability(self):
-        require_current(self._policy)
-        if not {'send', 'formatted_text_send'} <= set(self._policy.enabled_capabilities):
-            raise CompatibilityError('capability_disabled')
+        self._require_capabilities('send', 'formatted_text_send')
+
+    @staticmethod
+    def _reply_options(*, formatted: bool, topic: bool) -> tuple[str, ...]:
+        """A text reply's own options in the documented order: outgoing styles, then a selected topic."""
+        return (*(('formatted_text_send',) if formatted else ()), *(('topic_text_send',) if topic else ()))
+
+    def _require_reply_draft_options(self, draft) -> None:
+        """A stored text reply: the tool, send, then the draft's own options, before any source family."""
+        self._require_capabilities('reply_text_send', 'send', *self._reply_options(
+            formatted=bool(draft.outgoing_entities), topic=draft.topic is not None))
 
     @staticmethod
     def _draft_entity_rows(draft):
@@ -1098,9 +1109,10 @@ class Broker(SelectionBrokerMixin):
             required.add('topic_text_send')
         if old.outgoing_entities or new_formatted:
             required.add('formatted_text_send')
-        for selected_source in (old.reply_source, source):
-            if selected_source is not None:
-                required.update(('reply_text_send', *selected_source.required_capabilities))
+        # The source the revision installs: a refresh replaces the stored one, which is never shown again.
+        installed = old.reply_source if source is None else source
+        if installed is not None:
+            required.update(('reply_text_send', *installed.required_capabilities))
         def guard():
             # Called under registry lock: captured immutable/local facts only.
             require_current(self._policy)
@@ -1356,16 +1368,20 @@ class Broker(SelectionBrokerMixin):
     def _reply_artifact_owner(self, client_id: str) -> DraftOwner:
         owner=self._draft_owner(client_id)
         if "reply_artifact_send" not in self._policy.enabled_capabilities:
-            raise CompatibilityError("capability_disabled")
+            raise CapabilityDisabled(("reply_artifact_send",))
         return owner
 
     def _require_reply_source_policy(self, source):
-        require_current(self._policy)
-        if any(capability not in self._policy.enabled_capabilities for capability in source.required_capabilities):
-            raise CompatibilityError('capability_disabled')
+        self._require_capabilities(*source.required_capabilities)
+
+    @staticmethod
+    def _reply_disabled(response, error: CapabilityDisabled):
+        return response(status='capability_disabled', missing_capabilities=list(error.missing),
+                        detail=REPLY_CAPABILITY_DISABLED)
 
     def _reply_artifact_preview(self,draft,owner):
         if draft.reply_source is None or draft.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
+        self._require_capabilities('reply_artifact_send','send')
         self._require_reply_source_policy(draft.reply_source)
         return ReplyArtifactDraftPreview.create(self._plain_draft_preview(draft,owner),draft.reply_source)
 
@@ -1405,6 +1421,8 @@ class Broker(SelectionBrokerMixin):
                 local_admission_guard=lambda:self._reply_budget_check(provider),**kwargs)
             preview=self._reply_artifact_preview(draft,owner);self._remember_draft_title(draft)
             return PrepareReplyArtifactSendResponse(status='prepared',reply=preview,detail=REPLY_PREPARED)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(PrepareReplyArtifactSendResponse, error)
         except (DraftError,TDLibError,VoiceError,ValueError,CompatibilityError,AttributeError,TimeoutError,OSError):
             return PrepareReplyArtifactSendResponse(status='unavailable',detail=REPLY_UNAVAILABLE)
 
@@ -1414,13 +1432,20 @@ class Broker(SelectionBrokerMixin):
             draft=self._drafts.peek(request.draft_id,owner=owner)
             self._reply_budget_check(self._shared_client())
             return GetReplyArtifactDraftResponse(status='pending',reply=self._reply_artifact_preview(draft,owner),detail=REPLY_PENDING)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(GetReplyArtifactDraftResponse, error)
         except (DraftError,TDLibError,ValueError,CompatibilityError,TimeoutError):
             return GetReplyArtifactDraftResponse(status='unavailable',detail=REPLY_UNAVAILABLE)
 
     def _revise_reply_artifact_draft(self,request,*,client_id: str):
         try:
             owner=self._reply_artifact_owner(client_id);old=self._drafts.peek(request.draft_id,owner=owner)
-            self._reply_artifact_preview(old,owner);provider=self._shared_client()
+            if isinstance(request,RefreshReplyArtifactDraftRequest):
+                # A refresh names what the newly read source needs; the stored source it replaces is not asked.
+                if old.reply_source is None or old.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
+                self._require_capabilities('reply_artifact_send','send')
+            else:self._reply_artifact_preview(old,owner)
+            provider=self._shared_client()
             if isinstance(request,RefreshReplyArtifactDraftRequest):
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get('title'),max_length=255) or str(old.recipient)
@@ -1435,6 +1460,8 @@ class Broker(SelectionBrokerMixin):
             self._remember_draft_title(revised)
             return ReviseReplyArtifactDraftResponse(status='revised',previous_draft_id=request.draft_id,
                 reply=self._reply_artifact_preview(revised,owner),detail=REPLY_REVISED)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(ReviseReplyArtifactDraftResponse, error)
         except (DraftError,TDLibError,ValueError,CompatibilityError,AttributeError,TimeoutError):
             return ReviseReplyArtifactDraftResponse(status='unavailable',detail=REPLY_UNAVAILABLE)
 
@@ -1447,12 +1474,14 @@ class Broker(SelectionBrokerMixin):
     def _reply_owner(self, client_id: str) -> DraftOwner:
         owner=self._draft_owner(client_id)
         if "reply_text_send" not in self._policy.enabled_capabilities:
-            raise CompatibilityError("capability_disabled")
+            raise CapabilityDisabled(("reply_text_send",))
         return owner
 
     def _reply_preview(self, draft, owner: DraftOwner) -> ReplyDraftPreview:
         if draft.reply_source is None or draft.kind != "text":
             raise DraftError("reply draft is unavailable")
+        # The documented order: the tool, send, the draft's options, then the source's families.
+        self._require_reply_draft_options(draft)
         self._require_reply_source_policy(draft.reply_source)
         self._require_topic_policy(draft.draft_id, owner)
         content = ReplyTextDraftPreview(**self._draft_summary(draft, owner).model_dump(),
@@ -1470,12 +1499,10 @@ class Broker(SelectionBrokerMixin):
     def _prepare_reply_text_send(self, request: PrepareReplyTextSendRequest, *, client_id: str) -> PrepareReplyTextSendResponse:
         try:
             from .outgoing_entity_models import caller_outgoing_entities
-            if request.outgoing_entities:
-                self._require_formatting_capability()
-            if request.topic is not None:
-                require_current(self._policy)
-                if not {'send', 'reply_text_send', 'topic_text_send'} <= set(self._policy.enabled_capabilities):
-                    raise CompatibilityError('capability_disabled')
+            # The request's own options are checked together, before Telegram is read.
+            options = self._reply_options(formatted=bool(request.outgoing_entities), topic=request.topic is not None)
+            if options:
+                self._require_capabilities('reply_text_send', 'send', *options)
             owner=self._reply_owner(client_id)
             if request.reply_to.chat_id!=request.recipient:
                 raise DraftError("reply draft is unavailable")
@@ -1494,8 +1521,8 @@ class Broker(SelectionBrokerMixin):
                     ((topic is not None or request.outgoing_entities) and provider.send_observation_epoch is not epoch)):
                 raise DraftError("reply draft is unavailable")
             self._require_reply_source_policy(source)
-            if topic is not None and not {'send', 'reply_text_send', 'topic_text_send'} <= set(self._policy.enabled_capabilities):
-                raise CompatibilityError('capability_disabled')
+            if topic is not None:
+                self._require_capabilities('reply_text_send', 'send', 'topic_text_send')
             if request.outgoing_entities:
                 self._require_formatting_capability()
                 self._reply_budget_check(provider)
@@ -1509,6 +1536,8 @@ class Broker(SelectionBrokerMixin):
             preview=self._reply_preview(draft,owner)
             self._remember_draft_title(draft)
             return PrepareReplyTextSendResponse(status="prepared",reply=preview,detail=REPLY_PREPARED)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(PrepareReplyTextSendResponse, error)
         except (DraftError,TDLibError,ValueError,CompatibilityError,AttributeError,TimeoutError):
             return PrepareReplyTextSendResponse(status="unavailable",detail=REPLY_UNAVAILABLE)
 
@@ -1517,22 +1546,33 @@ class Broker(SelectionBrokerMixin):
             owner=self._reply_owner(client_id)
             draft=self._drafts.peek(request.draft_id,owner=owner)
             return GetReplyDraftResponse(status="pending",reply=self._reply_preview(draft,owner),detail=REPLY_PENDING)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(GetReplyDraftResponse, error)
         except (DraftError,TDLibError,ValueError,CompatibilityError):
             return GetReplyDraftResponse(status="unavailable",detail=REPLY_UNAVAILABLE)
 
     def _revise_reply_draft(self, request: UpdateReplyDraftRequest | RefreshReplyDraftRequest, *, client_id: str) -> ReviseReplyDraftResponse:
         try:
             from .outgoing_entity_models import caller_outgoing_entities
-            if isinstance(request, UpdateReplyDraftRequest) and request.outgoing_entities:
-                self._require_formatting_capability()
+            refresh = isinstance(request, RefreshReplyDraftRequest)
+            if not refresh and request.outgoing_entities:
+                # The request's own option, before the draft is looked up: the same for any draft ID.
+                self._require_capabilities('reply_text_send', 'send', 'formatted_text_send')
             owner=self._reply_owner(client_id)
             old=self._drafts.peek(request.draft_id,owner=owner)
-            self._reply_preview(old,owner)
+            if refresh:
+                # A refresh names what the newly read source needs: the draft's options now, the new
+                # source's families once it is read; the stored source it replaces is never asked.
+                # A topic reply has no refresh, so it is refused before any option is named.
+                if old.reply_source is None or old.kind != "text" or old.topic is not None:
+                    raise DraftError("reply draft is unavailable")
+                self._require_reply_draft_options(old)
+                self._require_topic_policy(old.draft_id, owner, stored_source=False)
+            else:
+                self._reply_preview(old,owner)
             provider=self._shared_client()
             epoch = provider.send_observation_epoch
-            if isinstance(request,RefreshReplyDraftRequest):
-                if old.topic is not None:
-                    raise DraftError('topic reply refresh is unavailable')
+            if refresh:
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get("title"),max_length=255) or str(old.recipient)
                 if old.outgoing_entities and title != old.recipient_title:
@@ -1548,7 +1588,7 @@ class Broker(SelectionBrokerMixin):
                     else self._draft_entity_rows(old))
             if rows:
                 self._require_formatting_capability()
-            self._require_topic_policy(old.draft_id, owner)
+            self._require_topic_policy(old.draft_id, owner, stored_source=not refresh)
             local_admission_guard = self._text_revision_guard(old, provider, epoch,
                 new_formatted=bool(rows), source=source)
             revised=self._drafts.revise(request.draft_id,owner=owner,recipient_title=title,reply=True,
@@ -1560,6 +1600,8 @@ class Broker(SelectionBrokerMixin):
             self._remember_draft_title(revised)
             return ReviseReplyDraftResponse(status="revised",previous_draft_id=request.draft_id,
                 reply=self._reply_preview(revised,owner),detail=REPLY_REVISED)
+        except CapabilityDisabled as error:
+            return self._reply_disabled(ReviseReplyDraftResponse, error)
         except (DraftError,TDLibError,ValueError,CompatibilityError,AttributeError,TimeoutError):
             return ReviseReplyDraftResponse(status="unavailable",detail=REPLY_UNAVAILABLE)
 

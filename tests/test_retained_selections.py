@@ -231,7 +231,8 @@ class RetainedBrokerTests(unittest.TestCase):
         return self.dispatch(op, {'selection_id':token,**kwargs})
 
     def unavailable(self, result):
-        self.assertEqual(result,{'status':'selection_unavailable','detail':'Selection is unavailable; select the source again.'})
+        self.assertEqual(result,{'status':'selection_unavailable','detail':'Selection is unavailable; select the source again.',
+                                 'next_action':'search_again'})
 
     def test_capture_exact_order_read_and_entity_drift_atomically_refuses(self):
         result=self.retain({'kind':'messages','anchors':[{'chat_id':7,'message_id':12},{'chat_id':7,'message_id':11}]})

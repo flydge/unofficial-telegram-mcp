@@ -10,6 +10,11 @@ _SPACE_RUN = re.compile(r"\s+")
 _EVIDENCE_PREFIX = "[untrusted Telegram evidence] "
 _LINK_HOSTS = frozenset({"t.me", "telegram.me"})
 MAX_TELEGRAM_LINK = 512
+# Only what a getMessageLink result uses (https://t.me/c/1/2?single&comment=3): letters and digits
+# (usernames, the c segment, ids, query names), "_" (usernames), "." (the host), ":" and "/" (scheme
+# and path), "?", "=" and "&" (TDLib's single, comment and thread parameters). Nothing else: no
+# brackets, parentheses or asterisks that read as Markdown, no fragment, no %-escape, no quote.
+_LINK_CHARACTERS = re.compile(r"[A-Za-z0-9_.:/?=&]+")
 
 
 def sanitize_telegram_text(value: object, *, max_length: int = 2000) -> str:
@@ -49,12 +54,16 @@ def safe_telegram_link(value: object) -> str | None:
 
     The one shared rule for chat and message links: a string of at most 512
     characters that sanitization leaves unchanged (so never truncated or
-    rewritten), scheme https, and a bare host t.me or telegram.me with no
+    rewritten), made only of the characters a Telegram message link uses (ASCII
+    letters and digits, "_", ".", ":", "/", "?", "=" and "&"), starting with
+    lowercase "https://" exactly, and a bare host t.me or telegram.me with no
     credentials or port. Anything else is no link at all.
     """
     if not isinstance(value, str) or not value or len(value) > MAX_TELEGRAM_LINK or not value.isascii():
         return None
-    if sanitize_telegram_text(value, max_length=MAX_TELEGRAM_LINK) != value or " " in value:
+    if not value.startswith("https://") or not _LINK_CHARACTERS.fullmatch(value):
+        return None
+    if sanitize_telegram_text(value, max_length=MAX_TELEGRAM_LINK) != value:
         return None
     try:
         parsed = urlsplit(value)

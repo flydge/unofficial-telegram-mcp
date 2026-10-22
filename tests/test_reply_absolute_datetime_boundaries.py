@@ -26,6 +26,7 @@ from telegram_search_mcp.reply_drafts import (
 from telegram_search_mcp.schemas import SendPreparedArtifactRequest, SendPreparedTextRequest
 from telegram_search_mcp.tdjson import TDLibClient
 from test_reply_absolute_datetime_targets import CHAT, MESSAGE, PRECISIONS, RELATIVE, absolute, message, span
+from test_text_replies import disabled
 
 CLIENT = "client_" + "f" * 32
 CAPABILITIES = ("send", "reply_text_send", "reply_artifact_send", "reply_formatted_targets",
@@ -141,12 +142,12 @@ class AbsoluteBoundaryTests(unittest.TestCase):
             for missing in SOURCE_CAPABILITIES:
                 with self.subTest(family=family, missing=missing):
                     self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
-                    self.assertEqual(self.prepare(family).status, "unavailable")
+                    self.assertEqual(disabled(self.prepare(family)),('capability_disabled',[missing]))
             self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
             self.prepared(family)
         self.assertEqual(self.dialogs, []); self.no_effects()
 
-    def test_each_capability_revoked_before_inspect_update_refresh_or_send_refuses_without_read(self):
+    def test_each_capability_revoked_before_inspect_update_refresh_or_send_refuses(self):
         # Break: assuming capabilities are only required at preparation.
         for family in ("text", "artifact"):
             for missing in SOURCE_CAPABILITIES:
@@ -155,11 +156,13 @@ class AbsoluteBoundaryTests(unittest.TestCase):
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
                 before = sum(r["@type"] == "getMessage" for r in self.raw.requests)
                 with self.subTest(family=family, missing=missing):
-                    self.assertEqual(self.inspect(draft_id, family).status, "unavailable")
-                    self.assertEqual(self.revise(draft_id, family).status, "unavailable")
-                    self.assertEqual(self.revise(draft_id, family, True).status, "unavailable")
-                    self.assertEqual(self.send(draft_id, family).status, "expired")
+                    self.assertEqual(disabled(self.inspect(draft_id, family)),('capability_disabled',[missing]))
+                    self.assertEqual(disabled(self.revise(draft_id, family)),('capability_disabled',[missing]))
                     self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests), before)
+                    # A refresh reads the source once and names what that newly read source needs (0.54).
+                    self.assertEqual(disabled(self.revise(draft_id, family, True)),('capability_disabled',[missing]))
+                    self.assertEqual(self.send(draft_id, family).status, "expired")
+                    self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests), before + 1)
         self.assertEqual(self.dialogs, []); self.no_effects()
 
     def test_each_capability_revoked_during_owner_confirmation_prevents_claim_and_staging(self):

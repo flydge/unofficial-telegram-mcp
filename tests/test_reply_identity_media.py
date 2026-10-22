@@ -24,6 +24,7 @@ from telegram_search_mcp.outgoing_stage import stage_approved_document, retire_s
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.reply_media_sources import media_content as parse_media, validate_content as validate_media, render_content as render_media
 from telegram_search_mcp.tdjson import TDLibClient
+from test_text_replies import disabled
 
 BASELINE = Path(__file__).with_name('fixtures')/'reply_source_v1_v7.json'
 CLIENT = 'client_' + 'a'*24
@@ -408,10 +409,10 @@ class IdentityMediaLifecycle:
         for lexical in (False, True):
             for missing in MIXED_CAPS if lexical else CAPS:
                 self.restore(lexical=lexical); self.revoke(missing)
-                self.assertEqual(self.dispatch(self.preparation, self.prepare_payload())['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.preparation, self.prepare_payload())),('capability_disabled',[missing]))
                 self.broker._policy = POLICY; did = self.prepare()['draft']['draft_id']; self.revoke(missing)
                 for op, extra in ((self.operations[0], {}), (self.operations[1], self.revision), (self.operations[2], {})):
-                    self.assertEqual(self.dispatch(op, {'draft_id': did, **extra})['status'], 'unavailable')
+                    self.assertEqual(disabled(self.dispatch(op, {'draft_id': did, **extra})),('capability_disabled',[missing]))
                 self.assertEqual(self.send(did)['status'], 'expired')
                 self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
@@ -428,19 +429,19 @@ class IdentityMediaLifecycle:
         self.assertEqual(self.broker._drafts.known_ids(), before)
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
 
-    def test_revision_invalidates_old_approval_and_refresh_requires_old_and_new_authority(self):
+    def test_revision_invalidates_old_approval_and_refresh_requires_the_new_sources_authority(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
         revision = self.dispatch(self.operations[1], {'draft_id': did, **self.revision})['reply']
         self.assertEqual(revision['reply_target'], preview['reply_target'])
         self.assertNotEqual(revision['preview_sha256'], preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired')
         did = revision['draft']['draft_id']; self.raw.source = source_shell('plain', [])
-        for missing in CAPS:
-            self.revoke(missing); self.assertEqual(self.dispatch(self.operations[2], {'draft_id': did})['status'], 'unavailable'); self.broker._policy = POLICY
-        plain = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.assertEqual(self.send(did)['status'], 'expired')
+        # Identity media -> plain needs nothing; the stored source's families are not asked (0.54).
+        self.revoke(*CAPS); plain = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.broker._policy = POLICY
+        self.assertEqual(self.send(did)['status'], 'expired')
         did = plain['draft']['draft_id']; self.raw.source = caption_source(lexical=True)
         for missing in MIXED_CAPS:
-            self.revoke(missing); self.assertEqual(self.dispatch(self.operations[2], {'draft_id': did})['status'], 'unavailable'); self.broker._policy = POLICY
+            self.revoke(missing); self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': did})),('capability_disabled',[missing])); self.broker._policy = POLICY
         mixed = self.dispatch(self.operations[2], {'draft_id': did})['reply']
         self.assertEqual(self.send(did)['status'], 'expired')
         self.assertEqual(self.broker._drafts.source_required_capabilities(mixed['draft']['draft_id'], owner=DraftOwner(CLIENT, 7)), MIXED_CAPS)

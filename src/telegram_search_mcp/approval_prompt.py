@@ -312,10 +312,11 @@ def _topic_document(draft) -> str:
 
 def _reply_target(target) -> tuple[list, list[str]]:
     """(payload lines, technical lines) for the message replied to; its text is untrusted evidence. The
-    evidence is the bound rendering (render_content / sanitize_telegram_text), so a sanitized target is
-    labelled a cleaned rendering and its sanitized flag stays directly under it."""
+    evidence is always the bound rendering (render_content / sanitize_telegram_text; styled and media
+    targets are JSON renderings even when nothing was cleaned), so the block is labelled a rendering, a
+    sanitized one also "cleaned, not exact", and its sanitized flag stays directly under it."""
     anchor = target.anchor
-    label = ' (cleaned rendering, not exact)' if target.sanitized else ''
+    label = ' (rendering, cleaned, not exact)' if target.sanitized else ' (rendering)'
     return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}{label}:',
              _Payload(_evidence(target.text)),
              f'Target sanitized: {target.sanitized}; truncated: {target.truncated}'],

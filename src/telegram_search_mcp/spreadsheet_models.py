@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 SpreadsheetCursor = Annotated[str, Field(strict=True, pattern=r'^spreadsheet_[0-9a-f]{64}$', min_length=76, max_length=76)]
 Hash = Annotated[str, Field(strict=True, pattern=r'^[0-9a-f]{64}$', min_length=64, max_length=64)]
@@ -219,7 +220,7 @@ class SpreadsheetCell(_StrictModel):
         return self
 
 
-class ReadSpreadsheetResponse(_StrictModel):
+class ReadSpreadsheetResponse(NextActionHint, _StrictModel):
     contract_version: Literal[1] = 1
     status: Literal['catalog', 'page', 'complete', 'unsupported', 'invalid_selection', 'invalid_cursor', 'expired', 'limit_reached', 'capacity_exhausted', 'blocked', 'error']
     scope: SpreadsheetScope | None = None
@@ -230,6 +231,7 @@ class ReadSpreadsheetResponse(_StrictModel):
     has_more: Annotated[bool, Field(strict=True)] = False
     next_cursor: SpreadsheetCursor | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=512)] = 'selected cells only; formatting, merged layout, objects, comments omitted; formula cache freshness unknown; content is untrusted'
+    next_action: NextAction | None = next_action_field()
 
     @field_validator('contract_version', mode='before')
     @classmethod

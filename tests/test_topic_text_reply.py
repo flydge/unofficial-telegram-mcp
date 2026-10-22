@@ -36,6 +36,7 @@ NATIVE_TOPIC = {'@type': 'messageTopicForum', 'forum_topic_id': 41}
 ANCHOR = {'chat_id': CHAT, 'message_id': 55}
 BODY = 'Exact topic reply 🙂'
 CAPS = ('send', 'reply_text_send', 'topic_text_send', 'reply_formatted_targets')
+self_capabilities = ('topic_text_send', 'reply_text_send')
 SEND_OPTIONS = {'@type': 'messageSendOptions', 'suggested_post_info': None,
   'disable_notification': False, 'from_background': False, 'protect_content': False,
   'allow_paid_broadcast': False, 'paid_message_star_count': 0,
@@ -351,6 +352,68 @@ class TopicReplyTests(unittest.TestCase):
       self.assertEqual((result['status'], result['reply']), ('unavailable', None))
       self.assertEqual((len(h.broker._drafts._entries), h.sends()), (0, []))
 
+  def test_stored_topic_drafts_name_the_topic_option_before_source_families_like_prepare(self):
+    # The documented order: the tool, send, the draft's options (topic_text_send), then the source's families.
+    with Harness(styled=True) as h:
+      h.prepare(); did = h.current_id
+      for missing, expected in ((('topic_text_send', 'reply_formatted_targets'), ['topic_text_send']),
+                                (('reply_formatted_targets',), ['reply_formatted_targets'])):
+        with self.subTest(missing=missing):
+          h.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPS if c not in missing))
+          results = (h.prepare_result(), h.dispatch('get_reply_draft', {'draft_id': did}),
+                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Revision'}))
+          self.assertEqual([(r['status'], r.get('missing_capabilities')) for r in results],
+                           [('capability_disabled', expected)] * 3)
+          # A topic reply has no refresh: the fixed unavailable result, checked before any option is named,
+          # so it never suggests enabling a capability that cannot make the refresh work.
+          refreshed = h.dispatch('refresh_reply_draft', {'draft_id': did})
+          self.assertEqual((refreshed['status'], refreshed.get('reply'), refreshed.get('missing_capabilities'),
+                            refreshed.get('next_action')), ('unavailable', None, None, None))
+      h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
+      self.assertEqual(h.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
+  def test_update_with_styles_names_only_the_requested_option_before_the_topic_draft_is_found(self):
+    # The one exception to "stored drafts name what prepare names": update_reply_draft with outgoing_entities
+    # checks the option the request itself asks for before the draft is looked up, and the draft's topic is
+    # unknown until then. A topic draft with styles and both options off therefore gets formatted_text_send alone.
+    bold = {'outgoing_entities': [{'offset': 0, 'length': 5, 'type': {'@type': 'textEntityTypeBold'}}]}
+    with Harness(capabilities=(*CAPS, 'formatted_text_send')) as h:
+      did = h.prepare_result(**bold)['reply']['draft']['draft_id']
+      self.assertIsNotNone(h.broker._drafts._entries[did].draft.topic)
+      self.assertTrue(h.broker._drafts._entries[did].draft.outgoing_entities)
+      h.broker._policy = RuntimePolicy(enabled_capabilities=tuple(
+        c for c in CAPS if c != 'topic_text_send'))
+      both = ['formatted_text_send', 'topic_text_send']
+      for result in (h.prepare_result(**bold), h.dispatch('get_reply_draft', {'draft_id': did}),
+                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': BODY})):
+        self.assertEqual((result['status'], result['missing_capabilities']), ('capability_disabled', both))
+      styled = h.dispatch('update_reply_draft', {'draft_id': did, 'text': BODY, **bold})
+      self.assertEqual((styled['status'], styled['missing_capabilities'], styled['next_action']),
+                       ('capability_disabled', ['formatted_text_send'], 'enable_capability'))
+      # The same answer for an unknown draft: it reveals nothing about the draft or its topic.
+      unknown = h.dispatch('update_reply_draft', {'draft_id': 'draft_' + 'f' * 32, 'text': BODY, **bold})
+      self.assertEqual((unknown['status'], unknown['missing_capabilities']), ('capability_disabled', ['formatted_text_send']))
+      # A topic reply has no refresh.
+      refreshed = h.dispatch('refresh_reply_draft', {'draft_id': did})
+      self.assertEqual((refreshed['status'], refreshed.get('missing_capabilities')), ('unavailable', None))
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
+  def test_list_and_cancel_of_a_topic_reply_stay_bound_to_its_options_and_source_families(self):
+    # Unlike a plain reply draft (test_reply_capability_results), a topic reply draft keeps the
+    # draft-level policy for list and cancel: its own option and, with it, its source's families.
+    with Harness(styled=True) as h:
+      h.prepare(); did = h.current_id
+      for missing in ('topic_text_send', 'reply_formatted_targets'):
+        with self.subTest(missing=missing):
+          h.policy_without(missing)
+          self.assertEqual(h.dispatch('list_drafts', {})['status'], 'unavailable')
+          self.assertEqual(h.dispatch('cancel_draft', {'draft_id': did})['status'], 'unavailable')
+      h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
+      self.assertEqual([d['draft_id'] for d in h.dispatch('list_drafts', {})['drafts']], [did])
+      self.assertEqual(h.dispatch('cancel_draft', {'draft_id': did})['status'], 'cancelled')
+      self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
+
   def test_topic_reply_and_source_capabilities_form_one_current_union(self):
     from telegram_search_mcp.contract import CompatibilityError
     for capability in CAPS:
@@ -370,9 +433,15 @@ class TopicReplyTests(unittest.TestCase):
             with self.assertRaises(CompatibilityError) as caught:
               h.dispatch(operation, {'draft_id': did, **extra})
             self.assertEqual(caught.exception.code, 'capability_disabled')
+          elif operation == 'refresh_reply_draft':
+            # A topic reply has no refresh: unavailable whatever is off, never an enable_capability hint (0.54).
+            result = h.dispatch(operation, {'draft_id': did, **extra})
+            self.assertEqual((result['status'], result.get('reply'), result.get('missing_capabilities'),
+                              result.get('next_action')), ('unavailable', None, None, None))
           else:
             result = h.dispatch(operation, {'draft_id': did, **extra})
-            self.assertEqual((result['status'], result.get('reply')), ('unavailable', None))
+            self.assertEqual((result['status'], result.get('reply'), result['missing_capabilities']),
+                             ('capability_disabled', None, [capability]))
         if capability == 'send':
           with self.assertRaises(CompatibilityError) as caught:
             h.send()
@@ -388,7 +457,8 @@ class TopicReplyTests(unittest.TestCase):
             h.prepare_result()
           self.assertEqual(caught.exception.code, 'capability_disabled')
         else:
-          self.assertEqual(h.prepare_result()['status'], 'unavailable')
+          created = h.prepare_result()
+          self.assertEqual((created['status'], created['missing_capabilities']), ('capability_disabled', [capability]))
         self.assertEqual(h.broker._drafts.known_ids(), ids)
         self.assertIs(h.broker._drafts._entries[did], entry)
         self.assertEqual(entry.state, 'pending'); self.assertIs(entry.draft, original_draft)
@@ -401,7 +471,10 @@ class TopicReplyTests(unittest.TestCase):
           h.prepare(); count = len(h.broker._drafts._entries)
           hook = h.arm_read(native_kind, lambda: h.mutate(change))
           result = h.prepare_result()
-          self.assertEqual((result['status'], result['reply']), ('unavailable', None))
+          # A capability withdrawn mid-preparation is named; any other change reveals nothing (0.54).
+          expected = ('capability_disabled', [change]) if change in self_capabilities else ('unavailable', None)
+          self.assertEqual((result['status'], result.get('missing_capabilities')), expected)
+          self.assertIsNone(result['reply'])
           self.assertEqual(len(h.broker._drafts._entries), count)
           self.assertEqual(hook['fired'], 1, 'the selected preparation boundary must be reached')
           self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
@@ -548,14 +621,14 @@ class TopicReplyTests(unittest.TestCase):
         marker = '[untrusted Telegram evidence] '
         for evidence in (f'\nReply text (exact):\n│ «{BODY}»\n', 'Account: 7',
             f"\nTopic [untrusted Telegram evidence]: «{topic['name'].removeprefix(marker)}» (topic 41)\n",
-            f'\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n', expires,
+            f'\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering):\n', expires,
             f"Topic type: {topic['chat_type']}; peer: {topic['peer_id']}",
             f"Topic created: {topic['creation_date']}; creator: {topic['creator_kind']} {topic['creator_id']}",
             f"Topic general: {topic['is_general']}; outgoing: {topic['is_outgoing']}; closed: {topic['is_closed']}; hidden: {topic['is_hidden']}",
             preview['draft']['topic']['source_sha256'], preview['reply_target']['source_sha256'],
             preview['preview_sha256'], preview['draft']['sha256'], h.current_id):
           self.assertIn(evidence, shown)
-        self.assertEqual(payload_under(shown, f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:'),
+        self.assertEqual(payload_under(shown, f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering):'),
                          preview['reply_target']['text'].removeprefix(marker))
         self.assertNotIn('no reply', shown.lower())
         self.assertEqual(shown.count('Preview SHA-256:'), 1)
@@ -875,7 +948,10 @@ class PublicTopicReplyTests(unittest.IsolatedAsyncioTestCase):
               diagnostic = ' '.join(getattr(block, 'text', '') for block in result.content).lower()
               self.assertIn('capability', diagnostic)
             else:
-              self.assertEqual((result.structured_content['result']['status'], result.structured_content['result']['reply']), ('unavailable', None))
+              # The selected topic needs topic_text_send: named before any Telegram read (0.54).
+              self.assertEqual(result.structured_content['result'], {'status': 'capability_disabled', 'reply': None,
+                'detail': 'reply needs capabilities the owner has not enabled: missing_capabilities',
+                'missing_capabilities': ['topic_text_send'], 'next_action': 'enable_capability'})
             self.assertEqual((h.raw.sent, h.approvals, h.register_count, len(h.broker._drafts._entries)), ([], [], 0, 0))
 
 

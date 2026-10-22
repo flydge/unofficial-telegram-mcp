@@ -265,7 +265,9 @@ class ApprovalBoundaryTests(unittest.TestCase):
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
                 with self.subTest(family=family, missing=missing):
                     self.assertEqual(self.prepare(family).model_dump(mode="json"),
-                        {"status": "unavailable", "reply": None, "detail": "reply draft is unavailable"})
+                        {"status": "capability_disabled", "reply": None,
+                         "detail": "reply needs capabilities the owner has not enabled: missing_capabilities",
+                         "missing_capabilities": [missing], "next_action": "enable_capability"})
             self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
             self.assertEqual(self.prepare(family).status, "prepared")
             self.raw.source = message()

@@ -32,7 +32,7 @@ from telegram_search_mcp.reply_formatted_sources import (
 )
 from telegram_search_mcp.sanitize import sanitize_telegram_text
 from telegram_search_mcp.tdjson import TDLibClient
-from test_reply_phone_targets import absolute, entity as old_entity, media, message as old_message
+from test_reply_phone_targets import absolute, entity as old_entity, media, message as old_message, disabled
 
 CHAT, MESSAGE, ACCOUNT = 123, 55, 7
 CLIENT = 'client_' + 'c' * 24
@@ -716,16 +716,18 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.raw.source = mixed()
             for capability in CAPS:
                 self.broker._policy = self.denied(capability); before = len(self.registrations)
-                self.assertEqual(self.prepare(family)['status'], 'unavailable')
+                self.assertEqual(disabled(self.prepare(family)),('capability_disabled',[capability]))
                 self.assertEqual(len(self.registrations), before)
                 self.broker._policy = POLICY; did = self.prepared(family)['draft']['draft_id']
                 self.broker._policy = self.denied(capability)
                 reads = sum(r['@type'] == 'getMessage' for r in self.raw.requests)
-                self.assertEqual(self.dispatch(self.operation('get', family), {'draft_id': did})['status'], 'unavailable')
-                self.assertEqual(self.revise(did, family)['status'], 'unavailable')
-                self.assertEqual(self.revise(did, family, True)['status'], 'unavailable')
-                self.assertEqual(self.send(did, family)['status'], 'expired')
+                self.assertEqual(disabled(self.dispatch(self.operation('get', family), {'draft_id': did})),('capability_disabled',[capability]))
+                self.assertEqual(disabled(self.revise(did, family)),('capability_disabled',[capability]))
                 self.assertEqual(sum(r['@type'] == 'getMessage' for r in self.raw.requests), reads)
+                # A refresh reads the source once and names what that newly read source needs (0.54).
+                self.assertEqual(disabled(self.revise(did, family, True)),('capability_disabled',[capability]))
+                self.assertEqual(self.send(did, family)['status'], 'expired')
+                self.assertEqual(sum(r['@type'] == 'getMessage' for r in self.raw.requests), reads + 1)
         self.assertEqual(self.dialogs, []); self.assertEqual(self.history, []); self.no_effects()
 
     def test_every_present_authority_revoked_at_owner_properties_and_immediate_prewire(self):
@@ -777,8 +779,8 @@ class TextUrlLifecycleTests(unittest.TestCase):
                     self.assertEqual(self.send(did, family)['status'], 'failed')
         self.no_effects()
 
-    def test_update_snapshot_and_refresh_require_both_old_and_new_full_authority(self):
-        # Break: update rereads provider state, refresh drops old/new authority, or old approval survives.
+    def test_update_snapshot_and_refresh_require_the_new_sources_full_authority(self):
+        # Break: update rereads provider state, refresh drops new-source authority, or old approval survives.
         legacy_policy = RuntimePolicy(enabled_capabilities=BASE)
         for family in ('text', 'artifact'):
             self.raw.source = mixed(); self.broker._policy = POLICY; self.decision = lambda: True
@@ -790,17 +792,17 @@ class TextUrlLifecycleTests(unittest.TestCase):
             self.assertEqual(updated['reply_target'], original['reply_target'])
             self.assertEqual(sum(r['@type'] == 'getMessage' for r in self.raw.requests), reads)
             self.assertEqual(self.send(did, family)['status'], 'expired')
+            # A refresh needs only what the newly read source needs, never the stored source's families (0.54).
             self.broker._policy = legacy_policy
-            self.assertEqual(self.revise(updated['draft']['draft_id'], family, True)['status'], 'unavailable')
-            self.broker._policy = POLICY
             legacy = self.revise(updated['draft']['draft_id'], family, True)['reply']
+            self.broker._policy = POLICY
             self.assertNotEqual(legacy['reply_target']['source_sha256'], original['reply_target']['source_sha256'])
             self.assertEqual(legacy['reply_target']['text'], '[untrusted Telegram evidence] plain')
             self.assertEqual(self.send(updated['draft']['draft_id'], family)['status'], 'expired')
             self.raw.source = mixed()
             for capability in CAPS:
                 self.broker._policy = self.denied(capability)
-                self.assertEqual(self.revise(legacy['draft']['draft_id'], family, True)['status'], 'unavailable')
+                self.assertEqual(disabled(self.revise(legacy['draft']['draft_id'], family, True)),('capability_disabled',[capability]))
             self.broker._policy = POLICY
             fresh = self.revise(legacy['draft']['draft_id'], family, True)['reply']
             self.assertEqual(fresh['reply_target'], original['reply_target'])

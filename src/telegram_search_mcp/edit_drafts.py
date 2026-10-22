@@ -18,6 +18,7 @@ from .forward_sources import MAX_ENTITIES, ForwardRefusal, ForwardSource
 from .reply_drafts import digest
 from .sanitize import sanitize_telegram_text
 from .schemas import ChatId
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
@@ -328,13 +329,14 @@ class ApplyPreparedTextEditRequest(_Closed):
     approved: StrictBool
 
 
-class ApplyPreparedTextEditResponse(_Closed):
+class ApplyPreparedTextEditResponse(NextActionHint, _Closed):
     status: ApplyStatus
     draft_id: DraftId
     chat_id: ChatId | None = None
     message_id: PositiveMessageId | None = None
     edit_date: Annotated[int, Field(strict=True, gt=0, le=2**31 - 1)] | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=200)]
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def exact(self):

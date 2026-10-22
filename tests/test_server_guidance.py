@@ -157,7 +157,7 @@ class FilteredListingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('prepare_text_send', listed)
         self.assertTrue(result.is_error)
         self.assertEqual(result.content[0].text, 'Error executing tool prepare_text_send: capability_disabled: send '
-                                                 '(owner must enable in runtime.toml)')
+                                                 '(owner must enable in runtime.toml); next_action: enable_capability')
 
 
 if __name__ == '__main__':

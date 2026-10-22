@@ -28,6 +28,7 @@ from telegram_search_mcp.reply_drafts import (
 from telegram_search_mcp.schemas import SendPreparedArtifactRequest, SendPreparedTextRequest
 from telegram_search_mcp.tdjson import TDLibClient
 from test_reply_datetime_media import caption, entity, provider_content
+from test_text_replies import disabled
 from test_reply_absolute_datetime_media import (
     CHAT, MESSAGE, KINDS, PRECISIONS, BASE_CAPS, RELATIVE, absolute, span, provider, file_of,
 )
@@ -167,16 +168,18 @@ class AbsoluteCaptionBrokerTests(unittest.TestCase):
                 for missing in SOURCE_CAPABILITIES:
                     denied = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
                     self.broker._policy = denied
-                    self.assertEqual(self.prepare(family).status, 'unavailable')
+                    self.assertEqual(disabled(self.prepare(family)),('capability_disabled',[missing]))
                     self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
                     draft = self.prepared(family).reply.draft.draft_id
                     self.broker._policy = denied; reads = self.reads(); dialogs = len(self.dialogs)
                     with self.subTest(source=source_kind, family=family, missing=missing):
-                        self.assertEqual(self.inspect(draft, family).status, 'unavailable')
-                        self.assertEqual(self.revise(draft, family).status, 'unavailable')
-                        self.assertEqual(self.revise(draft, family, True).status, 'unavailable')
+                        self.assertEqual(disabled(self.inspect(draft, family)),('capability_disabled',[missing]))
+                        self.assertEqual(disabled(self.revise(draft, family)),('capability_disabled',[missing]))
+                        self.assertEqual(self.reads(), reads)
+                        # A refresh reads the source once and names what that newly read source needs (0.54).
+                        self.assertEqual(disabled(self.revise(draft, family, True)),('capability_disabled',[missing]))
                         self.assertEqual(self.send(draft, family).status, 'expired')
-                        self.assertEqual(self.reads(), reads); self.assertEqual(len(self.dialogs), dialogs)
+                        self.assertEqual(self.reads(), reads + 1); self.assertEqual(len(self.dialogs), dialogs)
                     self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
                     draft = self.prepared(family).reply.draft.draft_id
                     def revoke(): self.broker._policy = denied; return True

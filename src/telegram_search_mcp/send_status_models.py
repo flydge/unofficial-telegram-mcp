@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .draft_models import DraftId
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 Status = Literal["pending", "sent", "failed", "outcome_unknown"]
 Evidence = Literal["none", "local_pending", "local_claimed", "provider_pending",
@@ -30,11 +31,12 @@ class GetSendStatusRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     draft_id: DraftId
 
-class GetSendStatusResponse(GetSendStatusRequest):
+class GetSendStatusResponse(NextActionHint, GetSendStatusRequest):
     status: Status
     evidence: Evidence
     detail: Detail
     message_id: Annotated[int, Field(strict=True, gt=0, lt=2**53)] | None = None
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def exact_evidence(self):

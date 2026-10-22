@@ -17,6 +17,7 @@ from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, digest
 from .reply_formatted_sources import _boundaries, _inert_json_string
 from .sanitize import sanitize_telegram_text
 from .schemas import ChatId
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 PREPARED = 'immutable forward draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'source message is not eligible; no draft was created'
@@ -474,12 +475,13 @@ class SendPreparedForwardRequest(_Closed):
     approved: StrictBool
 
 
-class SendPreparedForwardResponse(_Closed):
+class SendPreparedForwardResponse(NextActionHint, _Closed):
     status: SendStatus
     draft_id: DraftId
     recipient: ChatId | None = None
     message_id: Annotated[int, Field(strict=True, gt=0, lt=2**53)] | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=200)]
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def exact(self):

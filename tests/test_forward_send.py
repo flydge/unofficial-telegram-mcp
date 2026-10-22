@@ -1487,7 +1487,7 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
 
     def assert_unknown(self, result, did):
         self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
-                                  'message_id': None, 'detail': UNKNOWN})
+                                  'message_id': None, 'detail': UNKNOWN, 'next_action': 'check_send_status'})
 
     def test_concurrent_sends_make_one_attempt(self):
         # The second caller made no attempt but reads outcome_unknown, never sent or expired.

@@ -40,6 +40,7 @@ from telegram_search_mcp.reply_drafts import (
 from telegram_search_mcp.schemas import SendPreparedArtifactRequest, SendPreparedTextRequest
 from telegram_search_mcp.send_status_models import GetSendStatusRequest
 from telegram_search_mcp.tdjson import TDLibClient, ForbiddenTDLibRequest, _validate_bounded_request
+from test_text_replies import disabled
 
 CHAT = -10071
 MESSAGE = 901
@@ -447,7 +448,9 @@ class LifecycleTests(unittest.TestCase):
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != missing))
                 with self.subTest(family=family, missing=missing):
                     refused = self.prepare(family)
-                    self.assertEqual(refused.model_dump(mode="json"), {"status": "unavailable", "reply": None, "detail": "reply draft is unavailable"})
+                    self.assertEqual(refused.model_dump(mode="json"), {"status": "capability_disabled", "reply": None,
+                        "detail": "reply needs capabilities the owner has not enabled: missing_capabilities",
+                        "missing_capabilities": [missing], "next_action": "enable_capability"})
             self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
             self.assertEqual(self.prepare(family).status, "prepared")
         self.assertEqual(self.effects(), [])
@@ -482,8 +485,8 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(self.send(old, family).status, "expired")
         self.assertEqual(self.effects(), [])
 
-    def test_refresh_requires_old_and_new_source_authority_before_invalidating_old(self):
-        # Break: laundering old authority through refresh or accepting a newly introduced family.
+    def test_refresh_requires_the_new_sources_authority_before_invalidating_old(self):
+        # Break: accepting a newly introduced family, or invalidating the old draft on a refused refresh.
         for family in ("text", "artifact"):
             with self.subTest(family=family):
                 self.raw.source = message()
@@ -494,11 +497,12 @@ class LifecycleTests(unittest.TestCase):
                     lambda: self.broker._revise_reply_artifact_draft(RefreshReplyArtifactDraftRequest(draft_id=old), client_id=CLIENT))
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_datetime_targets"))
                 before = len(self.raw.requests)
-                self.assertEqual(refresh().status, "unavailable")
-                self.assertFalse(any(r["@type"] == "getMessage" for r in self.raw.requests[before:]))
+                # The newly read source still needs DateTime authority, so the refresh names it after one read (0.54).
+                self.assertEqual(disabled(refresh()),('capability_disabled',['reply_datetime_targets']))
+                self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests[before:]), 1)
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_identity_targets"))
                 self.raw.source = message("Date@user", [entity(), entity("textEntityTypeMention", offset=4, length=5)])
-                self.assertEqual(refresh().status, "unavailable")
+                self.assertEqual(disabled(refresh()),('capability_disabled',['reply_identity_targets']))
                 self.assertEqual(self.inspect(old, family).reply, prepared.reply)
                 self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
                 revised = refresh()
@@ -628,8 +632,10 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(len(captured), 1)
             rendered = logical(captured[0][-1])
             anchor = prepared.reply.reply_target.anchor
+            # A styled target is a JSON rendering even when nothing was cleaned (0.54 label rule).
+            label = " (rendering, cleaned, not exact)" if prepared.reply.reply_target.sanitized else " (rendering)"
             shown = payload_under(rendered, f"In reply to message {anchor.message_id} in chat {anchor.chat_id} "
-                                            "[untrusted Telegram evidence]:")
+                                            f"[untrusted Telegram evidence]{label}:")
             self.assertEqual(re.sub("⟦U\\+([0-9A-F]{4,6})⟧", lambda m: chr(int(m.group(1), 16)), shown),
                              prepared.reply.reply_target.text.removeprefix("[untrusted Telegram evidence] "))
             self.assertIn(prepared.reply.reply_target.source_sha256, rendered)

@@ -33,7 +33,8 @@ from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityE
 from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
-                       required_capabilities)
+                       missing_capabilities, required_capabilities)
+from .next_actions import NEXT_ACTIONS, guard_suffix
 from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPageResponse,
     PageSelection, AttachmentCursor)
 from .spreadsheet_models import (ReadSpreadsheetRequest, ReadSpreadsheetResponse,
@@ -235,7 +236,8 @@ _REPLY = (
     "OGG voice note reply_media_targets; styled text or captions reply_formatted_targets plus one per entity "
     "family present ("
     + "; ".join(f"{family} {capability}" for family, capability in _REPLY_FAMILIES)
-    + "); a forum topic topic_text_send. Without them the source is refused without content. " + _UNTRUSTED
+    + "); a forum topic topic_text_send. Without them the result is capability_disabled, naming only "
+    "missing_capabilities and no source content. " + _UNTRUSTED
 )
 _SELECTION = ("A selection from retain_selection (also needs retained_selections) may replace the raw source; it "
               "expires after a bounded time set by the owner's policy, and selection_unavailable means retain the "
@@ -751,12 +753,15 @@ _TRANSFER = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempoten
 _OVERWRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 # SDK 2.2.0 masks every exception except ToolError as "Error executing tool <name>".
 # Guard refusals are anticipated, so they carry this fixed text: the code and, for
-# capability_disabled, only the missing names from the closed capability set.
+# capability_disabled, only the missing names from the closed capability set, then the
+# fixed next_action suffix of the closed recovery map where one applies.
 _GUARD_REFUSALS = {
-    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)",
+    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)" + guard_suffix("capability_disabled"),
     "client_schema_mismatch": "client_schema_mismatch (refresh tools/list, then recheck _manifest)",
-    "config_stale": "config_stale (restart matching components)",
+    "config_stale": "config_stale (restart matching components)" + guard_suffix("config_stale"),
 }
+# _manifest compatibility codes that name a recovery step.
+_MANIFEST_NEXT_ACTIONS = {code: NEXT_ACTIONS[code] for code in ("broker_unavailable", "config_stale")}
 
 
 def _validate_raw_search_arguments(arguments: dict[str, object]) -> None:
@@ -895,6 +900,8 @@ def build_server(
             descriptor = {"package_version": __version__, "contract_version": CONTRACT_VERSION,
                           "schema_fingerprint": schema_fingerprint(), "enabled_capabilities": []}
             compatibility = {"status": error.code, "broker": None, "detail": "trusted runtime policy is stale"}
+        if compatibility["status"] in _MANIFEST_NEXT_ACTIONS:
+            compatibility = {**compatibility, "next_action": _MANIFEST_NEXT_ACTIONS[compatibility["status"]]}
         return {
             **descriptor,
             "broker_generation": (compatibility.get("broker") or {}).get("broker_generation"),
@@ -1758,7 +1765,7 @@ def build_server(
                     required = required_capabilities(_capability)
                     if kwargs.get('selection_id') is not None or kwargs.get('reply_selection_id') is not None:
                         required += ('retained_selections',)
-                    missing = [name for name in required if name not in runtime_policy.enabled_capabilities]
+                    missing = missing_capabilities(runtime_policy, *required)
                     if missing:
                         raise CompatibilityError("capability_disabled")
                 except CompatibilityError as error:

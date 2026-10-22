@@ -327,19 +327,19 @@ class LayoutTests(unittest.TestCase):
         _, calls = captured(arguments)
         self.assertEqual(logical(calls[0][0][-1]), (
             f'Send a document reply to «{TITLE}» (chat {CHAT})\nAccount: 7\nExpires: {EXPIRES}\n\n'
-            f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (cleaned rendering, not exact):\n'
+            f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering, cleaned, not exact):\n'
             '│ «Source line, second ⟦U+00AB⟧line⟦U+00BB⟧»\n'
             'Target sanitized: True; truncated: False\n\n'
             'File: «report.txt»\nMIME: text/plain\nBytes: 14\nCaption (exact):\n│ «See attached»\n' +
             tail(f'Draft: {DID}', f"SHA-256: {document['sha256']}",
                  'Target source SHA-256: ' + 'a' * 64, f"Preview SHA-256: {value['preview_sha256']}",
                  closing='Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.')))
-        # An unsanitized target is not labelled a rendering; its flag still sits directly under it.
+        # An unsanitized target is still a rendering, only not a cleaned one; its flag sits directly under it.
         exact = self.reply_artifact(document, 'Plain source', sanitized=False)
         _, calls = captured(file_arguments(document, draft_preview=None, reply_artifact_preview=exact))
-        self.assertIn(f'\n\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n│ «Plain source»\n'
+        self.assertIn(f'\n\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering):\n│ «Plain source»\n'
                       'Target sanitized: False; truncated: False\n\nFile: «report.txt»\n', logical(calls[0][0][-1]))
-        self.assertNotIn('rendering, not exact', calls[0][0][-1])
+        self.assertNotIn('cleaned', calls[0][0][-1])
         waveform = base64.b64encode(bytes(range(63))).decode()
         voice = file_preview('voice_note', b'OggS synthetic', 'memo.ogg', 'audio/ogg', duration_seconds=3,
                              waveform_base64=waveform, source_sha256='b' * 64, source_display_name='memo.m4a',

@@ -102,17 +102,40 @@ Every operation performs a fresh handshake on its own owner-authenticated Unix c
 
 In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broker or Telegram contact, is an MCP tool error (`isError`, no structured content) with one fixed text item, one of:
 
-- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml)`
-- `Error executing tool <tool>: config_stale (restart matching components)`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
+- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml); next_action: enable_capability`
+- `Error executing tool <tool>: config_stale (restart matching components); next_action: update_installation`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
 Since the 0.54 candidate, arguments that do not match a tool's input schema get one fixed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`):
 
 - `Error executing tool <tool>: invalid_arguments (arguments must match the input schema)`
 
 It never contains field paths, caller-chosen keys, values, pydantic text or documentation URLs. A call naming an unregistered tool gets `unknown_tool (refresh tools/list)` without the name. Argument validation runs before the guard, so invalid arguments to a disabled tool report `invalid_arguments`. Any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`.
+
+### Recovery hints (`next_action`)
+
+Since the 0.54 candidate the responses users hit most carry an optional `next_action` from one closed map
+(`next_actions.NEXT_ACTIONS`). A response never chooses it: it is derived from the response's own closed
+`status`, or, when the status names no condition, its closed `stop_reason`, and a value that contradicts
+them fails validation. It is omitted when no condition applies, so every other response is unchanged.
+
+| `next_action` | condition | where |
+| --- | --- | --- |
+| `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
+| `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
+| `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools |
+| `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
+| `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
+| `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
+
+Older tools that report a lost broker as a plain `error` with free-text detail carry no hint, because
+their status alone does not name the condition; `_manifest(check_broker=true)` reports it. The `expired`
+status of attachment pages, spreadsheets, presentations and drafts means the artifact or draft lapsed,
+not a cursor, and carries no hint. Adding the field changed the output schema of every tool that can
+return one of these statuses.
 
 ## Codex skill
 
@@ -431,7 +454,7 @@ Account: <ID>
 Expires: <time>
 [Topic [untrusted Telegram evidence]: «<topic name>» (topic <ID>)]
 
-In reply to message <ID> in chat <ID> [untrusted Telegram evidence][ (cleaned rendering, not exact)]:
+In reply to message <ID> in chat <ID> [untrusted Telegram evidence] (rendering[, cleaned, not exact]):
 │ «<the message replied to>»
 Target sanitized: True|False; truncated: False
 
@@ -453,8 +476,9 @@ Unofficial Telegram MCP will revalidate cached target evidence and make one repl
 ```
 
 The reply evidence is the bound rendering of the message replied to (`render_content` or
-`sanitize_telegram_text`), not Telegram's raw text. When cleaning changed it (`sanitized` true), its label
-says `(cleaned rendering, not exact)`; the sanitized flag always sits directly under the evidence.
+`sanitize_telegram_text`), not Telegram's raw text: styled and media targets are JSON renderings even when
+nothing was cleaned. Its label therefore always says `(rendering)`, and `(rendering, cleaned, not exact)`
+when cleaning changed it (`sanitized` true); the sanitized flag always sits directly under the evidence.
 
 A reply with a document, photo or voice note uses the same reply block, then the file lines of a plain
 file send. Its heading is `Send a document|photo|voice note reply to …`. A voice reply adds
@@ -736,7 +760,7 @@ After selecting exact anchors, call `read_messages(anchors=[{"chat_id": 123, "me
 
 Results preserve request order and carry their own exact source anchor, status and `coverage_complete`. Pending/failed sends and ephemeral replacement content are unsupported. Supported content kinds are text, document, photo, video, audio, animation, voice note, video note and sticker. Text/captions are limited to 20,000 Unicode characters per message and 100,000 per batch; the aggregate provider deadline is 30 seconds. Up to 20 exact chat resolutions, 20 selected-message reads, 20 sender hydrations and 20 message-link requests may occur after bounded authorization readiness. A budget exhausted before an anchor is read returns an explicit partial result for that anchor. No adjacent message, reply target or media download is requested.
 
-Since the 0.54 candidate, `source.telegram_url` carries the link Telegram's `getMessageLink` returns for the exact message, in every reader that returns `SelectedMessage` rows: `read_messages`, `read_history`, `read_topic_history`, `read_reply_chain`, `search_messages` (plain and Boolean), `search_chats`, `read_target_messages` and `retain_selection`. One shared rule validates it, the same one `search_correspondence` uses: the complete string, at most 512 characters, unchanged by sanitization, scheme `https`, host exactly `t.me` or `telegram.me` with no port or credentials. Anything else, a provider error or a deadline leaves `null` without adding an issue or lowering coverage; only lost authorization still ends the read. The link is requested without the message-thread form. TDLib returns a link only where the message allows one (typically supergroups and channels), so `null` is expected elsewhere; the form returned for forum-topic messages and the private-chat result have synthetic evidence only, not real-account evidence. The link is never synthesized from a username and is not a source fact: a retained selection is not refused or renewed when it appears or disappears. The cost is one extra serialized TDLib request per returned message, made after the row is otherwise valid (up to 20 per page, inside the existing 30-second budget), so a page near its deadline can return fewer rows.
+Since the 0.54 candidate, `source.telegram_url` carries the link Telegram's `getMessageLink` returns for the exact message, in every reader that returns `SelectedMessage` rows: `read_messages`, `read_history`, `read_topic_history`, `read_reply_chain`, `search_messages` (plain and Boolean), `search_chats`, `read_target_messages` and `retain_selection`. One shared rule validates it, the same one `search_correspondence` uses: the complete string, at most 512 characters, unchanged by sanitization, made only of the characters a Telegram message link uses (ASCII letters and digits, `_`, `.`, `:`, `/`, `?`, `=` and `&`, so no bracket, parenthesis, asterisk, `#` fragment, `%` escape, quote, angle bracket, backslash or space), starting with lowercase `https://` exactly, host exactly `t.me` or `telegram.me` with no port or credentials. Anything else, a provider error or a deadline leaves `null` without adding an issue or lowering coverage; only lost authorization still ends the read. In `search_chats` too, a failed or timed-out link request alone leaves `null` and keeps the page: it does not count as a lost transport, because a real loss still fails the next provider call or the page's closing account check. The link is requested without the message-thread form. TDLib returns a link only where the message allows one (typically supergroups and channels), so `null` is expected elsewhere; the form returned for forum-topic messages and the private-chat result have synthetic evidence only, not real-account evidence. The link is never synthesized from a username and is not a source fact: a retained selection is not refused or renewed when it appears or disappears. The cost is one extra serialized TDLib request per returned message, made after the row is otherwise valid (up to 20 per page, inside the existing 30-second budget), so a page near its deadline can return fewer rows.
 
 The text's `value` is untrusted data. `sanitized` reports NFKC normalization, control/bidi removal or whitespace collapse; `truncated` reports omitted text separately. Sender display names have the same explicit flags. Sanitization does not make evidence safe to execute or follow. `not_found` means currently deleted or inaccessible, not proven permanent deletion. Wrong-chat results never carry the unexpected content. Unsupported message types and incomplete metadata never become complete reads.
 
@@ -1481,6 +1505,71 @@ the original attempt through `get_send_status`, within the existing 900-second
 observation retention. Controlled transport tests establish technical behavior;
 actual Telegram delivery and the owner dialog require their own live verification.
 
+### Disabled source capabilities (0.54 candidate)
+
+When a reply needs a capability the trusted policy does not enable, the eight reply
+tools (`prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft`,
+`refresh_reply_draft` and their four artifact counterparts) return a typed result
+instead of `unavailable`:
+
+```json
+{"status": "capability_disabled", "reply": null,
+ "detail": "reply needs capabilities the owner has not enabled: missing_capabilities",
+ "missing_capabilities": ["reply_identity_targets", "reply_lexical_targets"],
+ "next_action": "enable_capability"}
+```
+
+(The revision tools add `"previous_draft_id": null`.) `missing_capabilities` holds only
+names from the closed capability set, never input or source text, each once, in the
+order the refused check requires them, extending the guard's rule: the tool's own
+capability, then `send`, then the reply's own options (`formatted_text_send` for
+outgoing styles, `topic_text_send` for a selected topic: those the request asks for
+and, for a stored draft, those the draft carries), which are checked together before
+Telegram is read (one exception for a styled update is noted below); then what the source needs, in its family order
+(`reply_media_targets`, `reply_formatted_targets`, the family that selected the
+source's version, then every other present family in the order bank card, phone,
+email, URL, DateTime, lexical, identity), with `topic_text_send` last for a source in
+a forum topic. The guard and the broker refuse the tool's own capability and `send`
+first, so in practice the list names options and source families. Stored drafts ask
+in the same order, so on one policy `get_reply_draft`, `update_reply_draft` and
+`prepare_reply_text_send` name the same list for the same options and source, with
+one exception: `update_reply_draft` with `outgoing_entities` checks the option the
+request itself asks for before the draft is looked up (see below), and the draft's
+topic is unknown until then. On a topic draft with styles and both
+`formatted_text_send` and `topic_text_send` off, that update therefore names only
+`formatted_text_send`, where `prepare_reply_text_send`, `get_reply_draft` and an
+update without styles name both. A topic reply has no refresh: `refresh_reply_draft`
+returns the fixed `unavailable` result for it before any option is named, so it
+never suggests `enable_capability`. For any other draft a refresh asks for the
+draft's own options before Telegram is read, then names only what the newly read
+source needs. It does not ask for the stored source it replaces, which it never shows
+again, and it builds the draft from the new source alone, so a refresh from a styled
+source to a plain one needs no family at all. Get and update keep asking for the
+stored source's families. Status, list and cancel stay send-only for a plain reply
+draft: `list_drafts` lists it and `cancel_draft` cancels it with its source's
+families off. A reply draft with a selected topic or outgoing styles stays bound to
+its own option and its source's families for them. Naming the families
+reveals which entity kinds the chosen message contains; the client chose that
+message and already has read access.
+
+Only capability-driven refusals change. A foreign or unknown draft, an account or
+session switch, expiry, a recipient that differs from the anchor and every
+unsupported or malformed source still return `unavailable` with the fixed
+`reply draft is unavailable`, with one exact exception. An option the request itself
+asks for (`formatted_text_send` for outgoing styles on `prepare_reply_text_send` or
+`update_reply_draft`, `topic_text_send` for a topic on `prepare_reply_text_send`) is
+checked first, before the draft is looked up, the account is resolved, the recipient
+is compared with the anchor or Telegram is read. When the policy disables it, the
+result is `capability_disabled` naming it, identically for an existing, foreign,
+unknown or expired draft, after an account switch, and for any recipient or source,
+so it reveals nothing about any of them. Everything else a reply needs (a stored
+draft's own options and the source's families) is checked only after the draft is
+found under the caller's owner and account, or after the recipient matched the anchor
+and the source was read, so those cases keep returning `unavailable`. A send of a
+reply draft whose capability was disabled keeps the existing `expired` result.
+`missing_capabilities` and `next_action` are omitted from every other result, so
+those results are unchanged. The output schemas of the eight tools changed.
+
 
 ## Artifact replies
 
@@ -1579,8 +1668,8 @@ markup, topics and ephemeral/deleting targets remain unavailable. Preparation
 never downloads media or opens provider file paths.
 
 Media opt-in remains required for inspection, outgoing update, refresh, owner
-confirmation and sent/failed/unknown receipt replay. Refresh checks both the stored
-and newly read source, including text-to-media and media-to-text transitions.
+confirmation and sent/failed/unknown receipt replay. Refresh checks the newly read
+source, including text-to-media and media-to-text transitions.
 Send-only list/cancel/status retain their metadata semantics. Revalidation under
 the provider lock compares the entire immutable source hash. False or raised final
 guards discard unattempted observations and record `local_failed` before transport.
@@ -1624,9 +1713,9 @@ and unknown/open DateTime formats remain unsupported. Exact fieldless Relative
 uses text v11 or caption v12; explicitly specified Absolute uses text v13 or
 caption v14 below. Null-only DateTime captions retain private v10.
 
-Opt-in remains required for preparation, stored inspection/update, both stored
-and refreshed source types, owner confirmation, final guards and terminal receipt
-replay. Gated media and styled-source terminal replay additionally requires the
+Opt-in remains required for preparation, stored inspection/update, a refresh whose
+newly read source needs it (the stored source it replaces is not asked), owner
+confirmation, final guards and terminal receipt replay. Gated media and styled-source terminal replay additionally requires the
 original provider instance and observation epoch; restart or epoch change makes
 replay unavailable. Pending expiry uses wall time; attempted replay expires at the
 inclusive monotonic 900-second retention boundary. Plain-source behavior is
@@ -1645,7 +1734,7 @@ Telegram delivery, owner-dialog approval or broader consumer readiness.
 Enable both `reply_media_targets` and `reply_formatted_targets`, plus `send` and
 the outgoing workflow's `reply_text_send` or `reply_artifact_send`. A nonempty
 styled caption requires both source capabilities throughout preparation,
-inspection/update, both sides of refresh, owner confirmation, final transport
+inspection/update, the freshly read refresh source, owner confirmation, final transport
 guards and sent/failed/unknown receipt replay. Removing either source opt-in
 makes the styled source unavailable. Empty and whitespace-only plain captions
 retain the media-only path.
@@ -1689,8 +1778,9 @@ The existing 1–32-span, whole-scalar UTF-16, closed-shape, int32, nonblank raw
 4096-character display bounds apply with no truncation. Lexical pairs and
 lexical/quote overlaps are refused; simple styles may contain, be contained by or
 coincide with lexical spans. Code/Pre/PreCode remain disjoint from all entities.
-Both source capabilities are required at preparation, inspection/update, both
-sides of refresh, owner confirmation, final transport guards and terminal replay.
+Both source capabilities are required at preparation, inspection/update, a refresh
+whose newly read source needs them, owner confirmation, final transport guards and
+terminal replay.
 Refresh or source edits require fresh approval; uncertain attempts are never
 resent. Topics, TextUrl captions and custom emoji remain unsupported; TextUrl messageText uses v23 below;
 fieldless URL text uses v15 and supported URL captions v16 below, identity text uses the
@@ -1724,7 +1814,7 @@ Overflow refuses rather than truncates. Existing entity overlap exclusions,
 closed media shapes and identity requirements remain in force.
 
 All three source capabilities are checked at preparation, inspection/revision,
-both sides of refresh, before and after owner confirmation, after fresh provider
+the freshly read refresh source, before and after owner confirmation, after fresh provider
 facts and after observation registration before raw transport, and on terminal
 replay. Singular authority accessors refuse these conjunctive sources. Owner,
 account, TTL and original provider/epoch boundaries remain in force. Outgoing
@@ -1765,7 +1855,7 @@ caps at 4096 characters. Escaping and sanitation are explicitly reflected in the
 preview; overflow refuses before registry mutation rather than truncating.
 
 All required source capabilities are checked during preparation, pending
-inspection/revision, both sides of refresh, before/after owner confirmation,
+inspection/revision, the freshly read refresh source, before/after owner confirmation,
 after fresh provider checks, after observation registration before raw transport,
 and on terminal replay. Source ID edits observed during provider revalidation
 refuse the send. Explicit text styles require `formatted_text_send`; attachment captions retain
@@ -1799,7 +1889,7 @@ complete marker-inclusive display caps at 4096 characters. Sanitation is flagged
 overflow refuses before registry mutation and never produces a partial preview.
 
 The complete capability tuple is enforced through preparation, inspection,
-revision, both sides of refresh, owner decision, final provider checks and
+revision, the freshly read refresh source, owner decision, final provider checks and
 registration-before-wire guards, and terminal replay. A user-ID-only edit or a
 stable media identity edit invalidates the source digest. An already changed
 source can still reach the immutable stored owner preview before the final source
@@ -1866,7 +1956,7 @@ under an incompatible version refuses. Supported DateTime captions use the
 separate v10/v12/v14 boundary below.
 
 The exact capability tuple follows both reply lifecycles through preparation,
-inspection/update, old/new refresh, owner decision, final provider checks,
+inspection/update, the freshly read refresh source, owner decision, final provider checks,
 registration before raw send and terminal replay. Updating outgoing content
 preserves the immutable source without rereading it. Refresh replaces it and
 invalidates the old revision and approval, including transitions between v13,
@@ -1970,7 +2060,7 @@ authority remain unchanged. Media helper URL parsing, validation and rendering
 remain default-off with `url=False`. No source media is downloaded.
 
 The full capability conjunction applies to preparation, stored inspection/update,
-both old and new refresh sources, owner confirmation, final source/properties
+the freshly read refresh source, owner confirmation, final source/properties
 guards, the immediate prewire boundary and terminal replay. Update preserves
 the source without rereading; refresh replaces the snapshot and invalidates old
 IDs and approvals, including transitions to/from older supported sources.
@@ -2032,7 +2122,7 @@ truncation. Public schemas, annotations, operation mappings, contract 1, IPC 2
 and schema fingerprint remain unchanged.
 
 The existing complete authority conjunction applies through prepare, get/update,
-both old/new refresh sources, owner confirmation, final source/properties checks,
+the freshly read refresh source, owner confirmation, final source/properties checks,
 immediate prewire checks and terminal replay. Get/update use stored evidence
 without rereading the provider; refresh binds a new source and invalidates the
 old ID and approval. Missing authority or owner-callback revocation refuses
@@ -2085,7 +2175,7 @@ restrictions, not claims about TDLib validity. Message4096/caption1024 scalars,
 bounds remain unchanged; overflow refuses without truncation.
 
 Get/update use the immutable stored source without a provider reread. Refresh
-requires both old and new capability conjunctions and invalidates prior IDs and
+requires the newly read source's conjunction and invalidates prior IDs and
 approval. Forged older phone tags and phone-less v19/v20 refuse; v19 remains
 messageText only. Earlier v1–v19 canonical/display bytes and authority, public schemas,
 annotations/mappings, contract1, IPC2 and schema fingerprint remain unchanged.
@@ -2127,7 +2217,7 @@ message4096/caption1024 scalar,32entity,projection65536 character/UTF8-byte and
 complete display4096 bounds remain; overflow refuses without truncation.
 
 The full present-family conjunction is enforced at preparation, immutable
-get/update, both old/new refresh sources, owner confirmation, final source/
+get/update, the freshly read refresh source, owner confirmation, final source/
 properties guards, immediate prewire and terminal replay. Missing authority or
 owner-callback revocation refuses before claim/staging. Later properties/prewire
 revocation or source drift may claim and transiently stage an artifact, but

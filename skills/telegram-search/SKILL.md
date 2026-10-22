@@ -809,8 +809,9 @@ MP3/M4A, longer voice notes, unknown identity/size, formatted/linked/embedded or
 unsafe targets remain unavailable. No source download is required. Full media
 display including its marker caps at 4096 characters and is never truncated.
 
-Media opt-in also applies to stored inspection/update/refresh and sent/failed/
-unknown receipt replay. Refresh requires it for both stored and new media sources.
+Media opt-in also applies to stored inspection/update and sent/failed/
+unknown receipt replay. A refresh requires it only when the newly read source
+is media, not for the stored source it replaces.
 Status/list/cancel remain send-only metadata operations. Obtain fresh approval for
 new IDs; send guards revalidate stable source facts. Cache progress, thumbnails,
 waveform and listening-state changes are not content verification. Pretransport
@@ -844,8 +845,8 @@ or share boundaries and adjacent spans are allowed. Full display including marke
 caps at 4096 characters. Lexical/URL/mention/custom-emoji/date/time entities and
 styled captions are unavailable; do not flatten or substitute an ordinary send.
 
-The source capability is required through stored inspection/update, both sides of
-refresh, approval, final guards and sent/failed/unknown receipt replay. Gated
+The source capability is required through stored inspection/update, a refresh whose
+newly read source needs it, approval, final guards and sent/failed/unknown receipt replay. Gated
 source receipts also bind provider instance/observation epoch and expire at the
 inclusive 900-second attempt-retention boundary. Read-only status/list/cancel
 retain send-only rules. Source span/language/quote-kind edits require a new

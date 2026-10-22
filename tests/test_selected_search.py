@@ -236,6 +236,34 @@ class SelectedSearchTests(unittest.TestCase):
                 self.assertEqual(response.status,'error')
                 self.assertEqual(response.coverage[1].state,'pending')
 
+    def test_a_failed_link_alone_leaves_the_url_empty_and_keeps_the_page(self):
+        # Decision (0.54): getMessageLink is best effort as in the other readers; it never closes the group.
+        for error in (TimeoutError('private timeout'), OSError('private transport')):
+            provider = SelectedProvider(count=3)
+            def fail(target, mid, error=error):
+                provider.calls.append(('link', target, mid))
+                raise error
+            provider.get_message_link = fail
+            response = self.reader(provider).read(self.request())
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(response.status, 'page')
+                self.assertIsNotNone(response.next_cursor)
+                self.assertEqual([r.message.source.telegram_url for r in response.results], [None, None])
+                self.assertTrue(all(r.issues == [] for r in response.results))
+                self.assertNotIn('private ', response.model_dump_json())
+
+    def test_a_real_transport_loss_after_a_failed_link_still_closes_the_group(self):
+        # The link failure is not masking: a loss that persists fails the closing account check.
+        provider = SelectedProvider(count=3)
+        def fail(target, mid):
+            provider.calls.append(('link', target, mid))
+            provider.account_hook = lambda p: (_ for _ in ()).throw(OSError('private transport'))
+            raise TimeoutError('private timeout')
+        provider.get_message_link = fail
+        response = self.reader(provider).read(self.request())
+        self.assertEqual((response.status, response.results, response.next_cursor), ('error', [], None))
+        self.assertEqual(response.coverage[1].state, 'pending')
+
     def test_account_change_between_preflight_and_child_or_after_content_suppresses_bodies(self):
         for when in ('before','after'):
             provider=SelectedProvider();calls=[0]

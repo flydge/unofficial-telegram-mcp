@@ -4,9 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 from functools import lru_cache
+from typing import Literal
 
 from . import __version__
-from .config import RuntimePolicy, ConfigurationError
+from .config import KNOWN_CAPABILITIES, RuntimePolicy, ConfigurationError
 
 CONTRACT_VERSION = 1
 OPERATION_CAPABILITIES = {
@@ -64,6 +65,25 @@ class CompatibilityError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+# The closed capability set as a schema type, sorted so the published schema is stable.
+CapabilityName = Literal[tuple(sorted(KNOWN_CAPABILITIES))]
+
+
+def missing_capabilities(policy: RuntimePolicy, *required: str) -> tuple[str, ...]:
+    """Only the missing names, once each, in the order they are required (the guard's rule)."""
+    return tuple(dict.fromkeys(name for name in required if name not in policy.enabled_capabilities))
+
+
+class CapabilityDisabled(CompatibilityError):
+    """`capability_disabled` carrying the missing names: closed, ordered, never derived from input."""
+    def __init__(self, missing: tuple[str, ...]):
+        if (type(missing) is not tuple or not missing or len(set(missing)) != len(missing)
+                or not set(missing) <= KNOWN_CAPABILITIES):
+            raise ValueError("missing capabilities must be distinct known names")
+        self.missing = missing
+        super().__init__("capability_disabled")
 
 
 COMPATIBILITY_CODES = frozenset({"package_mismatch", "contract_mismatch", "schema_mismatch", "config_mismatch",

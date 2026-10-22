@@ -15,7 +15,7 @@ from telegram_search_mcp.config import RuntimePolicy, load_runtime_policy
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.reply_formatted_sources import formatted_text
-from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR
+from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR, disabled
 from test_artifact_replies import ArtifactSendFixture, content_fixture
 
 MARKER = '[untrusted Telegram evidence] '
@@ -331,10 +331,10 @@ class LexicalLifecycleRisks:
         for missing in CAPS:
             denied = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != missing))
             self.broker._policy = denied
-            self.assertEqual(self.dispatch(op, payload)['status'], 'unavailable')
+            self.assertEqual(disabled(self.dispatch(op, payload)),('capability_disabled',[missing]))
             self.broker._policy = POLICY; did = self.prepare()['draft']['draft_id']; self.broker._policy = denied
             for operation, extra in ((self.ops[0], {}), (self.ops[1], self.extra()), (self.ops[2], {})):
-                self.assertEqual(self.dispatch(operation, dict(draft_id=did, **extra))['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(operation, dict(draft_id=did, **extra))),('capability_disabled',[missing]))
             self.assertEqual(self.send(did)['status'], 'expired')
             self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
@@ -382,25 +382,25 @@ class LexicalLifecycleRisks:
             self.assertEqual(self.send(did)['status'], 'expired')
         self.assertEqual((len(self.sends()), len(self.approvals)), (1, 1))
 
-    def test_revision_and_style_lexical_refresh_check_old_and_new_capabilities(self):
+    def test_revision_and_style_lexical_refresh_check_the_new_sources_capabilities(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
         revision = self.dispatch(self.ops[1], dict(draft_id=did, **self.extra()))['reply']
         self.assertEqual(revision['reply_target'], preview['reply_target'])
         self.assertNotEqual(revision['preview_sha256'], preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired'); did = revision['draft']['draft_id']
-        style = lexical(TEXT, [entity('Bold', 0, 16)])
-        for missing in CAPS:
-            self.raw.source = style
-            self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != missing))
-            self.assertEqual(self.dispatch(self.ops[2], {'draft_id': did})['status'], 'unavailable')
-        self.broker._policy = POLICY
+        # Lexical -> style needs only the new styled authority; the stored lexical family is not asked (0.54).
+        self.raw.source = lexical(TEXT, [entity('Bold', 0, 16)])
+        self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != CAPS[0]))
+        self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[CAPS[0]]))
+        self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != CAPS[1]))
         styled = self.dispatch(self.ops[2], {'draft_id': did})['reply']
+        self.broker._policy = POLICY
         self.assertNotEqual(styled['reply_target']['source_sha256'], preview['reply_target']['source_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired'); did = styled['draft']['draft_id']
         self.raw.source = lexical()
         for missing in CAPS:
             self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != missing))
-            self.assertEqual(self.dispatch(self.ops[2], {'draft_id': did})['status'], 'unavailable')
+            self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[missing]))
         self.broker._policy = POLICY
         refreshed = self.dispatch(self.ops[2], {'draft_id': did})['reply']
         self.assertEqual(refreshed['reply_target']['text'], DISPLAY)
@@ -491,7 +491,7 @@ class LexicalLifecycleRisks:
             for kind in KINDS:
                 self.raw.source = target(content=content_fixture(media, '#x'))
                 self.raw.source['content']['caption']['entities'] = [entity(kind)]
-                self.assertEqual(self.dispatch(op, payload)['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(op, payload)),('capability_disabled',['reply_media_targets']))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
 
     def test_register_before_wire_each_cap_policy_exception_epoch_revoke_discards_observation(self):

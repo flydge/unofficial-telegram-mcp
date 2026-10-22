@@ -17,7 +17,7 @@ from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.reply_drafts import ReplySource, source_from_message
 from telegram_search_mcp.reply_media_sources import media_content, render_content, validate_content
-from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR
+from test_text_replies import ReplyFixture, target, outgoing, CLIENT, FOREIGN, ANCHOR, disabled
 from test_artifact_replies import ArtifactSendFixture, content_fixture
 
 MARKER = '[untrusted Telegram evidence] '
@@ -416,10 +416,10 @@ class LexicalMediaLifecycleRisks:
             for enabled in itertools.combinations(CAPS, count):
                 missing = tuple(c for c in CAPS if c not in enabled)
                 self.restore(); self.deny(*missing)
-                self.assertEqual(self.dispatch(op, payload)['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(op, payload)),('capability_disabled',list(missing)))
                 self.restore(); did = self.prepare()['draft']['draft_id']; self.deny(*missing)
                 for operation, extra in ((self.ops[0], {}), (self.ops[1], self.extra()), (self.ops[2], {})):
-                    self.assertEqual(self.dispatch(operation, dict(draft_id=did, **extra))['status'], 'unavailable')
+                    self.assertEqual(disabled(self.dispatch(operation, dict(draft_id=did, **extra))),('capability_disabled',list(missing)))
                 self.assertEqual(self.send(did)['status'], 'expired')
                 self.assertIsNone(self.client._send_observations.snapshot(did))
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
@@ -474,22 +474,23 @@ class LexicalMediaLifecycleRisks:
             self.assertEqual(self.send(did)['status'], 'failed')
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 7))
 
-    def test_revision_preserves_v6_and_refresh_checks_authority_of_old_and_new_sources(self):
+    def test_revision_preserves_v6_and_refresh_checks_the_new_sources_authority(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
         revision = self.dispatch(self.ops[1], dict(draft_id=did, **self.extra()))['reply']
         self.assertEqual(revision['reply_target'], preview['reply_target'])
         self.assertNotEqual(revision['preview_sha256'], preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired'); did = revision['draft']['draft_id']
-        for old_kind, next_source in (('v6', caption_source(text='plain', spans=[])),
-                                      ('v2', target('plain')), ('v1', caption_source())):
+        # v6 -> v2 needs v2 media, v2 -> v1 nothing, v1 -> v6 the new triple: never the stored source's (0.54).
+        for next_source, needs in ((caption_source(text='plain', spans=[]), ('reply_media_targets',)),
+                                   (target('plain'), ()), (caption_source(), CAPS)):
             self.raw.source = next_source
-            for missing in CAPS:
-                # v6 -> v2 needs old triple; v1 -> v6 needs new triple.
-                if old_kind == 'v2' and missing != 'reply_media_targets': continue
+            for missing in needs:
                 self.deny(missing)
-                self.assertEqual(self.dispatch(self.ops[2], {'draft_id': did})['status'], 'unavailable')
+                self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[missing]))
                 self.broker._policy = POLICY
+            self.deny(*(c for c in CAPS if c not in needs))
             refreshed = self.dispatch(self.ops[2], {'draft_id': did})['reply']
+            self.broker._policy = POLICY
             self.assertEqual(self.send(did)['status'], 'expired')
             did = refreshed['draft']['draft_id']
         self.assertEqual(refreshed['reply_target']['text'], evidence())

@@ -89,7 +89,7 @@ class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 return original(connection,operation,payload,**kwargs) if operation=='handshake' else response
             with patch.object(self.proxy,'_exchange',side_effect=exchange):
                 refused=self.proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id))
-                self.assertEqual(refused.status,'selection_unavailable');self.assertEqual(set(refused.model_dump()),{'status','detail'})
+                self.assertEqual(refused.status,'selection_unavailable');self.assertEqual(set(refused.model_dump()),{'status','detail','next_action'})
 
     async def test_policy_ttl_bounds_issuance_in_the_broker_and_independently_in_the_proxy(self):
         import time
