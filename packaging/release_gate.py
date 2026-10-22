@@ -99,7 +99,9 @@ MAX_EVIDENCE_BYTES = 4 << 20
 MAX_COMMITS = 100000
 GIT_TIMEOUT, PIP_TIMEOUT, BUILD_TIMEOUT, SMOKE_TIMEOUT, SUITE_TIMEOUT = 120, 900, 900, 180, 3600
 COMMIT = re.compile(r"[0-9a-f]{7,40}")
-TAG = re.compile(r"v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?")
+# A release tag (docs/releasing.md, Versions): v and a version of the one grammar that is a release or an rcN
+# candidate (no aN, bN or .devN).
+TAG = re.compile(r"v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:rc(0|[1-9][0-9]{0,5}))?")
 HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
 RAW = re.compile(rb":[0-7]{6} [0-7]{6} [0-9a-f]{4,64} [0-9a-f]{4,64} ([A-Z])[0-9]{0,3}\t(.+)")
 MARK = re.compile(rb"commit ([0-9a-f]{40})")
@@ -112,8 +114,8 @@ MAX_HISTORY = 2000
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 RULE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_HITS = 100
-VERSION = re.compile(r'^__version__ = "([0-9]+(?:\.[0-9]+){1,3}(?:(?:a|b|rc)[0-9]+)?'
-                     r'(?:\.post[0-9]+)?(?:\.dev[0-9]+)?)"$', re.M)
+VERSION = re.compile(r'^__version__ = "((?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})\.(?:0|[1-9][0-9]{0,5})'
+                     r'(?:(?:a|b|rc)(?:0|[1-9][0-9]{0,5}))?(?:\.dev(?:0|[1-9][0-9]{0,5}))?)"$', re.M)
 PIN = re.compile(r"([a-z0-9]+(?:-[a-z0-9]+)*)==([0-9A-Za-z.+!]+)((?: --hash=sha256:[0-9a-f]{64})+)")
 TARGET = re.compile(r"# target: cpython-(3\.[0-9]{1,2}) macosx-arm64")
 EVIDENCE_KEYS = frozenset({"schema", "gate", "commit", "tree", "commit_time", "previous_tag", "previous_commit",

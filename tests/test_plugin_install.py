@@ -23,6 +23,7 @@ import unittest
 from telegram_search_mcp import __version__, product_identity as identity
 from telegram_search_mcp.native_runtime import designated_requirement
 from test_claude_code_modes import BOOTSTRAP, synthetic_kit
+from version_grammar import BAD, GOOD
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'plugins' / identity.PLUGIN_NAME
@@ -371,6 +372,25 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
                     path.unlink()
                 self.refusal(self.run_install(), 'pins_invalid', retained=False)
                 self.assertEqual(self.calls(), [])
+
+    def test_the_pinned_version_follows_the_one_release_version_grammar(self):
+        """tests/version_grammar.py: a good version (with plugin.json naming the same one) downloads from its
+        tag and installs; a bad one refuses pins_invalid before any download."""
+        manifest = json.loads((PLUGIN / '.claude-plugin' / 'plugin.json').read_text())
+        for version, good in [(v, True) for v in GOOD] + [(v, False) for v in BAD]:
+            with self.subTest(version=version):
+                self.setUp()
+                plugin_json = self.plugin / '.claude-plugin' / 'plugin.json'
+                plugin_json.write_text(json.dumps({**manifest, 'version': version}, indent=2) + '\n')
+                self.pin(version=version)
+                done = self.run_install()
+                if good:
+                    self.assertEqual((done.returncode, done.stderr), (0, ''))
+                    self.assertEqual([call[-1] for call in self.calls()],
+                                     [base_url() + '/v' + version + '/' + asset for asset in ASSETS])
+                else:
+                    self.refusal(done, 'pins_invalid', retained=False)
+                    self.assertEqual(self.calls(), [])
 
     def test_arguments_a_relative_invocation_or_an_unusable_home_refuse(self):
         self.refusal(self.run_install('--claude-code', 'user'), 'invalid_arguments', retained=False)

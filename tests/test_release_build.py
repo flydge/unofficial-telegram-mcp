@@ -76,12 +76,14 @@ class Fakes:
         self.seed_call = None
         self.signature_refusal = False
         self.signature_call = None
+        self.seed_prepare_refusal = False
+        self.seed_prepare_call = None
         self.dmg_tamper = False
         self.notarized = None
         self.publication = 'unreleased'
 
     def steps(self):
-        names = ('prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'signatures', 'notarize')
+        names = ('prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'seed_prepare', 'signatures', 'notarize')
         steps = {name: self.recorded(name, getattr(self, name)) for name in names}
         steps.update(git_export=RB._sibling('prepare_payload').git_export, check_matrix=SP.check_matrix,
                      identity_kind=SP.identity_kind, load_lock=lambda data: LOCK, fetch=self.fetch)
@@ -159,6 +161,11 @@ class Fakes:
             value.update(kind='developer-id-seed', publisher_identity=True, team_id=team_id)
         self.write(output / 'provenance.json', json.dumps(value).encode())
 
+    def seed_prepare(self, kit, scratch):
+        self.seed_prepare_call = (kit, scratch, sorted(p.name for p in kit.iterdir()))
+        if self.seed_prepare_refusal:
+            raise RB.BuildError('kit_failed')
+
     def signatures(self, kit, signed, index, kind, team_id):
         self.signature_call = (kit, signed, kind, team_id, sorted(p.name for p in kit.iterdir()), index['files'])
         if self.signature_refusal:
@@ -213,8 +220,10 @@ class ReleaseBuildTests(unittest.TestCase):
 
     def test_dry_run_builds_every_asset_and_check_rederives_them(self):
         evidence, fakes = self.build(tag='v1.2.3')
-        self.assertEqual(fakes.calls, ['prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'signatures',
-                                       'notarize'])
+        self.assertEqual(fakes.calls, ['prepare', 'sign', 'matrix', 'repin', 'assemble', 'seed', 'seed_prepare',
+                                       'signatures', 'notarize'])
+        self.assertEqual(fakes.seed_prepare_call, (self.root / 'out/kit', self.root / 'out/work/seed-prepare',
+                                                   sorted([*RB.KIT_DATA, *RB.KIT_EXECUTABLE, 'SHA256SUMS'])))
         self.assertEqual(fakes.seed_call, (None, None))  # The ad hoc seed.
         kit_dir, signed, kind, team, listed, _ = fakes.signature_call
         self.assertEqual((kit_dir, signed, kind, team), (self.root / 'out/kit', self.root / 'out/work/signed', 'adhoc',
@@ -423,6 +432,10 @@ class ReleaseBuildTests(unittest.TestCase):
         fakes.signature_refusal = True
         refused('signature_refused', 'o', fakes)
         self.assertIsNone(fakes.notarized)
+        fakes = Fakes(self)
+        fakes.seed_prepare_refusal = True  # The kit's seed refuses the kit's own index.
+        refused('kit_failed', 'q', fakes)
+        self.assertEqual((fakes.signature_call, fakes.notarized), (None, None))
         fakes = Fakes(self)
         fakes.seed = lambda checkout, output, identity, team_id: Fakes.seed(fakes, checkout, output, IDENTITY, TEAM)
         refused('seed_failed', 'p', fakes)  # A dry run whose seed claims a publisher.

@@ -61,6 +61,9 @@ TOOL_ENV = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
 # The launcher's two version literals: the admitted index release_version and its --help line.
 LAUNCHER_SITES = (re.compile(r"value\['release_version'\]!='([^'\n]*)'"), re.compile(r"print\('([^'\n]*): mcp \|"))
 VERSION = re.compile(r'^[0-9A-Za-z.+-]{1,64}$')
+# This package's own version: the one release version grammar (docs/releasing.md, Versions).
+PACKAGE_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                             r'(?:(?:a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
 NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
 HASH = re.compile(r'^[0-9a-f]{64}$')
 LICENSE_NAMES = re.compile(r'^(LICEN[CS]E|COPYING|NOTICE|AUTHORS)', re.I)
@@ -488,13 +491,14 @@ def manifest_facts(export_src, python=sys.executable):
     except (OSError, subprocess.SubprocessError, ValueError, UnicodeError):
         raise PayloadError('manifest_failed') from None
     _need(type(facts) is dict and set(facts) == {'package_version', 'contract_version', 'schema_fingerprint', 'tools'}
-          and type(facts['package_version']) is str and VERSION.match(facts['package_version']), 'manifest_failed')
+          and type(facts['package_version']) is str and PACKAGE_VERSION.fullmatch(facts['package_version']),
+          'manifest_failed')
     return facts
 
 
 def generate_launcher(template, version):
     """The launcher with its admitted version regenerated from __version__ at both closed sites."""
-    _need(type(version) is str and VERSION.match(version) is not None, 'manifest_failed')
+    _need(type(version) is str and PACKAGE_VERSION.fullmatch(version) is not None, 'manifest_failed')
     try:
         text = template.decode('utf-8')
     except UnicodeError:

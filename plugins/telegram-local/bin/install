@@ -109,9 +109,13 @@ tg_pins_size=$tg_size
 tg_publication=$(tg_pin publication string) || tg_refuse pins_invalid
 case "$tg_publication" in published|unreleased) ;; *) tg_refuse pins_invalid;; esac
 tg_version=$(tg_pin version string) || tg_refuse pins_invalid
-[ "${#tg_version}" -le 32 ] || tg_refuse pins_invalid
-case "$tg_version" in [0123456789]*) ;; *) tg_refuse pins_invalid;; esac
-case "$tg_version" in *[!0123456789.devrc]*|*..*|*.) tg_refuse pins_invalid;; esac
+# The one release version grammar (docs/releasing.md, Versions): X.Y.Z, optionally aN, bN or rcN, optionally
+# .devN; each number 0 or up to six digits with no leading zero. One line only, matched whole.
+[ "${#tg_version}" -le 64 ] || tg_refuse pins_invalid
+case "$tg_version" in ''|*[!0123456789.abdevrc]*) tg_refuse pins_invalid;; esac
+printf '%s\n' "$tg_version" | /usr/bin/env -i LC_ALL=C /usr/bin/grep -Eqx \
+    '(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})((a|b|rc)(0|[1-9][0-9]{0,5}))?(\.dev(0|[1-9][0-9]{0,5}))?' \
+    || tg_refuse pins_invalid
 tg_team=$(tg_pin team_id string) || tg_refuse pins_invalid
 case "$tg_team" in '') ;; *[!0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) tg_refuse pins_invalid;; *)
     [ "${#tg_team}" -eq 10 ] || tg_refuse pins_invalid;; esac

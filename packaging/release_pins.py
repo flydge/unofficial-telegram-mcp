@@ -24,7 +24,9 @@ KEYS = frozenset({'schema_version', 'version', 'team_id', 'publication'}
 MAX_BYTES = 4096
 HASH = re.compile(r'[0-9a-f]{64}')
 TEAM = re.compile(r'[0-9A-Z]{10}')
-VERSION = re.compile(r'[0-9][0-9.devrc]{0,31}')
+# The one release version grammar (docs/releasing.md, Versions): X.Y.Z, optionally aN, bN or rcN, optionally .devN.
+VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                     r'(?:(?:a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
 
 
 class PinsError(ValueError):
@@ -58,8 +60,7 @@ def parse(data):
     version, team = value['version'], value['team_id']
     _need(type(value['schema_version']) is int and value['schema_version'] == 1
           and value['publication'] in PUBLICATIONS
-          and type(version) is str and VERSION.fullmatch(version) is not None and '..' not in version
-          and not version.endswith('.')
+          and type(version) is str and VERSION.fullmatch(version) is not None
           and type(team) is str and (team == '' or TEAM.fullmatch(team) is not None))
     for name, _, bound in ASSETS:
         digest, size = value[f'{name}_sha256'], value[f'{name}_bytes']

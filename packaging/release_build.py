@@ -5,7 +5,8 @@ prepare_payload -> sign_payload and the entitlement matrix -> repin_native and t
 assemble_bundle (identity switch: none, or a named Keychain service) -> build_bootstrap_seed.sh (with
 --sign-identity and the same Developer ID identity, or ad hoc in a dry run) -> the kit (Install.command
 rendered from release-pins.json, bootstrap.sh, the seed, archive, index, release-pins.json, README,
-licences, SHA256SUMS) -> the kit signature check -> notarize_release.sh (payload zip, DMG, sign, notarize,
+licences, SHA256SUMS) -> the kit's own seed prepares the kit's own index and archive -> the kit signature check
+-> notarize_release.sh (payload zip, DMG, sign, notarize,
 staple) -> assets/ (the DMG, the curl-path files, release-pins.json, release-provenance.json, the
 corresponding-source archive and SHA256SUMS over all of them) -> release-build.json, every hash
 re-derived from disk; `check` re-derives them and the commit again.
@@ -56,7 +57,9 @@ CODES = frozenset({'usage', 'output_refused', 'checkout_dirty', 'tag_mismatch', 
 TOOL_ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'}
 GIT_ENV = {**TOOL_ENV, 'HOME': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
            'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
-TAG = re.compile(r'v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?')
+# A release tag (docs/releasing.md, Versions): v and a version of the one grammar that is a release or an rcN
+# candidate (no aN, bN or .devN).
+TAG = re.compile(r'v(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:rc(0|[1-9][0-9]{0,5}))?')
 PROFILE = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}')
 HASH = re.compile(r'[0-9a-f]{64}')
 SEED_KINDS = {'adhoc': 'developer-built-ad-hoc-seed', 'developer-id': 'developer-id-seed'}
@@ -208,6 +211,24 @@ def _default_steps(runner=subprocess.run):
             raise BuildError('seed_failed') from None
         _need(result.returncode == 0, 'seed_failed')
 
+    def seed_prepare(kit, scratch):
+        """The kit's seed runs `prepare` on the kit's index and archive as bootstrap.sh runs it (env -i, a fresh
+        private destination) and must answer verified for every indexed file; the unpacked copy is removed."""
+        index = kit / 'release-index.json'
+        scratch.mkdir(mode=0o700)
+        try:
+            listed = len(json.loads(index.read_bytes())['files'])
+            result = runner(['/usr/bin/env', '-i', 'PATH=/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL=C',
+                             str(kit / 'bootstrap-verifier'), 'prepare', '--index', str(index),
+                             '--trusted-index-sha256', file_digest(index)[0], '--archive', str(kit / 'release.tar.gz'),
+                             '--destination', str(scratch / 'release'), '--json'],
+                            capture_output=True, check=False, timeout=SEED_TIMEOUT)
+            value = json.loads(result.stdout) if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+            raise BuildError('kit_failed') from None
+        _need(type(value) is dict and value.get('verified') is True and value.get('files') == listed, 'kit_failed')
+        _remove_tree(scratch)
+
     def notarize(checkout, arguments, real):
         env = dict(TOOL_ENV)
         if real and os.environ.get('HOME', '').startswith('/'):
@@ -236,10 +257,18 @@ def _default_steps(runner=subprocess.run):
         'assemble': lambda signed, output, service: assembler.assemble_bundle(signed, output,
                                                                                app_identity_service=service),
         'seed': seed,
+        'seed_prepare': seed_prepare,
         'signatures': lambda kit, signed, index, kind, team_id: kit_signatures(kit, signed, index, kind, team_id,
                                                                                runner=runner),
         'notarize': notarize,
     }
+
+
+def _remove_tree(root):
+    """Remove an owner-only tree whose directories the seed left without write permission."""
+    for directory, _, _ in os.walk(root):
+        os.chmod(directory, 0o700)
+    shutil.rmtree(root)
 
 
 # Kit signatures ----------------------------------------------------------------------------------
@@ -420,6 +449,8 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
     _write(kit / 'NOTICE', files['NOTICE'][0])
     _write(kit / 'third-party-notices.md', files['docs/third-party-notices.md'][0])
     _write(kit / 'SHA256SUMS', sums(kit))
+    # The seed admits the index it ships with (release_version included), as the first install will run it.
+    steps['seed_prepare'](kit, work / 'seed-prepare')
 
     # 7. Before anything is notarized: every Mach-O the kit ships carries the expected signature.
     signatures = steps['signatures'](kit, work / 'signed', index, kind, pinned_team)

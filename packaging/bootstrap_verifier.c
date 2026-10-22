@@ -266,21 +266,24 @@ static bool boolean(Json *j, bool *out) {
     if (n >= 5 && !memcmp(j->p, "false", 5)) { j->p += 5; *out = false; return true; }
     return false;
 }
+/* One number of a version: 0, or up to six digits with no leading zero. */
+static bool version_number(const char **s) {
+    const char *start = *s;
+    while (**s >= '0' && **s <= '9') (*s)++;
+    size_t n = (size_t)(*s - start);
+    return n && n <= 6 && (n == 1 || *start != '0');
+}
+/* The one release version grammar (docs/releasing.md, Versions): X.Y.Z, then optionally aN, bN or rcN,
+ * then optionally .devN. */
 static bool version(const char *s) {
     for (unsigned part = 0; part < 3; part++) {
-        const char *start = s;
-        while (*s >= '0' && *s <= '9') s++;
-        size_t n = (size_t)(s - start);
-        if (!n || n > 6 || (n > 1 && *start == '0')) return false;
+        if (!version_number(&s)) return false;
         if (part < 2) { if (*s++ != '.') return false; }
     }
-    if (!*s) return true;
-    if (strncmp(s, ".dev", 4)) return false;
-    s += 4;
-    const char *start = s;
-    while (*s >= '0' && *s <= '9') s++;
-    size_t n = (size_t)(s - start);
-    return !*s && n > 0 && n <= 6 && (n == 1 || *start != '0');
+    if (*s == 'a' || *s == 'b') { s++; if (!version_number(&s)) return false; }
+    else if (s[0] == 'r' && s[1] == 'c') { s += 2; if (!version_number(&s)) return false; }
+    if (!strncmp(s, ".dev", 4)) { s += 4; if (!version_number(&s)) return false; }
+    return !*s;
 }
 static bool record(Json *j, File *f) {
     if (!take(j, '{')) return false;

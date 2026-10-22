@@ -1723,22 +1723,21 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         raise InstallError('installation_refused') from None
 
 
-_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})((?:\.(?:0|[1-9][0-9]{0,5})){0,4})(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?'
-                      r'(?:\.post(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
+# The one release version grammar (docs/releasing.md, Versions), as release_archive and the native seed admit it.
+_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                      r'(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
 _INF = float('inf')
 
 
 def _version_key(value):
-    """PEP 440 order of a public release version (N[.N]*[{a|b|rc}N][.postN][.devN]); anything else refuses."""
+    """PEP 440 order of a release version (X.Y.Z[{a|b|rc}N][.devN]); anything else refuses."""
     match=_VERSION.fullmatch(value) if type(value) is str else None
     if match is None:raise InstallError('downgrade_refused')
-    head,rest,letter,number,post,dev=match.groups()
-    release=[int(head),*(int(p) for p in rest.split('.')[1:])]
-    while len(release)>1 and release[-1]==0:release.pop()
+    major,minor,micro,letter,number,dev=match.groups()
     if letter is not None:pre=(('a','b','rc').index(letter),int(number))
-    elif dev is not None and post is None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
+    elif dev is not None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
     else:pre=(_INF,0)
-    return (tuple(release),pre,-_INF if post is None else int(post),_INF if dev is None else int(dev))
+    return ((int(major),int(minor),int(micro)),pre,_INF if dev is None else int(dev))
 
 
 def _changing(root, index_sha256):
