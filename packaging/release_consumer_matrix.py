@@ -125,7 +125,8 @@ CODES = frozenset({
     "usage", "repo_unavailable", "git_failed", "unknown_commit", "build_failed", "build_tools_missing",
     "install_failed", "census_failed", "broker_failed", "drive_failed", "cells_failed", "receipt_invalid",
     "acceptance_claimed", "owner_cell_passed", "cell_set_mismatch", "commit_mismatch", "wheel_mismatch",
-    "schema_mismatch", "tools_mismatch", "version_mismatch", "workdir_invalid", "wheelhouse_invalid"})
+    "schema_mismatch", "tools_mismatch", "version_mismatch", "workdir_invalid", "wheelhouse_invalid",
+    "harness_mismatch", "tree_mismatch", "field_mismatch"})
 RECEIPT_KEYS = frozenset({"schema", "acceptance", "harness", "commit", "tree", "version", "wheel", "build",
                           "install", "sdk", "schema_fingerprint", "census", "surface", "approval", "cells",
                           "owner_cells", "summary"})
@@ -697,6 +698,13 @@ class Driver:
         cell.expect("png", images and base64.b64decode(images[0].data).startswith(b"\x89PNG\r\n\x1a\n"))
 
     async def cell_cursor_list_chats(self, cell, consumer, tools) -> None:
+        self.replay_cursor = None
+        try:
+            await self._cursor_pages(cell, consumer)
+        finally:  # The paired cell is recorded either way, failing when no cursor came back.
+            await self.run_cell("recovery.restart_listing", self.cell_restart_listing(consumer))
+
+    async def _cursor_pages(self, cell, consumer) -> None:
         first = structured(await consumer.call("list_chats", {"scope": "main", "limit": LIST_PAGE}))
         ids = [row.get("chat_id") for row in first.get("results", [])]
         cell.expect("page", first.get("status") == "page" and first.get("next_cursor"))
@@ -707,10 +715,11 @@ class Driver:
         cell.expect("rest", rest == list(range(FIRST_CHAT + LIST_PAGE, FIRST_CHAT + CHAT_COUNT)))
         cell.expect("end", second.get("next_cursor") is None and "next_action" not in second)
         self.replay_cursor = first.get("next_cursor")
-        await self.run_cell("recovery.restart_listing", self.cell_restart_listing(consumer))
 
     def cell_restart_listing(self, consumer):
         async def body(cell):
+            if not cell.expect("cursor", isinstance(self.replay_cursor, str)):
+                return
             replay = structured(await consumer.call("list_chats", {"scope": "main", "limit": LIST_PAGE,
                                                                     "cursor": self.replay_cursor}))
             cell.expect("invalid_cursor", replay.get("status") == "invalid_cursor")
@@ -791,6 +800,7 @@ class Driver:
         again = structured(await consumer.call("send_prepared_text", {"draft_id": draft_id, "approved": True}))
         cell.expect("no_resend", again.get("status") == "outcome_unknown")
         cell.expect("one_dispatch", self.sends() == 1)
+        cell.expect("one_owner_prompt", len([e for e in self.broker_entries() if e.get("prompt") == "outcome"]) == 1)
 
     async def cell_client_schema_mismatch(self, cell) -> None:
         async with self.client(mode="legacy") as client:
@@ -965,7 +975,7 @@ def build_receipt(*, commit: str, tree: str, version: str, wheel: dict, build: d
 
 
 def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: str | None = None,
-                  census: dict | None = None) -> None:
+                  census: dict | None = None, committed: dict | None = None) -> None:
     """Every structural rule, then each binding that is given; refuses with one fixed code."""
     need(isinstance(receipt, dict) and set(receipt) == RECEIPT_KEYS and receipt["schema"] == SCHEMA,
          "receipt_invalid")
@@ -996,6 +1006,59 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
         need(receipt["version"] == census.get("version"), "version_mismatch")
         need(receipt["schema_fingerprint"] == census.get("schema_fingerprint"), "schema_mismatch")
         need(receipt["census"]["tools_sha256"] == tools_sha256(census.get("tools") or []), "tools_mismatch")
+        need(receipt["census"] == {"tool_count": len(census.get("tools") or []),
+                                   "tools_sha256": tools_sha256(census.get("tools") or []),
+                                   "capabilities": len(census.get("capabilities") or [])}, "field_mismatch")
+    if committed is not None:
+        check_fields(receipt, committed)
+
+
+def check_fields(receipt: dict, committed: dict) -> None:
+    """Every remaining receipt field against what the recorded commit's own harness and tree require: a
+    receipt from another harness, tree, closure or approval mode, or with an edited count, refuses."""
+    need(receipt["harness"] == {"path": "packaging/release_consumer_matrix.py", "sha256": committed["harness_sha256"]},
+         "harness_mismatch")
+    need(receipt["tree"] == committed["tree_id"], "tree_mismatch")
+    version = receipt["version"]
+    wheel, build, install = receipt["wheel"], receipt["build"], receipt["install"]
+    need(set(wheel) == {"file", "sha256", "bytes"} and wheel["file"] == f"{PROJECT.replace('-', '_')}-{version}"
+         f"-py3-none-any.whl" and type(wheel["bytes"]) is int and wheel["bytes"] > 0, "field_mismatch")
+    need(set(build) == {"build", "python", "setuptools", "source_date_epoch"}
+         and build["source_date_epoch"] == committed["epoch"], "field_mismatch")
+    freeze = install.get("freeze")
+    need(set(install) == {"constraints", "constraints_sha256", "wheelhouse", "distributions", "freeze", "pip_check",
+                          "record_entries"}
+         and install["constraints"] == committed["constraints"]
+         and install["constraints_sha256"] == committed["constraints_sha256"]
+         and install["wheelhouse"] in ("provided", "downloaded") and install["pip_check"] == "clean"
+         and type(install["distributions"]) is int and install["distributions"] == committed["distributions"]
+         and isinstance(freeze, list) and len(freeze) == install["distributions"] + 1
+         and type(install["record_entries"]) is int and install["record_entries"] > 0, "field_mismatch")
+    sdk = receipt["sdk"]
+    need(set(sdk) == {"distribution", "version", "revisions"} and sdk["distribution"] == SDK_DISTRIBUTION
+         and sdk["revisions"] == list(REVISIONS) and f"{SDK_DISTRIBUTION}=={sdk['version']}" in freeze,
+         "field_mismatch")
+    surface = receipt["surface"]
+    need(set(surface) == {"listing_sha256", "structured_results_validated", "tools_with_validated_results",
+                          "unschematized_tools"}
+         and isinstance(surface["listing_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", surface["listing_sha256"])
+         and type(surface["structured_results_validated"]) is int and surface["structured_results_validated"] > 0
+         and type(surface["tools_with_validated_results"]) is int and surface["tools_with_validated_results"] > 0
+         and surface["unschematized_tools"] == [], "field_mismatch")
+    need(receipt["approval"] in ({"mode": "scripted", "outcome": "declined"},
+                                 {"mode": "real_dialog", "outcome": "timeout"}), "field_mismatch")
+
+
+def committed_facts(gate, built: dict) -> dict:
+    """What the recorded commit's own tree fixes: its harness, tree id, epoch and pinned closure."""
+    tree = built["tree"]
+    release = re.match(r"[0-9]+\.[0-9]+\.[0-9]+", built["version"])
+    need(release, "build_failed")
+    constraints = f"packaging/constraints-{release.group(0)}.txt"
+    _, pins = _gate_call(gate, "install_failed", gate.parse_constraints, (tree / constraints).read_text(encoding="utf-8"))
+    return {"harness_sha256": gate.sha256_file(tree / "packaging/release_consumer_matrix.py"),
+            "tree_id": built["tree_id"], "epoch": built["epoch"], "constraints": constraints,
+            "constraints_sha256": gate.sha256_file(tree / constraints), "distributions": len(pins)}
 
 
 def load_receipt(path: Path) -> dict:
@@ -1292,6 +1355,8 @@ def run(args: argparse.Namespace) -> int:
     work, temporary = _workdir(args.workdir)
     try:
         built = build_wheel(gate, git, commit, work / "build")
+        committed = committed_facts(gate, built)
+        need(gate.sha256_file(HARNESS) == committed["harness_sha256"], "harness_mismatch")
         venv, installed = install(gate, built, work / "install", wheelhouse)
         python = venv / "bin" / "python"
         census = source_census(gate, python, built["tree"] / "src", work)
@@ -1310,7 +1375,8 @@ def run(args: argparse.Namespace) -> int:
         for cell in receipt["cells"]:
             if cell["status"] != "pass":  # Harness-defined labels only, never observed values.
                 print(f"cell {cell['id']}: {cell['failed_check']}", file=sys.stderr)
-        check_receipt(receipt, commit=commit, wheel_sha256=receipt["wheel"]["sha256"], census=census)
+        check_receipt(receipt, commit=commit, wheel_sha256=receipt["wheel"]["sha256"], census=census,
+                      committed=committed)
         write_receipt(receipt_path, receipt)
     finally:
         if temporary:
@@ -1338,7 +1404,8 @@ def check(args: argparse.Namespace) -> int:
     try:
         built = build_wheel(gate, git, commit, work / "build")
         census = source_census(gate, Path(sys.executable), built["tree"] / "src", work)
-        check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census)
+        check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census,
+                      committed=committed_facts(gate, built))
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print("consumer matrix receipt verified")

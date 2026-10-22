@@ -80,11 +80,20 @@ def sessions(*, failing: str | None = None, validated: int = 1, failures: tuple 
     return results
 
 
+# What the recorded commit fixes (committed_facts); receipt() is consistent with it.
+FACTS = {"harness_sha256": "e" * 64, "tree_id": OTHER, "epoch": 1700000000,
+         "constraints": "packaging/constraints-0.0.0.txt", "constraints_sha256": "f" * 64, "distributions": 2}
+
+
 def receipt(census: dict, **kwargs) -> dict:
-    return matrix.build_receipt(commit=COMMIT, tree=OTHER, version=census["version"],
-                                wheel={"file": "synthetic.whl", "sha256": WHEEL, "bytes": 1},
-                                build={"python": "3"}, install={"freeze": []}, census=census,
-                                sessions=sessions(**kwargs), harness_sha256="e" * 64)
+    return matrix.build_receipt(
+        commit=COMMIT, tree=OTHER, version=census["version"],
+        wheel={"file": f"telegram_search_mcp-{census['version']}-py3-none-any.whl", "sha256": WHEEL, "bytes": 1},
+        build={"build": "1.3.0", "python": "3.14.6", "setuptools": "80.9.0", "source_date_epoch": FACTS["epoch"]},
+        install={"constraints": FACTS["constraints"], "constraints_sha256": FACTS["constraints_sha256"],
+                 "wheelhouse": "provided", "distributions": 2, "freeze": ["mcp==2.2.0", "pydantic==2.0", "x==1"],
+                 "pip_check": "clean", "record_entries": 10},
+        census=census, sessions=sessions(**kwargs), harness_sha256=FACTS["harness_sha256"])
 
 
 def refusal(function, *args, **kwargs) -> str:
@@ -289,6 +298,7 @@ class SchemaChangeTests(unittest.TestCase):
                 fake.sha256_file = lambda file, digest=wheel_digest: digest
                 with self.subTest(expected=expected), mock.patch.object(matrix, "load_gate", return_value=fake), \
                         mock.patch.object(matrix, "build_wheel", return_value=built), \
+                        mock.patch.object(matrix, "committed_facts", return_value=FACTS), \
                         mock.patch.object(matrix, "source_census", return_value=observed), \
                         contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
@@ -296,6 +306,62 @@ class SchemaChangeTests(unittest.TestCase):
                 self.assertEqual((code, err.getvalue().strip()), (0, "") if expected is None else (2, expected))
                 if expected is None:
                     self.assertEqual(out.getvalue().strip(), "consumer matrix receipt verified")
+
+
+class ReceiptFieldTests(unittest.TestCase):
+    def test_a_valid_receipt_passes_every_field_check(self):
+        census = live_census()
+        matrix.check_receipt(receipt(census), commit=COMMIT, wheel_sha256=WHEEL, census=census, committed=FACTS)
+
+    def test_each_tampered_field_refuses(self):
+        census = live_census()
+        tampered = {
+            "harness": ("harness", {"path": "packaging/release_consumer_matrix.py", "sha256": "0" * 64},
+                        "harness_mismatch"),
+            "tree": ("tree", "0" * 40, "tree_mismatch"),
+            "approval_sent": ("approval", {"mode": "scripted", "outcome": "sent"}, "field_mismatch"),
+            "approval_mode": ("approval", {"mode": "real_dialog", "outcome": "declined"}, "field_mismatch"),
+            "sdk_revisions": ("sdk", {"distribution": "mcp", "version": "2.2.0", "revisions": []}, "field_mismatch"),
+            "sdk_version": ("sdk", {"distribution": "mcp", "version": "9.9.9",
+                                    "revisions": list(matrix.REVISIONS)}, "field_mismatch"),
+            "census_count": ("census", None, "field_mismatch"),
+        }
+        for label, (key, value, code) in tampered.items():
+            with self.subTest(field=label):
+                document = receipt(census)
+                document[key] = value if value is not None else {**document["census"], "tool_count": 1}
+                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
+                                         census=census, committed=FACTS), code)
+        for key, value in (("pip_check", "broken"), ("distributions", 3), ("record_entries", 0),
+                           ("constraints_sha256", "0" * 64), ("wheelhouse", "elsewhere")):
+            with self.subTest(install=key):
+                document = receipt(census)
+                document["install"] = {**document["install"], key: value}
+                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
+                                         census=census, committed=FACTS), "field_mismatch")
+        for key, value in (("structured_results_validated", 0), ("tools_with_validated_results", 0),
+                           ("unschematized_tools", ["read_history"]), ("listing_sha256", "x")):
+            with self.subTest(surface=key):
+                document = receipt(census)
+                document["surface"] = {**document["surface"], key: value}
+                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
+                                         census=census, committed=FACTS), "field_mismatch")
+        document = receipt(census)
+        document["build"] = {**document["build"], "source_date_epoch": 1}
+        self.assertEqual(refusal(matrix.check_receipt, document, census=census, committed=FACTS), "field_mismatch")
+
+    def test_run_refuses_a_working_tree_harness_that_differs_from_the_commits(self):
+        fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path("/"), Git=lambda repo: object(),
+                               resolve_commit=lambda git, value: COMMIT, sha256_file=lambda file: "1" * 64)
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(matrix, "load_gate", return_value=fake), \
+                mock.patch.object(matrix, "build_wheel", return_value={"tree": Path(directory), "version": "0.0.0"}), \
+                mock.patch.object(matrix, "committed_facts", return_value=FACTS), \
+                mock.patch.object(matrix, "install", side_effect=AssertionError("installed")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = matrix.main(["run", "--commit", COMMIT, "--receipt", str(Path(directory) / "r.json"), "--repo",
+                                directory, "--workdir", str(Path(directory) / "work")])
+        self.assertEqual((code, err.getvalue().strip()), (2, "harness_mismatch"))
 
 
 class SyntheticAccountTests(unittest.TestCase):
