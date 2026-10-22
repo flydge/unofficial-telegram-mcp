@@ -104,6 +104,13 @@ class _GuardedClient:
         self.get_account_id()
         return self._call('get_message', target, mid)
 
+    def get_message_link(self, chat_id, message_id):
+        # Best effort, as in every reader: a timed-out or failed link leaves telegram_url empty and
+        # does not mark the transport lost. The row is already hydrated and no cursor depends on the
+        # link, and a real loss cannot hide: the next guarded call and the page's closing account
+        # check (a real getMe) both fail into provider_error.
+        return self.owner._client.get_message_link(chat_id, message_id)
+
 
 class _OwnedExactReader(ExactSearchReader):
     """Private child capacity and scope lifetime belong solely to one outer scan."""
