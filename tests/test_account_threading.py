@@ -187,10 +187,12 @@ class BrokerThreadingTests(Fixture):
 
     def test_tdlib_client_from_an_account_uses_its_session_staging_and_enrollment(self):
         loader = mock.Mock(return_value=(b'k' * 32, lambda: None))
+        # from_defaults sets the broker's process umask; the real call would leak it into every later test.
         with mock.patch('telegram_search_mcp.credential_identity.session_credential_loader', loader), \
-                mock.patch.object(tdjson, 'LegacyTDJson'):
+                mock.patch.object(tdjson, 'LegacyTDJson'), mock.patch.object(tdjson.os, 'umask') as umask:
             client = tdjson.TDLibClient.from_defaults(self.work)
             default = tdjson.TDLibClient.from_defaults()
+        self.assertEqual(umask.call_args_list, [mock.call(0o077)] * 2)
         self.assertEqual(loader.call_args_list, [mock.call(SetupPaths.from_account(self.work)), mock.call()])
         self.assertEqual((client._session_directory, client._staging_root), (self.work.session, self.work.staging))
         self.assertEqual((default._session_directory, default._staging_root), (config.TDLIB_SESSION_DIRECTORY, None))
