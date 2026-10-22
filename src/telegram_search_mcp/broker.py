@@ -38,7 +38,7 @@ from .broker_protocol import (
     receive_request,
     send_frame,
 )
-from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, RuntimePolicy, load_runtime_policy
+from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths, ensure_private_directory, RuntimePolicy, load_runtime_policy
 from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
                        require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
@@ -188,7 +188,7 @@ class Broker(SelectionBrokerMixin):
         *,
         socket_path: Path,
         lock_path: Path | None = None,
-        client_factory: ClientFactory = TDLibClient.from_defaults,
+        client_factory: ClientFactory | None = None,
         verify_peer_uid: bool = True,
         peer_uid_loader: PeerUidLoader = _peer_uid,
         context_clock: Callable[[], float] = time.monotonic,
@@ -197,26 +197,32 @@ class Broker(SelectionBrokerMixin):
         max_clients: int = 64,
         max_workers: int = 8,
         artifact_store: ArtifactStore | None = None,
-        download_source_root: Path = TDLIB_SESSION_DIRECTORY / "files",
+        download_source_root: Path | None = None,
         approval_prompt: Callable[..., ApprovalDecision | bool] = decide_approved_send,
         policy: RuntimePolicy | None = None,
+        account: AccountPaths | None = None,
     ) -> None:
+        """`account` None is the default alias: every default below is its 0.54 call."""
         if min(max_pending, max_clients, max_workers) < 1:
             raise ValueError("broker bounds must be positive")
         if context_ttl_seconds <= 0:
             raise ValueError("context_ttl_seconds must be positive")
-        self._policy = policy if policy is not None else load_runtime_policy()
+        self._policy = policy if policy is not None else (
+            load_runtime_policy() if account is None else load_runtime_policy(account.policy))
         self._contract = contract_descriptor(self._policy)
         self._generation = "broker_" + secrets.token_hex(16)
         self._socket_path = socket_path
         self._lock_path = lock_path or socket_path.with_name("broker.lock")
-        self._client_factory = client_factory
-        self._artifact_store = artifact_store if artifact_store is not None else ArtifactStore()
+        self._client_factory = client_factory if client_factory is not None else (
+            TDLibClient.from_defaults if account is None else lambda: TDLibClient.from_defaults(account))
+        self._artifact_store = artifact_store if artifact_store is not None else (
+            ArtifactStore() if account is None else ArtifactStore(cache_dir=account.artifacts))
         self._artifact_authority = ArtifactAuthority(self._generation, clock=lambda: self._artifact_store.clock(),
                                                      account_lookup=self._artifact_account)
         self._drafts = OutgoingDraftRegistry(self._artifact_store,
                                             max_ttl_seconds=self._policy.max_draft_ttl_seconds)
-        self._uploads = LocalUploadRegistry(self._artifact_store)
+        self._uploads = (LocalUploadRegistry(self._artifact_store) if account is None
+                         else LocalUploadRegistry(self._artifact_store, root=account.uploads))
         self._upload_authorities = LocalUploadAuthorityRegistry(self._uploads, self._artifact_authority,
                                                                admission=self._upload_admission)
         self._approval_prompt = approval_prompt
@@ -224,7 +230,10 @@ class Broker(SelectionBrokerMixin):
         self._selections = SelectionRegistry(ttl_seconds=self._policy.selection_ttl_seconds)
         self._artifact_provenance = {}
         self._artifact_metadata: dict[str, tuple[object, str | None, str | None, str]] = {}
-        self._download_source_root = download_source_root
+        self._download_source_root = (download_source_root if download_source_root is not None
+                                      else (DEFAULT_ACCOUNT_PATHS if account is None else account).files)
+        # Staging keeps the module's own root for the default alias (its 0.54 call).
+        self._staging = {} if account is None else {"root": account.staging}
         self._verify_peer_uid = verify_peer_uid
         self._peer_uid_loader = peer_uid_loader
         self._max_clients = max_clients
@@ -1909,7 +1918,7 @@ class Broker(SelectionBrokerMixin):
                 )
             failure_detail = "TDLib rejected the send"
             try:
-                staged_path = stage_approved_document(claim)
+                staged_path = stage_approved_document(claim, **self._staging)
             except (OSError,ValueError,ConfigurationError) as error:
                 if isinstance(error,ConfigurationError) and claim.draft.reply_source is None:
                     raise  # Preserve the ordinary-send exception boundary.
@@ -1962,7 +1971,7 @@ class Broker(SelectionBrokerMixin):
                 receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="outcome_unknown")
             if receipt.status in {"sent", "failed"}:
                 try:
-                    retire_staged_document(staged_path)
+                    retire_staged_document(staged_path, **self._staging)
                 except (OSError, ValueError):
                     pass  # The receipt still owns the provider outcome; staging is TTL-bounded.
             return SendPreparedArtifactResponse(
@@ -2280,7 +2289,7 @@ class Broker(SelectionBrokerMixin):
                                                          provider_epoch=epoch))
             failure_detail = 'TDLib rejected the send'
             try:
-                staged_path = stage_approved_document(claim)
+                staged_path = stage_approved_document(claim, **self._staging)
             except (OSError, ValueError, ConfigurationError):
                 self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
                 return result('local_failed', 'local staged file could not be prepared; no provider send was attempted')
@@ -2309,7 +2318,7 @@ class Broker(SelectionBrokerMixin):
                 receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
             if receipt.status in {'sent', 'failed'}:
                 try:
-                    retire_staged_document(staged_path)
+                    retire_staged_document(staged_path, **self._staging)
                 except (OSError, ValueError):
                     pass  # The receipt still owns the provider outcome; staging is TTL-bounded.
             if receipt.evidence == 'local_failed':

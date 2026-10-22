@@ -17,10 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .config import APP_SUPPORT_ROOT
+from .config import CACHE_DIRECTORY
 from .artifact_authority import active_scope
 
-CACHE_DIRECTORY = APP_SUPPORT_ROOT / "artifacts"
 DOCUMENT_LIMIT = 64 * 1024 * 1024
 MEDIA_LIMIT = 256 * 1024 * 1024
 GLOBAL_LIMIT = 1024 * 1024 * 1024
@@ -48,13 +47,13 @@ class ArtifactStore:
     def __init__(
         self,
         *,
-        cache_dir: Path = CACHE_DIRECTORY,
+        cache_dir: Path | None = None,
         clock: Callable[[], float] = time.time,
         max_document_bytes: int = DOCUMENT_LIMIT,
         max_media_bytes: int = MEDIA_LIMIT,
         max_total_bytes: int = GLOBAL_LIMIT,
     ) -> None:
-        self.cache_dir = Path(cache_dir)
+        self.cache_dir = CACHE_DIRECTORY if cache_dir is None else Path(cache_dir)
         self.quarantine_dir = self.cache_dir.with_name(self.cache_dir.name + "-quarantine")
         self.clock = clock
         self.max_document_bytes = max_document_bytes

@@ -21,13 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .config import APP_SUPPORT_ROOT
+from .config import WHISPER_MODEL_PATH as DEFAULT_MODEL_PATH
 
 
 MAX_SOURCE_BYTES = 256 * 1024 * 1024
 MAX_WINDOW_SECONDS = 300.0
 MAX_FRAMES = 12
-DEFAULT_MODEL_PATH = APP_SUPPORT_ROOT / "models" / "ggml-small.bin"
 FFMPEG = Path("/opt/homebrew/bin/ffmpeg")
 FFPROBE = Path("/opt/homebrew/bin/ffprobe")
 WHISPER_CLI = Path("/opt/homebrew/bin/whisper-cli")

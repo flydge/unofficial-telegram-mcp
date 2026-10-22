@@ -30,8 +30,8 @@ from .retained_selection_models import RetainSelectionRequest, RetainSelectionSo
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
-from .config import (BROKER_SOCKET_PATH, CAPABILITY_PROFILES, PROFILE_DEPENDENCIES, RuntimePolicy, load_runtime_policy,
-                     ConfigurationError, homebrew_openssl_keg, unlocking_profiles)
+from .config import (BROKER_SOCKET_PATH, CACHE_DIRECTORY, CAPABILITY_PROFILES, PROFILE_DEPENDENCIES, AccountPaths,
+                     RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg, unlocking_profiles)
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        missing_capabilities, required_capabilities)
@@ -41,7 +41,6 @@ from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPa
 from .spreadsheet_models import (ReadSpreadsheetRequest, ReadSpreadsheetResponse,
     SheetRange, SpreadsheetCursor)
 from .presentation_models import ReadPresentationRequest, ReadPresentationResponse
-from .artifact_store import CACHE_DIRECTORY
 from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, send_status
 from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareReplyArtifactSendResponse,
     GetReplyArtifactDraftRequest, GetReplyArtifactDraftResponse, UpdateReplyArtifactDraftRequest,
@@ -918,11 +917,18 @@ def _inline_attachment_page_image(path: Path, artifact_id: str, *, root: Path, m
 
 def build_server(
     *, service_factory: Callable[[], SearchService] = _default_service,
-    artifact_root: Path = CACHE_DIRECTORY,
+    artifact_root: Path | None = None,
     policy: RuntimePolicy | None = None,
+    account: AccountPaths | None = None,
 ) -> MCPServer:
-    """Build the complete MCP surface without opening Telegram until search is called."""
-    runtime_policy = policy if policy is not None else load_runtime_policy()
+    """Build the complete MCP surface without opening Telegram until search is called.
+
+    `account` None is the default alias: its socket, policy and artifact root are the 0.54 constants.
+    """
+    if artifact_root is None:
+        artifact_root = CACHE_DIRECTORY if account is None else account.artifacts
+    runtime_policy = policy if policy is not None else (
+        load_runtime_policy() if account is None else load_runtime_policy(account.policy))
     server = _PolicyServer(
         name="telegram-search-mcp",
         title=identity.DISPLAY_NAME,
@@ -948,8 +954,12 @@ def build_server(
         require_current(runtime_policy)
         contract_descriptor(runtime_policy)
         if service is None:
-            service = (BrokerClient(socket_path=BROKER_SOCKET_PATH, policy=runtime_policy)
-                       if service_factory is _default_service else service_factory())
+            if service_factory is not _default_service:
+                service = service_factory()
+            elif account is None:
+                service = BrokerClient(socket_path=BROKER_SOCKET_PATH, policy=runtime_policy)
+            else:
+                service = BrokerClient(socket_path=account.socket, policy=runtime_policy, account=account)
             atexit.register(service.close)
         return service
 
@@ -1866,13 +1876,14 @@ def build_server(
     return server
 
 
-def _run_check() -> int:
+def _run_check(account: AccountPaths | None = None) -> int:
     print("INITIALIZING_TDLIB", file=sys.stderr)
     if bundled_runtime_pin().startswith("Homebrew"):
         print("TDLIB_OPENSSL_KEG: " + homebrew_openssl_keg(), file=sys.stderr)
     client: BrokerClient | None = None
     try:
-        client = BrokerClient(socket_path=BROKER_SOCKET_PATH)
+        client = (BrokerClient(socket_path=BROKER_SOCKET_PATH) if account is None
+                  else BrokerClient(socket_path=account.socket, account=account))
         status = client.check()
     except BrokerCompatibilityError as error:
         code = error.code if error.code in COMPATIBILITY_CODES else "handshake_unavailable"

@@ -172,7 +172,7 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                     credentials = identity.credentials
                     record, key = enrollment.create(store, identity)
                 _ensure_policy(paths)
-                for directory in (paths.session / 'db', paths.session / 'files'):
+                for directory in (paths.account.database, paths.account.files):
                     fd = open_private_directory(directory, create=True)
                     os.close(fd)
                 terminal.require_secure()
@@ -184,8 +184,9 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                         result = SetupResult('authorized', None)
                         break
                     if state is AuthorizationState.PARAMETERS:
-                        transport.set_parameters(credentials, key, database_directory=str(paths.session / 'db'),
-                            files_directory=str(paths.session / 'files'), application_version=__version__, timeout=remaining())
+                        transport.set_parameters(credentials, key, database_directory=str(paths.account.database),
+                            files_directory=str(paths.account.files), application_version=__version__,
+                            timeout=remaining())
                     elif state is AuthorizationState.ENCRYPTION:
                         transport.check_database_key(key, timeout=remaining())
                     elif state in {AuthorizationState.PHONE, AuthorizationState.CODE, AuthorizationState.PASSWORD}:

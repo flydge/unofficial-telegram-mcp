@@ -96,7 +96,8 @@ class MacOSSecretStore:
     Denied/locked operations never unlock, retry, or use a plaintext fallback.
     """
 
-    def __init__(self, service: str = KEYCHAIN_SERVICE, *, backend_factory: Callable | None = None):
+    def __init__(self, service: str | None = None, *, backend_factory: Callable | None = None):
+        service = KEYCHAIN_SERVICE if service is None else service
         if type(service) is not str or not service or len(service.encode('utf-8')) > 1024:
             _raise_safe('invalid_record')
         self._service = service

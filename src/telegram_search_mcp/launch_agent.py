@@ -19,16 +19,17 @@ from .broker import Broker, BrokerStartupError
 from .config import (
     BROKER_LOCK_PATH,
     BROKER_SOCKET_PATH,
-    KEYCHAIN_SERVICE,
+    # Transient QR connect helper: same per-user derivation as the broker label.
+    CONNECT_JOB_LABEL,
+    DEFAULT_ALIAS,
     LAUNCH_AGENT_LABEL,
     LAUNCH_AGENT_PLIST,
+    AccountPaths,
     validate_tdlib_runtime,
 )
 from .session_owner import OwnerLeaseError, open_private_directory
 
 LAUNCHCTL = "/bin/launchctl"
-# Transient QR connect helper: same per-user derivation as the broker label.
-CONNECT_JOB_LABEL = f"{KEYCHAIN_SERVICE}.connect"
 
 
 class LaunchAgentError(RuntimeError):
@@ -38,13 +39,38 @@ class LaunchAgentError(RuntimeError):
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
-def _default_preflight() -> None:
+def account_options(account: AccountPaths) -> dict[str, AccountPaths]:
+    """Keyword arguments naming one account's launchd jobs: none for the default alias, so its 0.54 calls stay."""
+    return {} if account.alias == DEFAULT_ALIAS else {"account": account}
+
+
+def _broker_job(account: AccountPaths | None) -> tuple[str, Path]:
+    """The broker's launchd label and plist: the module constants for the default alias (account None)."""
+    return (LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST) if account is None else (account.broker_label, account.broker_plist)
+
+
+def _connect_label(account: AccountPaths | None) -> str:
+    return CONNECT_JOB_LABEL if account is None else account.connect_label
+
+
+def _require_default_program(account: AccountPaths | None) -> None:
+    """A job for a named alias needs that alias in its argv (0.55 phase B); until then none is written."""
+    if account is not None and account.alias != DEFAULT_ALIAS:
+        raise LaunchAgentError("account job arguments are unavailable")
+
+
+def _default_preflight(account: AccountPaths | None = None) -> None:
     from .credential_identity import preflight_credentials
     validate_tdlib_runtime()
-    preflight_credentials()
+    if account is None:
+        preflight_credentials()
+    else:
+        from .enrollment import SetupPaths
+        preflight_credentials(SetupPaths.from_account(account))
 
 
-def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:
+def launch_agent_payload(*, python_executable: Path, account: AccountPaths | None = None) -> dict[str, Any]:
+    _require_default_program(account)
     from .bundle_runtime import broker_arguments
     bundled = broker_arguments()
     executable = python_executable.absolute()
@@ -52,7 +78,7 @@ def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:
     if not resolved_executable.is_file():
         raise LaunchAgentError("Python executable is invalid")
     return {
-        "Label": LAUNCH_AGENT_LABEL,
+        "Label": _broker_job(account)[0],
         "ProgramArguments": bundled or [
             str(executable),
             "-m",
@@ -70,7 +96,7 @@ def launch_agent_payload(*, python_executable: Path) -> dict[str, Any]:
     }
 
 
-def _managed_payload(value: object) -> bool:
+def _managed_payload(value: object, account: AccountPaths | None = None) -> bool:
     if not isinstance(value, dict):
         return False
     expected_keys = {
@@ -97,7 +123,7 @@ def _managed_payload(value: object) -> bool:
     selected = bundled is not None and arguments == bundled
     return (
         set(value) == expected_keys
-        and value.get("Label") == LAUNCH_AGENT_LABEL
+        and value.get("Label") == _broker_job(account)[0]
         and (selected or legacy)
         and value.get("RunAtLoad") is True
         and value.get("KeepAlive") is True
@@ -167,16 +193,16 @@ def _read_launch_agent(directory_descriptor: int, name: str) -> object | None:
             os.close(descriptor)
 
 
-def write_launch_agent(*, plist_path: Path, python_executable: Path) -> None:
+def write_launch_agent(*, plist_path: Path, python_executable: Path, account: AccountPaths | None = None) -> None:
     """Atomically write the fixed, credential-free LaunchAgent definition."""
     directory_descriptor = _open_launch_agent_directory(plist_path)
     temporary_name = f".{plist_path.name}.{secrets.token_hex(16)}.tmp"
     temporary_exists = False
     try:
         existing = _read_launch_agent(directory_descriptor, plist_path.name)
-        if existing is not None and not _managed_payload(existing):
+        if existing is not None and not _managed_payload(existing, account):
             raise LaunchAgentError("existing LaunchAgent plist is not owned by this service")
-        payload = launch_agent_payload(python_executable=python_executable)
+        payload = launch_agent_payload(python_executable=python_executable, account=account)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(
@@ -243,20 +269,27 @@ def _run_launchctl(
 
 def install_launch_agent(
     *,
-    plist_path: Path = LAUNCH_AGENT_PLIST,
+    plist_path: Path | None = None,
     python_executable: Path = Path(sys.executable),
     runner: Runner = subprocess.run,
-    preflight: Callable[[], None] = _default_preflight,
+    preflight: Callable[[], None] | None = None,
     uid: int | None = None,
+    account: AccountPaths | None = None,
 ) -> None:
-    preflight()
+    label, default_plist = _broker_job(account)
+    plist_path = default_plist if plist_path is None else plist_path
+    if preflight is None:
+        _default_preflight(account)
+    else:
+        preflight()
     write_launch_agent(
         plist_path=plist_path,
         python_executable=python_executable,
+        account=account,
     )
     user_id = os.getuid() if uid is None else uid
     domain = f"gui/{user_id}"
-    service = f"{domain}/{LAUNCH_AGENT_LABEL}"
+    service = f"{domain}/{label}"
     _run_launchctl(
         [LAUNCHCTL, "bootout", service],
         runner=runner,
@@ -286,10 +319,11 @@ def launch_agent_status(
     *,
     runner: Runner = subprocess.run,
     uid: int | None = None,
+    account: AccountPaths | None = None,
 ) -> bool:
     user_id = os.getuid() if uid is None else uid
     completed = _run_launchctl(
-        [LAUNCHCTL, "print", f"gui/{user_id}/{LAUNCH_AGENT_LABEL}"],
+        [LAUNCHCTL, "print", f"gui/{user_id}/{_broker_job(account)[0]}"],
         runner=runner,
         required=False,
     )
@@ -322,23 +356,25 @@ def _require_enrolled_definition(parent: int, plist_path: Path, payload: dict) -
 
 
 def validate_enrolled_broker(
-    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    *, plist_path: Path | None = None,
     python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
-    uid: int | None = None,
+    uid: int | None = None, account: AccountPaths | None = None,
 ) -> None:
     """Read-only intended-registration check for an existing competing owner.
 
     No directory/plist creation, bootstrap, stop, restart or provider operation.
     A compatible socket alone cannot substitute for the installed lifecycle.
     """
+    label, default_plist = _broker_job(account)
+    plist_path = default_plist if plist_path is None else plist_path
     if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
         raise LaunchAgentError('LaunchAgent directory is unsafe')
     parent = _open_launch_agent_directory(plist_path)
     try:
-        payload = launch_agent_payload(python_executable=python_executable)
+        payload = launch_agent_payload(python_executable=python_executable, account=account)
         _require_enrolled_definition(parent, plist_path, payload)
         user_id = os.getuid() if uid is None else uid
-        service = f'gui/{user_id}/{LAUNCH_AGENT_LABEL}'
+        service = f'gui/{user_id}/{label}'
         state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=10)
         if state.returncode != 0 or not _matching_live_registration(state.stdout, plist_path, payload):
             raise LaunchAgentError('existing service does not match the installed broker')
@@ -349,9 +385,9 @@ def validate_enrolled_broker(
 
 
 def start_enrolled_broker(
-    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    *, plist_path: Path | None = None,
     python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
-    uid: int | None = None, create: bool = True,
+    uid: int | None = None, create: bool = True, account: AccountPaths | None = None,
 ) -> None:
     """Start after auth teardown; no bootout, kill, restart or existing rewrite.
 
@@ -361,6 +397,8 @@ def start_enrolled_broker(
     Ready is checked separately through the compatible IPC boundary. With
     create=False nothing is ever written: a missing definition refuses.
     """
+    label, default_plist = _broker_job(account)
+    plist_path = default_plist if plist_path is None else plist_path
     if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
         raise LaunchAgentError('LaunchAgent directory is unsafe')
     if create:
@@ -369,7 +407,7 @@ def start_enrolled_broker(
     temporary = '.enrolled-agent-' + secrets.token_hex(16)
     created = False
     try:
-        payload = launch_agent_payload(python_executable=python_executable)
+        payload = launch_agent_payload(python_executable=python_executable, account=account)
         existing = _read_launch_agent(parent, plist_path.name)
         if existing is None and not create:
             raise LaunchAgentError('no installed broker to restore')
@@ -394,7 +432,7 @@ def start_enrolled_broker(
         _require_enrolled_definition(parent, plist_path, payload)
         user_id = os.getuid() if uid is None else uid
         domain = f'gui/{user_id}'
-        service = f'{domain}/{LAUNCH_AGENT_LABEL}'
+        service = f'{domain}/{label}'
         state = _run_launchctl([LAUNCHCTL, 'print', service], runner=runner, required=False, timeout=10)
         if state.returncode == 0:
             if not _matching_live_registration(state.stdout, plist_path, payload):
@@ -413,9 +451,9 @@ def start_enrolled_broker(
 
 
 def restore_enrolled_broker(
-    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    *, plist_path: Path | None = None,
     python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
-    uid: int | None = None,
+    uid: int | None = None, account: AccountPaths | None = None,
 ) -> None:
     """Put back a broker that existed before a failed reconnect; never create one.
 
@@ -423,7 +461,7 @@ def restore_enrolled_broker(
     service is not loaded (a loaded matching service is left as it is).
     """
     start_enrolled_broker(plist_path=plist_path, python_executable=python_executable,
-                          runner=runner, uid=uid, create=False)
+                          runner=runner, uid=uid, create=False, account=account)
 
 
 def _await_retired(service: str, *, runner: Runner, sleeper: Callable[[float], None]) -> None:
@@ -439,9 +477,9 @@ def _await_retired(service: str, *, runner: Runner, sleeper: Callable[[float], N
 
 
 def stop_enrolled_broker(
-    *, plist_path: Path = LAUNCH_AGENT_PLIST,
+    *, plist_path: Path | None = None,
     python_executable: Path = Path(sys.executable), runner: Runner = subprocess.run,
-    uid: int | None = None, sleeper: Callable[[float], None] = time.sleep,
+    uid: int | None = None, sleeper: Callable[[float], None] = time.sleep, account: AccountPaths | None = None,
 ) -> None:
     """QR-06 reconnect: stop the exact receipt-bound broker, nothing else.
 
@@ -451,9 +489,9 @@ def stop_enrolled_broker(
     The plist stays on disk so the next start reuses the same registration.
     """
     validate_enrolled_broker(plist_path=plist_path, python_executable=python_executable,
-                             runner=runner, uid=uid)
+                             runner=runner, uid=uid, account=account)
     user_id = os.getuid() if uid is None else uid
-    service = f'gui/{user_id}/{LAUNCH_AGENT_LABEL}'
+    service = f'gui/{user_id}/{_broker_job(account)[0]}'
     try:
         _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=True, timeout=10)
         _await_retired(service, runner=runner, sleeper=sleeper)
@@ -479,9 +517,11 @@ def connect_job_arguments(*, python_executable: Path = Path(sys.executable)) -> 
     return [str(executable), '-m', 'telegram_search_mcp.setup_cli', 'connect-helper']
 
 
-def connect_job_payload(*, python_executable: Path = Path(sys.executable)) -> dict[str, Any]:
+def connect_job_payload(*, python_executable: Path = Path(sys.executable),
+                        account: AccountPaths | None = None) -> dict[str, Any]:
+    _require_default_program(account)
     return {
-        'Label': CONNECT_JOB_LABEL,
+        'Label': _connect_label(account),
         'ProgramArguments': connect_job_arguments(python_executable=python_executable),
         'RunAtLoad': True,
         'KeepAlive': False,
@@ -494,13 +534,14 @@ def connect_job_payload(*, python_executable: Path = Path(sys.executable)) -> di
     }
 
 
-def write_connect_job(*, plist_path: Path, python_executable: Path = Path(sys.executable)) -> None:
+def write_connect_job(*, plist_path: Path, python_executable: Path = Path(sys.executable),
+                      account: AccountPaths | None = None) -> None:
     """Owner-only, exclusive, no-follow plist in the private run directory.
 
     Only a stale regular file of ours is replaced; the caller has established that
     no helper job is running. Anything else at the name (link, directory) refuses.
     """
-    payload = connect_job_payload(python_executable=python_executable)
+    payload = connect_job_payload(python_executable=python_executable, account=account)
     try:
         parent = open_private_directory(plist_path.parent, create=True)
     except OwnerLeaseError:
@@ -563,11 +604,12 @@ def remove_connect_job(plist_path: Path) -> bool:
 _IDLE_JOB_STATES = frozenset({'state = not running', 'state = exited'})
 
 
-def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None) -> str:
+def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None,
+                      account: AccountPaths | None = None) -> str:
     """'busy', 'idle' (registered, explicitly not running) or 'absent'; anything else raises."""
     user_id = os.getuid() if uid is None else uid
     try:
-        state = _run_launchctl([LAUNCHCTL, 'print', f'gui/{user_id}/{CONNECT_JOB_LABEL}'],
+        state = _run_launchctl([LAUNCHCTL, 'print', f'gui/{user_id}/{_connect_label(account)}'],
                                runner=runner, required=False, timeout=10)
     except (OSError, subprocess.SubprocessError):
         raise LaunchAgentError('unable to verify connect job') from None
@@ -583,11 +625,11 @@ def connect_job_state(*, runner: Runner = subprocess.run, uid: int | None = None
 
 def stop_connect_job(
     *, runner: Runner = subprocess.run, uid: int | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
+    sleeper: Callable[[float], None] = time.sleep, account: AccountPaths | None = None,
 ) -> None:
     """Boot out our own transient helper job (idle, finished or hung) and await retirement."""
     user_id = os.getuid() if uid is None else uid
-    service = f'gui/{user_id}/{CONNECT_JOB_LABEL}'
+    service = f'gui/{user_id}/{_connect_label(account)}'
     try:
         stopped = _run_launchctl([LAUNCHCTL, 'bootout', service], runner=runner, required=False, timeout=10)
         if stopped.returncode != 0:
@@ -603,7 +645,7 @@ def stop_connect_job(
 def start_connect_job(
     *, plist_path: Path, python_executable: Path = Path(sys.executable),
     runner: Runner = subprocess.run, uid: int | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
+    sleeper: Callable[[float], None] = time.sleep, account: AccountPaths | None = None,
 ) -> str:
     """Bootstrap the transient helper; 'running' when a busy one exists (nothing is touched).
 
@@ -613,12 +655,12 @@ def start_connect_job(
     user_id = os.getuid() if uid is None else uid
     domain = f'gui/{user_id}'
     try:
-        state = connect_job_state(runner=runner, uid=user_id)
+        state = connect_job_state(runner=runner, uid=user_id, account=account)
         if state == 'busy':
             return 'running'
         if state == 'idle':
-            stop_connect_job(runner=runner, uid=user_id, sleeper=sleeper)
-        write_connect_job(plist_path=plist_path, python_executable=python_executable)
+            stop_connect_job(runner=runner, uid=user_id, sleeper=sleeper, account=account)
+        write_connect_job(plist_path=plist_path, python_executable=python_executable, account=account)
         try:
             _run_launchctl([LAUNCHCTL, 'bootstrap', domain, str(plist_path)],
                            runner=runner, required=True, timeout=10)
@@ -634,6 +676,7 @@ def start_launch_agent_if_stopped(
     *,
     runner: Runner = subprocess.run,
     uid: int | None = None,
+    account: AccountPaths | None = None,
 ) -> None:
     """Start the broker service if it is not running; never kill a running one.
 
@@ -645,7 +688,7 @@ def start_launch_agent_if_stopped(
         [
             LAUNCHCTL,
             "kickstart",
-            f"gui/{user_id}/{LAUNCH_AGENT_LABEL}",
+            f"gui/{user_id}/{_broker_job(account)[0]}",
         ],
         runner=runner,
         required=False,
@@ -654,18 +697,21 @@ def start_launch_agent_if_stopped(
 
 def uninstall_launch_agent(
     *,
-    plist_path: Path = LAUNCH_AGENT_PLIST,
+    plist_path: Path | None = None,
     runner: Runner = subprocess.run,
     uid: int | None = None,
+    account: AccountPaths | None = None,
 ) -> None:
+    label, default_plist = _broker_job(account)
+    plist_path = default_plist if plist_path is None else plist_path
     directory_descriptor = _open_launch_agent_directory(plist_path)
     try:
         payload = _read_launch_agent(directory_descriptor, plist_path.name)
-        if payload is not None and not _managed_payload(payload):
+        if payload is not None and not _managed_payload(payload, account):
             raise LaunchAgentError("existing LaunchAgent plist is not owned by this service")
         user_id = os.getuid() if uid is None else uid
         _run_launchctl(
-            [LAUNCHCTL, "bootout", f"gui/{user_id}/{LAUNCH_AGENT_LABEL}"],
+            [LAUNCHCTL, "bootout", f"gui/{user_id}/{label}"],
             runner=runner,
             required=False,
         )
@@ -676,9 +722,10 @@ def uninstall_launch_agent(
         os.close(directory_descriptor)
 
 
-def run_broker() -> int:
+def run_broker(account: AccountPaths | None = None) -> int:
     validate_tdlib_runtime()
-    broker = Broker(socket_path=BROKER_SOCKET_PATH, lock_path=BROKER_LOCK_PATH)
+    broker = (Broker(socket_path=BROKER_SOCKET_PATH, lock_path=BROKER_LOCK_PATH) if account is None else
+              Broker(socket_path=account.socket, lock_path=account.broker_lock, account=account))
 
     def stop(_signum: int, _frame: object) -> None:
         broker.shutdown()

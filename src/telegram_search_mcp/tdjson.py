@@ -20,10 +20,9 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from . import __version__, product_identity
-from .config import TDLIB_SESSION_DIRECTORY, ensure_private_directory, tdlib_runtime
+from .config import STAGING_ROOT, TDLIB_SESSION_DIRECTORY, AccountPaths, ensure_private_directory, tdlib_runtime
 from .discovery_state import CatalogPosition, ChatListName
 from .keychain import ApiCredentials, read_api_credentials
-from .outgoing_stage import STAGING_ROOT
 from .reply_drafts import ReplySource, source_from_message, LINK_OPTIONS, SEND_OPTIONS, strict_shape
 
 _ALLOWED_REQUEST_TYPES = frozenset(
@@ -111,11 +110,11 @@ def _valid_voice_waveform(value: object) -> bool:
         return False
 
 
-def _valid_staged_input_file(value: object) -> bool:
+def _valid_staged_input_file(value: object, staging_root: Path) -> bool:
     return (
         isinstance(value, dict) and set(value) == {"@type", "path"}
         and value.get("@type") == "inputFileLocal" and isinstance(value.get("path"), str)
-        and Path(value["path"]).parent.parent == STAGING_ROOT
+        and Path(value["path"]).parent.parent == staging_root
         and Path(value["path"]).parent.name.startswith("draft_")
     )
 
@@ -226,7 +225,9 @@ def _exact_edit_text(value: str) -> bool:
     return not edge_whitespace(value) and not rewritten_text(value)
 
 
-def _validate_bounded_request(payload: dict[str, Any]) -> None:
+def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None = None) -> None:
+    """`staging_root` None is the default alias's STAGING_ROOT, read at call time."""
+    staging = STAGING_ROOT if staging_root is None else staging_root
     request_type = payload.get("@type")
     if request_type == "getForumTopicHistory" and (
         set(payload) != {"@type", "chat_id", "forum_topic_id", "from_message_id", "offset", "limit"}
@@ -313,7 +314,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and document.get("@type") == "inputDocument"
             and document.get("thumbnail") is None
             and document.get("disable_content_type_detection") is True
-            and _valid_staged_input_file(document.get("document"))
+            and _valid_staged_input_file(document.get("document"), staging)
             and isinstance(caption, dict) and caption.get("@type") == "formattedText"
             and set(caption) == {"@type", "text", "entities"}
             and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
@@ -328,7 +329,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and isinstance(photo, dict)
             and set(photo) == {"@type", "photo", "thumbnail", "video", "added_sticker_file_ids", "width", "height"}
             and photo.get("@type") == "inputPhoto"
-            and _valid_staged_input_file(photo.get("photo"))
+            and _valid_staged_input_file(photo.get("photo"), staging)
             and photo.get("thumbnail") is None and photo.get("video") is None
             and photo.get("added_sticker_file_ids") == []
             and photo.get("width") == 0 and photo.get("height") == 0
@@ -347,7 +348,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and content.get("@type") == "inputMessageVoiceNote"
             and isinstance(voice, dict) and set(voice) == {"@type", "voice_note", "duration", "waveform"}
             and voice.get("@type") == "inputVoiceNote"
-            and _valid_staged_input_file(voice.get("voice_note"))
+            and _valid_staged_input_file(voice.get("voice_note"), staging)
             and type(voice.get("duration")) is int and 1 <= voice["duration"] <= 600
             and _valid_voice_waveform(voice.get("waveform"))
             and content.get("self_destruct_type") is None
@@ -369,7 +370,7 @@ def _validate_bounded_request(payload: dict[str, Any]) -> None:
             and set(video) == {"@type", "video", "thumbnail", "cover", "start_timestamp", "added_sticker_file_ids",
                                "duration", "width", "height", "supports_streaming"}
             and video.get("@type") == "inputVideo"
-            and _valid_staged_input_file(video.get("video"))
+            and _valid_staged_input_file(video.get("video"), staging)
             and video.get("thumbnail") is None and video.get("cover") is None
             and type(video.get("start_timestamp")) is int and video["start_timestamp"] == 0
             and type(video.get("added_sticker_file_ids")) is list and video["added_sticker_file_ids"] == []
@@ -878,13 +879,15 @@ class TDLibClient:
         self,
         *,
         raw: RawTDJson,
-        session_directory: Path = TDLIB_SESSION_DIRECTORY,
+        session_directory: Path | None = None,
         credential_loader: Callable[[], ApiCredentials] = read_api_credentials,
         database_key_loader: Callable[[], bytes] | None = None,
         request_timeout: float = 30.0,
+        staging_root: Path | None = None,
     ) -> None:
         self._raw = raw
-        self._session_directory = session_directory
+        self._session_directory = TDLIB_SESSION_DIRECTORY if session_directory is None else session_directory
+        self._staging_root = staging_root  # None: the default alias's STAGING_ROOT, read at each validation.
         self._credential_loader = credential_loader
         self._database_key_loader = database_key_loader
         self._request_timeout = request_timeout
@@ -907,12 +910,17 @@ class TDLibClient:
         }
 
     @classmethod
-    def from_defaults(cls) -> "TDLibClient":
+    def from_defaults(cls, account: AccountPaths | None = None) -> "TDLibClient":
         os.umask(0o077)
         from .credential_identity import session_credential_loader
         # The broker already holds the exclusive session lease at this boundary.
-        key, credentials = session_credential_loader()
-        return cls(raw=LegacyTDJson(), credential_loader=credentials, database_key_loader=lambda: key)
+        if account is None:
+            key, credentials = session_credential_loader()
+            return cls(raw=LegacyTDJson(), credential_loader=credentials, database_key_loader=lambda: key)
+        from .enrollment import SetupPaths
+        key, credentials = session_credential_loader(SetupPaths.from_account(account))
+        return cls(raw=LegacyTDJson(), session_directory=account.session, staging_root=account.staging,
+                   credential_loader=credentials, database_key_loader=lambda: key)
 
     def _apply_catalog_update(self, update: dict[str, Any]) -> None:
         change = _catalog_change_from_update(update)
@@ -1026,7 +1034,7 @@ class TDLibClient:
         if (not isinstance(request_type, str) or request_type not in _ALLOWED_REQUEST_TYPES or
                 request_type in _CALL_REFUSED_TYPES):
             raise ForbiddenTDLibRequest("TDLib request is not allowed")
-        _validate_bounded_request(payload)
+        _validate_bounded_request(payload, self._staging_root)
         aggregate_deadline = getattr(self._request_context, "deadline", None)
         with self._serialized_provider_call(aggregate_deadline):
             if aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
@@ -1702,7 +1710,7 @@ class TDLibClient:
                    "options": {**SEND_OPTIONS, "sending_id": sending_id},
                    "send_copy": send_copy, "remove_caption": remove_caption}
         try:
-            _validate_bounded_request(payload)
+            _validate_bounded_request(payload, self._staging_root)
         except ForbiddenTDLibRequest as error:
             raise MessageSendNotAttempted("forward request shape is not allowed") from error
         with self._serialized_reply_call():
@@ -1897,7 +1905,7 @@ class TDLibClient:
     def _change_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:
         """One raw state-change request and its direct result; no send observation is involved."""
         try:
-            _validate_bounded_request(payload)
+            _validate_bounded_request(payload, self._staging_root)
             if payload.get("@type") not in _CHANGE_REQUEST_TYPES:
                 raise ForbiddenTDLibRequest("TDLib change request is not allowed")
         except ForbiddenTDLibRequest as error:
@@ -2259,7 +2267,7 @@ class TDLibClient:
             "options": {**SEND_OPTIONS,"sending_id":sending_id},
             "input_message_content": content,
         }
-        _validate_bounded_request(payload)
+        _validate_bounded_request(payload, self._staging_root)
         with self._serialized_provider_call():
             if not self._ready:
                 raise AuthorizationBlocked("the dedicated TDLib session is not authorizationStateReady")

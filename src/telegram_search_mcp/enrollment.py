@@ -4,14 +4,14 @@ This is not an account registry or authorization proof. Existing unrecognized
 databases are never adopted, migrated or rekeyed. Missing managed keys refuse.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
 import re
 import secrets
 import stat
-from .config import APP_SUPPORT_ROOT
+from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths
 from .credential_identity import CredentialIdentityError
 from .credentials import SecretValue, CredentialStoreError
 from .session_owner import open_private_directory, OwnerLeaseError
@@ -26,16 +26,30 @@ class EnrollmentError(RuntimeError):
 
 @dataclass(frozen=True)
 class SetupPaths:
-    """The CLI has no path override. Explicit paths are an inert test boundary."""
-    root: Path = APP_SUPPORT_ROOT
+    """The CLI has no path override. Explicit paths are an inert test boundary: SetupPaths(root) keeps the
+    default alias's names and puts every location under root. `from_account` derives one account's paths."""
+    root: Path | None = None
+    account: AccountPaths | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        account = DEFAULT_ACCOUNT_PATHS if self.account is None else self.account
+        if type(account) is not AccountPaths:
+            raise TypeError('account paths required')
+        root = account.root if self.root is None else self.root
+        object.__setattr__(self, 'root', root)
+        object.__setattr__(self, 'account', account if root == account.root else account.relocated(root))
+
+    @classmethod
+    def from_account(cls, account: AccountPaths) -> SetupPaths:
+        return cls(account.root, account)
     @property
-    def session(self): return self.root / 'tdlib'
+    def session(self): return self.account.session
     @property
-    def lock(self): return self.root / 'run' / 'broker.lock'
+    def lock(self): return self.account.broker_lock
     @property
-    def policy(self): return self.root / 'runtime.toml'
+    def policy(self): return self.account.policy
     @property
-    def record(self): return self.root / 'enrollment.json'
+    def record(self): return self.account.enrollment_record
 
 
 _FIELDS = {'version', 'uid', 'enrollment_id', 'session', 'root_device', 'root_inode',
@@ -85,10 +99,9 @@ class EnrollmentStore:
         finally:
             os.close(session_fd)
 
-    @staticmethod
-    def _has_marker(root_fd):
+    def _has_marker(self, root_fd):
         try:
-            session = os.open('tdlib', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+            session = os.open(self.paths.session.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
         except FileNotFoundError:
             return False
         try:
