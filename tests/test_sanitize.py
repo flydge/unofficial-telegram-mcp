@@ -72,6 +72,20 @@ class TelegramLinkTests(unittest.TestCase):
             with self.subTest(value=repr(value)[:60]):
                 self.assertIsNone(safe_telegram_link(value))
 
+    def test_link_characters_are_an_rfc3986_allowlist_with_an_exact_lowercase_scheme(self) -> None:
+        # Unreserved, reserved and %HH escapes only; the single quote is excluded with the other quotes.
+        for value in ("https://t.me/c/1/2?single&comment=3", "https://t.me/a%20b%7E", "https://t.me/x_y-z.~",
+                      "https://t.me/s/chan!$&()*+,;=:@", "https://t.me/a#frag"):
+            with self.subTest(value=value):
+                self.assertEqual(safe_telegram_link(value), value)
+        for value in ('https://t.me/a"b', "https://t.me/a'b", "https://t.me/<x>", "https://t.me/a>b",
+                      "https://t.me/a\\b", "https://t.me/a b", "https://t.me/a\tb", "https://t.me/a{b}",
+                      "https://t.me/a|b", "https://t.me/a^b", "https://t.me/a`b", "https://t.me/a%2",
+                      "https://t.me/a%zz", "https://t.me/%", "HTTPS://t.me/x", "Https://t.me/x", "hTtPs://t.me/x",
+                      "https:/t.me/x", "https:t.me/x"):
+            with self.subTest(value=value):
+                self.assertIsNone(safe_telegram_link(value))
+
     def test_link_is_never_rewritten_or_truncated_into_acceptance(self) -> None:
         # Sanitization must leave the value unchanged; a link it would rewrite or
         # truncate is no link at all rather than a shortened one.
