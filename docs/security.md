@@ -1864,7 +1864,10 @@ logged, echoed or raised; only hashes leave the module. The one exception is an 
 backup, which stays in the installation's private transaction evidence.
 
 **Ownership.** The receipt (`claude_desktop_ownership`) records an entry only when this installer wrote
-it. A first install adds only an absent entry. An identical entry is `reused` and not owned. A different
+it: a first install, upgrade or rollback whose step ended `registered`. An upgrade or rollback whose
+step ended otherwise replaced nothing and keeps the earlier record, so the entry it left in place stays
+owned; ownership is derived from the transaction journals, so a v1 receipt is read the same way. A first
+install adds only an absent entry. An identical entry is `reused` and not owned. A different
 entry refuses the whole install before anything is created (`claude_desktop_registration_conflict`);
 only `--adopt-legacy` replaces one, after its exact bytes are backed up. An upgrade or rollback replaces
 the entry only while it still equals the owned one, and an uninstall removes it only while it is exactly
@@ -2056,7 +2059,9 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
-  receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A Claude Code
+  receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A client
+  entry is owned only when an install, upgrade or rollback of this installation wrote it, and it stays
+  owned through later steps that ended otherwise, wherever it is still exactly that entry. A Claude Code
   entry is changed only through the located `claude` CLI, each attempt recorded before it is made, and
   an entry that is still exactly ours after its removal attempts refuses as `uninstall_incomplete`.
 - **Adoption is explicit.** `--adopt-legacy` must be the last token of the `bootstrap.sh` command and is

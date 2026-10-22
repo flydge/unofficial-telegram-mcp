@@ -367,13 +367,19 @@ def _sweep_initial(root, keep):
                     os.unlink(name,dir_fd=fd);os.fsync(fd)
 
 
-def _install_pending(root):
-    """Whether the first install of the published `root` is unfinished: its journal short of `complete`."""
+def _install_transactions(root):
+    """The first-install transaction directories of the published `root` (a bounded listing)."""
     found=[]
     with open_owned_directory(root/'transactions',private=True):pass
     for count,path in enumerate((root/'transactions').iterdir()):
         if count>4*MAX_CHANGES:raise InstallError('recovery_limit')
         if path.name.startswith('install_') and transaction_name(path.name):found.append(path)
+    return found
+
+
+def _install_pending(root):
+    """Whether the first install of the published `root` is unfinished: its journal short of `complete`."""
+    found=_install_transactions(root)
     if len(found)!=1:return False  # Not one first install of ours: the transaction's own checks refuse.
     return unique_json(read(found[0]/'journal.json',mode=0o600)).get('stage')!='complete'
 
@@ -936,21 +942,43 @@ def _codex_ownership(root, receipt):
     return Receipt.from_bytes(data)
 
 
-def _desktop_ownership(root, receipt, command, arguments):
-    """The receipt's Claude Desktop ownership when it owns exactly (command, arguments), else None.
-
-    v2 carries it in receipt.json; a v1 receipt's comes from its install journal.
-    """
-    if receipt['schema_version']==2:value=receipt['claude_desktop_ownership']
-    elif receipt['claude_desktop']=='registered':
-        journal=unique_json(read(root/'transactions'/receipt_transaction(receipt)/'journal.json',mode=0o600))
-        records=journal.get('publications',{}).get('claude_desktop_add')
-        value=records[0].get('ownership') if type(records) is list and len(records)==1 and type(records[0]) is dict else None
-    else:value=None
+def _owned_desktop(value, command, arguments):
+    """`value` when it is a Claude Desktop ownership record of exactly (command, arguments), else None."""
     if value is None:return None
     owned=Receipt.from_bytes(json.dumps(value,sort_keys=True,separators=(',',':')).encode())
     expected=hashlib.sha256(claude_desktop_registration.subtree(command,arguments)).hexdigest()
     return value if owned.client=='claude-desktop' and owned.post_subtree_hash==expected else None
+
+
+def _client_owners(root, below=None):
+    """The Claude Code and Claude Desktop entries the installation owns: {client: (command, arguments, record)}.
+
+    For each client, the entry written by the newest finished transaction whose step for that client ended
+    `registered`: its release's command, and for Claude Desktop its ownership record. An upgrade or rollback whose
+    step ended otherwise (a CLI failure, no CLI, an unreadable config, a kill in a write-ahead window, `reused`)
+    replaced nothing of ours, so the earlier entry stays ours while it is still exactly that entry. Read newest
+    first from the journals: the finished changes numbered below `below` (the one being run does not count yet),
+    then the first install. A client missing from the result owns nothing. The same for v1 and v2 receipts.
+    """
+    paths=[root/'transactions'/('change_%d'%n)/'journal.json' for n in reversed(_changes(root)) if below is None or n<below]
+    found=_install_transactions(root)
+    if len(found)==1:paths.append(found[0]/'journal.json')
+    owners,decided={},set()
+    for path in paths:
+        if len(decided)==2:break
+        journal=unique_json(read(path,mode=0o600))
+        if path.parent.name.startswith('change_') and (journal.get('kind') not in ('upgrade','rollback')
+                                                      or journal.get('stage')!='finished'):
+            raise InstallError('transaction_conflict')
+        if type(journal.get('release_root')) is not str:raise InstallError('transaction_conflict')
+        command,arguments=_commands(Path(journal['release_root']))
+        for client in ('claude_code','claude_desktop'):
+            if client in decided or (_record(journal,client) or {}).get('status')!='registered':continue
+            decided.add(client)
+            if client=='claude_code':owners[client]=(command,arguments,None);continue
+            value=_owned_desktop((_record(journal,'claude_desktop_add') or {}).get('ownership'),command,arguments)
+            if value is not None:owners[client]=(command,arguments,value)
+    return owners
 
 
 def _codex_change(source, registration, ownership):
@@ -1531,8 +1559,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         if claude_skills_status not in CLAUDE_SKILLS:raise InstallError('metadata_conflict')
         names=['telegram-search','telegram-setup']+(['claude-telegram-search','claude-telegram-setup'] if claude_skills_status=='installed' else [])
         ownership=_codex_ownership(root,current)
-        desktop_owned=_desktop_ownership(root,current,from_command,from_arguments)
-        claude_owned=current['claude_code']=='registered'
+        # The entries this installation owns now: the from-release's, or one an earlier step left in place.
+        owners=_client_owners(root,int(name[7:]) if resuming else None)
+        claude_owned,desktop_owned=owners.get('claude_code'),owners.get('claude_desktop')
         payloads={}
         if from_root.exists():payloads['from']=_service_payload(from_root,label)
         if not resuming:
@@ -1570,11 +1599,12 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                     except (RuntimePathError,TypeError,KeyError):raise InstallError('skill_conflict') from None
             if mode=='user':
                 state=claude_registration.state(home,to_command,to_arguments)
-                if state=='different' and claude_registration.state(home,from_command,from_arguments)!='exact':
+                if (state=='different' and claude_registration.state(home,from_command,from_arguments)!='exact'
+                        and (claude_owned is None or claude_registration.state(home,*claude_owned[:2])!='exact')):
                     data=claude_registration.entry_backup(home) if adopt and kind=='upgrade' else None
                     if data is None or len(data)>MAX_BACKUP_BYTES:raise InstallError('claude_registration_conflict')
                     adopted['claude_code']=data
-            state,_=claude_desktop_registration.observe_change(home,(from_command,from_arguments) if desktop_owned else None,
+            state,_=claude_desktop_registration.observe_change(home,desktop_owned[:2] if desktop_owned else None,
                                                                to_command,to_arguments)
             if state=='different' and claude_desktop_registration.state(home,from_command,from_arguments)!='exact':
                 data=claude_desktop_registration.entry_backup(home) if adopt and kind=='upgrade' else None
@@ -1691,9 +1721,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             if now=='exact':return 'registered' if j.recorded('claude_remove') else 'reused'
             if now=='unavailable':return 'unavailable'
             if j.recorded('claude_remove') is None and now=='different':
-                old=claude_registration.state(home,from_command,from_arguments)
-                removable=(old=='exact' and claude_owned or 'claude_code' in adopted
-                           and claude_registration.adopted(home,adopted['claude_code']['sha256']))
+                removable=(claude_owned is not None and claude_registration.state(home,*claude_owned[:2])=='exact'
+                           or 'claude_code' in adopted and claude_registration.adopted(home,adopted['claude_code']['sha256']))
                 if not removable:return 'failed'
                 if cli is None:return 'not_found'
                 j.update(single=('claude_remove',{'attempt':1}));checkpoint('recorded:claude_remove')
@@ -1717,7 +1746,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 _desktop_discard(j,home)
                 if state()=='exact':return 'registered'
             observed,plan=claude_desktop_registration.observe_change(
-                home,(from_command,from_arguments) if desktop_owned else None,to_command,to_arguments,
+                home,desktop_owned[:2] if desktop_owned else None,to_command,to_arguments,
                 adopted=adopted['claude_desktop']['sha256'] if 'claude_desktop' in adopted else None)
             if add is not None:
                 if observed not in ('owned','adopted','absent') or not _desktop_unchanged(j,add,plan):return 'failed'
@@ -1754,10 +1783,10 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
             j.update('policy')
         checkpoint('policy')
+        # Ownership follows the entry: the one this transaction wrote, else the one it left in place (`_client_owners`).
+        add=j.recorded('claude_desktop_add')
+        desktop_owner=add['ownership'] if desktop_status=='registered' and add else desktop_owned[2] if desktop_owned else None
         if kind=='upgrade':
-            add=j.recorded('claude_desktop_add')
-            # Ownership follows only an entry this transaction wrote.
-            desktop_owner=add['ownership'] if desktop_status=='registered' and add else None
             carried={**(current['adopted'] if current['schema_version']==2 else {}),**_adopted_records(adopted,name)}
             receipt={k:current[k] for k in ('installation_root','codex_home','skills_root','claude_skills_root','user_home',
                                             'claude_code_mode','claude_skills','status')}
@@ -1769,10 +1798,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                            previous={'index_sha256':from_index,'release_root':str(from_root),
                                      'package_version':current['package_version'],'transaction':receipt_transaction(current)})
         else:
-            # The receipt the older release last accepted, with the skill copies it now finds.
-            receipt={**target,'publication_objects':{**target['publication_objects'],**objects}}
-            if target['schema_version']==2 and current['schema_version']==2:
-                receipt['adopted']={**current['adopted'],**target['adopted']}
+            # The receipt the older release last accepted (its schema), with the skill copies it now finds and this
+            # rollback's own client outcomes: it owns what it wrote, so uninstall and the next upgrade see it.
+            receipt={**target,'publication_objects':{**target['publication_objects'],**objects},
+                     'claude_code':claude_status,'claude_desktop':desktop_status}
+            if target['schema_version']==2:
+                receipt['claude_desktop_ownership']=desktop_owner
+                if current['schema_version']==2:receipt['adopted']={**current['adopted'],**target['adopted']}
         data=encoded(receipt)
         j.advance('receipt_pending')
         j.replace('receipt',root/'receipt.json',lambda p:create(p,data),_exact(data),_exact(previous_bytes))
@@ -1902,9 +1934,9 @@ def _uninstall_service(service):
 
 def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude_candidates=None,
               claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None):
-    """Remove only owned objects: the broker plist (exact label booted out first), the Codex, Claude Code and
-    Claude Desktop entries the receipt owns, the owned skill copies and the installation root with its
-    releases. The Telegram session, enrollment and Keychain are never touched; `--adopt-legacy` backups
+    """Remove only owned objects: the broker plist (exact label booted out first), the Codex entry the receipt owns,
+    the Claude Code and Claude Desktop entries the installation owns (`_client_owners`), the owned skill copies and
+    the installation root with its releases. The Telegram session, enrollment and Keychain are never touched; `--adopt-legacy` backups
     (adopted.json and a v2 receipt's records) are kept beside the removed root.
 
     Every refusal, the pending-send gate included, comes before the transaction exists. After a write-ahead
@@ -1946,7 +1978,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             command,arguments=_commands(installed)
             config=Path(receipt['codex_home'])/'config.toml'
             owner=_codex_ownership(root,receipt)
-            owned=_desktop_ownership(root,receipt,command,arguments)
+            owners=_client_owners(root,int(name[7:]) if journal is not None and journal.get('kind')=='uninstall' else None)
             backups=_adoption_backups(root,receipt)
             service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
             observed=None
@@ -2000,10 +2032,12 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 status='skipped'
                 if receipt['claude_code_mode']=='user':
                     attempts=j.attempts('claude_remove')
-                    state=claude_registration.state(home,command,arguments)
+                    owned=owners.get('claude_code')
+                    cc=owned[:2] if owned else (command,arguments)
+                    state=claude_registration.state(home,*cc)
                     if not attempts and state=='absent':status='absent'
                     elif not attempts and state=='unavailable':status='unavailable'
-                    elif not attempts and (state!='exact' or receipt['claude_code']!='registered'):status='kept'
+                    elif not attempts and (state!='exact' or owned is None):status='kept'
                     else:
                         cli=None
                         if state=='exact':
@@ -2013,7 +2047,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                             try:claude_registration.remove(claude_runner,cli,home)
                             except claude_registration.ClaudeCliError:pass
                             checkpoint('published:claude_remove')
-                            state=claude_registration.state(home,command,arguments)
+                            state=claude_registration.state(home,*cc)
                         if not attempts and cli is None:status='not_found'
                         elif state=='absent':status='removed'
                         elif state=='different':status='kept'  # No longer ours.
@@ -2025,7 +2059,9 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             if j.recorded('claude_desktop') is None:
                 add=j.recorded('claude_desktop_add')
                 if add is not None:_desktop_discard(j,home)
-                state,plan=claude_desktop_registration.observe_removal(home,command,arguments)
+                owned=owners.get('claude_desktop')
+                desktop_entry=owned[:2] if owned else (command,arguments)
+                state,plan=claude_desktop_registration.observe_removal(home,*desktop_entry)
                 status=None
                 if add is None:
                     if state in ('skipped','unavailable','absent'):status=state
@@ -2038,7 +2074,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if state=='exact' and len(j.attempts('claude_desktop_write'))<8:
                         _desktop_write(j,home,plan)
                         checkpoint('published:claude_desktop_add')
-                        state,_=claude_desktop_registration.observe_removal(home,command,arguments)
+                        state,_=claude_desktop_registration.observe_removal(home,*desktop_entry)
                     if state in ('absent','skipped'):status='removed'
                     elif state=='different':status='kept'  # No longer ours.
                     else:raise InstallError('uninstall_incomplete')

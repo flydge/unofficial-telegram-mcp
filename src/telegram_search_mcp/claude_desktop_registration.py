@@ -4,7 +4,7 @@ The config lives in `<home>/Library/Application Support/Claude`; when that direc
 Claude Desktop is not evidently present and nothing is read or written. Reads are bounded (1 MiB),
 no-follow, ACL-checked descriptor reads of an owner-owned single-link file that is not group or world
 writable (Electron writes 0644), parsed as strict JSON. A first install only ever adds an absent entry;
-an upgrade or rollback replaces only the entry its receipt owns, an uninstall removes only that entry,
+an upgrade or rollback replaces only the entry the installation owns, an uninstall removes only that entry,
 and `--adopt-legacy` replaces a foreign entry only after its exact backup is recorded. Each write is a
 compare-before-replace atomic replacement that keeps the file's mode; the caller journals the temporary's
 name before it is created and its inode before the replace. Every neighbouring value keeps its meaning and every number its exact

@@ -589,9 +589,10 @@ resumes by repeating the command:
 1. The new release tree is copied next to the current one; older release trees stay in `releases/`.
 2. The broker is observed and the pending-send gate runs (below), before any client file is written.
 3. The Codex subtree, the skill copies, the Claude Code user-scope entry (in `user` mode) and the
-   Claude Desktop entry are replaced. Only entries the installer's receipt owns are replaced; an entry
-   you removed is added back, and a different entry refuses (`registration_conflict`,
-   `claude_registration_conflict`, `claude_desktop_registration_conflict`).
+   Claude Desktop entry are replaced. Only entries the installation owns are replaced (see
+   [owned client entries](#owned-client-entries)); an entry you removed is added back, and a different
+   entry refuses (`registration_conflict`, `claude_registration_conflict`,
+   `claude_desktop_registration_conflict`).
 4. The exact receipt-bound broker is booted out, if it is loaded, and its LaunchAgent plist is rewritten.
 5. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
@@ -633,7 +634,9 @@ RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
 
 It re-registers the previous release's entries by the same owned-entry rules, rewrites the broker plist,
 passes the same pending-send gate, restores the `runtime.toml` version line and switches `current.json`
-back. The result is `status: rolled_back` with `next_action: restart_mcp_clients`. Repeating the
+back. The restored receipt keeps the previous release's schema but records the rollback's own
+`claude_code` and `claude_desktop` outcomes, and the entries the rollback wrote are owned like an
+upgrade's, so a later upgrade replaces them and `uninstall` removes them. The result is `status: rolled_back` with `next_action: restart_mcp_clients`. Repeating the
 rollback, or running the kit of the release it went back to again (its `Install.command`, the same
 `bootstrap.sh` command, or for a `plugin`-mode installation that release's plugin `bin/install`), changes
 nothing and returns that result with `installation: reused` and without `service`; the newer kit
@@ -646,6 +649,16 @@ or the previous release's manifest or Codex ownership no longer matches. A rollb
 send, move or edit that already happened. Going back to a 0.51 install is a manual procedure; see
 [rollback](security.md#rollback).
 
+### Owned client entries
+
+The installation owns a Claude Code or Claude Desktop entry that its own first install, upgrade or
+rollback wrote (that step's result was `registered`), and only while the entry is still exactly what it
+wrote. When a later upgrade or rollback ends otherwise for that client (`failed`, `not_found`,
+`unavailable`, or `reused` for an entry it did not write), it replaced nothing, so the entry it left in
+place stays owned: the next upgrade replaces it and `uninstall` removes it. An entry that was already
+there (`reused` on a first install), one you wrote, and one you changed are never owned. Ownership is
+read from the installation's own transaction journals, the same way for every receipt schema.
+
 ### Uninstall
 
 `uninstall` removes only objects the receipt owns. Run it the same way as `rollback`, with `uninstall`
@@ -655,8 +668,8 @@ recorded; the Claude Code user-scope entry (through the `claude` CLI, `user` mod
 Desktop entry, leaving its neighbours and the file's mode; the skill copies the receipt binds; and
 finally the installation root with all releases.
 
-Each part reports `removed`, `absent`, `kept` (changed since the install, so left alone), or for a
-client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
+Each part reports `removed`, `absent`, `kept` (not an entry the installation owns, or changed since it
+was written, so left alone), or for a client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
 `claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
 present after its removal attempt; repeat the command. An unfinished first install refuses as
 `transaction_pending` with `pending_action: install` and is left as it is; repeat the install first.
