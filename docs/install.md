@@ -699,9 +699,10 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
   upgrade may be refused and repeated (a refusal's restore starts the next run's Codex write afresh, so our
   table changed in the instant between that write's record and its replace, run after run, never uses it
-  up), with one exact bound: each skill copy is written at most eight times within one upgrade, so removing
-  or replacing the same copy before each of eight repeats of one unfinished upgrade makes every later repeat
-  refuse `recovery_limit`; `uninstall` still ends that upgrade. Every run before `current.json` switches decides the service from
+  up), with one exact bound: each skill copy is written at most eight times within one upgrade, the first
+  write included, so a repeat that would write it a ninth time (you removed or replaced it before each of
+  eight repeats of one unfinished upgrade) refuses `recovery_limit`, and so does every repeat after it;
+  `uninstall` still ends that upgrade. Every run before `current.json` switches decides the service from
   what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist
   on disk: the old release's, or after a kill past the plist rewrite the new release's). A run that goes
   on stops an old broker started again meanwhile (gated first), also when none ran as the upgrade began,

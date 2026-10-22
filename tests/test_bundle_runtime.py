@@ -89,12 +89,24 @@ class BundleRuntimeTests(BundleInstallTests):
                 selection.check()
                 self.assertEqual(selection.arguments('broker')[-1],'broker')
 
-    def test_the_installer_still_refuses_codex_registration_and_agents_skill_drift_on_repeat(self):
-        for kind in ['registration','skill','skill_extra','skill_removed']:
+    def test_the_installer_still_refuses_codex_registration_drift_on_repeat(self):
+        self.selected()
+        self.client_drift('registration')
+        with self.assertRaises(self.packet_[0].InstallError):self.install(self.packet_)
+
+    def test_agents_skill_drift_after_the_receipt_is_the_users_and_never_blocks_a_repeat(self):
+        # 0.53.0rc2: once receipt.json records the copies the install wrote they are not checked again; a copy the
+        # user edited, extended or removed stays as it is (the repeat refused for good before; for a removal even
+        # when killed short of the commit, with uninstall naming the unfinished install).
+        for kind in ['skill','skill_extra','skill_removed']:
             with self.subTest(kind=kind):
                 self.setUp();self.selected()
                 self.client_drift(kind)
-                with self.assertRaises(self.packet_[0].InstallError):self.install(self.packet_)
+                before=sorted((str(p.relative_to(self.skills)),p.read_bytes() if p.is_file() else None)
+                              for p in self.skills.rglob('*'))
+                self.assertEqual(self.install(self.packet_)['installation'],'reused')
+                self.assertEqual(sorted((str(p.relative_to(self.skills)),p.read_bytes() if p.is_file() else None)
+                                        for p in self.skills.rglob('*')),before)
 
     def test_launch_check_never_reads_client_state(self):
         from telegram_search_mcp import bundle_runtime

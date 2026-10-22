@@ -960,6 +960,14 @@ class _Service:
         if self.kind()[0]!='to':return self._recheck()
         live=_live(self.runner,self.label)
         if live is None or _matches_live(live,self.plist,self.target):return False
+        previous=self._previous_payload(j,live)
+        if previous is None:return False
+        self.gate(previous)
+        return True
+
+    def _previous_payload(self, j, live):
+        """The definition a live registration from our plist path runs when it is the one the stop replaced (the
+        kept `service.previous` bytes) or a known one; else None."""
         candidates=list(self.known.values())
         if j.recorded('service_previous') is not None:
             try:candidates.insert(0,plistlib.loads(self._kept(j)))
@@ -967,9 +975,8 @@ class _Service:
         for value in candidates:
             if (type(value) is dict and type(value.get('ProgramArguments')) is list and value['ProgramArguments']
                     and _matches_live(live,self.plist,value)):
-                self.gate(value)
-                return True
-        return False
+                return value
+        return None
 
     def cycle(self, j):
         """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
@@ -1100,11 +1107,12 @@ class _Service:
         booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
         observed=j.recorded('service')
         if observed is None:return 'not_loaded'
-        if observed['plist']!='absent':
-            try:on_disk=self.kind()[0]
-            except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Decided below, as before.
-            if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
-        if not observed['loaded']:return 'not_loaded'
+        if not observed['loaded']:
+            if observed['plist']!='absent':
+                try:on_disk=self.kind()[0]
+                except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Not read before: as before.
+                if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
+            return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
             if self.kind()[0]=='absent':
@@ -1112,8 +1120,11 @@ class _Service:
                 j.write('plist',self.plist,_plist_bytes(self.target),b'',existed=False,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
             live=_live(self.runner,self.label)
+            if live is not None and not _matches_live(live,self.plist,self.target):
+                previous=self._previous_payload(j,live)
+                if previous is None:raise InstallError('service_conflict')
+                self.gate(previous);_bootout(self.runner,self.label);live=None
             if live is None:_bootstrap(self.runner,self.plist)
-            elif not _matches_live(live,self.plist,self.target):raise InstallError('service_conflict')
             j.update(single=('service_restarted',{'attempt':1}));j.checkpoint('restarted')
         return 'restarted'
 
