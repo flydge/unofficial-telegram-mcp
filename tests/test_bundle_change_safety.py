@@ -172,17 +172,30 @@ class PendingGateTests(SafetyHarness, unittest.TestCase):
         self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
         self.selection_check()
 
-    def test_the_stop_is_gated_again_and_the_transaction_resumes(self):
-        _, old = self.full()
-        new = self.build('b', launcher=b'# second release\n')
-        self.answers = ['none', 'none', 'pending']
-        with self.assertRaises(self.module().InstallError) as caught:
-            self.install(new)
-        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
-        self.assertNotIn('bootout', self.launchctl.verbs())
-        self.assertEqual(self.pointer()['release_root'], old['release_root'])
-        self.assertEqual(self.install(new)['service'], 'restarted')
-        self.assertEqual(self.launchctl.verbs().count('bootout'), 1)
+    def test_the_stop_is_gated_again_before_any_client_write_and_the_transaction_resumes(self):
+        """The broker stop follows its last gate directly, before the first client write: a send that starts
+        between the two gates refuses with every client entry, the plist and the session unchanged."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                if kind == 'rollback':
+                    self.install(new)
+                action = (lambda: self.install(new)) if kind == 'upgrade' else (lambda: self.change('rollback'))
+                before, calls, boots = self.client_files(), len(self.claude().calls), self.launchctl.verbs().count('bootout')
+                self.answers = ['none', 'none', 'pending']
+                with self.assertRaises(self.module().InstallError) as caught:
+                    action()
+                self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+                self.assertEqual(self.client_files(), before)
+                self.assertEqual(self.claude().calls[calls:], [])
+                self.assertEqual(self.launchctl.verbs().count('bootout'), boots)
+                self.assertEqual(self.temporaries(), [])
+                self.assertEqual(action()['service'], 'restarted')
+                self.assertEqual(self.launchctl.verbs().count('bootout'), boots + 1)
+                self.assertEqual(self.pointer()['release_root'],
+                                 str(self.runtime / 'releases' / new[3]) if kind == 'upgrade' else old['release_root'])
 
 
 class PendingActionTests(SafetyHarness, unittest.TestCase):
@@ -327,6 +340,19 @@ class LegacyAdoptionSafetyTests(AdoptionHarness, SafetyHarness, unittest.TestCas
         self.legacy()
         before = {p: p.read_bytes() for p in (self.codex / 'config.toml', self.desktop_config, self.claude().path, self.plist)}
         self.answers = ['none', 'pending']
+        packet = self.build('a')
+        with self.assertRaises(self.module().InstallError) as caught:
+            self.install(packet, adopt_legacy=True)
+        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+        self.assertEqual(self.claude().calls, [])
+        self.assertNotIn('bootout', self.launchctl.verbs())
+        self.assertEqual(self.install(packet, adopt_legacy=True)['service'], 'restarted')
+
+    def test_adopting_a_legacy_broker_gates_its_stop_before_any_client_write(self):
+        self.legacy()
+        before = {p: p.read_bytes() for p in (self.codex / 'config.toml', self.desktop_config, self.claude().path, self.plist)}
+        self.answers = ['none', 'none', 'pending']  # Before the transaction, at its observation, at the stop.
         packet = self.build('a')
         with self.assertRaises(self.module().InstallError) as caught:
             self.install(packet, adopt_legacy=True)

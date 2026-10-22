@@ -2044,10 +2044,14 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   `expected_package_version`. Every other byte of that file, capabilities included, stays, and a file
   that cannot be changed that way refuses (`policy_conflict`). `enrollment.json`, the managed key, the
   TDLib session and the Keychain are never written; their hashes are only read.
-- **Pending-send gate.** Before the first client write, and again right before the broker is booted out,
-  a running exact receipt-bound broker is asked, through its own interpreter, whether any client context
-  is connected. A context may hold a draft or an unresolved send outcome. Anything but "none" (including an
-  unknown answer) refuses with nothing changed (`pending_send_unresolved`). Only the exact label is
+- **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
+  right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
+  through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
+  whether any client context is connected. A context may hold a draft or an unresolved send outcome.
+  Anything but "none" (including an unknown answer) refuses (`pending_send_unresolved`). The bootout
+  follows the last check directly and precedes every client write, so a refusal leaves every client
+  entry, the plist and the session unchanged; after the first check, the copied release tree and the
+  unfinished transaction stay until the same command is repeated. Only the exact label is
   booted out, an owned broker only after its live registration matches the on-disk plist, and it is
   bootstrapped again after the commit only if it was running. An uncertain send is never retried.
 - **Downgrade refused.** A package version that sorts below the installed one refuses
@@ -2055,8 +2059,8 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **Rollback only to unchanged state.** It refuses (`rollback_refused`) unless `enrollment.json` is
   byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
   in the version line, and the previous release's manifest and Codex ownership still match.
-- **Commit order.** The new release tree is copied next to the old one, clients and the plist follow,
-  then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
+- **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
+  plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
   receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A client

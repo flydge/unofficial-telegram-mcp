@@ -672,14 +672,15 @@ SKILL_NAMES = ('telegram-search', 'telegram-setup', 'claude-telegram-search', 'c
 _MANUAL = ('failed', 'unavailable', 'not_found')
 _DESKTOP_MANUAL = ('failed', 'unavailable')
 _REFUSALS = (BundleError, RuntimePathError, ConfigConflict, OwnerLeaseError, OSError, ValueError, KeyError, TypeError)
-_INSTALL_STEPS = ['prepared','release_pending','release','registration_pending','registration','telegram-search_pending','telegram-search',
-                  'telegram-setup_pending','telegram-setup','claude-telegram-search_pending','claude-telegram-search',
-                  'claude-telegram-setup_pending','claude-telegram-setup','claude_code_pending','claude_code',
-                  'claude_desktop_pending','claude_desktop','service_pending','service','policy_pending','policy',
-                  'receipt_pending','receipt','complete']
-_CHANGE_STEPS = ['prepared','release_pending','release','registration_pending','registration',
+# The broker stop (`service`) directly follows its last pending-send gate and precedes the first client write.
+_INSTALL_STEPS = ['prepared','release_pending','release','service_pending','service','registration_pending','registration',
+                  'telegram-search_pending','telegram-search','telegram-setup_pending','telegram-setup',
+                  'claude-telegram-search_pending','claude-telegram-search','claude-telegram-setup_pending',
+                  'claude-telegram-setup','claude_code_pending','claude_code','claude_desktop_pending','claude_desktop',
+                  'policy_pending','policy','receipt_pending','receipt','complete']
+_CHANGE_STEPS = ['prepared','release_pending','release','service_pending','service','registration_pending','registration',
                  *[s for n in SKILL_NAMES for s in (n+'_pending',n)],
-                 'claude_code_pending','claude_code','claude_desktop_pending','claude_desktop','service_pending','service',
+                 'claude_code_pending','claude_code','claude_desktop_pending','claude_desktop',
                  'policy_pending','policy','receipt_pending','receipt','pointer_pending','complete','finished']
 _UNINSTALL_STEPS = ['prepared','service','registration','claude_code','claude_desktop','skills','retired']
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
@@ -829,7 +830,8 @@ class _Service:
         if self._observed(j)['loaded'] and j.recorded('service_stopped') is None:self._recheck()
 
     def stop(self, j):
-        """Boot out only a still-loaded exact registration, gated again right before, then rewrite the plist."""
+        """Boot out only a still-loaded exact registration, gated again right before, then rewrite the plist. Runs
+        before the first client write, so a refusal here leaves every client entry unchanged."""
         observed=self._observed(j)
         if observed['loaded'] and j.recorded('service_stopped') is None:
             if self._recheck():_bootout(self.runner,self.label)
@@ -1245,8 +1247,13 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             # Only an adopted foreign broker is ever stopped here; its definition is replaced by ours.
             service=_Service(plist,agent_label,_service_payload(installed,agent_label),adopted=adopted['service']['sha256'],
                              runner=launchctl,pending=probe,home=home) if 'service' in adopted else None
-            # Its observation and pending-send gate come before the first client write.
-            if service is not None and not reached('service'):service.observe(j)
+            # Its observation, its pending-send gate and its stop all come before the first client write: a send
+            # that starts before the stop refuses with every client entry still as it was.
+            if not reached('service'):
+                if service is not None:service.observe(j)
+                j.advance('service_pending')
+                if service is not None:service.stop(j)
+                update('service')
             if not reached('registration'):
                 if not reached('registration_pending'):update('registration_pending')
                 # A killed earlier attempt leaves its journaled temporary beside the config.
@@ -1388,10 +1395,6 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 if not reached('complete'):
                     if not reached('claude_desktop'):update('claude_desktop')
                     checkpoint('claude_desktop')
-                if not reached('service'):
-                    j.advance('service_pending')
-                    if service is not None:service.stop(j)
-                    update('service')
                 if not reached('policy'):
                     j.advance('policy_pending')
                     # The adopted broker's session pin follows it (any version), only that line.
@@ -1493,11 +1496,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             checkpoint, cli, claude_runner, launchctl, pending_sends):
     """Upgrade (to `source`) or rollback (to the receipt's previous release) of an installed root.
 
-    Every refusal (a downgrade, a foreign or drifted object, a pending send) comes before the transaction
-    exists. Order: adoption records (adopted.json), release, the broker observation with its pending-send
-    gate, Codex, skills, Claude Code, Claude Desktop, broker stop (gated again) and plist, the runtime.toml
-    version line, receipt.json, then current.json (the commit). Only a broker that was loaded is
-    bootstrapped again, after the commit, because a release is admitted only once current.json names it.
+    Every refusal of a downgrade or a foreign or drifted object comes before the transaction exists; so does
+    the first pending-send gate. Order: adoption records (adopted.json), release, the broker observation with
+    its pending-send gate, the broker stop (gated again right before it) and plist, then Codex, skills, Claude
+    Code, Claude Desktop, the runtime.toml version line, receipt.json, then current.json (the commit). A
+    pending send found inside the transaction refuses before any client write, leaving the copied release
+    and the open transaction for the repeat. Only a broker that was loaded is bootstrapped again, after the
+    commit, because a release is admitted only once current.json names it.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
@@ -1673,8 +1678,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         to_payload=_service_payload(to_root,label)
         service=_Service(plist,label,to_payload,known=payloads,adopted=adopted['service']['sha256'] if 'service' in adopted else None,
                          runner=launchctl,pending=pending_sends,home=home)
-        # The broker observation and its pending-send gate come before the first client write.
-        if not j.reached('service'):service.observe(j)
+        # The broker observation, its pending-send gate and the stop of a loaded broker (gated again right before it)
+        # all come before the first client write: no session can start between the last gate and the stop, and a
+        # send that starts before it refuses with every client entry, the plist and the session unchanged.
+        if not j.reached('service'):
+            service.observe(j)
+            j.advance('service_pending');service.stop(j);j.update('service')
+        checkpoint('service')
         # Codex: our owned subtree replaced in place (compare-before-replace over the exact preimage).
         if not j.reached('registration'):
             j.advance('registration_pending')
@@ -1775,9 +1785,6 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             j.update(single=('claude_desktop',{'status':desktop_status}))
         if desktop_status not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
         j.advance('claude_desktop');checkpoint('claude_desktop')
-        if not j.reached('service'):
-            j.advance('service_pending');service.stop(j);j.update('service')
-        checkpoint('service')
         if not j.reached('policy'):
             j.advance('policy_pending')
             _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])

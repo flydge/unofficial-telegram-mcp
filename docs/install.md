@@ -582,22 +582,23 @@ a `plugin`-mode installation: it passes `--claude-code plugin`, prints the `stat
 the repeat's) and exits 0; over a `user` or `skip` installation it refuses as `bootstrap_failed`, after
 the installer's own refusal line.
 Over a receipt-bound installation of another release, `bootstrap-install` runs an upgrade transaction
-instead of a first install. Refusals for a downgrade, a foreign or changed object or a pending send come
-before the transaction exists, so they change nothing. The steps, each journaled so that an interruption
-resumes by repeating the command:
+instead of a first install. Refusals for a downgrade or a foreign or changed object come before the
+transaction exists, so they change nothing; for a pending send see the gate below. The steps, each
+journaled so that an interruption resumes by repeating the command:
 
 1. The new release tree is copied next to the current one; older release trees stay in `releases/`.
-2. The broker is observed and the pending-send gate runs (below), before any client file is written.
+2. The broker is observed and the pending-send gate runs (below). Right after it the exact receipt-bound
+   broker is booted out, if it is loaded, and its LaunchAgent plist is rewritten: all before any client
+   file is written.
 3. The Codex subtree, the skill copies, the Claude Code user-scope entry (in `user` mode) and the
    Claude Desktop entry are replaced. Only entries the installation owns are replaced (see
    [owned client entries](#owned-client-entries)); an entry you removed is added back, and a different
    entry refuses (`registration_conflict`, `claude_registration_conflict`,
    `claude_desktop_registration_conflict`).
-4. The exact receipt-bound broker is booted out, if it is loaded, and its LaunchAgent plist is rewritten.
-5. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
+4. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
    `policy_conflict`.
-6. `receipt.json` is rewritten and `current.json` is switched last. The broker is bootstrapped again
+5. `receipt.json` is rewritten and `current.json` is switched last. The broker is bootstrapped again
    only if it was running before.
 
 The result is `status: upgraded` with `previous_release_root`, `service` and `next_action:
@@ -606,11 +607,17 @@ restart_mcp_clients`. Reconnect every client: a running proxy that loaded the ol
 are not written.
 
 **Pending-send gate.** If the broker is running, the installer asks it, through its own release's
-client, whether any client context is connected. A context may hold a draft or an unresolved send
-outcome, and an unknown answer counts as pending. Any such answer refuses as `pending_send_unresolved`
-before anything changes; the gate runs again right before the broker is stopped. Quit the MCP clients,
-wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send is never
-retried by an upgrade.
+client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether any client
+context is connected. A context may hold a draft or an unresolved send outcome, and an unknown answer
+counts as pending. It asks before the transaction exists, again once the new release is copied, and a
+last time right before the broker is stopped, which comes before any client file is written. Any such
+answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
+session unchanged. A refusal at the first check changes nothing at all; at a later one the new release
+tree is already copied and the upgrade stays unfinished, so `rollback`, `uninstall` and another kit
+refuse as `transaction_pending` (`pending_action: upgrade`) until the same command is repeated. Quit the
+MCP clients, wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send
+is never retried by an upgrade. From the broker stop until the upgrade finishes, running MCP clients
+cannot reach the broker.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
