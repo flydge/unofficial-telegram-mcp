@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import os
 from pathlib import Path, PurePosixPath
 import secrets
@@ -381,7 +382,7 @@ class ArtifactRefusalTests(GateCase):
 
 class ConstraintsTests(unittest.TestCase):
     def test_tracked_constraints_pin_the_direct_dependencies_with_hashes(self) -> None:
-        release = ".".join(telegram_search_mcp.__version__.split(".")[:3])
+        release = re.match(r"[0-9]+\.[0-9]+\.[0-9]+", telegram_search_mcp.__version__).group(0)  # as the gate names it
         target, pins = gate.parse_constraints(
             (TESTS.parent / "packaging" / f"constraints-{release}.txt").read_text(encoding="utf-8"))
         self.assertEqual(target, "3.14")
