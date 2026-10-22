@@ -9,9 +9,19 @@ from `CLAUDE.md` (`.venv/bin/python`). Synthetic and automated evidence is techn
 only: real Telegram, installed-consumer and owner-session rows are recorded separately and
 disclosed as such in the release notes.
 
-What is released: the source tree, its sdist and wheel, and the documents in `docs/`. The
-private bundle that carries the application identity is never part of the public tree or of the
-release artifacts; its build (`packaging/assemble_bundle.py`) is owner-run and outside this list.
+What is released: the source tree, its sdist and wheel, and the documents in `docs/`. From 0.53 a
+release can also carry the assets `packaging/release_build.py` builds (the DMG, the curl-path files,
+`release-pins.json`, `release-provenance.json`, the corresponding-source archive and `SHA256SUMS`)
+and the Claude Code plugin's copy of those pins (section 4). The release build assembles no
+application identity by default; shipping one is the owner's separate decision
+([owner checklist](plans/0.53-signing-owner-checklist.md), section 4), and a private bundle that
+carries the owner's identity is never part of the public tree or of the release artifacts.
+
+**Publication hold.** Building, signing and notarizing publish nothing. Assets are uploaded only when
+Gpub (section 8) names them. While the release manifest says `publication: unreleased` (the build
+writes that until the corresponding source is complete), the pins say so too: the plugin's
+`bin/install` refuses with `release_not_published` and the documented curl recipe stops before running
+anything.
 
 ## 1. Version sites
 
@@ -26,6 +36,8 @@ and the test is the authority if the two differ.
 | `tests/test_bundle_archive.py`, `tests/test_bundle_install.py` | the synthetic release fixtures |
 | `skills/telegram-search/SKILL.md`, `skills/telegram-setup/SKILL.md` | the "paired with" version line of each skill |
 | `README.md`, `CHANGELOG.md` | the status paragraph and the top changelog heading |
+| `plugins/telegram-local/.claude-plugin/plugin.json` | the plugin's `version` (`tests/test_claude_plugin.py` requires `__version__`) |
+| `plugins/telegram-local/release-pins.json` | its `version`, equal to `plugin.json`'s: the unreleased placeholder during development, the build's own file in the release commit (section 4) |
 | `docs/install.md`, `docs/reference.md`, `docs/roadmap.md`, `docs/security.md`, `docs/licensing.md`, `docs/third-party-notices.md` | candidate or release wording and the `expected_package_version` examples |
 | `docs/release-notes-<version>.md` | the notes of this release; new for every release |
 
@@ -35,12 +47,14 @@ listed in `pyproject.toml` (`[tool.setuptools.data-files]`) and `MANIFEST.in`, a
 find stragglers: `git grep -n -F '<previous dev version>'`.
 
 `expected_package_version` in a user's `runtime.toml` is a per-installation pin, not a version
-site; see section 8. The tests of the frozen 0.51.0 harness (`tests/test_release_*.py`) keep their
+site; see section 9. The tests of the frozen 0.51.0 harness (`tests/test_release_*.py`) keep their
 0.51.0 fixtures on purpose and are not version sites.
 
 ## 2. Pre-cut conditions
 
-All must hold before the gate runs; the release commit is the commit that holds them.
+All must hold before the gate runs; the release commit is the commit that holds them. A release with
+assets has two such commits, the build commit and its release commit (section 4), and each one is
+gated.
 
 1. **Clean tree.** `git status --porcelain` prints nothing and `git rev-parse HEAD` is the commit
    to release. Untracked local notes (`CLAUDE.local.md`) are gitignored and not part of it.
@@ -59,16 +73,16 @@ All must hold before the gate runs; the release commit is the commit that holds 
    ```
 
    Never run `pip install .` in a checkout; it leaves `build/` and changes which tests run.
-4. **Privacy guard green.** `tests/test_public_tree_privacy.py` passes (section 4).
+4. **Privacy guard green.** `tests/test_public_tree_privacy.py` passes (section 5).
 5. **Versions agree.** `tests/test_version_consistency.py` passes with the release version.
 6. **Documents ready.** `CHANGELOG.md`, `docs/release-notes-<version>.md` and `docs/roadmap.md`
-   follow section 5, and every unmet gate bullet is disclosed in the notes.
+   follow section 6, and every unmet gate bullet is disclosed in the notes.
 7. **Pins reviewed.** If a dependency pin or `packaging/tdlib-lock.json` changed since the
    previous tag, `docs/third-party-notices.md`, `docs/licensing.md` and `docs/licenses/` match, and
    `packaging/constraints-<version>.txt` pins the tested closure with hashes.
 
 Author and committer identity and per-commit history findings are not pre-cut conditions: the
-gate reports them (section 4) and publication waits for the owner's history decision when the
+gate reports them (section 5) and publication waits for the owner's history decision when the
 identity is not the public one or `history_findings` is not 0.
 
 ## 3. Release gate
@@ -93,7 +107,7 @@ details in `<dir>/refusal.json`. Both must exit 0.
   use is pip downloading the hash-pinned build and test tools into `<dir>/toolhouse` and the
   closure of `packaging/constraints-<version>.txt` into `<dir>/wheelhouse`. In order, it downloads
   the tools, builds the sdist and the wheel twice and requires identical bytes, checks their
-  members against the tracked files, runs the privacy scan of section 4 (a hit refuses before the
+  members against the tracked files, runs the privacy scan of section 5 (a hit refuses before the
   closure is downloaded or anything is installed), downloads the closure, installs it offline with
   `pip check` and every `RECORD` hash, smoke-tests the installed server over stdio, then runs the
   full suite from a fresh archive extraction in a fresh offline venv with a hermetic HOME. It
@@ -108,6 +122,14 @@ details in `<dir>/refusal.json`. Both must exit 0.
 - Any later commit, even a documentation fix, is a new release commit and needs a new `run`.
 - `release_preflight` and `release_sdk_probe` are the frozen 0.51.0 harness and do not certify
   0.52.x; see [release-preflight.md](release-preflight.md).
+- **Bundle stage (0.53 and later).** With `--bundle-native-directory <prepare_native.py output>` and
+  `--bundle-cache <private download cache>` (both or neither, on `run` and again on `verify`), `run`
+  also builds the bundle after the suite with the commit's own `packaging/release_build.py` in ad hoc
+  dry-run mode, offline from the cached pinned inputs, into `<dir>/bundle`, runs its `check`, and
+  records the hashes under `bundle`. The repository's `HEAD` must be the gated commit. `verify`
+  re-derives the recorded hashes from disk and rebuilds; the rebuild must reproduce every hash except
+  the DMG's and those that record it. Refusals: `bundle_inputs_invalid`, `bundle_commit_mismatch`,
+  `bundle_failed`, `bundle_mismatch`. A release with assets runs the gate with this stage.
 
 The evidence is a local artifact: keep it with the release record outside the public tree (its
 `identities` hold names and addresses, its `history_findings` paths), and quote digests and
@@ -128,11 +150,55 @@ Its keys:
 | `install` | `freeze` of the installed closure, `pip_check` and the number of verified `record_entries` |
 | `smoke` | `server_version`, `tool_count`, `tools_sha256`, `schema_fingerprint` and `capabilities` seen over stdio |
 | `privacy` | the `guard` file and its `guard_sha256`, its `rules`, the `allow` entry count, `scanned` counts and `hits` (empty) |
-| `history_findings` | the per-commit history report of section 4: `commits`, `files` and `lines` scanned, the `total` and the first 2000 `findings` as `<12-hex commit>:<path>:<line>:<rule>`; a report, not a refusal |
+| `history_findings` | the per-commit history report of section 5: `commits`, `files` and `lines` scanned, the `total` and the first 2000 `findings` as `<12-hex commit>:<path>:<line>:<rule>`; a report, not a refusal |
 | `identities` | `commits` in the range and each author, committer and co-author with role, `class` (`noreply` or `direct`) and commit count |
 | `tests` | `tests`, `passed`, `failed`, `errors`, `skipped`, the `skips` with reasons, the last log line (`summary`), and `junit`, `log` with their SHA-256 |
+| `bundle` | only with the bundle stage: `mode` (`adhoc-dry-run`), `source_commit`, and the sha256 of the kit's `archive`, `index`, `seed`, `pins` and `kit_sums`, the `source_archive`, the `dmg`, the `assets_sums` and the `build_evidence` (`release-build.json`) |
 
-## 4. Privacy and identity
+## 4. Release assets, signing and the release commit (0.53 and later)
+
+A release that ships the DMG, the curl-path assets and the plugin's pins is cut in two commits. The
+build commit holds the version and everything else of the release. Its release commit, the build
+commit's only child, changes exactly one file: the plugin's `release-pins.json`, a byte-for-byte copy of
+the signed build's own file. The tag goes on the release commit. That committed copy at the tag is the
+trust root of the curl and plugin paths (see the [install guide](install.md#publisher-team-id-and-what-binds-what)),
+never the copy uploaded next to the assets. The pins cannot live in the build commit itself, because
+the archive they pin records that commit.
+
+1. **Build commit.** The pre-cut conditions hold (section 2) and the gate with the bundle stage
+   passes `run` and `verify` (section 3).
+2. **Ad hoc dry run and the signed build** on the build commit, from a clean checkout, by the owner
+   ([owner checklist](plans/0.53-signing-owner-checklist.md), section 5): `release_build.py build
+   --dry-run` and `check`, then the Developer ID build without `--tag` (the tag is not on this commit)
+   and its `check`. The build signs the payload and the seed, checks every Mach-O in the kit,
+   notarizes the payload zip and the DMG and staples the DMG; the output directory holds `kit/`,
+   `assets/` and `release-build.json`. Its `kit/release-pins.json` has the one schema the plugin's
+   `bin/install` reads (`packaging/release_pins.py`).
+3. **Release commit.** Copy the file and commit only it, with the public identity:
+
+   ```bash
+   cp <out>/kit/release-pins.json plugins/telegram-local/release-pins.json
+   git add plugins/telegram-local/release-pins.json
+   git commit -m "<version>: release pins"
+   PYTHONPATH=src .venv/bin/python packaging/release_build.py release-commit --output <out>
+   ```
+
+   `release-commit` exits 0 only when `HEAD` is clean, its only parent is the build's source commit
+   (it re-runs `check` against that commit), it changes exactly the plugin's `release-pins.json`, that
+   file equals the kit's byte for byte and `plugin.json` names the same version. A dry-run output is
+   refused (`release_commit_invalid`): an ad hoc kit never becomes the plugin's pins.
+4. **Gate the release commit** with the bundle stage (section 3); any later commit is a new release
+   commit. The suite there checks that the committed pins have the schema and the Team ID of the
+   reviewed native pin table (`tests/test_release_pins.py`).
+5. **Tag the release commit** (section 7), then run `release-commit --tag v<version>` once more.
+6. **Assets** are uploaded only under Gpub (section 8), to the GitHub release of that tag, exactly the
+   files in `<out>/assets/`, each compared with `<out>/assets/SHA256SUMS` and `release-build.json`.
+
+The publication hold above applies at every step. Upgrades of an installed bundle and their rollback
+are the installer's (section 9 and section 10); the owner's own installation is migrated with
+`--adopt-legacy` only in the owner session ([install guide](install.md#adopting-entries-the-installer-does-not-own---adopt-legacy)).
+
+## 5. Privacy and identity
 
 **Public tree.** It carries no private account data, local paths or internal working records
 (the standard of [the 0.51.0 notes](release-notes-0.51.0.md)). `tests/test_public_tree_privacy.py`
@@ -161,7 +227,7 @@ removed, yet that text stays in the published history. `run` therefore also runs
 over the names and lines each commit of `git log -p <tag>..<sha>` added (a merge contributes what
 its conflict resolution added, git's remerge diff). Its findings are a classified report in
 `history_findings` (`<12-hex commit>:<path>:<line>:<rule>`, never the value), not a refusal:
-history remediation is the owner's decision, taken before publication (Gpub, section 7).
+history remediation is the owner's decision, taken before publication (Gpub, section 8).
 
 **Identity.** New commits and tags use the repository-local public identity of the v0.51.0 tag
 (name `Unofficial Telegram MCP Contributors`, address `noreply@users.noreply.github.com`),
@@ -175,7 +241,7 @@ checklist never rewrites history on its own. The same list from git:
 git log --format='%an <%ae> | %cn <%ce>' <tag>..<sha> | sort -u
 ```
 
-## 5. Changelog, release notes and roadmap
+## 6. Changelog, release notes and roadmap
 
 - **`CHANGELOG.md`**, newest first. The development heading `## <version>.dev0 — unreleased`
   becomes `## <version> — <YYYY-MM-DD>` in the release commit. Entries describe behaviour users
@@ -184,17 +250,18 @@ git log --format='%an <%ae> | %cn <%ce>' <tag>..<sha> | sort -u
   the title `# <version> — <date>`, the navigation line, then Available behavior, Corrections
   included, Accepted scenarios (what was exercised, by which consumer, with real or synthetic
   providers), Known limits (including every unmet gate bullet of the release plan), and License
-  and public identifiers. Include the upgrade note of section 8. Frozen after the tag, except
+  and public identifiers. Include the upgrade note of section 9. Frozen after the tag, except
   for broken links.
 - **`docs/roadmap.md`**: update the "Updated" date, move the candidate section into the completed
   slices, refresh the status rows, and link this document. Technical acceptance of a slice does
   not complete the plan (see "Maintaining this record" there).
 
-## 6. Tag
+## 7. Tag
 
 Tag only after `verify` passes, and only locally. Tags are annotated, never lightweight, and
 unsigned like `v0.51.0`: the name is `v<version>` for a release (`v<version>rcN` for a candidate),
-the first message line is `<version>: <short theme>`, the tagger is the public identity.
+the first message line is `<version>: <short theme>`, the tagger is the public identity. A release
+with assets tags its release commit (section 4), never the build commit.
 
 ```bash
 git tag -a v<version> -m "<version>: <short theme>" <sha>
@@ -203,11 +270,11 @@ git for-each-ref refs/tags/v<version> --format='%(taggername) <%(taggeremail)> %
 git rev-parse v<version>^{commit}                # equals the commit in evidence.json
 ```
 
-## 7. Publication (Gpub)
+## 8. Publication (Gpub)
 
 Gpub is an explicit owner authorization naming the refs and artifacts to publish. Until it is
 given, nothing is pushed to `main` and no tag leaves the machine; working branches may be pushed
-as backups. It also needs the owner's decision on the history and identity question of section 4,
+as backups. It also needs the owner's decision on the history and identity question of section 5,
 because moving `main` forward makes the cheaper remediation (rewriting only the unmerged branch
 range) impossible without rewriting `main`. Gpub checks `history_findings` in the verified
 evidence: its `total` must be 0, or the owner's acceptance of the listed findings (or the
@@ -236,8 +303,10 @@ git push origin refs/tags/v<version>
 ```
 
 The release is source-only unless the authorization also names artifacts. If it names the sdist or
-wheel, upload exactly the files `run` produced and compare their SHA-256 with the evidence. There
-is no package-index upload by default.
+wheel, upload exactly the files `run` produced and compare their SHA-256 with the evidence. If it
+names the release assets (section 4), upload exactly the files of `<out>/assets/` to the GitHub release
+of the tag and compare each with `<out>/assets/SHA256SUMS`; the plugin path then works only for pins
+that say `published`. There is no package-index upload by default.
 
 Remote post-checks:
 
@@ -250,20 +319,25 @@ git -C <fresh-dir-outside-tmp> rev-parse HEAD 'HEAD^{tree}'   # commit and tree 
 `main` and the peeled tag must both equal the released commit, and the clone's tree hash must equal
 the one in the evidence.
 
-## 8. Upgrade note: `runtime.toml` pins
+## 9. Upgrade note: `runtime.toml` pins
 
-A broker and proxy refuse (`config_stale`) when the policy file pins another package version. The
-release notes of every version therefore tell installed users: after upgrading, set
-`expected_package_version` in `~/Library/Application Support/TelegramSearchMCP/runtime.toml` to the
-new version, keep `expected_contract_version` and the other lines, and keep the modes (`0700`
-directory, `0600` file). A policy written by `connect` pins the version that wrote it. A running
+A broker and proxy refuse (`config_stale`) when the policy file pins another package version. A 0.53
+or later bundle upgrade (a newer kit's `Install.command`, `bootstrap.sh` or the plugin's
+`bin/install`) and `rollback` rewrite only that line themselves, after the pending-send gate
+([install guide](install.md#upgrade)). For every other route, the release notes tell installed users:
+after upgrading, set `expected_package_version` in
+`~/Library/Application Support/TelegramSearchMCP/runtime.toml` to the new version, keep
+`expected_contract_version` and the other lines, and keep the modes (`0700` directory, `0600` file). A policy written by `connect` pins the version that wrote it. A running
 client session keeps its old proxy and is refused until its MCP server restarts; clients refresh
 their tool listing after an upgrade. Never overwrite an existing policy blindly; see "Enabling more
 capabilities" in [install.md](install.md) and the policy example in [reference.md](reference.md).
 
-## 9. Rollback
+## 10. Rollback
 
-Installed runtime: follow "Rollback" in [security.md](security.md#rollback). Before an upgrade,
+Installed bundle (0.53 and later): the installed launcher's `rollback` returns to the release before
+the last upgrade while no newer state exists, and a repeat changes nothing
+([install guide](install.md#rollback)). Other installed runtimes: follow "Rollback" in
+[security.md](security.md#rollback). Before an upgrade,
 save the previous runtime, the owner-only plist, the consumer config and the installed skill in a
 private directory outside the source tree; restore them and re-bootstrap only the validated
 LaunchAgent. It leaves TDLib session data, credentials and historical data in place. The security
@@ -274,13 +348,15 @@ Published release: a pushed tag is not retracted. Fix forward with a new patch v
 checklist; deleting a remote tag or branch is a separate owner-authorized action and does not remove
 the objects.
 
-## 10. After the release
+## 11. After the release
 
 Open the next development line in one commit by the public identity, on top of the tagged commit
 (the tag is never moved):
 
 1. Set `__version__` to the next development version (`<next>.dev0`) and update the version
-   sites of section 1 that carry a development literal.
+   sites of section 1 that carry a development literal. The plugin's `release-pins.json` goes back to
+   the unreleased placeholder (all-zero hashes and sizes, `"publication": "unreleased"`, `"team_id": ""`)
+   with the new version, so that `bin/install` refuses until the next release commit.
 2. Add `## <next>.dev0 — unreleased` on top of `CHANGELOG.md`.
 3. Point the README status and `docs/roadmap.md` at the new candidate.
 4. Run the full suite as in section 2; the version-consistency test must pass.
@@ -310,12 +386,13 @@ false`: owner and real-account cells stay `pending` and need their own records.
 | Privacy guard | `tests/test_public_tree_privacy.py` |
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |
-| Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` |
+| Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` (with the bundle stage for a release with assets) |
 | Consumer matrix (synthetic cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
+| Assets: dry run, signed build, release commit, its gate | section 4; [owner checklist](plans/0.53-signing-owner-checklist.md) |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
 | History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |
-| Tag | `git tag -a v<version> -m ...` |
-| Gpub with remote pre and post checks | section 7 |
-| Pin note for users | section 8, in the release notes |
+| Tag | `git tag -a v<version> -m ...` (the release commit for a release with assets) |
+| Gpub with remote pre and post checks | section 8 |
+| Pin note for users | section 9, in the release notes |
 | Rollback | `docs/security.md#rollback` |
-| Dev bump | section 10 |
+| Dev bump | section 11 |

@@ -53,13 +53,13 @@ class InstallHarness:
         files = {
             'launcher.py': b'# inert unit fixture\n',
             'python/bin/python3': b'inert-runtime',
-            'app/telegram_search_mcp/__init__.py': b'__version__ = "0.53.0.dev0"\n',
+            'app/telegram_search_mcp/__init__.py': b'__version__ = "0.53.0rc1"\n',
             'native/libtdjson.dylib': b'inert-native',
             'skills/telegram-search/SKILL.md': b'search-skill',
             'skills/telegram-setup/SKILL.md': b'setup-skill',
             'tdlib-lock.json': json.dumps(v1_lock(inert_natives())).encode(),  # a v1 manifest pairs with an ad-hoc lock
         }
-        manifest = dict(schema_version=1, package_version='0.53.0.dev0', target='macos-arm64',
+        manifest = dict(schema_version=1, package_version='0.53.0rc1', target='macos-arm64',
             minimum_os='26.0', contract_version=1, schema_fingerprint='a' * 64,
             tools=['_manifest', 'search_correspondence'], native_lock_sha256=hashlib.sha256(files['tdlib-lock.json']).hexdigest(),
             skills=[dict(id=n, sha256=hashlib.sha256(files['skills/' + n + '/SKILL.md']).hexdigest())
@@ -76,7 +76,7 @@ class InstallHarness:
             records.append(dict(path=name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), executable=executable))
         for parent, dirs, _ in os.walk(release):
             Path(parent).chmod(0o700)
-        index = dict(schema_version=1, target='macos-arm64', release_version='0.53.0.dev0', archive_bytes=1,
+        index = dict(schema_version=1, target='macos-arm64', release_version='0.53.0rc1', archive_bytes=1,
                      archive_sha256='b' * 64, unpacked_bytes=sum(len(v) for v in files.values()), files=records)
         index_path = self.base / 'index.json'
         index_path.write_bytes(json.dumps(index).encode())
@@ -213,16 +213,28 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
                 with self.assertRaises(packet[0].InstallError): self.install(packet)
                 self.assertFalse((self.codex / 'config.toml').exists())
 
-    def test_concurrent_config_drift_is_retained_and_resume_refuses(self):
-        packet = self.fixture()
-        def drift(stage):
-            if stage == 'release':
-                (self.codex / 'config.toml').write_bytes(b'# concurrent edit\n')
-                (self.codex / 'config.toml').chmod(0o600)
-        with self.assertRaises(packet[0].InstallError): self.install(packet, checkpoint=drift)
-        self.assertEqual((self.codex / 'config.toml').read_bytes(), b'# concurrent edit\n')
-        with self.assertRaises(packet[0].InstallError): self.install(packet)
-        self.assertFalse((self.runtime / 'current.json').exists())
+    def test_concurrent_config_drift_keeps_the_neighbours_and_a_foreign_entry_refuses(self):
+        # A neighbour written while the release is copied is merged, every byte kept; a `telegram_search`
+        # entry that appears meanwhile is never touched and every resume refuses.
+        for drift, merged in ((b'# concurrent edit\n', True),
+                              (b'# concurrent edit\n[mcp_servers.telegram_search]\ncommand = "/foreign"\n', False)):
+            with self.subTest(merged=merged):
+                self.setUp()
+                packet = self.fixture()
+                def edit(stage):
+                    if stage == 'release':
+                        (self.codex / 'config.toml').write_bytes(drift)
+                        (self.codex / 'config.toml').chmod(0o600)
+                if merged:
+                    self.assertEqual(self.install(packet, checkpoint=edit)['status'], 'activation_required')
+                    data = (self.codex / 'config.toml').read_bytes()
+                    self.assertTrue(data.startswith(drift) and b'[mcp_servers.telegram_search]' in data)
+                    continue
+                with self.assertRaises(packet[0].InstallError): self.install(packet, checkpoint=edit)
+                self.assertEqual((self.codex / 'config.toml').read_bytes(), drift)
+                with self.assertRaises(packet[0].InstallError): self.install(packet)
+                self.assertEqual((self.codex / 'config.toml').read_bytes(), drift)
+                self.assertFalse((self.runtime / 'current.json').exists())
 
     def test_unsafe_root_and_skill_ancestry_are_refused(self):
         packet = self.fixture()

@@ -20,7 +20,7 @@ import uuid
 
 import tomlkit
 from tomlkit.container import OutOfOrderTableProxy
-from tomlkit.items import InlineTable, Table
+from tomlkit.items import Comment, InlineTable, Table, Trivia, Whitespace
 from . import product_identity as identity
 from .bundle_paths import _validate_descriptor_acl, file_metadata_identity, RuntimePathError
 
@@ -142,6 +142,22 @@ def _owned(document):
     return entry
 
 
+def _tail(table):
+    """(table, index): from `index` on, `table`'s body holds only the comments and blank lines that follow our
+    subtree's last key (or its last sub-table's). tomlkit attaches them to us, but in the file they come before
+    whatever follows (a comment the user writes above the next table, or at the end of the file): they are the
+    user's, never part of the ownership hash, and an edit of ours leaves them where they are."""
+    while True:
+        body = table.value.body
+        index = len(body)
+        while index and body[index - 1][0] is None and isinstance(body[index - 1][1], (Whitespace, Comment)):
+            index -= 1
+        if index == len(body) and index and isinstance(body[-1][1], Table):
+            table = body[-1][1]
+            continue
+        return table, index
+
+
 def _subtree(entry) -> bytes | None:
     if entry is None:
         return None
@@ -154,7 +170,11 @@ def _subtree(entry) -> bytes | None:
         return encoded
     document = tomlkit.document()
     servers = tomlkit.table(is_super_table=True)
-    servers.add(SERVER_NAME, deepcopy(entry))
+    owned = deepcopy(entry)
+    if isinstance(owned, Table):
+        table, index = _tail(owned)
+        del table.value.body[index:]
+    servers.add(SERVER_NAME, owned)
     document.add('mcp_servers', servers)
     encoded = tomlkit.dumps(document).encode('utf-8')
     # tomlkit attaches blank separators preceding the next table to this table.
@@ -167,6 +187,42 @@ def _subtree(entry) -> bytes | None:
     if len(encoded) > MAX_SUBTREE_BYTES:
         raise ConfigConflict('invalid_registration')
     return encoded
+
+
+def _span(source: bytes) -> tuple[int, int] | None:
+    """Byte offsets of our standard table's own lines in `source` (its header through its last key, without the
+    trailing comments `_tail` leaves to the user), or None when our entry is not one such table.
+
+    Located exactly: unique markers are rendered before the header and before the trailing comments, and the
+    rendering with both removed must equal `source` byte for byte, else None.
+    """
+    text = source.decode('utf-8')
+    document = tomlkit.parse(text)
+    entry = _owned(document)
+    if not isinstance(entry, Table) or entry.is_super_table():
+        return None
+    token = uuid.uuid4().hex
+    start, end = '#telegram-search-own-%s\n' % token, '#telegram-search-tail-%s' % token
+    table, index = _tail(entry)
+    entry.trivia.indent = start + entry.trivia.indent
+    table.value.body.insert(index, (None, Comment(Trivia(comment_ws='', comment=end, trail='\n'))))
+    marked = tomlkit.dumps(document)
+    end += '\n'
+    if marked.count(start) != 1 or marked.count(end) != 1:
+        return None
+    first, last = marked.index(start), marked.index(end)
+    if last < first or marked.replace(start, '', 1).replace(end, '', 1) != text:
+        return None
+    return len(text[:first].encode('utf-8')), len(text[:last - len(start)].encode('utf-8'))
+
+
+def _splice(source: bytes, own: bytes) -> bytes | None:
+    """`source` with our table's own lines replaced by `own` (b'' removes them) and every other byte kept, or
+    None when they cannot be located exactly (`_span`)."""
+    found = _span(source)
+    if found is None:
+        return None
+    return source[:found[0]] + own + source[found[1]:]
 
 
 def _entry(desired: Registration, *, inline: bool = False):
@@ -329,8 +385,13 @@ def merge_registration(source: bytes, desired: Registration, ownership: Receipt 
         separator = b'\n' if not source or source.endswith(b'\n') else b'\n\n'
         candidate = source + separator + wanted
     else:
-        document['mcp_servers'][SERVER_NAME] = replacement
-        candidate = tomlkit.dumps(document).encode('utf-8')
+        # Only our own lines change; the comments after them stay the user's (`_tail`).
+        candidate = None if inline else _splice(source, wanted)
+        if candidate is None:
+            document['mcp_servers'][SERVER_NAME] = replacement
+            candidate = tomlkit.dumps(document).encode('utf-8')
+        elif _subtree(_owned(_parse(candidate))) != wanted:
+            raise ConfigConflict('invalid_change')
     after = _subtree(_owned(_parse(candidate)))
     return ConfigChange(source, candidate, current, after, ownership)
 
@@ -341,17 +402,23 @@ def rollback_registration(source: bytes, receipt: Receipt) -> ConfigChange:
     document = _parse(source)
     current = _subtree(_owned(document))
     _check_ownership(current, receipt)
-    if receipt.pre_subtree is None:
-        if current is not None:
-            del document['mcp_servers'][SERVER_NAME]
-            if (not document['mcp_servers'] and isinstance(document['mcp_servers'], Table)
-                    and document['mcp_servers'].is_super_table()):
-                del document['mcp_servers']
-    else:
-        if 'mcp_servers' not in document:
-            document.add('mcp_servers', tomlkit.table(is_super_table=True))
-        document['mcp_servers'][SERVER_NAME] = deepcopy(_owned(_parse(receipt.pre_subtree)))
-    candidate = tomlkit.dumps(document).encode('utf-8')
+    # Only our own lines change; the comments after them stay the user's (`_tail`).
+    standard = receipt.pre_subtree is None or not receipt.pre_subtree.startswith(b'[mcp_servers]\n')
+    candidate = _splice(source, receipt.pre_subtree or b'') if current is not None and standard else None
+    if candidate is not None and _subtree(_owned(_parse(candidate))) != receipt.pre_subtree:
+        raise ConfigConflict('invalid_change')
+    if candidate is None:
+        if receipt.pre_subtree is None:
+            if current is not None:
+                del document['mcp_servers'][SERVER_NAME]
+                if (not document['mcp_servers'] and isinstance(document['mcp_servers'], Table)
+                        and document['mcp_servers'].is_super_table()):
+                    del document['mcp_servers']
+        else:
+            if 'mcp_servers' not in document:
+                document.add('mcp_servers', tomlkit.table(is_super_table=True))
+            document['mcp_servers'][SERVER_NAME] = deepcopy(_owned(_parse(receipt.pre_subtree)))
+        candidate = tomlkit.dumps(document).encode('utf-8')
     after = _subtree(_owned(_parse(candidate)))
     return ConfigChange(source, candidate, current, after, receipt)
 
@@ -548,9 +615,13 @@ def adopt_registration(source: bytes, desired: Registration) -> ConfigChange:
     current = _subtree(_owned(document))
     if current is None:
         raise ConfigConflict('ownership_conflict')
-    replacement = _entry(desired, inline=isinstance(document.get('mcp_servers'), InlineTable))
-    document['mcp_servers'][SERVER_NAME] = replacement
-    candidate = tomlkit.dumps(document).encode('utf-8')
+    inline = isinstance(document.get('mcp_servers'), InlineTable)
+    replacement = _entry(desired, inline=inline)
+    # Only the foreign table's own lines change; the comments after them stay the user's (`_tail`).
+    candidate = None if inline else _splice(source, _subtree(replacement))
+    if candidate is None:
+        document['mcp_servers'][SERVER_NAME] = replacement
+        candidate = tomlkit.dumps(document).encode('utf-8')
     after = _subtree(_owned(_parse(candidate)))
     if after != _subtree(replacement) or _neighbors(source) != _neighbors(candidate):
         raise ConfigConflict('invalid_change')
@@ -563,6 +634,9 @@ def owned_subtree(source: bytes) -> bytes | None:
 
 
 def _neighbors(source: bytes) -> bytes:
+    removed = _splice(source, b'')
+    if removed is not None:
+        return removed.rstrip(b'\r\n')
     document = _parse(source)
     if _owned(document) is not None:
         del document['mcp_servers'][SERVER_NAME]

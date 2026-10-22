@@ -4,11 +4,18 @@ Development host only (the owner's Mac); stdlib plus this checkout's own package
 prepare_payload -> sign_payload and the entitlement matrix -> repin_native and the v2 manifest ->
 assemble_bundle (identity switch: none, or a named Keychain service) -> build_bootstrap_seed.sh (with
 --sign-identity and the same Developer ID identity, or ad hoc in a dry run) -> the kit (Install.command
-with the pins embedded, bootstrap.sh, the seed, archive, index, release-pins.json, README, licences,
-SHA256SUMS) -> the kit signature check -> notarize_release.sh (payload zip, DMG, sign, notarize,
+rendered from release-pins.json, bootstrap.sh, the seed, archive, index, release-pins.json, README,
+licences, SHA256SUMS) -> the kit signature check -> notarize_release.sh (payload zip, DMG, sign, notarize,
 staple) -> assets/ (the DMG, the curl-path files, release-pins.json, release-provenance.json, the
 corresponding-source archive and SHA256SUMS over all of them) -> release-build.json, every hash
 re-derived from disk; `check` re-derives them and the commit again.
+
+release-pins.json has the one schema of release_pins.py, the file the plugin's bin/install reads: the
+version, publication, Team ID and the sha256 and size of bootstrap.sh, the seed, the index and the
+archive. A Developer ID build's file is copied byte for byte into plugins/<plugin>/release-pins.json in
+the release commit, the build commit's only child, which carries the release tag; `release-commit`
+checks that commit against this output (docs/releasing.md). That committed copy at the tag is the trust
+root of the curl and plugin paths, never the copy published next to the assets.
 
 The kit signature check runs before anything is notarized: every Mach-O the kit ships, found by magic
 (the seed, and each payload file that release.tar.gz holds, bound to its index sha256), must be
@@ -45,16 +52,13 @@ SCHEMA = 'tgmcp-release-build/v1'
 CODES = frozenset({'usage', 'output_refused', 'checkout_dirty', 'tag_mismatch', 'prepare_failed', 'sign_failed',
                    'entitlements_unproven', 'repin_failed', 'assemble_failed', 'seed_failed', 'kit_failed',
                    'notarize_failed', 'source_archive_failed', 'evidence_invalid', 'evidence_mismatch',
-                   'seed_unsigned', 'signature_refused', 'release_build_refused'})
+                   'seed_unsigned', 'signature_refused', 'release_build_refused', 'release_commit_invalid'})
 TOOL_ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C'}
 GIT_ENV = {**TOOL_ENV, 'HOME': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
            'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
 TAG = re.compile(r'v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:rc[0-9]{1,4})?')
 PROFILE = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}')
 HASH = re.compile(r'[0-9a-f]{64}')
-TEAM = re.compile(r'[0-9A-Z]{10}')
-PIN_KEYS = frozenset({'schema_version', 'release_version', 'publisher', 'team_id', 'publication', 'seed', 'index',
-                      'archive'})
 SEED_KINDS = {'adhoc': 'developer-built-ad-hoc-seed', 'developer-id': 'developer-id-seed'}
 # How native/ is signed, recorded in release-provenance.json (policy values: sign_payload.NATIVE_POLICY).
 NATIVE_SIGNING = {
@@ -320,7 +324,7 @@ def release_build(output, *, native_directory, cache, checkout=ROOT, offline=Fal
 
 
 _STEP_CODES = {'PayloadError': 'prepare_failed', 'SigningError': 'sign_failed', 'RepinError': 'repin_failed',
-               'ReleasePackageError': 'assemble_failed', 'InstallCommandError': 'kit_failed'}
+               'ReleasePackageError': 'assemble_failed', 'InstallCommandError': 'kit_failed', 'PinsError': 'kit_failed'}
 
 
 def _release_build(output, native_directory, cache, checkout, offline, dry_run, identity, team_id, notary_profile,
@@ -395,24 +399,23 @@ def _release_build(output, native_directory, cache, checkout, offline, dry_run, 
           and seed_provenance.get('publisher_identity') is (kind == 'developer-id')
           and seed_provenance.get('team_id') == pinned_team, 'seed_failed' if kind == 'adhoc' else 'seed_unsigned')
 
-    # 6. The kit: what the DMG holds.
-    install = _sibling('install_command')
+    # 6. The kit: what the DMG holds. release-pins.json first; Install.command is rendered from its bytes.
+    install, release_pins = _sibling('install_command'), _sibling('release_pins')
     archive_sha, archive_bytes = file_digest(work / 'bundle/release.tar.gz')
     _need(archive_sha == bundle.archive_sha256, 'assemble_failed')
-    pins = {'schema_version': 1, 'release_version': version, 'publisher': kind, 'team_id': pinned_team,
-            'publication': manifest['publication'],
-            'seed': {'file': 'bootstrap-verifier', 'sha256': seed_sha, 'bytes': seed_bytes},
-            'index': {'file': 'release-index.json', 'sha256': sha256(index_bytes)},
-            'archive': {'file': 'release.tar.gz', 'sha256': archive_sha, 'bytes': archive_bytes}}
-    _write(kit / 'Install.command', install.render(seed_sha256=seed_sha, seed_bytes=seed_bytes,
-                                                   index_sha256=sha256(index_bytes), team_id=pinned_team,
-                                                   published=manifest['publication'] == 'published'), 0o555)
-    _write(kit / 'bootstrap.sh', files['packaging/bootstrap.sh'][0])
+    bootstrap = files['packaging/bootstrap.sh'][0]
+    pins = release_pins.encode(version=version, publication=manifest['publication'], team_id=pinned_team or '',
+                               assets={'bootstrap': (sha256(bootstrap), len(bootstrap)),
+                                       'seed': (seed_sha, seed_bytes),
+                                       'index': (sha256(index_bytes), len(index_bytes)),
+                                       'archive': (archive_sha, archive_bytes)})
+    _write(kit / 'Install.command', install.render_pins(pins), 0o555)
+    _write(kit / 'bootstrap.sh', bootstrap)
     _copy(work / 'seed/bootstrap-verifier', kit / 'bootstrap-verifier', 0o555)
     _copy(work / 'bundle/release.tar.gz', kit / 'release.tar.gz')
     _write(kit / 'release-index.json', index_bytes)
-    _write(kit / 'release-pins.json', json_bytes(pins))
-    _write(kit / 'README.txt', readme(product_identity.DISPLAY_NAME, version, dry_run))
+    _write(kit / 'release-pins.json', pins)
+    _write(kit / 'README.txt', readme(product_identity.DISPLAY_NAME, version, dry_run, product_identity.PLUGIN_NAME))
     _write(kit / 'LICENSE', files['LICENSE'][0])
     _write(kit / 'NOTICE', files['NOTICE'][0])
     _write(kit / 'third-party-notices.md', files['docs/third-party-notices.md'][0])
@@ -488,16 +491,22 @@ def _republish(signed, lock, kind, team_id):
     return manifest
 
 
-def readme(display_name, version, dry_run):
+def readme(display_name, version, dry_run, plugin_name):
     build = ('Ad hoc test build (dry run): not notarized, so Gatekeeper refuses it on other Macs.\n' if dry_run
              else 'Signed with Developer ID and notarized; the DMG is stapled.\n')
     return (f'{display_name} {version} for macOS 26 or later on Apple silicon\n\n'
-            'Double-click Install.command. In Terminal it verifies this kit against the pins embedded in it,\n'
-            'installs into your user account and registers the MCP server with the supported AI clients it\n'
-            'finds. It then starts the Telegram login in the same window: a QR page opens in your browser;\n'
-            'scan it with Telegram on your phone. The final result prints in Terminal.\n\n'
-            'Without the DMG: run `/usr/bin/env -i /bin/sh -p bootstrap.sh` with the seed and index pins from\n'
-            'release-pins.json, and --seed-team with its team_id when it has one (see the install guide).\n\n'
+            'Double-click Install.command. In Terminal it runs bootstrap.sh from this folder with the seed and\n'
+            'index pins embedded in Install.command: bootstrap.sh checks the seed (and its Developer ID Team\n'
+            'ID in a signed kit), and the seed checks the index and the archive. Install.command and\n'
+            'bootstrap.sh themselves are only as trustworthy as the DMG they came in, so check the DMG first\n'
+            '(see the install guide). It installs into your user account, registers the MCP server with the\n'
+            'supported AI clients it finds, then starts the Telegram login in the same window: a QR page\n'
+            'opens in your browser; scan it with Telegram on your phone. The final result prints in Terminal.\n\n'
+            'Without the DMG, follow the curl path of the install guide. Take the pins from release-pins.json\n'
+            f'as committed in the project repository at the release tag (plugins/{plugin_name}/release-pins.json),\n'
+            'never from a copy downloaded next to these files. Check that its team_id is the publisher Team ID\n'
+            'printed in the project README and install guide, and that bootstrap.sh, bootstrap-verifier,\n'
+            'release-index.json and release.tar.gz match its sha256 and byte counts, before running anything.\n\n'
             'SHA256SUMS lists every file here. Licences: LICENSE, NOTICE, third-party-notices.md.\n'
             + build).encode()
 
@@ -606,22 +615,28 @@ def check(output, checkout=ROOT):
         raise BuildError('evidence_invalid') from None
 
 
-def _pins_team(pins, mode):
-    """The kit pins' closed shape for this evidence mode; returns the pinned Team ID (None ad hoc)."""
-    _need(type(pins) is dict and set(pins) == PIN_KEYS and pins['schema_version'] == 1
-          and pins['publication'] in ('unreleased', 'published')
-          and all(type(pins[k]) is dict for k in ('seed', 'index', 'archive')), 'evidence_invalid')
-    team = pins['team_id']
-    if mode == 'developer-id':
-        _need(pins['publisher'] == 'developer-id' and type(team) is str and TEAM.fullmatch(team) is not None,
-              'evidence_mismatch')
+def _kit_pins(output, evidence):
+    """The kit's release-pins.json under the one schema, bound to the evidence and to Install.command."""
+    release_pins = _sibling('release_pins')
+    raw = (output / 'kit/release-pins.json').read_bytes()
+    try:
+        pins = release_pins.parse(raw)
+    except ValueError:
+        raise BuildError('evidence_invalid') from None
+    if evidence['mode'] == 'developer-id':
+        _need(pins['team_id'] != '', 'evidence_mismatch')
     else:
-        _need(mode == 'adhoc-dry-run' and pins['publisher'] == 'adhoc' and team is None
-              and pins['publication'] == 'unreleased', 'evidence_mismatch')
-    return team
+        _need(pins['team_id'] == '' and pins['publication'] == 'unreleased', 'evidence_mismatch')
+    kit = evidence['kit']
+    _need(pins['version'] == evidence['release_version']
+          and all((pins[f'{name}_sha256'], pins[f'{name}_bytes']) == (kit[asset]['sha256'], kit[asset]['bytes'])
+                  for name, asset, _ in release_pins.ASSETS), 'evidence_mismatch')
+    _need((output / 'kit/Install.command').read_bytes() == _sibling('install_command').render_pins(raw),
+          'evidence_mismatch')
+    return pins
 
 
-def _check(output, checkout):
+def _check(output, checkout, commit=None):
     try:
         raw = (output / 'release-build.json').read_bytes()
         _need(len(raw) <= MAX_EVIDENCE, 'evidence_invalid')
@@ -632,7 +647,7 @@ def _check(output, checkout):
           and set(evidence) == {'schema', 'mode', 'source_commit', 'release_version', 'tag', 'assets', 'kit'}
           and evidence['mode'] in ('adhoc-dry-run', 'developer-id')
           and all(type(evidence[k]) is dict for k in ('assets', 'kit')), 'evidence_invalid')
-    _need(head_commit(checkout) == evidence['source_commit'], 'evidence_mismatch')
+    _need((head_commit(checkout) if commit is None else commit) == evidence['source_commit'], 'evidence_mismatch')
     derived = derive_evidence(output, commit=evidence['source_commit'], version=evidence['release_version'],
                               tag=evidence['tag'], mode=evidence['mode'])
     _need(derived == evidence, 'evidence_mismatch')
@@ -641,21 +656,44 @@ def _check(output, checkout):
     for group in ('assets', 'kit'):
         listed = _parse_sums((output / group / 'SHA256SUMS').read_bytes())
         _need(listed == {n: v['sha256'] for n, v in evidence[group].items() if n != 'SHA256SUMS'}, 'evidence_mismatch')
-    pins = json.loads((output / 'kit/release-pins.json').read_bytes())
-    team = _pins_team(pins, evidence['mode'])
-    _need(pins['seed']['sha256'] == evidence['kit']['bootstrap-verifier']['sha256']
-          and pins['seed']['bytes'] == evidence['kit']['bootstrap-verifier']['bytes']
-          and pins['index']['sha256'] == evidence['kit']['release-index.json']['sha256']
-          and pins['archive']['sha256'] == evidence['kit']['release.tar.gz']['sha256'], 'evidence_mismatch')
-    command = (output / 'kit/Install.command').read_bytes().decode('ascii')
-    _need(f"install_seed_sha256={pins['seed']['sha256']}\n" in command
-          and f"install_seed_bytes={pins['seed']['bytes']}\n" in command
-          and f"install_index_sha256={pins['index']['sha256']}\n" in command
-          and f"install_seed_team='{team or ''}'\n" in command, 'evidence_mismatch')
+    pins = _kit_pins(output, evidence)
     for name in CURL_PATH:
         _need(evidence['assets'][name] == evidence['kit'][name], 'evidence_mismatch')
     return {'status': 'verified', 'source_commit': evidence['source_commit'], 'mode': evidence['mode'],
-            'assets': len(evidence['assets']), 'kit': len(evidence['kit'])}
+            'publication': pins['publication'], 'assets': len(evidence['assets']), 'kit': len(evidence['kit'])}
+
+
+def release_commit(output, checkout=ROOT, tag=None):
+    """The release commit against a Developer ID build's output: HEAD is clean, its only parent is the
+    build's source commit (which `check` re-derives against), it changes exactly the plugin's
+    release-pins.json, and that file is the kit's byte for byte; a named tag must point at HEAD."""
+    try:
+        return _release_commit(Path(output), Path(checkout), tag)
+    except BuildError:
+        raise
+    except Exception:
+        raise BuildError('evidence_invalid') from None
+
+
+def _release_commit(output, checkout, tag):
+    from telegram_search_mcp import product_identity
+    plugin = f'plugins/{product_identity.PLUGIN_NAME}'
+    head = _clean(checkout, tag)
+    listed = _git(checkout, 'rev-list', '--parents', '-n', '1', head)
+    commits = listed.stdout.decode('ascii', 'replace').split()
+    _need(listed.returncode == 0 and len(commits) == 2 and commits[0] == head, 'release_commit_invalid')
+    summary = _check(output, checkout, commit=commits[1])
+    _need(summary['mode'] == 'developer-id', 'release_commit_invalid')
+    changed = _git(checkout, 'diff', '--no-renames', '--name-only', '-z', commits[1], head)
+    _need(changed.returncode == 0 and changed.stdout == f'{plugin}/release-pins.json'.encode() + b'\0',
+          'release_commit_invalid')
+    pins = _git(checkout, 'cat-file', 'blob', f'{head}:{plugin}/release-pins.json')
+    manifest = _git(checkout, 'cat-file', 'blob', f'{head}:{plugin}/.claude-plugin/plugin.json')
+    kit = (output / 'kit/release-pins.json').read_bytes()
+    _need(pins.returncode == 0 and pins.stdout == kit and manifest.returncode == 0
+          and json.loads(manifest.stdout)['version'] == json.loads(kit)['version'], 'release_commit_invalid')
+    return {'status': 'verified', 'release_commit': head, 'source_commit': commits[1], 'tag': tag,
+            'publication': summary['publication']}
 
 
 def main(argv=None):
@@ -682,12 +720,18 @@ def main(argv=None):
     verify = commands.add_parser('check')
     verify.add_argument('--output', required=True)
     verify.add_argument('--checkout', default=str(ROOT))
+    released = commands.add_parser('release-commit', help="check HEAD: the build commit plus the kit's pins copy")
+    released.add_argument('--output', required=True, help='the Developer ID build output')
+    released.add_argument('--checkout', default=str(ROOT))
+    released.add_argument('--tag', help='release tag that must point at HEAD')
     try:
         args = parser.parse_args(argv)
         if str(Path(args.checkout) / 'src') not in sys.path and 'telegram_search_mcp' not in sys.modules:
             sys.path.insert(0, str(Path(args.checkout) / 'src'))
         if args.command == 'check':
             result = check(Path(args.output), Path(args.checkout))
+        elif args.command == 'release-commit':
+            result = release_commit(Path(args.output), Path(args.checkout), args.tag)
         else:
             evidence = release_build(Path(args.output), native_directory=Path(args.native_directory),
                                      cache=Path(args.cache), checkout=Path(args.checkout), offline=args.offline,

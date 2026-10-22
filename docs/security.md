@@ -1774,8 +1774,13 @@ controlling the same OS UID or make arbitrary editors participate in the lease.
 Initialization uses an inode-bound durable intent before root publication.
 Release, skills and local metadata retain staged-object publication records;
 pending recovery requires that exact object, not merely matching content. The
-owned Codex subtree still permits unrelated neighbor edits after its completed
-publication. Interrupted unbound packets are preserved without adoption, and
+owned Codex subtree permits unrelated neighbor edits, after its completed publication and while a
+transaction runs: its ownership hash covers only the table's own keys and values, not the comments and
+blank lines tomlkit attaches after its last key (a comment above the next table), and a replacement or
+removal splices only the table's own lines, located exactly, so every other byte stays. A config that
+changed after the transaction recorded its preimage is written over its current bytes while the
+`telegram_search` entry is still the preimage's (or was removed); any other entry refuses, even one equal
+to ours, because only the object the transaction wrote is ever taken as its own. Interrupted unbound packets are preserved without adoption, and
 recovery attempts are bounded.
 Current pointer publication occurs last; interrupted installations fail closed
 until exact checked recovery. A first install stops no active broker and adopts no foreign data.
@@ -1871,13 +1876,17 @@ logged, echoed or raised; only hashes leave the module. The one exception is an 
 backup, which stays in the installation's private transaction evidence.
 
 **Ownership.** The receipt (`claude_desktop_ownership`) records an entry only when this installer wrote
-it. A first install adds only an absent entry. An identical entry is `reused` and not owned. A different
+it: a first install, upgrade or rollback whose step ended `registered`. An upgrade or rollback whose
+step ended otherwise replaced nothing and keeps the earlier record, so the entry it left in place stays
+owned; ownership is derived from the transaction journals, so a v1 receipt is read the same way. A first
+install adds only an absent entry. An identical entry is `reused` and not owned. A different
 entry refuses the whole install before anything is created (`claude_desktop_registration_conflict`);
 only `--adopt-legacy` replaces one, after its exact bytes are backed up. An upgrade or rollback replaces
 the entry only while it still equals the owned one, and an uninstall removes it only while it is exactly
-that, so an entry you changed is kept. After an interruption the same write is repeated only over a file
-still byte-identical to the journaled preimage, at most 8 attempts, and a killed attempt's temporary is
-unlinked only while it is the journaled inode.
+that, so an entry you changed is kept. After an interruption the write is made again, planned over the
+file as it is then, only while our entry is still absent, the owned one or the adopted one, at most 8
+attempts, so a neighbour written meanwhile is kept; a killed attempt's temporary is unlinked only while it
+is the journaled inode.
 
 **Limits.** Claude Desktop may rewrite its configuration from memory while it runs; the read-only
 `status` action reports `drift` and the manual entry, and the install asks for a restart. The entry
@@ -1904,14 +1913,40 @@ environment. Any failure prints one fixed line, `{"schema_version":1,"error_code
 and exits 1.
 
 The shim only chooses a candidate path. The launcher then re-admits the receipt, the index and every
-file of that release tree by hash before importing anything, and it admits only the release the
-receipt names, so a pointer to any other tree fails there.
+file of that release tree by hash before it imports any of the package's own code, and it admits only the
+release the receipt names, so a pointer to any other tree fails there. What runs before that check comes
+from the same candidate tree and is verified only afterwards: the interpreter (`python/bin/python3`,
+started with `-I -S -B`, so no site directory, no user path and no `PYTHON*` variables) and the
+standard-library modules it loads at startup, `launcher.py` itself, and the standard-library modules the
+launcher imports before admitting (`ctypes`, `hashlib`, `json`, `os`, `pathlib`, `platform`, `stat`,
+`sys`, and what they import). Until then only the shim's pointer and path checks and the tree's owner-only
+modes bind that candidate; a process that can write as the same user is outside these checks.
 
-**The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's committed
-`release-pins.json`, reviewed with the plugin commit the marketplace pins: no environment value,
-argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the reviewed bytes
-(sorted keys, two-space indent, one newline) and its `version` must equal `plugin.json`'s. Unpublished
-pins refuse (`release_not_published`), and published pins must carry a Team ID. Each of the four
+**What the plugin trusts.** Every plugin file, `bin/install`, `bin/mcp-entry`, `.mcp.json` and
+`release-pins.json` alike, comes from one commit: whatever commit of this repository's branch the user's
+marketplace clone last added or updated to. The marketplace entry names the plugin by a relative path
+with no ref or commit, nothing pins a plugin commit, and a marketplace update can change the scripts and
+the pins together without a separate review. The trust root of the plugin path is therefore that branch.
+Claude Code runs `bin/mcp-entry` as soon as the plugin is enabled, before any check of `release-pins.json`
+the user makes, and `bin/install` runs when the user starts it; both run as the user, and no signature,
+Team ID or pin covers either script. The Team ID check binds the downloaded seed, not the scripts that
+download and run it: a branch with tampered scripts and matching pins passes every pin check. The only
+check is to read the files (both scripts are short POSIX `sh`) before installing or enabling the plugin,
+and to compare every plugin file with `plugins/telegram-local/` at the release tag
+([Claude Code plugin](install.md#claude-code-plugin), step 3). That comparison shows the clone is at the
+tag; it does not protect against whoever can push to the repository, who can move the tag too.
+
+**The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's own files,
+`bin/install` and `release-pins.json`, as the user's marketplace clone holds them (above). In a release,
+`release-pins.json` is the release build's own file, copied byte for byte in the release commit, which
+carries the tag ([releasing](releasing.md), section 4), so the plugin copy at the tag `v<version>` is the
+reference to compare with. Before running the installer, inspect `<plugin root>/release-pins.json`: `team_id` must be
+the publisher Team ID `256X5MUA6S` stated in the README and the install guide, and `version` the release
+you expect; compare the file with `plugins/telegram-local/release-pins.json` at that tag. No environment
+value, argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the
+canonical bytes (sorted keys, two-space indent, one newline) of the one schema
+(`packaging/release_pins.py`) and its `version` must equal `plugin.json`'s. Unreleased pins refuse
+(`release_not_published`), and published pins must carry a Team ID. Each of the four
 assets comes from the fixed GitHub Releases URL pattern through `/usr/bin/curl -q --proto =https
 --proto-redir =https --tlsv1.2 --fail --silent --location --max-redirs 5`, with a 30-second connect
 timeout, a per-asset time limit and `--max-filesize` set to the pinned size. There is one attempt per
@@ -1919,8 +1954,9 @@ asset, no retry and no resume, so assets of different uploads are never mixed. T
 folder created under your home, and each must match its pinned size and sha256 before anything runs.
 Then the pinned `bootstrap.sh` installs with `--claude-code plugin --seed-team <pinned Team ID>`.
 `curl` sets no quarantine, so Gatekeeper never evaluates that seed; the Team ID check of its Developer
-ID designated requirement, on top of the sha256 pins, is what binds it to the publisher. The plugin
-never passes `--adopt-legacy`.
+ID designated requirement, on top of the sha256 pins, binds it to the Team ID the pins name. Both come
+from the plugin's files, so they bind the seed to the publisher only as far as those files are the
+reviewed ones and their `team_id` is `256X5MUA6S`. The plugin never passes `--adopt-legacy`.
 
 In plugin mode the installer writes no Claude Code user-scope entry and no `~/.claude/skills` copy. An
 existing user-scope entry is only noted (`claude_code_user_entry: present`), never removed. Every
@@ -1929,14 +1965,34 @@ plugin tool name, `mcp__plugin_<plugin>_<server>__<tool>`, fits the client's 64-
 
 ## Signing and Team ID trust chain (0.53 candidate)
 
-This is the chain from a downloaded kit to the running interpreter, outermost first. The Developer ID
-steps cannot be exercised until the owner's certificate exists; the ad hoc dry run exercises the same
-code with the identity `-`.
+This is the chain from a downloaded kit to the running interpreter, outermost first. The owner
+provisioned the Developer ID Application identity and the notary profile on 21.10.2026 (the signing
+preflight returned `notary: ok` for Team ID `256X5MUA6S`). The Developer ID steps have still not run:
+the signed and notarized build, its Gatekeeper observation and publication are owner-session rows. The
+ad hoc dry run exercises the same code with the identity `-`.
 
-1. **Pins.** The seed's sha256 and byte count and the index's sha256 are literals in `Install.command`
-   (the plugin's committed pins, or the operator's, on the other paths). `bootstrap.sh` checks the seed
-   against them before running it. The seed then authenticates the archive and every member against the
-   index before extraction, and the launcher re-hashes the installed tree at every start.
+**What binds what.** The trust root of the curl path, and the reference the plugin path is compared
+with, is `release-pins.json` as committed in the repository at the release tag
+(`plugins/telegram-local/release-pins.json`), never the copy published next to the assets: whoever can
+replace the assets can replace that copy too. The plugin's `bin/install` reads its own copy, the one in
+the user's marketplace clone, which holds the same bytes only while the clone is at that tag (see the
+runtime installer above). The release build writes
+the file in one schema (`packaging/release_pins.py`) and the release commit copies it byte for byte
+([releasing](releasing.md), section 4). The pins name the Team ID and bind `bootstrap.sh`, the seed, the
+index and the archive by sha256 and size; a user checks all four and compares `team_id` with the
+publisher Team ID `256X5MUA6S` stated in the README and the install guide before running anything
+([curl path](install.md#curl-path)). The tag binds the pins only as far as the repository is trusted:
+anyone who can push to it can move a tag or change the file, which is why the Team ID is compared with
+a value published outside the release. On the DMG path the DMG's Developer ID signature and stapled
+ticket cover the kit, including `Install.command`, `bootstrap.sh` and the pins embedded in
+`Install.command`; spctl accepts any notarized team, so the DMG's `TeamIdentifier` is compared too.
+
+1. **Pins.** The seed's sha256 and byte count and the index's sha256 are literals in `Install.command`,
+   rendered from the kit's `release-pins.json`; on the curl path they come from the tagged repository
+   copy above and on the plugin path from the plugin's copy, and both also pin `bootstrap.sh` itself.
+   `bootstrap.sh` checks the seed against
+   them before running it. The seed then authenticates the archive and every member against the index
+   before extraction, and the launcher re-hashes the installed tree at every start.
 2. **Team ID, `--seed-team`.** With `--seed-team <TEAMID>`, after the pins and before the seed runs,
    `bootstrap.sh` runs `codesign --verify --strict -R` with the requirement
    `native_runtime.designated_requirement(TEAMID)`: Apple's anchor, a certificate chain through Apple's
@@ -1953,8 +2009,9 @@ code with the identity `-`.
    `native_runtime` (source commit, TDLib version, schema hash, minimum OS, ABI, license source, OpenSSL
    version, build method) and the unsigned artifacts must equal the v1 pins. An `adhoc` lock has no
    Team ID and ships the unsigned bytes. A `developer-id` lock ships different bytes and its Team ID
-   must be listed in the row. No row lists a Team ID yet, so no Developer ID lock is admitted until a
-   reviewed commit adds the owner's. At load each native passes `codesign --verify --strict`, plus the
+   must be listed in the row. The one row lists the publisher's team, `256X5MUA6S`; any other Team ID
+   needs a reviewed commit to the table before its lock is admitted. At load each native passes
+   `codesign --verify --strict`, plus the
    Team ID requirement for `developer-id`, and the manifest's publisher must equal the lock's kind and
    Team ID (`publisher_mismatch`).
 5. **Signing.** `packaging/sign_payload.py` signs every Mach-O found by its magic, matched against the
@@ -1984,12 +2041,17 @@ against the Team ID requirement before submission and again after stapling, and 
 notarized Developer ID. Separately, a zip of the signed payload tree is submitted so the notary service
 registers every Mach-O. The shipped `release.tar.gz` is not submitted: the service does not look inside
 it, so its members are not notary-inspected, and its integrity rests on the pinned index and the seed
-(step 1), not on Gatekeeper. The seed keeps the quarantine attribute `cp` copies, so Gatekeeper
-evaluates it and, because a bare Mach-O cannot be stapled, fetches its ticket online. The seed
-creates the extracted files with plain `openat` calls and copies no extended attribute, so they carry no
-quarantine and Gatekeeper does not evaluate them individually; this has not been confirmed by listing
-attributes on a real install. A file fetched with `curl` has no quarantine, so on that path only the
-pins and the Team ID check stand between the download and the seed.
+(step 1), not on Gatekeeper. `bootstrap.sh` keeps the quarantine attribute `cp` copies to the staged
+seed, so that Gatekeeper can evaluate it and, because a bare Mach-O cannot be stapled, fetch its ticket
+online. This is the design and has not been observed: no signed seed has run, and on the DMG path it
+also depends on the mounted volume's files carrying quarantine at all (an owner-session observation).
+The seed creates the extracted files with plain `openat` calls and copies no extended attribute, so they
+carry no quarantine and Gatekeeper does not evaluate them individually; this has not been confirmed by
+listing attributes on a real install. A file fetched with `curl` has no quarantine, so on that path only
+the pins from the tagged repository copy and the Team ID check stand between the download and the seed.
+`Install.command` itself is not code-signed, so no notarization ticket names it; the DMG's signature and
+ticket cover the image it ships in. How Gatekeeper treats the double-clicked script from a stapled,
+quarantined image is a known limit until the owner-session run observes it.
 
 **Keychain.** The managed database key's Keychain access is tied to the code identity of the runtime's
 interpreter. A different signing identity than the one that created the item can make macOS ask once;
@@ -2012,10 +2074,14 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   `expected_package_version`. Every other byte of that file, capabilities included, stays, and a file
   that cannot be changed that way refuses (`policy_conflict`). `enrollment.json`, the managed key, the
   TDLib session and the Keychain are never written; their hashes are only read.
-- **Pending-send gate.** Before the first client write, and again right before the broker is booted out,
-  a running exact receipt-bound broker is asked, through its own interpreter, whether any client context
-  is connected. A context may hold a draft or an unresolved send outcome. Anything but "none" (including an
-  unknown answer) refuses with nothing changed (`pending_send_unresolved`). Only the exact label is
+- **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
+  right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
+  through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
+  whether any client context is connected. A context may hold a draft or an unresolved send outcome.
+  Anything but "none" (including an unknown answer) refuses (`pending_send_unresolved`). The bootout
+  follows the last check directly and precedes every client write, so a refusal leaves every client
+  entry, the plist and the session unchanged; after the first check, the copied release tree and the
+  unfinished transaction stay until the same command is repeated. Only the exact label is
   booted out, an owned broker only after its live registration matches the on-disk plist, and it is
   bootstrapped again after the commit only if it was running. An uncertain send is never retried.
 - **Downgrade refused.** A package version that sorts below the installed one refuses
@@ -2023,11 +2089,65 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **Rollback only to unchanged state.** It refuses (`rollback_refused`) unless `enrollment.json` is
   byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
   in the version line, and the previous release's manifest and Codex ownership still match.
-- **Commit order.** The new release tree is copied next to the old one, clients and the plist follow,
-  then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
+- **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
+  plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
+- **A late refusal restores the service first.** Any refusal after the broker stop and before
+  `current.json` switches (the same for a rollback, and for an adopting first install before
+  `current.json` exists) first puts the `runtime.toml` version line back if the transaction rewrote it
+  (to the value journaled before its first rewrite; a line changed since stays), writes the previous plist
+  back byte for byte, from a copy kept in the transaction (`service.previous`, its hash journaled) before
+  the first rewrite, and bootstraps the previous broker again only if it was loaded. Every run before the
+  commit checks the version line again, so the repeat pins the new version once more. The restore is
+  journaled: a write-ahead record carrying the refusal's fixed code precedes its effects and a closing
+  record follows them, every effect is decided from the files and launchd, and a run that finds the
+  write-ahead record without the closing one finishes the restore and refuses with the recorded code. It
+  is idempotent by state like the stop: the target's broker, which a login after a kill past the plist
+  rewrite starts from that plist, is booted out first, without the pending-send gate (short of the commit
+  its release is not admitted, so it serves no session); the previous broker loaded again stays; a broker
+  under the label that is neither stays running and refuses (`service_conflict`). It also removes the
+  temporaries killed client writes left beside the Codex config, the Claude Desktop config, the plist and
+  `runtime.toml`, each only by the name journaled before its creation (and, once journaled, its inode);
+  uninstall and the commit do the same for a change parked with one. A plist changed since the stop is
+  never overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
+  client entry written before the refusal, which already names the new release and so cannot start the
+  server until the repeat commits (only a refusal at the switch of `current.json` itself comes after
+  `receipt.json` names the new release, and then neither release starts until the repeat or an uninstall).
+  The same command stops the broker again (gated again) and resumes. Cycles are not limited, since each
+  is a run the user starts; the cycle lives in one journal record replaced in place, and a finished
+  restore drops its cycle's write records, so the journal does not grow with their number.
+- **The service step is idempotent by state.** Every run before the commit, whatever stage the journal
+  records, makes the service the target's: a previous definition that was loaded again after the stop is
+  gated and booted out again (also when no broker ran as the change began; then none is started after the
+  commit), and the plist is rewritten until it is the target's. After the commit only the target's plist
+  is bootstrapped, and only if a broker ran as the change began; any other definition refuses
+  (`service_conflict`) and nothing is started. A kill anywhere in a repeat's stop, or a login after it,
+  therefore cannot leave the old broker running on the new pin.
+- **A parked change has two ways out.** An upgrade or rollback refused before its stop, or after a late
+  refusal's finished restore, is parked: its repeat resumes it once the named object is put back or
+  removed, and `uninstall` goes over it, removing what the receipt the change started from owns plus what
+  the change's journal binds (its Codex entry once written, its skill copies, the Claude Code and Claude
+  Desktop entries it recorded `registered`), each only while it is exactly that object; its adoption
+  backups are kept. `rollback` and another kit refuse (`transaction_pending`). A change interrupted with
+  its broker stopped or its restore unfinished is not parked: uninstall names it too. A parked adopting
+  first install has no installed release yet, so only its repeat ends it.
+- **Client edits made meanwhile are merged.** Each client file is written over its current bytes. Only a
+  change of our own Codex entry or skill copy (or, when adopting, of the adopted foreign Codex entry)
+  after the transaction recorded it refuses, with the same fixed code before or right after our write
+  (`target_conflict`, or `foreign_registration` on a first install); a changed Claude Code or Claude
+  Desktop entry is left alone and reported `failed`, and an entry or skill copy removed meanwhile, also
+  one this transaction already wrote, is written again before the commit. A skill copy this transaction
+  published, edited and then put back in place is its own again only while it is the very object an attempt
+  published (the binding its journal records) and holds exactly the target's bytes; an edit that keeps the
+  binding but not the bytes still refuses (`skill_conflict`). Claude Code entries are
+  written only by its CLI, which keeps its neighbours.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
-  receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A Claude Code
+  receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,
+  by the inode the install intent binds, with whatever else was put inside it; install, upgrade and
+  rollback refuse a foreign top-level name in it (`runtime_conflict`), and the guide tells users to keep
+  nothing of their own there. An entry or skill copy that changed is kept (`kept`) or refuses. A client
+  entry is owned only when an install, upgrade or rollback of this installation wrote it, and it stays
+  owned through later steps that ended otherwise, wherever it is still exactly that entry. A Claude Code
   entry is changed only through the located `claude` CLI, each attempt recorded before it is made, and
   an entry that is still exactly ours after its removal attempts refuses as `uninstall_incomplete`.
 - **Adoption is explicit.** `--adopt-legacy` must be the last token of the `bootstrap.sh` command and is
@@ -2035,13 +2155,25 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   foreign entry or plist (Codex, Claude Code user scope, Claude Desktop, the broker plist) is replaced
   only after its exact bytes (at most 1 MiB each, at most 64 records) are recorded in the transaction,
   `adopted.json` and the receipt. A foreign broker passes the pending-send gate first. `uninstall` moves
-  every backup beside the removed root and reports it as `legacy_backups`.
+  every backup beside the removed root and reports it as `legacy_backups`. Adoption checks nothing about
+  what it replaces beyond its size and, for the plist, that its bytes stay the backed-up ones until they
+  are replaced: whatever `telegram_search` entry and broker plist it finds is backed up and replaced, not
+  only a 0.51 or 0.52 one. The pending-send gate runs the interpreter the foreign plist names, so adopting
+  trusts that interpreter. The `--adopt-legacy` recipe adds no check of its own: it runs `bootstrap.sh`
+  from the kit folder as given, so the release is checked only as far as the user first checks the four
+  kit files and the Team ID against the pins from the trust root, as on the curl path; `bootstrap.sh` then
+  checks the seed (sha256, size, Developer ID requirement for that Team ID), and the seed the index and
+  every archive member. Backups are kept, never restored automatically.
 - **Leftovers only when provably the installer's.** Beside the root, under the parent directory's lock, a
   killed first install's staged root is removed only when every entry in it is one the installer creates
   (an empty one only under one of its fixed attempt names), an older intent temporary only when it parses
   as the intent, and the root an uninstall retired only while it is the exact directory the install
-  intent binds; the intent goes last. A lookalike stays. An unfinished first install or uninstall is
-  named by the next action (`transaction_pending` with `pending_action`), never half-removed.
+  intent binds; the intent goes last. A lookalike stays, also one under the intent's recorded staged name
+  after the root's publication. An unfinished first install (its exact bound staged root) or an uninstall
+  short of its retiring rename is named by the next action (`transaction_pending` with `pending_action`),
+  never half-removed; uninstall reads the intent and makes that check before it removes anything. After the
+  retiring rename, the uninstall's last journaled step, the next install or uninstall finishes removing
+  the retired root, also when an interruption left it partly removed.
 
 The release trees of earlier versions stay in `releases/` until an uninstall removes the root. The
 checks are cooperative: they detect drift and refuse; they do not make arbitrary editors take the lease.

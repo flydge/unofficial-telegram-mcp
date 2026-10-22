@@ -49,14 +49,15 @@ def encode_pins(value):
 
 
 class CommittedFilesTests(unittest.TestCase):
-    def test_the_committed_pins_are_the_canonical_unpublished_placeholder_for_this_version(self):
+    def test_the_committed_pins_are_canonical_and_name_this_version(self):
+        # The unreleased placeholder, or in a release commit the build's own file (test_release_pins).
         data = PINS.read_bytes()
         value = json.loads(data)
         self.assertEqual(set(value), PIN_KEYS)
         self.assertEqual(data, encode_pins(value))  # The script compares exactly these bytes.
         plugin = json.loads((PLUGIN / '.claude-plugin' / 'plugin.json').read_text())
-        self.assertEqual((value['schema_version'], value['publication'], value['version'], value['team_id']),
-                         (1, 'unpublished', __version__, ''))
+        self.assertEqual((value['schema_version'], value['version']), (1, __version__))
+        self.assertIn(value['publication'], ('unreleased', 'published'))
         self.assertEqual(plugin['version'], value['version'])
 
     def test_the_script_uses_the_fixed_pattern_one_attempt_and_https_only(self):
@@ -108,7 +109,7 @@ name=${{url##*/}}
         text = text.replace(PASSWD_LINE, f"tg_home='{passwd}'\n").replace(CURL_LINE, f"tg_curl='{self.curl}'\n")
         (self.plugin / 'bin' / 'install').write_text(text)
 
-    def serve_stub_bootstrap(self, *, status='activation_required', installation=None):
+    def serve_stub_bootstrap(self, *, status='activation_required', installation='installed'):
         (self.served / 'bootstrap.sh').write_text(f'''#!/bin/sh
 for a in "$@"; do printf '%s\\n' "$a"; done > '{self.out}/bootstrap-argv'
 /usr/bin/env > '{self.out}/bootstrap-env'
@@ -179,7 +180,8 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
     def test_success_verifies_every_asset_runs_bootstrap_in_plugin_mode_and_removes_the_workspace(self):
         done = self.run_install()
         self.assertEqual((done.returncode, done.stderr), (0, ''))
-        self.assertEqual(json.loads(done.stdout), {'activation_command': 'synthetic', 'status': 'activation_required'})
+        self.assertEqual(json.loads(done.stdout), {'activation_command': 'synthetic', 'status': 'activation_required',
+                                                   'installation': 'installed'})
         self.assertEqual(self.workspaces(), [])
         workspace = Path((self.out / 'bootstrap-self').read_text().strip()).parent
         self.assertEqual(workspace.parent, self.home)
@@ -307,16 +309,24 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
         self.assertEqual(json.loads(done.stderr.splitlines()[0])['error_code'], 'integrity_failure')  # bootstrap's own line.
         self.assertTrue((workspace / 'release.tar.gz').is_file())
         for status, installation in (('refused', None), ('upgraded', None), ('upgraded', 'installed'),
-                                     ('rolled_back', 'rolled_back'), ('uninstalled', 'removed')):
+                                     ('rolled_back', 'rolled_back'), ('rolled_back', 'upgraded'), ('uninstalled', 'removed'),
+                                     ('activation_required', None), ('activation_required', 'upgraded'),
+                                     ('activation_required', 'rolled_back')):
             with self.subTest(status=status, installation=installation):
                 self.setUp()
                 self.serve_stub_bootstrap(status=status, installation=installation)
                 self.refusal(self.run_install(), 'result_invalid', retained=True)
 
-    def test_the_unpublished_placeholder_refuses_before_any_download(self):
-        self.pin(raw=PINS.read_bytes())
-        self.refusal(self.run_install(), 'release_not_published', retained=False)
-        self.assertEqual(self.calls(), [])
+    def test_unreleased_pins_refuse_before_any_download(self):
+        placeholder = encode_pins({**{k: 0 if k.endswith('_bytes') else '0' * 64 for k in PIN_KEYS},
+                                   'schema_version': 1, 'publication': 'unreleased', 'version': __version__,
+                                   'team_id': ''})
+        for raw in (placeholder, encode_pins(self.pins_for_served(publication='unreleased'))):
+            with self.subTest(raw=raw):
+                self.setUp()
+                self.pin(raw=raw)
+                self.refusal(self.run_install(), 'release_not_published', retained=False)
+                self.assertEqual(self.calls(), [])
 
     def test_malformed_or_unsafe_pins_refuse_before_any_download(self):
         good = self.pins_for_served()
@@ -336,6 +346,7 @@ printf '%s\\n' '{json.dumps({"activation_command": "synthetic", "status": status
             'no team': encode_pins({**good, 'team_id': ''}),
             'short team': encode_pins({**good, 'team_id': 'ABCDE'}),
             'unknown publication': encode_pins({**good, 'publication': 'draft'}),
+            'retired vocabulary': encode_pins({**good, 'publication': 'unpublished'}),
             'zero bytes': encode_pins({**good, 'archive_bytes': 0}),
             'oversized seed': encode_pins({**good, 'seed_bytes': 2097153}),
             'not json': b'pins\n',

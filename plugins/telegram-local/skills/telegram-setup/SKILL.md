@@ -5,7 +5,7 @@ description: Install the local Unofficial Telegram MCP bundle and connect the us
 
 # Telegram setup
 
-Paired with candidate `0.53.0.dev0`, contract 1. Needs Apple Silicon macOS 26+
+Paired with candidate `0.53.0rc1`, contract 1. Needs Apple Silicon macOS 26+
 and Claude Code, Codex or Claude Desktop running on the same Mac as the user's browser and Telegram
 phone app. The signed DMG and the public release assets do not exist yet, so the routes below
 describe what the installer does; confirm with the user which kit they have.
@@ -26,10 +26,12 @@ step seems to need one, stop and use the Terminal fallback at the end.
      (it reads its configuration only at launch), then go to step 4.
    - **Claude Code plugin** (`telegram-local`, added with `/plugin marketplace add` and
      `/plugin install`): the plugin carries no runtime until it is installed, and its server stops with
-     `runtime_not_installed`. With the user's go-ahead, run
-     `/bin/sh -p "<plugin root>/bin/install"` with no arguments, where `<plugin root>` is the directory
-     the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`); if you cannot tell what it is, ask the user
-     to run the command instead of guessing a path. It prints the installer result with
+     `runtime_not_installed`. First read `<plugin root>/release-pins.json`, where `<plugin root>` is the
+     directory the plugin is installed in (`${CLAUDE_PLUGIN_ROOT}`), and show the user its `version` and
+     `team_id`; continue only when `team_id` is the publisher Team ID `256X5MUA6S` from the project
+     README. With the user's go-ahead, run `/bin/sh -p "<plugin root>/bin/install"` with no arguments;
+     if you cannot tell what the plugin root is, ask the user to run the command instead of guessing a
+     path. It prints the installer result with
      `claude_code: plugin`. Continue at step 2 (over an installed release it upgrades instead; see
      "Upgrade, rollback and uninstall").
    - **Shell route** (`/bin/sh -p bootstrap.sh …` from a kit folder, with `--claude-code user`, `plugin` or
@@ -107,11 +109,13 @@ Installer results:
 
 ## Upgrade, rollback and uninstall
 
-Only when the user asks, and best in the user's own native Terminal. Before it stops the broker, the
-installer asks it whether any client context is connected, and an open MCP client can count as one.
-It then refuses with `pending_send_unresolved` and nothing has changed. Ask the user to quit every
-MCP client (or leave the Telegram tools unused for about five minutes) and run it again; stop after
-two refusals.
+Only when the user asks, and best in the user's own native Terminal. Before it stops the broker, and
+before it changes any client entry, the installer asks the broker whether any client context is
+connected, and an open MCP client can count as one. It then refuses with `pending_send_unresolved`: no
+client entry, broker or session has changed, but an upgrade or rollback may stay unfinished, and then
+other actions refuse with `transaction_pending` until the same command runs again. Ask the user to quit
+every MCP client (or leave the Telegram tools unused for about five minutes) and run the same command
+again; stop after two refusals and tell the user that this same command finishes it later.
 
 - **Upgrade:** the user runs the newer kit's `Install.command`, the same `bootstrap.sh` command with the
   newer pins (without `--claude-code`, or with the installed mode), or in plugin mode a newer plugin's
@@ -132,6 +136,18 @@ two refusals.
   installation folder is repeated with the launcher inside
   `~/Library/Application Support/.TelegramSearch-removed-<random>/releases/<sha256>/`. Never edit
   `runtime.toml`, the broker plist or a registration to get past a refusal.
+- `target_conflict`, `skill_conflict`, `policy_conflict` or `foreign_registration` from an upgrade, a
+  rollback or a first install that adopts an older installation: the installer's own `telegram_search`
+  entry, skill copy or `runtime.toml` version line changed while it ran. When that comes after the broker
+  stop, the installer has already put the old broker back (its `runtime.toml` version line and plist as
+  they were, started again if it was running), so the installed release keeps serving; the change stays
+  unfinished, and clients whose entry was already switched start the server only once the same command
+  finishes. Tell the user which object changed; the user puts it back or removes it themselves (a
+  removed `telegram_search` table or skill copy is written again), then runs the same command, as often
+  as needed. Edits elsewhere in those files are kept and need nothing. For an upgrade or rollback the
+  other way out is `uninstall`, which also removes what the change already wrote; `rollback` and another
+  kit refuse with `transaction_pending` until the same command or `uninstall` has run. An adopting first
+  install ends only with its own repeat.
 
 ## Terminal fallback
 

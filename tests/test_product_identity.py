@@ -35,6 +35,28 @@ LITERALS = {
     'TelegramSearchMCP': {'product_identity.py', 'config.py'},
 }
 SERVER_LITERAL = re.compile(r'''['"]telegram_search['"]''')
+REPOSITORY = SOURCE.parents[1]
+# packaging/, plugins/ and the marketplace manifest cannot all read product_identity (shell scripts, JSON
+# manifests, the shipped skill copies): each product name spelled there is on this explicit allowlist,
+# relative to the repository, so a rename knows every file it must edit. A name counts only as a whole
+# word (`TelegramSearch` is not found inside `TelegramSearchMCP`).
+SHIPPED = {
+    'DISPLAY_NAME': {'.claude-plugin/marketplace.json', 'plugins/telegram-local/.claude-plugin/plugin.json',
+                     'plugins/telegram-local/skills/telegram-search/SKILL.md',
+                     'plugins/telegram-local/skills/telegram-setup/SKILL.md'},
+    'BUNDLE_ROOT_NAME': {'packaging/bootstrap.sh', 'plugins/telegram-local/bin/mcp-entry',
+                         'plugins/telegram-local/skills/telegram-setup/SKILL.md'},
+    'PLUGIN_NAME': {'.claude-plugin/marketplace.json', 'plugins/telegram-local/.claude-plugin/plugin.json',
+                    'plugins/telegram-local/bin/install', 'plugins/telegram-local/skills/telegram-setup/SKILL.md'},
+    'MARKETPLACE_NAME': {'.claude-plugin/marketplace.json', 'plugins/telegram-local/.claude-plugin/plugin.json',
+                         'plugins/telegram-local/bin/install'},
+    'CODESIGN_ID_PREFIX': set(),
+}
+# The internal support directory (not renamed) as packaging/ and plugins/ spell it.
+SHIPPED_SUPPORT = {'packaging/release_gate.py', 'plugins/telegram-local/skills/telegram-setup/SKILL.md'}
+# The two scripts that spell the installation root: bootstrap.sh's default and the plugin shim's pointer path.
+ROOT_LINES = {'packaging/bootstrap.sh': 'bootstrap_root="$bootstrap_account/Library/Application Support/{}"',
+              'plugins/telegram-local/bin/mcp-entry': 'tg_root="$tg_home/Library/Application Support/{}"'}
 
 
 def codes(**names):
@@ -126,6 +148,29 @@ class RenameImpactTests(unittest.TestCase):
             found = {str(path.relative_to(SOURCE)) for path in self.sources() if literal in path.read_text('utf-8')}
             self.assertEqual(found - allowed, set(), literal)
             self.assertIn('product_identity.py', found, literal)
+
+    def shipped(self):
+        files = sorted(path for top in ('packaging', 'plugins', '.claude-plugin') for path in (REPOSITORY / top).rglob('*')
+                       if path.is_file() and '__pycache__' not in path.parts)
+        self.assertIn(REPOSITORY / 'packaging' / 'bootstrap.sh', files)
+        return {str(path.relative_to(REPOSITORY)): path.read_text('utf-8') for path in files}
+
+    def test_packaging_and_plugins_spell_product_names_only_on_the_explicit_allowlist(self):
+        texts = self.shipped()
+        for name, allowed in SHIPPED.items():
+            with self.subTest(name=name):
+                word = re.compile(r'(?<![A-Za-z0-9])' + re.escape(getattr(product_identity, name)) + r'(?![A-Za-z0-9])')
+                self.assertEqual({path for path, text in texts.items() if word.search(text)}, allowed)
+        self.assertEqual({path for path, text in texts.items() if 'TelegramSearchMCP' in text}, SHIPPED_SUPPORT)
+        self.assertEqual({path for path, text in texts.items() if SERVER_LITERAL.search(text)}, set())
+
+    def test_the_scripts_spell_the_installation_root_as_bundle_root_name(self):
+        for path, line in ROOT_LINES.items():
+            with self.subTest(path=path):
+                lines = [text for text in (REPOSITORY / path).read_text('utf-8').splitlines()
+                         if '/Library/Application Support/' in text]
+                self.assertEqual(len(lines), 1)
+                self.assertIn(line.format(product_identity.BUNDLE_ROOT_NAME), lines[0])
 
     def test_mcp_server_name_literal_appears_only_in_product_identity(self):
         found = {path.name for path in self.sources() if SERVER_LITERAL.search(path.read_text('utf-8'))}

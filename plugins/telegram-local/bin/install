@@ -5,15 +5,22 @@
 # --fail and no retry or resume (so assets of different uploads are never mixed), into a private
 # mktemp directory under the passwd home. Every asset must match its pinned size and sha256 before
 # anything runs; then the pinned bootstrap.sh installs with --claude-code plugin and --seed-team
-# <the pinned Team ID>, and the installer JSON is printed on stdout. A first install (activation_required),
-# an upgrade or a repeat (upgraded, or rolled_back with installation reused) is a success; any other result
-# refuses as result_invalid. The directory is removed on success and kept on failure. The reviewed plugin
-# commit, pinned by the marketplace, is the trust input: no environment value, argument or downloaded
-# byte selects a URL, pin or path. Published pins must carry
+# <the pinned Team ID>, and the installer JSON is printed on stdout. Exactly the results the installer returns
+# for a kit are a success: a first install (activation_required with installation installed or reused), an
+# upgrade or its repeat (upgraded with installation upgraded or reused), or the repeat of the release a finished
+# rollback went back to (rolled_back with installation reused); any other result refuses as result_invalid.
+# The directory is removed on success and kept on failure.
+# Trust input: this plugin's files (this script, bin/mcp-entry and release-pins.json, the release build's
+# file copied byte for byte in the release commit) as the user's marketplace clone holds them. The
+# marketplace names the plugin by a relative path with no ref, so that is whatever commit of the branch the
+# clone last updated to, and a marketplace update can change them all; no pin covers either script. Read
+# both scripts and compare every plugin file with the release tag (docs/install.md, Claude Code plugin,
+# step 3), release-pins.json's team_id and version included, before running this.
+# No environment value, argument or downloaded byte selects a URL, pin or path. Published pins must carry
 # a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
-# evaluates the downloaded seed, and bootstrap.sh's --seed-team check of its Developer ID designated
-# requirement is what binds it to the publisher, on top of the sha256 pins. Stock absolute tools only;
-# every refusal is one fixed JSON line on stderr.
+# evaluates the downloaded seed; bootstrap.sh's --seed-team check of its Developer ID designated
+# requirement binds it to that Team ID, on top of the sha256 pins, and both come from this plugin's pins.
+# Stock absolute tools only; every refusal is one fixed JSON line on stderr.
 set -eu
 umask 077
 
@@ -100,7 +107,7 @@ tg_file "$tg_pins" 4096 || tg_refuse pins_invalid
 tg_pins_size=$tg_size
 [ "$(tg_pin schema_version integer)" = 1 ] || tg_refuse pins_invalid
 tg_publication=$(tg_pin publication string) || tg_refuse pins_invalid
-case "$tg_publication" in published|unpublished) ;; *) tg_refuse pins_invalid;; esac
+case "$tg_publication" in published|unreleased) ;; *) tg_refuse pins_invalid;; esac
 tg_version=$(tg_pin version string) || tg_refuse pins_invalid
 [ "${#tg_version}" -le 32 ] || tg_refuse pins_invalid
 case "$tg_version" in [0123456789]*) ;; *) tg_refuse pins_invalid;; esac
@@ -161,15 +168,11 @@ tg_field() {
     /usr/bin/env -i /usr/bin/plutil -extract "$1" raw -expect string -o - "$tg_work/result.json" 2>/dev/null
 }
 tg_status=$(tg_field status) || tg_refuse result_invalid
-case "$tg_status" in
-    activation_required) ;;
-    upgraded|rolled_back)
-        # An upgrade, or a repeat of the installed release: installation upgraded or reused.
-        tg_installation=$(tg_field installation) || tg_refuse result_invalid
-        case "$tg_status:$tg_installation" in
-            upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
-            *) tg_refuse result_invalid;;
-        esac;;
+tg_installation=$(tg_field installation) || tg_refuse result_invalid
+# Exactly the results the installer can return for a kit: a first install (installed, or reused on a repeat), an
+# upgrade or its repeat, or the repeat of the release a finished rollback went back to.
+case "$tg_status:$tg_installation" in
+    activation_required:installed|activation_required:reused|upgraded:upgraded|upgraded:reused|rolled_back:reused) ;;
     *) tg_refuse result_invalid;;
 esac
 tg_result=$(/usr/bin/env -i /bin/cat "$tg_work/result.json") || tg_refuse result_invalid

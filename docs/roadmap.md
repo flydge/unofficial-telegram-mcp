@@ -2,14 +2,14 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md) · [Releasing](releasing.md)
 
-Updated **2026-10-21**. The released baseline remains **0.51.0**; the
+Updated **2026-10-22**. The released baseline remains **0.51.0**; the
 **0.52.0** release is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## In development — **0.53.0.dev0**
+## Release candidate — **0.53.0rc1**
 
-Client coverage and distribution: [spec](plans/0.53-client-distribution-spec.md) and its [task record](plans/0.53-client-distribution-spec.tasks.md). The earlier `0.53-*` and `0.54-*` specs (forward/copy, native video, archive and edit) shipped in 0.52.0.
+Client coverage and distribution: [spec](plans/0.53-client-distribution-spec.md), its [task record](plans/0.53-client-distribution-spec.tasks.md) and the [release notes](release-notes-0.53.0rc1.md). A local annotated tag with release-gate evidence; not published. The earlier `0.53-*` and `0.54-*` specs (forward/copy, native video, archive and edit) shipped in 0.52.0.
 
 **Implemented, with technical evidence only** (unit tests, synthetic kits, and an ad hoc dry run on the
 build Mac; no signed build and no real run in Claude Desktop or the plugin yet):
@@ -30,12 +30,14 @@ build Mac; no signed build and no real run in Claude Desktop or the plugin yet):
 - **F. Documentation:** the [install guide](install.md#install-from-the-053-kit-dmg-curl-and-plugin-development),
   the security model, the reference, the setup skill and the changelog.
 
-**Waits for the owner (phase G):** the Developer ID certificate and notary profile, then the signed and
-notarized build; the application-identity decision; the product name and its single rename commit; the
+**Waits for the owner (phase G):** the signed and notarized build (the Developer ID identity and notary
+profile were provisioned on 21.10.2026, preflight ok) and its Gatekeeper observation, including the
+unsigned `Install.command` double-click; the application-identity decision; the product name and its single rename commit; the
 clean-macOS-user run from a browser-downloaded DMG (QR with 2FA, interruption, logout and login,
 searches in Claude Code, Codex and Claude Desktop, and the plugin path); migration of the owner's daily
-install; publication. An independent critic review of the slice is also still to do. No signed DMG and
-no public release asset exists.
+install; publication. An independent critic review of the slice ran on 21.10.2026 and its findings were
+addressed on 22.10.2026; what stays open is listed in the [task record](plans/0.53-client-distribution-spec.tasks.md).
+No signed DMG and no public release asset exists.
 
 ## Current release — 0.52.0
 
@@ -143,7 +145,7 @@ Still unfinished:
 - **First (0.52.0):** the version and the tag.
 - **Backlog (deferred by the owner on 20.10.2026):** the clean macOS user install of the identity
   bundle, including an interrupted helper and a logout/login on that user.
-- **In development as 0.53.0.dev0 — client coverage and distribution** (chosen by the owner on
+- **Release candidate 0.53.0rc1 — client coverage and distribution** (chosen by the owner on
   20.10.2026; status above):
   - registration in Claude Desktop (implemented, synthetic evidence);
   - a Claude Code plugin package (implemented, synthetic evidence);
@@ -171,7 +173,7 @@ by remembered context, inspect it, process it, prepare a result and explicitly s
 it to the intended Telegram conversation without manual IDs or file copying.
 
 After the 0.52.0 gate, the next focus is client coverage and distribution (in development as
-0.53.0.dev0): the same QR-first
+0.53.0rc1): the same QR-first
 setup in Claude Desktop and as a Claude Code plugin, from a signed and notarized bundle. Short answers
 with usable sources, retained conversational selections, understandable approvals
 and recovery take priority alongside capabilities that actually block a task.
@@ -258,7 +260,7 @@ refusal was accepted, and no new reply delivery is claimed for that deleted sour
      day).
    - **Out of scope:** mandatory end-user API-pair entry or Terminal-only login does not satisfy
      this scope.
-2. **Priority #2 — client coverage and distribution (in development as 0.53.0.dev0):** the same
+2. **Priority #2 — client coverage and distribution (release candidate 0.53.0rc1):** the same
    QR-first setup registered in Claude Desktop and installable as a Claude Code plugin. This includes
    Developer ID signing and notarization of the bundle so that a downloaded copy passes Gatekeeper, a
    distinct product name before any public listing, and public hosting with source/notice closure.

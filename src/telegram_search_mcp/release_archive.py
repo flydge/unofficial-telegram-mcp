@@ -25,7 +25,9 @@ MAX_UNPACKED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_FILES = 10000
 MAX_MEMBER_BYTES = 256 * 1024 * 1024
 _HASH = re.compile(r'[0-9a-f]{64}\Z')
-_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:\.dev(0|[1-9][0-9]{0,5}))?\Z')
+# A release, a pre-release (aN, bN, rcN) or a development version, as the installer orders them.
+_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                      r'(?:(?:a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?\Z')
 
 
 class ReleaseArchiveError(ValueError):

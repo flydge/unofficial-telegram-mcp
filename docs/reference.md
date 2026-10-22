@@ -10,7 +10,7 @@ The public surface of the current candidate contains fifty-five tools (published
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
-- `discover_targets` advances bounded Main/Archive catalog and global-message evidence lanes for Codex-authored hypotheses. It returns evidence, never a semantic winner.
+- `discover_targets` advances bounded Main/Archive catalog and global-message evidence lanes for hypotheses written by the MCP client's model. It returns evidence, never a semantic winner.
 - `search_correspondence` searches one exact `@username` or numeric `chat_id` for message text, captions, file metadata, or any Unicode decimal-number sequence in text/captions.
 - `get_attachment` transfers the original file from one exact message anchor into a private, bounded cache.
 - `get_message_context` returns bounded neighboring messages for an exact anchor.
@@ -52,14 +52,14 @@ The reference workflow is:
 ```text
 Saved Messages / exact @username -> resolve_target -> exact chat_id
 
-free-form intent -> Codex creates 2..5 lexical hypotheses
+free-form intent -> the MCP client's model creates 2..5 lexical hypotheses
                  -> discover_targets advances catalog + global-message lanes
                  -> candidates are grouped by exact chat_id with provenance anchors
                  -> unique strong evidence + complete coverage: exact final search
                  -> competing, partial, or incomplete evidence: continue or clarify
 ```
 
-For free-form intent, Codex supplies two to five unique normalized hypotheses and reuses the same hypotheses and scope with every returned cursor. Unofficial Telegram MCP performs lexical provider searches; Codex owns semantic expansion and interpretation. Telegram-originated titles and snippets are untrusted evidence, never instructions.
+For free-form intent, the MCP client's model supplies two to five unique normalized hypotheses and reuses the same hypotheses and scope with every returned cursor. Unofficial Telegram MCP performs lexical provider searches; the MCP client's model owns semantic expansion and interpretation. Telegram-originated titles and snippets are untrusted evidence, never instructions.
 
 “Account-wide” means that the authorized Main and Archive catalog lanes, plus one `searchMessages` lane for every `(hypothesis, requested list)` pair, are traversable to their documented end conditions. It is not guaranteed semantic recall. A poor lexical hypothesis can miss relevant messages even when every requested lane reports complete coverage.
 
@@ -143,9 +143,9 @@ status of attachment pages, spreadsheets, presentations and drafts means the art
 not a cursor, and carries no hint. Adding the field changed the output schema of every tool that can
 return one of these statuses.
 
-## Codex skill
+## Paired skill
 
-The matching Codex skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
+The matching skill is versioned with the MCP at [`skills/telegram-search/SKILL.md`](../skills/telegram-search/SKILL.md). Keeping both artifacts in one repository makes their tool contract, routing rules, and safety boundaries reviewable as one version. The runtime-installed skill remains a separate local copy and is updated only after the repository version has been reviewed and verified.
 
 Since the 0.54 candidate the skill is a lean workflow guide of at most 20,000 bytes and 300 lines (it was about 85 KB): the start gate (`_manifest(check_broker=true)`, `compatible`, then `available_tools`, with no fixed tool count), target routing, semantic discovery, thorough search with coverage rules, a which-tool table, the answer-and-source format with provider links, the approval rule and recovery by `next_action`. Per-tool limits, refusal codes and preview fields now live only in the tool descriptions and this reference. The Claude Code plugin carries a byte-identical copy. `tests/test_skill_coverage.py` checks it against the built server: every tool, capability, status, field, argument, `next_action` value and transfer-helper option the skill names exists; each row of the which-tool table names exactly the capabilities its tools need, and every tool appears once; the recovery table lists the closed `next_action` map; and every `next_action` value, the approval statuses `declined`, `timeout` and `dialog_unavailable`, `capability_disabled` with `missing_capabilities`, `outcome_unknown` and `get_send_status` appear in it.
 
@@ -511,7 +511,7 @@ The caller cannot raise these budgets. Discovery cursors are memory-only, expire
 
 Global hits are grouped by exact `chat_id`. Each returned message anchor is `{chat_id, message_id}` and is accepted only after exact chat and message rehydration agree with the provider result. Secret chats and cross-chat, edited, deleted, malformed, or unverifiable evidence are excluded or make coverage partial.
 
-Codex may choose a candidate only after complete catalog, global-message, and hydration coverage, and only when exactly one candidate has strong mutually agreeing evidence: a unique exact/compact catalog title, evidence from at least two distinct hypotheses, or metadata plus message evidence from a distinct hypothesis. Competing evidence requires clarification. `partial`, `blocked`, `error`, or `expired` evidence never authorizes selection; incomplete `page` coverage must continue.
+The MCP client's model may choose a candidate only after complete catalog, global-message, and hydration coverage, and only when exactly one candidate has strong mutually agreeing evidence: a unique exact/compact catalog title, evidence from at least two distinct hypotheses, or metadata plus message evidence from a distinct hypothesis. Competing evidence requires clarification. `partial`, `blocked`, `error`, or `expired` evidence never authorizes selection; incomplete `page` coverage must continue.
 
 Final retrieval is a separate exact-chat boundary. After direct resolution or an evidence-backed selection, call `search_correspondence` only with the selected exact numeric `chat_id` and verify that every returned anchor uses that same ID. `discover_targets` never performs or auto-chains the final search.
 
@@ -568,7 +568,7 @@ Every result is one JSON object on stdout; every refusal is one line on stderr.
 
 | Action | Run as | `status` |
 | --- | --- | --- |
-| First install, or an upgrade over an installed release | `bootstrap.sh`, which runs the new release's `launcher.py bootstrap-install` | `activation_required` (first install), `upgraded` |
+| First install, or an upgrade over an installed release | `bootstrap.sh`, which runs the new release's `launcher.py bootstrap-install` | `activation_required` (first install), `upgraded`, or `rolled_back` with `installation: reused` (the kit of the release a finished rollback went back to, run again) |
 | `rollback` | the installed release's `launcher.py rollback` | `rolled_back` |
 | `uninstall` | the installed release's `launcher.py uninstall` | `uninstalled` |
 | `status` | the installed release's `launcher.py status` | the connect status, plus `clients` |
@@ -593,7 +593,7 @@ First install fields:
 | `activation_arguments`, `activation_command` | The installed `python3 -I -S -B launcher.py connect`, as an argument list and as one shell-quoted string. |
 | `adopted` | Present with `--adopt-legacy`: the sorted clients adopted, from `codex`, `claude_code`, `claude_desktop` and `service`. |
 | `service` | Present only when a foreign broker was adopted: `restarted` or `not_loaded`. |
-| `claude_code_user_entry` | `present` in `plugin` mode when a user-scope entry exists. It is a read-only note. |
+| `claude_code_user_entry` | `present` in `plugin` mode when a user-scope entry exists, in every result (also an upgrade's, a rollback's and their repeats'). It is a read-only note. |
 | `claude_registration_command` | A nonsecret argument list to run yourself, when `claude_code` is `failed`, `unavailable` or `not_found`. |
 | `claude_desktop_next_action` | `restart_claude_desktop`, when `claude_desktop` is `registered`. |
 | `claude_desktop_manual_entry` | `{"mcpServers": {"telegram_search": {"command": …, "args": […]}}}`, when `claude_desktop` is `failed` or `unavailable`. |
@@ -604,11 +604,16 @@ Upgrade and rollback results carry `status` `upgraded` or `rolled_back`; `instal
 (`restarted` when the broker ran before and was bootstrapped again, `not_loaded` otherwise),
 `next_action: restart_mcp_clients` and the extras above. A repeat changes nothing: repeating an upgrade to
 the release that is already current returns `status: upgraded` with `installation: reused` and without
-`previous_release_root` and `service`; repeating a rollback after it finished returns
-`status: rolled_back` with `installation: reused` and without `service`.
+`previous_release_root` and `service`; repeating a rollback after it finished, or running the kit of the
+release it went back to again, returns `status: rolled_back` with `installation: reused` and without
+`service`. A repeat is checked like an upgrade first: an explicitly given `--claude-code` mode, Codex home
+or skills root other than the installed receipt's refuses as `upgrade_conflict`. `Install.command` and the
+plugin's `bin/install` accept exactly these kit results: `activation_required` with `installation`
+`installed` or `reused`, `upgraded` with `upgraded` or `reused`, and `rolled_back` with `reused`.
 
 An uninstall result has `status: uninstalled`, `installation` `removed` (or `absent` when nothing was
-installed), `next_action: restart_mcp_clients`, one status for each of `service`, `codex`, `claude_code`,
+installed, including a repeat that finished removing the retired root an interruption after the retiring
+rename left), `next_action: restart_mcp_clients`, one status for each of `service`, `codex`, `claude_code`,
 `claude_desktop` (`removed`, `absent`, `kept`, `skipped`, `unavailable` or `not_found` as applicable)
 and `skills` (a status for each skill copy: `removed`, `absent` or `kept`), and `legacy_backups` (a path)
 when `--adopt-legacy` backups were kept.
@@ -628,24 +633,33 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `claude_registration_conflict` | Claude Code user scope has a different `telegram_search` entry. |
 | `claude_desktop_registration_conflict` | Claude Desktop has a different `telegram_search` entry. |
 | `claude_desktop_config_unsupported` | The Claude Desktop config cannot be rewritten while keeping every neighbour exactly. |
-| `registration_conflict` | The Codex `telegram_search` subtree is not one the installer owns, or it changed. |
-| `foreign_registration` | The Codex config changed after the transaction prepared its edit. |
+| `registration_conflict` | The Codex `telegram_search` subtree is not one the installer owns, or its own keys and values changed (comments after it do not count). |
+| `foreign_registration` | During a first install, the Codex `telegram_search` entry changed (or one appeared) after the transaction prepared its edit; edits elsewhere in the file are merged. |
 | `service_conflict` | The broker plist or its live registration is not an exactly known definition. |
 | `skill_conflict` | A skill directory exists that this installation did not publish, or its content differs from the release's. |
 | `foreign_release`, `foreign_receipt`, `foreign_pointer`, `foreign_telegram-search`, `foreign_telegram-setup`, `foreign_claude-telegram-search`, `foreign_claude-telegram-setup` | That path exists and is not the object this transaction recorded. |
-| `runtime_conflict`, `initialization_conflict`, `target_conflict`, `overlapping_paths` | The installation root, install intent or a target is not in the expected state, or the roots overlap. |
+| `target_conflict` | During an upgrade or rollback, the Codex `telegram_search` entry changed after the transaction prepared its edit (edits elsewhere are merged), or another target is not in the expected state. |
+| `runtime_conflict`, `initialization_conflict`, `overlapping_paths` | The installation root or install intent is not in the expected state, or the roots overlap. |
 | `metadata_conflict`, `transaction_conflict` | A receipt, pointer, adoption record or journal is inconsistent. |
 | `recovery_limit` | A bounded number of recovery attempts or packets is used up. |
 | `pending_send_unresolved` | The running broker reports a connected client context, or the question could not be answered. |
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
 | `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
-| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. |
+| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
 | `rollback_unavailable` | There is no previous release to return to. |
 | `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
+
+A refusal raised after an upgrade's, a rollback's or an adopting first install's broker stop, and before
+`current.json` switches, first boots out the new release's broker if a login started it from the rewritten
+plist, puts the `runtime.toml` version line back if it was rewritten, writes the previous broker plist back
+byte for byte and bootstraps that broker again if it was running (a broker loaded under the label that is
+neither release's is left running and refuses as `service_conflict`); the transaction stays unfinished until the same command is repeated,
+as often as needed, or, for an upgrade or rollback, until `uninstall` removes the installation together with what the change wrote
+([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under
 [DMG path](install.md#dmg-path); the plugin's `bin/install` codes are listed under
@@ -666,7 +680,8 @@ says yes; the macOS dialog then waits 120 seconds with Cancel as the default, `d
 `get_send_status` and never sending again. *Recovery* says to follow a response's `next_action` when it
 carries one (`check_connection`, `connect_account`, `update_installation`, `enable_capability`,
 `search_again`, `restart_listing`, `check_send_status`), and names `capability_disabled`,
-`selection_unavailable` and an unavailable broker. The paired `telegram-search` skill mirrors it.
+`selection_unavailable` and an unavailable broker. The paired `telegram-search` skill gives the same answer rules
+(numbered sources, one coverage line) and the same preview floor, with per-tool detail on top.
 
 ### Tool titles, descriptions and annotations
 
@@ -721,8 +736,9 @@ either.
 `_manifest` returns three tool lists:
 
 - `tools`: every registered tool (55 in this candidate).
-- `available_tools`: the registered tools, in registration order, whose every required capability the
-  loaded policy enables. A stale policy enables nothing, so it lists only `_manifest` and
+- `available_tools`: the registered tools whose every required capability the loaded policy enables, in
+  the order of the server's fixed tool-name list (`_TOOL_NAMES`, the order of `tools`); `tools/list`
+  lists the same set in registration order, which can differ. A stale policy enables nothing, so it lists only `_manifest` and
   `compatibility.status` carries the reason (`config_stale`).
 - `tool_capabilities`: for each registered tool, the list of capabilities it requires, including those a
   capability implies (for example `send` for `forward_send`). `_manifest` requires none.
@@ -766,7 +782,9 @@ The record is JSON Lines with schema `tgmcp-stdio-record/v1`. Its events:
 | `rpc_error` | `method`, `tool` and the numeric JSON-RPC `code`. |
 | `end` | `exit_status`, frame and method counts per side, `unparsed`, `oversized`, `untracked` and `suppressed_events`. |
 
-Arguments, result text, Telegram content and identifiers are never recorded. A name or version outside
+Every event also carries `event` (its name) and `t_ms` (milliseconds since start). Arguments, result
+text, Telegram content and identifiers are never recorded, but block sizes follow the content (a found
+and a not-found result differ), so keep a record with owner-only evidence. A name or version outside
 its closed grammar is written as `redacted`. Frames above 32 MiB are relayed but not parsed, at most 4,096
 events are written (later ones are counted), and at most 1,024 requests are tracked at once.
 

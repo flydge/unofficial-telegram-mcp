@@ -20,7 +20,7 @@ class BundleArchiveTests(unittest.TestCase):
                 item=tarfile.TarInfo(name); item.size=len(data); item.type=kind; item.linkname='outside'
                 tar.addfile(item,io.BytesIO(data))
         archive=root/'archive.tar.gz'; archive.write_bytes(gzip.compress(buffer.getvalue()+trailing,mtime=0)); archive.chmod(0o400)
-        body=dict(schema_version=1,target='macos-arm64',release_version='0.53.0.dev0',archive_bytes=archive.stat().st_size,
+        body=dict(schema_version=1,target='macos-arm64',release_version='0.53.0rc1',archive_bytes=archive.stat().st_size,
             archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),unpacked_bytes=7,
             files=[dict(path='safe/value.txt',bytes=7,sha256=hashlib.sha256(b'checked').hexdigest(),executable=False)])
         return archive,load_archive_index(json.dumps(body).encode())
@@ -31,6 +31,19 @@ class BundleArchiveTests(unittest.TestCase):
             extract_verified_archive(archive,index,root/'new')
             self.assertEqual((root/'new/safe/value.txt').read_bytes(),b'checked')
             self.assertEqual((root/'new/safe/value.txt').stat().st_mode&0o777,0o400)
+
+    def test_release_version_grammar_admits_releases_pre_releases_and_development_versions_only(self):
+        def index(version):
+            return json.dumps(dict(schema_version=1, target='macos-arm64', release_version=version, archive_bytes=1,
+                                   archive_sha256='0' * 64, unpacked_bytes=1,
+                                   files=[dict(path='a', bytes=1, sha256='0' * 64, executable=False)])).encode()
+        for good in ('0.53.0', '0.53.0rc1', '0.53.0a2', '0.53.0b3', '0.53.0.dev0', '0.53.0rc1.dev2', '10.0.12'):
+            with self.subTest(version=good):
+                self.assertEqual(load_archive_index(index(good)).release_version, good)
+        for bad in ('0.53', '0.53.0rc', '0.53.0RC1', '0.53.0-rc1', '0.53.0c1', '0.53.0rc01', '00.53.0', '0.53.0.post1',
+                    ' 0.53.0', '0.53.0\n'):
+            with self.subTest(version=bad), self.assertRaises(ReleaseArchiveError):
+                load_archive_index(index(bad))
 
     def test_duplicate_traversal_link_illegal_type_tail_and_corruption_are_retained(self):
         cases=[ [('safe/value.txt',b'checked',tarfile.REGTYPE)]*2,
