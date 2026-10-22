@@ -143,7 +143,9 @@ class ContractTextTests(unittest.TestCase):
     def test_refusal_texts_equal_the_source_constants(self):
         from telegram_search_mcp import approval_prompt, server
         prefix = "Error executing tool {}: "
-        self.assertEqual(matrix.INVALID_ARGUMENTS, server._INPUT_REFUSALS["invalid_arguments"])
+        schema = {"properties": {"a": {}, "b": {}}, "required": ["a"]}
+        self.assertEqual(server._argument_refusal("t", schema, {"zzz": 1}, None),
+                         matrix.INVALID_ARGUMENTS.format("t", "missing a; 1 unexpected argument(s)"))
         self.assertEqual(matrix.UNKNOWN_TOOL, server._INPUT_REFUSALS["unknown_tool"])
         self.assertEqual(matrix.CAPABILITY_DISABLED.format("t", "c"),
                          prefix.format("t") + server._GUARD_REFUSALS["capability_disabled"].format("c"))
@@ -157,7 +159,8 @@ class ContractTextTests(unittest.TestCase):
 
     def test_refusal_texts_are_the_documented_ones(self):
         reference = (ROOT / "docs" / "reference.md").read_text(encoding="utf-8")
-        for text in (matrix.INVALID_ARGUMENTS.format("<tool>"), matrix.UNKNOWN_TOOL,
+        for text in (matrix.INVALID_ARGUMENTS.format("<tool>", "missing <names>; invalid <names>; <n> unexpected "
+                                                     "argument(s)"), matrix.UNKNOWN_TOOL,
                      matrix.CAPABILITY_DISABLED.format("<tool>", "<capabilities>"),
                      matrix.CONFIG_STALE.format("<tool>"), matrix.CLIENT_SCHEMA_MISMATCH.format("<tool>")):
             self.assertIn(text, reference)

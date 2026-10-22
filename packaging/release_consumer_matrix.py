@@ -135,7 +135,8 @@ BROKER_START_SECONDS, DRIVE_SECONDS, CENSUS_SECONDS, BUILD_SECONDS = 30, 900, 18
 REAL_DIALOG_SECONDS = 5
 
 # Fixed texts a consumer sees (docs/reference.md); a deliberate text change updates these.
-INVALID_ARGUMENTS = "Error executing tool {}: invalid_arguments (arguments must match the input schema)"
+# Argument refusals name only schema parameters (missing, invalid) and count undeclared keys.
+INVALID_ARGUMENTS = "Error executing tool {}: invalid_arguments: {}"
 UNKNOWN_TOOL = "unknown_tool (refresh tools/list)"
 CAPABILITY_DISABLED = ("Error executing tool {}: capability_disabled: {} (owner must enable in runtime.toml); "
                        "next_action: enable_capability")
@@ -637,19 +638,22 @@ class Driver:
             cell.expect(f"{prompt.name}:grants_nothing", any("grants no capability" in text for text in texts))
 
     async def cell_refusal_invalid_arguments(self, cell, consumer, tools) -> None:
-        for name, arguments in (("list_chats", {"scope": "everywhere", "limit": 1}),
-                                ("list_chats", {"scope": "main", "limit": 1, "path": "/nonexistent"}),
-                                ("read_attachment", {"artifact_id": 7}),
-                                ("prepare_text_send", {"recipient": True, "text": "x"})):
+        for name, arguments, clause in (("list_chats", {"scope": "everywhere", "limit": 1}, "invalid scope"),
+                                        ("list_chats", {"scope": "main", "limit": 1, "path": "/nonexistent"},
+                                         "1 unexpected argument(s)"),
+                                        ("read_attachment", {"artifact_id": 7}, "invalid artifact_id"),
+                                        ("prepare_text_send", {"recipient": True, "text": "x"}, "invalid recipient"),
+                                        ("prepare_text_send", {"text": "x"}, "missing recipient")):
             text = error_text(await consumer.call(name, arguments))
-            cell.expect(f"{name}:text", text == INVALID_ARGUMENTS.format(name))
+            cell.expect(f"{name}:text", text == INVALID_ARGUMENTS.format(name, clause))
             cell.expect(f"{name}:no_detail", text is not None and "pydantic" not in text and "/nonexistent" not in text)
 
     async def cell_refusal_invalid_arguments_hook(self, cell, consumer, tools) -> None:
-        for arguments in ({"target": FIRST_CHAT, "query": "matrix"},
-                          {"target": FIRST_CHAT, "query": {"text": "matrix"}, "date_from": "yesterday"}):
+        for arguments, clause in (({"target": FIRST_CHAT, "query": "matrix"}, "invalid query"),
+                                  ({"target": FIRST_CHAT, "query": {"text": "matrix"}, "date_from": "yesterday"},
+                                   "invalid date_from")):
             text = error_text(await consumer.call("search_correspondence", arguments))
-            cell.expect("text", text == INVALID_ARGUMENTS.format("search_correspondence"))
+            cell.expect("text", text == INVALID_ARGUMENTS.format("search_correspondence", clause))
 
     async def cell_refusal_unknown_tool(self, cell, consumer, tools) -> None:
         text = error_text(await consumer.call("matrix_unknown_tool", {"probe": "matrix"}))
@@ -741,15 +745,17 @@ class Driver:
             cell.expect("retained_selections." + key, selections.get(key) == value)
 
     async def cell_caps_input_bounds(self, cell, consumer, tools) -> None:
-        for name, arguments in (("list_chats", {"scope": "main", "limit": LIST_PAGE + 1}),
-                                ("read_attachment", {"artifact_id": None, "max_chars": 20_001}),
-                                ("read_attachment", {"artifact_id": None, "max_pages": 6}),
-                                ("get_message_context", {"anchor": {"chat_id": FIRST_CHAT, "message_id": 1},
-                                                         "radius": 5}),
-                                ("create_local_artifact", {"file_name": "a" * 129, "content": "x"}),
-                                ("prepare_text_send", {"recipient": FIRST_CHAT, "text": "x" * 4097})):
+        for name, arguments, parameter in (("list_chats", {"scope": "main", "limit": LIST_PAGE + 1}, "limit"),
+                                           ("read_attachment", {"artifact_id": None, "max_chars": 20_001}, "max_chars"),
+                                           ("read_attachment", {"artifact_id": None, "max_pages": 6}, "max_pages"),
+                                           ("get_message_context", {"anchor": {"chat_id": FIRST_CHAT, "message_id": 1},
+                                                                    "radius": 5}, "radius"),
+                                           ("create_local_artifact", {"file_name": "a" * 129, "content": "x"},
+                                            "file_name"),
+                                           ("prepare_text_send", {"recipient": FIRST_CHAT, "text": "x" * 4097},
+                                            "text")):
             cell.expect(f"{name}:refused", error_text(await consumer.call(name, arguments))
-                        == INVALID_ARGUMENTS.format(name))
+                        == INVALID_ARGUMENTS.format(name, "invalid " + parameter))
 
     async def prepared(self, cell, consumer, text: str) -> str | None:
         draft = structured(await consumer.call("prepare_text_send", {"recipient": FIRST_CHAT, "text": text}))

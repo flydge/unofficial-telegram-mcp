@@ -56,7 +56,7 @@ CLAUSES = (re.compile(f"missing ({NAMES})"), re.compile(f"invalid ({NAMES})"),
 FALLBACK = 'Error executing tool {}: invalid_arguments (arguments must match the input schema)'
 ART = 'artifact_' + 'a' * 32 + '_' + 'b' * 64 + '_1'
 SEL = 'selection_' + 'c' * 64
-ANCHOR = {'chat_id': -1001234567890, 'message_id': 77}
+ANCHOR = {'chat_id': 4242, 'message_id': 77}
 # One valid raw-source call per tool that accepts a retained selection.
 RAW_SOURCES = {
     'get_attachment': {'anchor': ANCHOR}, 'get_message_context': {'anchor': ANCHOR},
@@ -66,8 +66,8 @@ RAW_SOURCES = {
     'read_presentation': {'artifact_id': ART},
     'prepare_artifact_send': {'artifact_id': ART, 'recipient': 7, 'display_name': 'report.pdf',
                               'mime_type': 'application/pdf'},
-    'prepare_reply_text_send': {'recipient': -1001234567890, 'text': 'Thanks', 'reply_to': ANCHOR},
-    'prepare_reply_artifact_send': {'artifact_id': ART, 'recipient': -1001234567890, 'display_name': 'report.pdf',
+    'prepare_reply_text_send': {'recipient': 4242, 'text': 'Thanks', 'reply_to': ANCHOR},
+    'prepare_reply_artifact_send': {'artifact_id': ART, 'recipient': 4242, 'display_name': 'report.pdf',
                                     'mime_type': 'application/pdf', 'reply_to': ANCHOR},
 }
 SELECTED_BY = {'artifact_id': 'selection_id', 'anchor': 'selection_id', 'anchors': 'selection_id',
