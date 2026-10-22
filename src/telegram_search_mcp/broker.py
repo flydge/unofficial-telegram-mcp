@@ -25,7 +25,8 @@ from pydantic import ValidationError
 from .artifact_store import ArtifactStore, ArtifactStoreError
 from .artifact_authority import ArtifactAuthority, ArtifactReaderClient, ArtifactUnavailable, active_scope
 from .config import ConfigurationError
-from .approval_prompt import DETAILS as APPROVAL_DETAILS, NOT_GIVEN, ApprovalDecision, approval_outcome, decide_approved_send
+from .approval_prompt import (DETAILS as APPROVAL_DETAILS, NOT_GIVEN, UNAVAILABLE as DIALOG_UNAVAILABLE, ApprovalDecision,
+                              approval_outcome, decide_approved_send)
 from .attachment_service import get_attachment, get_message_context
 from .message_reader import read_messages
 from .reply_reader import read_reply_chain
@@ -220,6 +221,8 @@ class Broker(SelectionBrokerMixin):
         self._upload_authorities = LocalUploadAuthorityRegistry(self._uploads, self._artifact_authority,
                                                                admission=self._upload_admission)
         self._approval_prompt = approval_prompt
+        # One owner dialog at a time (_owner_dialog): held only while a dialog is open.
+        self._dialog_lock = threading.Lock()
         self._draft_recipient_titles: dict[str, str] = {}
         self._selections = SelectionRegistry(ttl_seconds=self._policy.selection_ttl_seconds)
         self._artifact_provenance = {}
@@ -536,6 +539,17 @@ class Broker(SelectionBrokerMixin):
                 return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
             except (ArtifactUnavailable, TDLibError):
                 return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
+
+    def _owner_dialog(self, **facts) -> ApprovalDecision | bool:
+        """The owner's approval dialog, one at a time across every send and apply. While another dialog is open
+        this call shows none and answers dialog_unavailable at once: its draft stays pending, and nothing waits
+        behind the open dialog, so a click meant for one draft can never approve another."""
+        if not self._dialog_lock.acquire(blocking=False):
+            return DIALOG_UNAVAILABLE
+        try:
+            return self._approval_prompt(**facts)
+        finally:
+            self._dialog_lock.release()
 
     def _upload_admission(self):
         """Observe bounded policy outside locks, return a pure final fact check."""
@@ -1797,7 +1811,7 @@ class Broker(SelectionBrokerMixin):
             if entry.reply_source is None:
                 reply_confirmation[('topic_preview' if entry.topic is not None or entry.outgoing_entities
                                     else 'draft_preview')] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._approval_prompt(
+            decision = approval_outcome(self._owner_dialog(
                 recipient_title=expected_title, recipient=entry.recipient,
                 display_name=entry.display_name, size_bytes=entry.size_bytes,
                 sha256=entry.sha256, caption=entry.caption, kind=entry.kind, text=entry.text,
@@ -2085,7 +2099,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(FORWARD_UNAVAILABLE)
             preview = self._forward_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='forward', forward_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2257,7 +2271,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(VIDEO_UNAVAILABLE)
             preview = self._video_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption=entry.caption, kind='video', video_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2443,7 +2457,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(ARCHIVE_UNAVAILABLE)
             preview = self._archive_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='archive', archive_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2612,7 +2626,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._approval_prompt(recipient_title=expected_title,
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='text_edit', text_edit_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.

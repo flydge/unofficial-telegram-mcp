@@ -459,6 +459,8 @@ class TopicTextTests(unittest.TestCase):
             barrier.wait(timeout=5)
             return True
         self.broker._approval_prompt = approve
+        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+        self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self.send, preview['draft_id']) for _ in range(2)]
             outcomes = [f.result(timeout=8)['status'] for f in futures]

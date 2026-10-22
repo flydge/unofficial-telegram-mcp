@@ -2315,7 +2315,16 @@ Everything else maps to a status that never sends or changes anything:
   125-second process limit, an exception inside the script, any exception from `subprocess.run` itself
   (including a `ValueError` for a NUL byte or an unencodable argument), a timer value outside 1–120 seconds, or
   arguments that do not describe exactly one preview bound to the broker's own draft. Any other value an
-  injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`.
+  injected prompt returns, such as a string or a truthy object, is also `dialog_unavailable`. So is a send
+  or apply that arrives while another owner dialog is open (below).
+
+**One dialog at a time.** The broker shows at most one owner dialog, across every send and apply kind and
+every client. A call that arrives while a dialog is open shows none: it answers `dialog_unavailable` at
+once, makes no attempt and leaves its draft pending, and nothing is queued behind the open dialog. Every
+dialog has the same size and position, so stacked dialogs would let a click meant for one draft approve
+another; a client that keeps calling `send_prepared_*` on other drafts while the owner reads a dialog gets
+only refusals. A repeated call on the same draft while its dialog is open is refused the same way; once
+that dialog approved and sent, a repeat replays the receipt.
 
 The dialog runs through `subprocess.run` with a bounded timeout. Details are fixed strings; no input,
 dialog text or provider message is echoed.
