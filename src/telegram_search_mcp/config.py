@@ -104,6 +104,8 @@ def _homebrew_tdlib() -> Path:
 RUNTIME_POLICY_PATH = APP_SUPPORT_ROOT / "runtime.toml"
 LEGACY_CAPABILITIES = ("artifacts", "read", "send")
 KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "forward_send", "video_send", "archive_chats", "edit_own_text"))
+# Retained selections live a fixed, never-sliding time from capture start.
+SELECTION_TTL_DEFAULT, SELECTION_TTL_MINIMUM, SELECTION_TTL_MAXIMUM = 900, 60, 1800
 
 
 @dataclass(frozen=True)
@@ -115,10 +117,14 @@ class RuntimePolicy:
     expected_schema_fingerprint: str | None = None
     source_path: Path | None = None
     max_draft_ttl_seconds: int = 900
+    selection_ttl_seconds: int = SELECTION_TTL_DEFAULT
 
     def __post_init__(self) -> None:
         if type(self.max_draft_ttl_seconds) is not int or not 1 <= self.max_draft_ttl_seconds <= 86400:
             raise ValueError("draft TTL must be an integer from 1 to 86400 seconds")
+        if (type(self.selection_ttl_seconds) is not int or
+                not SELECTION_TTL_MINIMUM <= self.selection_ttl_seconds <= SELECTION_TTL_MAXIMUM):
+            raise ValueError("selection TTL must be an integer from 60 to 1800 seconds")
 
     def public_settings(self) -> dict[str, object]:
         return {"config_version": self.config_version,
@@ -126,7 +132,8 @@ class RuntimePolicy:
                 "expected_package_version": self.expected_package_version,
                 "expected_contract_version": self.expected_contract_version,
                 "expected_schema_fingerprint": self.expected_schema_fingerprint,
-                "max_draft_ttl_seconds": self.max_draft_ttl_seconds}
+                "max_draft_ttl_seconds": self.max_draft_ttl_seconds,
+                "selection_ttl_seconds": self.selection_ttl_seconds}
 
     def require_current(self) -> None:
         if self.source_path is not None and load_runtime_policy(self.source_path) != self:
@@ -163,7 +170,8 @@ def load_runtime_policy(path: Path = RUNTIME_POLICY_PATH) -> RuntimePolicy:
     try:
         value = tomllib.loads(data.decode("utf-8"))
         allowed = {"config_version", "enabled_capabilities", "expected_package_version",
-                   "expected_contract_version", "expected_schema_fingerprint", "max_draft_ttl_seconds"}
+                   "expected_contract_version", "expected_schema_fingerprint", "max_draft_ttl_seconds",
+                   "selection_ttl_seconds"}
         if set(value) - allowed or type(value.get("config_version")) is not int or value["config_version"] != 1:
             raise ValueError
         capabilities = value.get("enabled_capabilities")
@@ -183,6 +191,7 @@ def load_runtime_policy(path: Path = RUNTIME_POLICY_PATH) -> RuntimePolicy:
         return RuntimePolicy(enabled_capabilities=tuple(sorted(capabilities)),
                              expected_package_version=package, expected_contract_version=contract,
                              expected_schema_fingerprint=fingerprint, source_path=path,
-                             max_draft_ttl_seconds=value.get("max_draft_ttl_seconds", 900))
+                             max_draft_ttl_seconds=value.get("max_draft_ttl_seconds", 900),
+                             selection_ttl_seconds=value.get("selection_ttl_seconds", SELECTION_TTL_DEFAULT))
     except (ValueError, UnicodeError, TypeError):
         raise ConfigurationError("runtime configuration version or settings are invalid") from None

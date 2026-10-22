@@ -98,8 +98,10 @@ class SelectionClientMixin:
             raw=self._request('retain_selection',request.model_dump(mode='json'))
             result=TypeAdapter(RetainSelectionResponse).validate_json(json.dumps(raw,allow_nan=False),strict=True)
             if isinstance(result,SelectionRefusal):return result
+            # The proxy loaded the same trusted policy; the broker cannot widen the lifetime.
+            ttl=self._policy.selection_ttl_seconds
             remaining=(result.expires_at-datetime.now(timezone.utc)).total_seconds()
-            if not 0<remaining<=300:raise ProxySelectionRefusal()
+            if not 0<remaining<=ttl:raise ProxySelectionRefusal()
             if source.kind=='file':
                 if result.kind!='file' or result.file.artifact_id!=source.artifact_id:raise ProxySelectionRefusal()
                 _,_,checksum,size=source.artifact_id.split('_')
@@ -121,7 +123,7 @@ class SelectionClientMixin:
                     # A verified replacement cannot leave stale same-source issuance
                     # consuming local capacity or being reused after source reversion.
                     self._selection_states={k:v for k,v in self._selection_states.items() if v.source_key!=source_key}
-                    prior=_Issuance(result.model_copy(deep=True),self._selection_generation,min(started+300,time.monotonic()+remaining),source_key)
+                    prior=_Issuance(result.model_copy(deep=True),self._selection_generation,min(started+ttl,time.monotonic()+remaining),source_key)
                     self._selection_states[result.selection_id]=prior
                 self._selection_local(result.selection_id)
             return result

@@ -85,8 +85,16 @@ enabled_capabilities = ["read", "artifacts", "send"]
 expected_package_version = "0.51.0"
 expected_contract_version = 1
 max_draft_ttl_seconds = 900 # Optional; strict integer 1..86400, default 900.
+selection_ttl_seconds = 900 # Optional (0.54 candidate); strict integer 60..1800, default 900.
 # Optionally pin expected_schema_fingerprint to the reviewed local manifest value.
 ```
+
+| Optional setting | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `max_draft_ttl_seconds` | strict integer 1..86400 | 900 | Lifetime of each unsent draft revision |
+| `selection_ttl_seconds` | strict integer 60..1800 | 900 | Fixed lifetime of a [retained selection](#exact-retained-selections-opt-in-candidate) from capture start; never renewed and still capped by the artifact or verified-target expiry |
+
+A boolean, float, string or out-of-range value rejects the whole file. Both settings are part of the effective configuration that `config_fingerprint` covers. Since the 0.54 candidate `selection_ttl_seconds` is always included, so every `config_fingerprint`, the default one too, differs from 0.53's; a proxy and broker that loaded different values report `config_mismatch`. Before the 0.54 candidate the selection lifetime was a fixed 300 seconds. Schemas and the schema fingerprint are unchanged.
 
 `read` covers existing target discovery, exact search and context; `artifacts` covers existing selected attachments and local artifact/upload operations; `send` covers existing previews and approved sends. Omitting this file preserves exactly those existing capabilities, including all existing approval requirements. A policy written by the 0.52 candidate `connect` lists only `read` and `artifacts`; `send` must then be added explicitly (see [Enabling more capabilities](install.md#enabling-more-capabilities-candidate)). `read_messages` enables selected full-message reads and is not a legacy default; add it explicitly to `enabled_capabilities` to opt in. `read_history` independently enables bounded history reads and must also be added explicitly. `read_reply_chain` independently enables bounded same-chat ancestry and must be added explicitly. `list_topics` independently enables forum topic listing and must be added explicitly. `read_topic_history` independently enables exact forum history and must be added explicitly; the other read capabilities do not enable it. `search_messages` independently enables paginated lexical text/caption search and must be added explicitly; no existing read capability enables it. `list_chats` independently enables bounded chat listing with unread metadata and must also be added explicitly. `forward_send` independently enables exact forward/copy of one message (`prepare_forward_send`, `send_prepared_forward`) and must be added explicitly together with `send`; neither `send` nor any reply or read capability enables it, and with only one of the two the tools are not listed in tools/list and are refused at the SDK guard, the proxy and the broker. `video_send` independently enables sending one native video (`prepare_video_send`, `send_prepared_video`) and is handled the same way: it must be added explicitly together with `send`, no other capability enables it, and with only one of the two the tools are not listed in tools/list and are refused at the SDK guard, the proxy and the broker. The artifact being sent normally comes from an `artifacts` operation (a download or a local upload), but preparation itself checks only `send` and `video_send`. `archive_chats` independently enables moving one chat between the Main and Archive lists (`prepare_chat_archive`, `apply_prepared_archive`) and `edit_own_text` independently enables replacing the plain text of one own outgoing text message (`prepare_text_edit`, `apply_prepared_text_edit`); each must be added explicitly together with `send`, no other capability enables either, neither enables the other, and with only one of the two the tools are not listed in tools/list and are refused at the SDK guard, the proxy and the broker. Either of them, together with `send`, also grants a narrow informational read through its prepare tool (see [Informational read side effect](#informational-read-side-effect)). `verified_targets` independently enables both verification and handle reads and is off by default; existing read capabilities do not enable it. Other future extension capabilities require explicit opt-in; unknown names, wildcard values, malformed settings and unsupported config versions are rejected. An empty capability list disables product operations while retaining diagnostics. Config changes block already-running components with `config_stale`; restart matching components after reviewing the new configuration. Optional expected-version/schema pins reject stale loaded code even when proxy and broker match one another. Roll back the matching package and policy together.
 
@@ -2220,9 +2228,12 @@ the typed `{"result": <operation response or refusal>}` wrapper. Image-returning
 `CallToolResult` tools expose the operation/refusal directly in `structured_content`
 alongside their existing media blocks. Inspect the published output schema.
 
-Selections live at most 300 seconds from capture start, capped by artifact or target
-expiry. Unchanged recapture returns the original token and expiry. Use never renews
-a selection. There are 16 live entries and four active operations, including pending
+Selections live a fixed `selection_ttl_seconds` from capture start (trusted policy,
+60..1800, default 900; a fixed 300 before the 0.54 candidate), capped by artifact or
+target expiry. The broker issues that lifetime and the proxy independently refuses a
+longer one. Unchanged recapture returns the original token and expiry. Use never renews
+a selection. Only message selections gain from a longer setting: a verified target
+handle and an owned file keep their own expiry as the cap. There are 16 live entries and four active operations, including pending
 captures, per owner; capacity refuses without eviction. The exact private projection
 is bounded to 64 KiB per message and 100000 raw text characters per capture.
 Oversized, malformed or unsupported sources refuse atomically; ordinary reader

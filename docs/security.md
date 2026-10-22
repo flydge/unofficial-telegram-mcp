@@ -2056,7 +2056,13 @@ account and revocation epoch, schema fingerprint, ordered anchors or immutable
 artifact hash/size/metadata, original provenance, target dependency, and fixed wall
 and monotonic expiry. No persisted raw body, entity, filename, local path or token
 registry is created. Capacity is 16 live entries/four active operations including
-pending captures per owner, without eviction or sliding refresh.
+pending captures per owner, without eviction or sliding refresh. Since the 0.54
+candidate the fixed lifetime comes from trusted `selection_ttl_seconds` (strict
+integer 60..1800, default 900, previously a fixed 300 seconds), still capped by the
+artifact or verified-target expiry. The broker's registry takes it from its loaded
+policy; the proxy refuses any issued expiry beyond its own loaded value. The setting
+is part of the configuration fingerprint, so mismatched components report
+`config_mismatch`. A caller cannot change it.
 
 Exact projection hashes the complete bounded raw text/caption, original whole-scalar
 UTF-16 entity coordinates and inert type payloads, identity/date/edit/reply/topic/album

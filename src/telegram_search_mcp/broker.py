@@ -221,7 +221,7 @@ class Broker(SelectionBrokerMixin):
                                                                admission=self._upload_admission)
         self._approval_prompt = approval_prompt
         self._draft_recipient_titles: dict[str, str] = {}
-        self._selections = SelectionRegistry()
+        self._selections = SelectionRegistry(ttl_seconds=self._policy.selection_ttl_seconds)
         self._artifact_provenance = {}
         self._artifact_metadata: dict[str, tuple[object, str | None, str | None, str]] = {}
         self._download_source_root = download_source_root

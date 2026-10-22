@@ -91,6 +91,29 @@ class SelectionBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 refused=self.proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id))
                 self.assertEqual(refused.status,'selection_unavailable');self.assertEqual(set(refused.model_dump()),{'status','detail'})
 
+    async def test_policy_ttl_bounds_issuance_in_the_broker_and_independently_in_the_proxy(self):
+        import time
+        from dataclasses import replace
+        from datetime import datetime, timezone
+        from telegram_search_mcp.contract import contract_descriptor
+        from telegram_search_mcp.retained_selections import SelectionRegistry
+        short=replace(self.broker._policy,selection_ttl_seconds=60)
+        self.broker._policy=short;self.broker._contract=contract_descriptor(short)
+        proxy=BrokerClient(socket_path=self.broker._socket_path,policy=short,restart_callback=lambda:None)
+        self.addCleanup(proxy.close)
+        source=self.request({'kind':'messages','anchors':[{'chat_id':7,'message_id':11}]})
+        # A broker still issuing the 900 s default cannot widen the proxy's 60 s policy.
+        self.assertEqual(self.broker._selections.ttl_seconds,900)
+        self.assertEqual(proxy.retain_selection(source).status,'selection_unavailable')
+        self.broker._selections=SelectionRegistry(ttl_seconds=60)
+        started=time.monotonic()
+        issued=proxy.retain_selection(source)
+        self.assertEqual(issued.status,'retained')
+        self.assertTrue(55<(issued.expires_at-datetime.now(timezone.utc)).total_seconds()<=60)
+        self.assertLessEqual(proxy._selection_states[issued.selection_id].expires_monotonic,time.monotonic()+60)
+        self.assertGreaterEqual(proxy._selection_states[issued.selection_id].expires_monotonic,started+55)
+        self.assertEqual(proxy.read_messages(ReadMessagesRequest(selection_id=issued.selection_id)).status,'complete')
+
     async def test_proxy_tolerates_link_flips_but_refuses_a_link_outside_the_shared_rule(self):
         source=self.request({'kind':'messages','anchors':[{'chat_id':7,'message_id':11}]})
         issued=self.proxy.retain_selection(source)
