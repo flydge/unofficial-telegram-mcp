@@ -678,6 +678,14 @@ recorded; the Claude Code user-scope entry (through the `claude` CLI, `user` mod
 Desktop entry, leaving its neighbours and the file's mode; the skill copies the receipt binds; and
 finally the installation root with all releases.
 
+**The installation root belongs to the installer.** `~/Library/Application Support/TelegramSearch`
+holds only what the installer writes: `releases/`, `transactions/`, `receipt.json`, `current.json`,
+`adopted.json` and `.install.lock`. Do not keep your own files or folders there. An install, upgrade or
+rollback refuses a root with any other top-level name (`runtime_conflict`), but `uninstall` removes the
+root as one owned folder, with everything inside it, including anything you added (a file at the top
+or a copy under `releases/`). Only the `--adopt-legacy` backups are moved out first
+(`legacy_backups`). The Telegram session and policy are not in this folder.
+
 Each part reports `removed`, `absent`, `kept` (not an entry the installation owns, or changed since it
 was written, so left alone), or for a client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
 `claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still

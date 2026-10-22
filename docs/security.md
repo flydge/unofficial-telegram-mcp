@@ -2065,7 +2065,10 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
-  receipt or journal binds. An entry or skill copy that changed is kept (`kept`) or refuses. A client
+  receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,
+  by the inode the install intent binds, with whatever else was put inside it; install, upgrade and
+  rollback refuse a foreign top-level name in it (`runtime_conflict`), and the guide tells users to keep
+  nothing of their own there. An entry or skill copy that changed is kept (`kept`) or refuses. A client
   entry is owned only when an install, upgrade or rollback of this installation wrote it, and it stays
   owned through later steps that ended otherwise, wherever it is still exactly that entry. A Claude Code
   entry is changed only through the located `claude` CLI, each attempt recorded before it is made, and
