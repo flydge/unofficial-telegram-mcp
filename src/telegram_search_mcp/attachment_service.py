@@ -9,7 +9,7 @@ from typing import Any
 
 from .sanitize import render_evidence, sanitize_telegram_text
 from .schemas import AttachmentRequest, AttachmentResponse, MessageContextRequest, MessageContextResponse, ContextEvidence
-from .config import TDLIB_SESSION_DIRECTORY
+from .config import DEFAULT_ACCOUNT_PATHS
 from .artifact_store import ArtifactStoreError
 from .tdjson import AuthorizationBlocked, DownloadTooLarge, MessageNotFound, SecretChatRejected, TDLibError
 
@@ -91,12 +91,13 @@ def get_attachment(
     store: Any,
     request: AttachmentRequest,
     *,
-    source_root: Path = TDLIB_SESSION_DIRECTORY / "files",
+    source_root: Path | None = None,
     capture_source=None,
     validate_source=None,
     record_source=None,
 ) -> AttachmentResponse:
     """Resolve one exact message, download its selected original, and snapshot it."""
+    source_root = DEFAULT_ACCOUNT_PATHS.files if source_root is None else source_root
     anchor = request.anchor
 
     def incomplete(status: str, detail: str, selected: SelectedAttachment | None = None) -> AttachmentResponse:

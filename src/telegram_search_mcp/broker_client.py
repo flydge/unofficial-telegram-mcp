@@ -30,7 +30,7 @@ from .broker_protocol import (
     receive_frame,
     send_frame,
 )
-from .config import RuntimePolicy, load_runtime_policy
+from .config import AccountPaths, RuntimePolicy, load_runtime_policy
 from .contract import (CompatibilityError, COMPATIBILITY_CODES, contract_descriptor, require_compatible, fingerprint,
                        require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, send_status
@@ -233,10 +233,10 @@ def _connect(socket_path: Path) -> socket.socket:
     return connection
 
 
-def _request_launchd_restart() -> None:
+def _request_launchd_restart(account: AccountPaths | None = None) -> None:
     from .launch_agent import start_launch_agent_if_stopped
 
-    start_launch_agent_if_stopped()
+    start_launch_agent_if_stopped(account=account)
 
 
 # A starting broker reads its Keychain key and opens an encrypted database before
@@ -261,18 +261,22 @@ class BrokerClient(SelectionClientMixin):
         retry_backoff_seconds: float = 0.25,
         sleeper: Callable[[float], None] = time.sleep,
         policy: RuntimePolicy | None = None,
+        account: AccountPaths | None = None,
     ) -> None:
+        """`account` names the broker's alias for the default policy and restart; None is the default alias."""
         if request_timeout <= 0 or request_timeout > MAX_DEADLINE_SECONDS:
             raise ValueError("request_timeout must be between zero and 570 seconds")
         if retry_backoff_seconds < 0 or retry_backoff_seconds > 5:
             raise ValueError("retry_backoff_seconds must be between zero and five")
-        self._policy = policy if policy is not None else load_runtime_policy()
+        self._policy = policy if policy is not None else (
+            load_runtime_policy() if account is None else load_runtime_policy(account.policy))
         self._has_client_state = False
         self._socket_path = socket_path
         self._connector = connector
         self._request_timeout = float(request_timeout)
         self._client_id = client_id or f"client_{secrets.token_urlsafe(24)}"
-        self._restart_callback = restart_callback or _request_launchd_restart
+        self._restart_callback = restart_callback or (
+            _request_launchd_restart if account is None else lambda: _request_launchd_restart(account))
         self._retry_backoff_seconds = float(retry_backoff_seconds)
         self._sleeper = sleeper
         self._closed = False

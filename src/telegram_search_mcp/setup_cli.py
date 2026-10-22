@@ -8,7 +8,7 @@ from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavail
 from .config import load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
-from .launch_agent import CONNECT_JOB_LABEL, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
+from .launch_agent import account_options, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
 from .secure_terminal import NativeTerminal
 from .session_owner import SessionOwnerLease, OwnerLeaseError
 from .setup_wizard import run_setup, setup_status
@@ -35,13 +35,13 @@ COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-crede
 
 
 def _client(paths, timeout):
-    return BrokerClient(socket_path=paths.lock.parent / 'broker.sock',
+    return BrokerClient(socket_path=paths.account.socket,
         policy=load_runtime_policy(paths.policy), request_timeout=timeout,
         restart_callback=lambda: None, retry_backoff_seconds=0)
 
 
 def existing_broker_status(paths):
-    if not (paths.lock.parent / 'broker.sock').exists():
+    if not paths.account.socket.exists():
         return 'not_running'
     client = None
     try:
@@ -59,6 +59,7 @@ def existing_broker_status(paths):
 def handoff_broker(*, paths=None, timeout=30, sleeper=time.sleep):
     """Successful launch is not Ready. Never stop a competing owner."""
     paths = SetupPaths() if paths is None else paths
+    jobs = account_options(paths.account)  # Empty for the default alias: its 0.54 calls.
     client = None
     busy = False
     try:
@@ -70,11 +71,11 @@ def handoff_broker(*, paths=None, timeout=30, sleeper=time.sleep):
             busy = True
         if busy:
             try:
-                validate_enrolled_broker()  # Read-only; preserve the competing owner.
+                validate_enrolled_broker(**jobs)  # Read-only; preserve the competing owner.
             except LaunchAgentError:
                 return 'broker_incompatible'
         else:
-            start_enrolled_broker()
+            start_enrolled_broker(**jobs)
         deadline = time.monotonic() + timeout
         for _ in range(1000):
             remaining = deadline - time.monotonic()
@@ -107,7 +108,7 @@ def _connect_command(command, paths):
         return connect_cli.connect_helper(paths, store=MacOSSecretStore(), provider_factory=LegacyTDJson,
                                           handoff=handoff_broker, **options)
     if command == 'connect-helper':  # Internal: only our launchd job runs it, and it prints nothing.
-        if os.environ.get('XPC_SERVICE_NAME') != CONNECT_JOB_LABEL:
+        if os.environ.get('XPC_SERVICE_NAME') != paths.account.connect_label:
             # Not launched as our transient job: touch nothing (no lock, status or plist).
             print(json.dumps({'status': 'refused', 'code': 'connect_helper_requires_launchd',
                               'next_action': 'run_connect'}, sort_keys=True))

@@ -4,37 +4,168 @@ from __future__ import annotations
 
 import os
 import platform
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+import re
 import stat
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
+
+
+class ConfigurationError(RuntimeError):
+    """Raised when a fixed local runtime boundary is unsafe or unavailable."""
+
+
+DEFAULT_ALIAS = "default"
+# A named alias is a closed token; `default` matches it but is reserved for today's single account.
+ALIAS_GRAMMAR = re.compile(r"[a-z][a-z0-9]{0,11}")
+# Set only by named_aliases_for_tests until the phase B registry admits named aliases.
+_NAMED_ALIASES_ADMITTED: ContextVar[bool] = ContextVar("telegram_search_mcp_named_aliases", default=False)
+
+
+class AccountPathsError(ConfigurationError):
+    """A fixed refusal; the rejected alias is never echoed."""
+
+    def __init__(self) -> None:
+        self.code = "alias_unavailable"
+        super().__init__(self.code)
+
+
+@contextmanager
+def named_aliases_for_tests() -> Iterator[None]:
+    """The explicit test hook: inside it, and only there, an AccountPaths may hold a named alias.
+
+    Nothing in src or packaging enters it (tests/test_account_paths.py checks); phase B's registry becomes
+    the only other way in.
+    """
+    token = _NAMED_ALIASES_ADMITTED.set(True)
+    try:
+        yield
+    finally:
+        _NAMED_ALIASES_ADMITTED.reset(token)
+
+
+@dataclass(frozen=True)
+class AccountPaths:
+    """Every per-account location and name; the default alias is today's single account in today's paths.
+
+    `for_alias(DEFAULT_ALIAS, home)` is the only public constructor until the alias registry exists
+    (0.55 phase B); any other alias refuses with `alias_unavailable`. Every construction, the generated
+    __init__, dataclasses.replace and `relocated` included, refuses a named alias outside
+    named_aliases_for_tests. The Keychain service is the one name every alias shares (spec decision 6);
+    the Whisper model stays shared outside (WHISPER_MODEL_PATH). Call sites take `account=None` for the
+    default alias, which keeps every 0.54 call and constant.
+    """
+    alias: str
+    root: Path
+    session: Path
+    database: Path
+    files: Path
+    run: Path
+    socket: Path
+    broker_lock: Path
+    connect_lock: Path
+    connect_status: Path
+    connect_plist: Path
+    artifacts: Path
+    artifacts_quarantine: Path
+    uploads: Path
+    uploads_quarantine: Path
+    staging: Path
+    staging_quarantine: Path
+    policy: Path
+    enrollment_record: Path
+    keychain_service: str
+    broker_label: str
+    broker_plist: Path
+    connect_label: str
+
+    def __post_init__(self) -> None:
+        if type(self.alias) is not str or (self.alias != DEFAULT_ALIAS and (
+                not _NAMED_ALIASES_ADMITTED.get() or ALIAS_GRAMMAR.fullmatch(self.alias) is None)):
+            raise AccountPathsError()
+
+    @property
+    def server_name(self) -> str:
+        """The MCP server name, read through the product identity at call time like every product name."""
+        from . import product_identity as identity
+        return identity.MCP_SERVER_NAME if self.alias == DEFAULT_ALIAS else f"{identity.MCP_SERVER_NAME}_{self.alias}"
+
+    @classmethod
+    def for_alias(cls, alias: str, home: Path) -> AccountPaths:
+        if type(alias) is not str or alias != DEFAULT_ALIAS:
+            raise AccountPathsError()
+        return cls._home_layout(DEFAULT_ALIAS, Path(home), ("TelegramSearchMCP",), "")
+
+    @classmethod
+    def _derive(cls, alias: str, home: Path) -> AccountPaths:
+        """A named alias's layout: a sibling of the legacy tree, never inside it (spec decision 6).
+
+        Private, and `default` is reserved: it never takes this layout. Building the result needs the
+        explicit test hook until the registry (phase B) admits named aliases.
+        """
+        if type(alias) is not str or alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is None:
+            raise AccountPathsError()
+        return cls._home_layout(alias, Path(home), ("TelegramSearchMCP-accounts", alias), f".a.{alias}")
+
+    @classmethod
+    def _home_layout(cls, alias: str, home: Path, root: tuple[str, ...], job_suffix: str) -> AccountPaths:
+        service = f"com.{home.name}.telegram-search-mcp"
+        job = service + job_suffix
+        broker_label = f"{job}.broker"
+        return cls._layout(alias, home.joinpath("Library", "Application Support", *root), service, broker_label,
+                           home / "Library" / "LaunchAgents" / f"{broker_label}.plist", f"{job}.connect")
+
+    def relocated(self, root: Path) -> AccountPaths:
+        """The same names with every location under `root`: the inert test boundary of SetupPaths(root)."""
+        return self._layout(self.alias, root, self.keychain_service, self.broker_label, self.broker_plist,
+                            self.connect_label)
+
+    @classmethod
+    def _layout(cls, alias: str, root: Path, keychain_service: str, broker_label: str, broker_plist: Path,
+                connect_label: str) -> AccountPaths:
+        session, run = root / "tdlib", root / "run"
+        artifacts, uploads, staging = root / "artifacts", root / "incoming-uploads", root / "outgoing-staging"
+        return cls(alias=alias, root=root, session=session, database=session / "db", files=session / "files",
+                   run=run, socket=run / "broker.sock", broker_lock=run / "broker.lock",
+                   connect_lock=run / "connect.lock", connect_status=run / "connect-status.json",
+                   connect_plist=run / f"{connect_label}.plist",
+                   artifacts=artifacts, artifacts_quarantine=artifacts.with_name(artifacts.name + "-quarantine"),
+                   uploads=uploads, uploads_quarantine=uploads.with_name(uploads.name + "-quarantine"),
+                   staging=staging, staging_quarantine=staging.with_name(staging.name + "-quarantine"),
+                   policy=root / "runtime.toml", enrollment_record=root / "enrollment.json",
+                   keychain_service=keychain_service, broker_label=broker_label, broker_plist=broker_plist,
+                   connect_label=connect_label)
+
 
 def _owner_paths(home: Path) -> tuple[Path, str, str, Path]:
     """Derive per-user runtime locations without recording an account name."""
-    root = home / "Library" / "Application Support" / "TelegramSearchMCP"
-    keychain_service = f"com.{home.name}.telegram-search-mcp"
-    agent_label = f"{keychain_service}.broker"
-    agent_plist = home / "Library" / "LaunchAgents" / f"{agent_label}.plist"
-    return root, keychain_service, agent_label, agent_plist
+    paths = AccountPaths.for_alias(DEFAULT_ALIAS, home)
+    return paths.root, paths.keychain_service, paths.broker_label, paths.broker_plist
 
 
+DEFAULT_ACCOUNT_PATHS = AccountPaths.for_alias(DEFAULT_ALIAS, Path.home())
 APP_SUPPORT_ROOT, KEYCHAIN_SERVICE, LAUNCH_AGENT_LABEL, LAUNCH_AGENT_PLIST = (
-    _owner_paths(Path.home())
-)
-TDLIB_SESSION_DIRECTORY = APP_SUPPORT_ROOT / "tdlib"
+    DEFAULT_ACCOUNT_PATHS.root, DEFAULT_ACCOUNT_PATHS.keychain_service, DEFAULT_ACCOUNT_PATHS.broker_label,
+    DEFAULT_ACCOUNT_PATHS.broker_plist)
+TDLIB_SESSION_DIRECTORY = DEFAULT_ACCOUNT_PATHS.session
 TDLIB_LIBRARY = Path("/opt/homebrew/opt/tdlib/lib/libtdjson.dylib")
 EXPECTED_TDLIB_KEG = "HEAD-d1085f9"
 # The Homebrew/source path answers the same synchronous getOption probe the bundle path runs.
 EXPECTED_TDLIB_VERSION = "1.8.67"
 EXPECTED_TDLIB_COMMIT = "d1085f9cebc5a62379991ae1652673954f229c1f"
 HOMEBREW_OPENSSL = Path("/opt/homebrew/opt/openssl@3")
-BROKER_RUNTIME_DIRECTORY = APP_SUPPORT_ROOT / "run"
-BROKER_SOCKET_PATH = BROKER_RUNTIME_DIRECTORY / "broker.sock"
-BROKER_LOCK_PATH = BROKER_RUNTIME_DIRECTORY / "broker.lock"
-
-
-class ConfigurationError(RuntimeError):
-    """Raised when a fixed local runtime boundary is unsafe or unavailable."""
+BROKER_RUNTIME_DIRECTORY = DEFAULT_ACCOUNT_PATHS.run
+BROKER_SOCKET_PATH = DEFAULT_ACCOUNT_PATHS.socket
+BROKER_LOCK_PATH = DEFAULT_ACCOUNT_PATHS.broker_lock
+CONNECT_JOB_LABEL = DEFAULT_ACCOUNT_PATHS.connect_label
+CACHE_DIRECTORY = DEFAULT_ACCOUNT_PATHS.artifacts
+UPLOAD_ROOT = DEFAULT_ACCOUNT_PATHS.uploads
+STAGING_ROOT = DEFAULT_ACCOUNT_PATHS.staging
+# One speech model for every account (spec 3A), beside the default account's tree.
+WHISPER_MODEL_PATH = APP_SUPPORT_ROOT / "models" / "ggml-small.bin"
 
 
 def ensure_private_directory(path: Path) -> Path:
@@ -101,7 +232,7 @@ def _homebrew_tdlib() -> Path:
 
 
 # Trusted local policy is independent of the MCP consumer's tool allowlist.
-RUNTIME_POLICY_PATH = APP_SUPPORT_ROOT / "runtime.toml"
+RUNTIME_POLICY_PATH = DEFAULT_ACCOUNT_PATHS.policy
 LEGACY_CAPABILITIES = ("artifacts", "read", "send")
 KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "forward_send", "video_send", "archive_chats", "edit_own_text"))
 # Owner-facing capability profiles: every optional capability belongs to exactly one profile; the base

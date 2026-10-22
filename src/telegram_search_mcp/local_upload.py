@@ -18,9 +18,8 @@ from typing import Callable
 
 from .artifact_store import ArtifactStore, StoredArtifact
 from .artifact_authority import active_scope
-from .config import APP_SUPPORT_ROOT, ensure_private_directory
+from .config import UPLOAD_ROOT, ensure_private_directory
 
-UPLOAD_ROOT = APP_SUPPORT_ROOT / "incoming-uploads"
 UPLOAD_TTL_SECONDS = 15 * 60
 MAX_CHUNK_BYTES = 512 * 1024
 MAX_ACTIVE_UPLOADS = 8
@@ -66,11 +65,11 @@ class _Upload:
 
 
 class LocalUploadRegistry:
-    def __init__(self, store: ArtifactStore, *, root: Path = UPLOAD_ROOT,
+    def __init__(self, store: ArtifactStore, *, root: Path | None = None,
                  clock: Callable[[], float] = time.time, capacity: int = MAX_ACTIVE_UPLOADS,
                  quarantine_limit_bytes: int = MAX_QUARANTINE_BYTES) -> None:
         self._store = store
-        self._root = Path(root)
+        self._root = UPLOAD_ROOT if root is None else Path(root)
         self._clock = clock
         self._capacity = capacity
         self._quarantine_limit_bytes = quarantine_limit_bytes

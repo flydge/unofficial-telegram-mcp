@@ -11,18 +11,18 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import APP_SUPPORT_ROOT, ensure_private_directory
+from .config import STAGING_ROOT, ensure_private_directory
 from .outgoing_drafts import ClaimedDraft
 
-STAGING_ROOT = APP_SUPPORT_ROOT / "outgoing-staging"
 MAX_STAGING_BYTES = 512 * 1024 * 1024
 LARGE_FILE_THRESHOLD = 10 * 1024 * 1024
 _DRAFT_NAME = re.compile(r"draft_[0-9a-f]{32}\Z")
 _LOCK = threading.Lock()
 
 
-def stage_approved_document(claim: ClaimedDraft, *, root: Path = STAGING_ROOT) -> Path:
+def stage_approved_document(claim: ClaimedDraft, *, root: Path | None = None) -> Path:
     """Copy verified bytes to the exact reviewed file name before provider use."""
+    root = STAGING_ROOT if root is None else root
     draft = claim.draft
     name = draft.display_name
     if (not _DRAFT_NAME.fullmatch(draft.draft_id) or not name or name in {".", ".."}
@@ -105,8 +105,9 @@ def stage_approved_document(claim: ClaimedDraft, *, root: Path = STAGING_ROOT) -
                 os.close(source_fd)
 
 
-def retire_staged_document(path: Path, *, root: Path = STAGING_ROOT) -> None:
+def retire_staged_document(path: Path, *, root: Path | None = None) -> None:
     """Retire a finished copy, quarantining large files outside the worktree."""
+    root = STAGING_ROOT if root is None else root
     if path.parent.parent != root or not _DRAFT_NAME.fullmatch(path.parent.name):
         return
     try:

@@ -17,13 +17,15 @@ import sys
 import time
 import uuid
 from collections.abc import Sequence
+from pathlib import Path
 
 from pydantic import ValidationError, TypeAdapter
 from .local_upload_models import LocalUploadManifest, UploadAuthorityEnvelope, UPLOAD_MODELS
 
 from .broker_client import BrokerClient, BrokerUnavailable
-from .artifact_store import CACHE_DIRECTORY, MEDIA_LIMIT, TTL_SECONDS
-from .config import BROKER_SOCKET_PATH, ConfigurationError, load_runtime_policy
+from .artifact_store import MEDIA_LIMIT, TTL_SECONDS
+# With account None the default alias's cache and socket are these module names, read at call time.
+from .config import BROKER_SOCKET_PATH, CACHE_DIRECTORY, AccountPaths, ConfigurationError, load_runtime_policy
 from .contract import CompatibilityError, contract_descriptor, require_compatible, require_current
 from .local_upload import MAX_CHUNK_BYTES, _LIMITS, _NAME
 from .schemas import (
@@ -218,7 +220,8 @@ def _authority_stdin():
 
 
 def upload_source(*, source: str, kind: str, client: BrokerClient | None,
-                  file_name: str | None = None, authority_envelope: UploadAuthorityEnvelope | None = None) -> dict[str, str | int]:
+                  file_name: str | None = None, authority_envelope: UploadAuthorityEnvelope | None = None,
+                  account: AccountPaths | None = None) -> dict[str, str | int]:
     """Verify and stream one explicit local source; never retry dispatched work."""
     with _PinnedSource(source) as pinned:
         manifest = _verified_manifest(pinned, kind, file_name)
@@ -227,7 +230,7 @@ def upload_source(*, source: str, kind: str, client: BrokerClient | None,
         if external and manifest != authority_envelope.manifest:
             raise TransferError('manifest_mismatch')
         if client is None:
-            client = _make_client()
+            client = _make_client(account)
         ready = _call(client, 'redeem_local_upload_authority', authority_envelope) if external else _call(
             client, 'begin_local_upload', BeginLocalUploadRequest(**manifest.model_dump()))
         if (ready.status != "ready" or type(ready.upload_id) is not str
@@ -337,8 +340,8 @@ class _PinnedDirectory:
 
 class _PinnedArtifact:
     """Read one fixed-cache selection without lookup's creation, pruning or chmod."""
-    def __init__(self, artifact_id: str, size: int):
-        self.directory = _PinnedDirectory(str(CACHE_DIRECTORY), "artifact_unverified")
+    def __init__(self, artifact_id: str, size: int, cache: Path | None = None):
+        self.directory = _PinnedDirectory(str(CACHE_DIRECTORY if cache is None else cache), "artifact_unverified")
         self.fd = -1
         self.name = artifact_id
         try:
@@ -511,7 +514,8 @@ def _verify_download_bytes(fd: int, size: int, sha256: str) -> None:
 
 
 def download_artifact(*, artifact_id: str, destination: str, client: BrokerClient,
-                      _publication: _DownloadPublication | None = None) -> dict[str, str | int]:
+                      _publication: _DownloadPublication | None = None,
+                      account: AccountPaths | None = None) -> dict[str, str | int]:
     """Export one cache handle; publication errors preserve possible complete bytes."""
     publication = _publication if _publication is not None else _DownloadPublication()
     source = target = None
@@ -533,7 +537,7 @@ def download_artifact(*, artifact_id: str, destination: str, client: BrokerClien
         first = _download_handshake(client, local)
         _require_artifacts(policy)
         try:
-            source = _PinnedArtifact(artifact_id, size)
+            source = _PinnedArtifact(artifact_id, size, None if account is None else account.artifacts)
             target = _PinnedDestination(destination, source)
             target.create_stage()
             digest = hashlib.sha256()
@@ -646,8 +650,11 @@ class _UploadBrokerClient(BrokerClient):
         return self._authorized_call('finish_authorized_local_upload', request)
 
 
-def _make_client() -> BrokerClient:
-    return _UploadBrokerClient(socket_path=BROKER_SOCKET_PATH, policy=load_runtime_policy(),
+def _make_client(account: AccountPaths | None = None) -> BrokerClient:
+    if account is None:
+        return _UploadBrokerClient(socket_path=BROKER_SOCKET_PATH, policy=load_runtime_policy(),
+                                  restart_callback=lambda: None)
+    return _UploadBrokerClient(socket_path=account.socket, policy=load_runtime_policy(account.policy),
                               restart_callback=lambda: None)
 
 

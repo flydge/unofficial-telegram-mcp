@@ -11,6 +11,7 @@ from __future__ import annotations
 import calendar
 import errno
 import fcntl
+import functools
 import json
 import math
 import os
@@ -26,9 +27,9 @@ from .broker_client import BrokerCompatibilityError, BrokerUnavailable
 from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, next_action,
                            run_connect, valid_retry_after, write_connect_status)
 from .credentials import CredentialStoreError
-from .launch_agent import (CONNECT_JOB_LABEL, LAUNCH_AGENT_PLIST, LaunchAgentError, connect_job_state,
-                           remove_connect_job, restore_enrolled_broker, start_connect_job, stop_connect_job,
-                           stop_enrolled_broker, validate_enrolled_broker)
+from .launch_agent import (LaunchAgentError, account_options, connect_job_state, remove_connect_job,
+                           restore_enrolled_broker, start_connect_job, stop_connect_job, stop_enrolled_broker,
+                           validate_enrolled_broker)
 from .secure_terminal import TerminalError
 from .session_owner import OwnerLeaseError, SessionOwnerLease, acquire_owner_lock, open_private_directory
 from .setup_wizard import _api_credentials, setup_status
@@ -60,12 +61,17 @@ _DENIED = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
 
 
 def job_plist_path(paths):
-    return paths.lock.parent / (CONNECT_JOB_LABEL + '.plist')
+    return paths.account.connect_plist
 
 
 def connect_lock_path(paths):
     """Single-helper lock, separate from the session lease (broker.lock)."""
-    return paths.lock.parent / 'connect.lock'
+    return paths.account.connect_lock
+
+
+def _jobs(paths):
+    """Keyword arguments naming this account's launchd jobs; none for the default alias (its 0.54 calls)."""
+    return account_options(paths.account)
 
 
 def _denied(error):
@@ -87,7 +93,7 @@ def _take_connect_lock(paths):
 def _connect_lock_held(paths):
     """Probe without creating anything: True only while some process holds connect.lock."""
     try:
-        parent = open_private_directory(paths.lock.parent)
+        parent = open_private_directory(paths.account.run)
     except OwnerLeaseError:
         return False
     descriptor = -1
@@ -129,7 +135,7 @@ def _probe_broker(paths, client_factory, *, check_timeout=PROBE_CHECK, monotonic
     The handshake has PROBE_HANDSHAKE seconds. Only a compatible broker gets check_timeout for its
     check; a check that runs that budget out is 'starting'. Anything else is 'other'.
     """
-    if not (paths.lock.parent / 'broker.sock').exists():
+    if not paths.account.socket.exists():
         return 'none'
     def ask(timeout, request):
         client = client_factory(paths, timeout)
@@ -179,7 +185,7 @@ def _await_free(paths, sleeper):
 def _clear_status(paths):
     """'ok' | 'denied' | 'unsafe'. Remove a previous run's status so `wait` can never report a stale outcome."""
     try:
-        parent = open_private_directory(paths.lock.parent, create=True)
+        parent = open_private_directory(paths.account.run, create=True)
     except OwnerLeaseError as error:
         return 'denied' if _denied(error) else 'unsafe'
     try:
@@ -226,13 +232,14 @@ def _write_denied(terminal):
 
 
 def connect(paths, *, client_factory, terminal, inline, runner=subprocess.run, uid=None,
-            sleeper=time.sleep, python_executable=Path(sys.executable), broker_plist=LAUNCH_AGENT_PLIST,
+            sleeper=time.sleep, python_executable=Path(sys.executable), broker_plist=None,
             clock=time.time, monotonic=time.monotonic):
     """(JSON-able dict, exit code). Returns once the screen is requested, never waiting on the owner.
 
     At most about 10 s, or about 40 s when a compatible broker's first check is still starting.
     """
     try:
+        broker_plist = paths.account.broker_plist if broker_plist is None else broker_plist
         return _connect(paths, client_factory=client_factory, terminal=terminal, inline=inline,
                         runner=runner, uid=uid, sleeper=sleeper, python_executable=python_executable,
                         broker_plist=broker_plist, clock=clock, monotonic=monotonic)
@@ -254,7 +261,7 @@ def _enter(paths, runner, uid, sleeper, clock):
     for _ in range(int(LINGER_WAIT / _STEP) + 3):  # Every pass sleeps once or boots out once.
         lock = _take_connect_lock(paths)
         try:
-            job = connect_job_state(runner=runner, uid=uid)
+            job = connect_job_state(runner=runner, uid=uid, **_jobs(paths))
             record = _read_status(paths)  # After the job: a fresh helper's start cleared it first.
             if lock is not None and job != 'busy':
                 lock, held = None, lock
@@ -265,7 +272,8 @@ def _enter(paths, runner, uid, sleeper, clock):
         terminal = record is not None and record[0] in _TERMINAL
         hung = record is not None and clock() > record[2] + HUNG_GRACE
         if job == 'busy' and not booted and (hung or (terminal and polls >= LINGER_WAIT / _STEP)):
-            stop_connect_job(runner=runner, uid=uid, sleeper=sleeper)  # Our transient job; its run is over.
+            # Our transient job; its run is over.
+            stop_connect_job(runner=runner, uid=uid, sleeper=sleeper, **_jobs(paths))
             booted = True
             continue
         if terminal and polls < LINGER_WAIT / _STEP:
@@ -276,7 +284,7 @@ def _enter(paths, runner, uid, sleeper, clock):
     return None, (dict(_IN_PROGRESS), 0)
 
 
-def _starting(state, runner, uid, python_executable, broker_plist):
+def _starting(state, runner, uid, python_executable, broker_plist, jobs):
     """A compatible broker whose check outlived PROBE_CHECK: only our enrolled, validated one is starting.
 
     Read-only: nothing is stopped or started, whatever the validation finds.
@@ -284,7 +292,7 @@ def _starting(state, runner, uid, python_executable, broker_plist):
     if state == 'managed':
         try:
             validate_enrolled_broker(plist_path=broker_plist, python_executable=python_executable,
-                                     runner=runner, uid=uid)
+                                     runner=runner, uid=uid, **jobs)
         except LaunchAgentError:
             pass
         else:
@@ -304,7 +312,7 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
         _forget_finished_run(paths)
         return {'status': 'already_connected'}, 0  # Repeat use never asks for a new login.
     if probe == 'starting':
-        return _starting(state, runner, uid, python_executable, broker_plist)
+        return _starting(state, runner, uid, python_executable, broker_plist, _jobs(paths))
     try:
         lock, response = _enter(paths, runner, uid, sleeper, clock)
     except LaunchAgentError:
@@ -323,7 +331,7 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
 
 def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, uid, sleeper, python_executable,
             broker_plist):
-    stopped = False
+    stopped, jobs = False, _jobs(paths)
     if probe == 'blocked':
         # The narrow reconnect exception: only an enrolled, receipt-bound, compatible broker whose
         # authorization is still not ready right now. Validation precedes the stop; any doubt keeps it.
@@ -336,17 +344,17 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
     if probe == 'blocked':
         try:
             validate_enrolled_broker(plist_path=broker_plist, python_executable=python_executable,
-                                     runner=runner, uid=uid)
+                                     runner=runner, uid=uid, **jobs)
         except LaunchAgentError:
             return _refused('owner_busy')  # Nothing was stopped.
         stopped = True  # From here on a failure restores the broker before it reports.
         try:
             stop_enrolled_broker(plist_path=broker_plist, python_executable=python_executable,
-                                 runner=runner, uid=uid, sleeper=sleeper)
+                                 runner=runner, uid=uid, sleeper=sleeper, **jobs)
         except LaunchAgentError:
-            return _restore('owner_busy', broker_plist, python_executable, runner, uid)
+            return _restore('owner_busy', broker_plist, python_executable, runner, uid, jobs)
     def refuse(code):
-        return _restore(code, broker_plist, python_executable, runner, uid) if stopped else _refused(code)
+        return _restore(code, broker_plist, python_executable, runner, uid, jobs) if stopped else _refused(code)
     held = _await_free(paths, sleeper) if stopped else _lease(paths)
     if held != 'free':
         return refuse({'busy': 'owner_busy', 'unsafe': 'owner_unsafe'}.get(held) or _write_denied(terminal))
@@ -359,7 +367,7 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
         except BaseException:
             if stopped:  # Also when the inline helper could not even be built.
                 _restore_quietly(lambda: restore_enrolled_broker(
-                    plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid))
+                    plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid, **jobs))
             raise
         value, code = _report(result.phase, result.code, result.retry_after)
         if stopped and value['code'] == 'owner_busy':  # This run stopped (and restored) the broker.
@@ -367,7 +375,7 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
         return value, code
     try:
         started = start_connect_job(plist_path=job_plist_path(paths), python_executable=python_executable,
-                                    runner=runner, uid=uid, sleeper=sleeper)
+                                    runner=runner, uid=uid, sleeper=sleeper, **jobs)
     except LaunchAgentError:
         return refuse('connect_launch_failed')
     if started == 'running':
@@ -377,10 +385,11 @@ def _locked(paths, state, probe, *, client_factory, terminal, inline, runner, ui
     return {'status': 'screen_opened', 'next_action': 'wait'}, 0
 
 
-def _restore(code, broker_plist, python_executable, runner, uid):
+def _restore(code, broker_plist, python_executable, runner, uid, jobs):
     """After our stop, no helper started: put the enrolled broker back, then report truthfully."""
     try:
-        restore_enrolled_broker(plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid)
+        restore_enrolled_broker(plist_path=broker_plist, python_executable=python_executable, runner=runner, uid=uid,
+                                **jobs)
     except Exception:
         return _refused('broker_start_failed')
     if code == 'connect_in_progress':
@@ -400,7 +409,7 @@ def read_connect_status(paths):
 def _read_status(paths):
     """(phase, code, expires_at epoch seconds, retry_after) from a strictly valid status file, else None."""
     try:
-        parent = open_private_directory(paths.lock.parent)
+        parent = open_private_directory(paths.account.run)
     except OwnerLeaseError:
         return None
     descriptor = -1
@@ -450,7 +459,7 @@ def _helper_alive(paths, runner, uid):
     even briefly, could collide with a handoff.
     """
     try:
-        if connect_job_state(runner=runner, uid=uid) == 'busy':
+        if connect_job_state(runner=runner, uid=uid, **_jobs(paths)) == 'busy':
             return True
     except LaunchAgentError:
         pass  # launchd is not queryable here; the connect lock still tells.
@@ -518,7 +527,7 @@ def _wait(paths, runner, uid, sleeper, monotonic, clock, timeout, poll):
 # cancel ------------------------------------------------------------------------------------
 
 def cancel(paths, *, runner=subprocess.run, uid=None, sleeper=time.sleep, clock=time.time,
-           restore_broker=restore_enrolled_broker):
+           restore_broker=None):
     """(JSON-able dict, exit code). Boots out our own running helper job, nothing else.
 
     launchd's SIGTERM makes the helper cancel its run, which tears the auth client down and
@@ -527,9 +536,12 @@ def cancel(paths, *, runner=subprocess.run, uid=None, sleeper=time.sleep, clock=
     An inline run in the user's Terminal is not ours to stop: nothing_to_cancel.
     """
     try:
-        if connect_job_state(runner=runner, uid=uid) != 'busy':
+        jobs = _jobs(paths)
+        if restore_broker is None:
+            restore_broker = functools.partial(restore_enrolled_broker, **jobs)
+        if connect_job_state(runner=runner, uid=uid, **jobs) != 'busy':
             return {'status': 'nothing_to_cancel'}, 0
-        stop_connect_job(runner=runner, uid=uid, sleeper=sleeper)
+        stop_connect_job(runner=runner, uid=uid, sleeper=sleeper, **jobs)
     except (Exception, KeyboardInterrupt):  # launchd unusable here, or interrupted: the run expires by itself.
         return _refused('cancel_failed')
     try:
@@ -605,7 +617,7 @@ def _record_failure(paths, clock, expires_at, code):
 def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, ui_factory=None,
                    server_factory=None, run=run_connect, opener=open_url, clock=time.time,
                    sleeper=time.sleep, linger=HELPER_LINGER, lifetime=HELPER_LIFETIME, lock_held=False,
-                   restore_broker=restore_enrolled_broker, handle_sigterm=False):
+                   restore_broker=None, handle_sigterm=False):
     """Serve the loopback screen and drive one run_connect; returns its ConnectResult.
 
     The single helper: it holds connect.lock for its whole run including the linger
@@ -621,6 +633,8 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
     linger. The page stays up briefly after a terminal phase, then the server closes and
     our own launchd plist is removed.
     """
+    if restore_broker is None:
+        restore_broker = functools.partial(restore_enrolled_broker, **_jobs(paths))
     if ui_factory is None or server_factory is None:
         from .connect_server import ConnectServer, LoopbackConnectUI
         ui_factory = ui_factory or LoopbackConnectUI

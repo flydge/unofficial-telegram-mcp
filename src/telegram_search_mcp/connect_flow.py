@@ -146,7 +146,7 @@ def _iso(seconds):
 
 
 def connect_status_path(paths):
-    return paths.lock.parent / 'connect-status.json'
+    return paths.account.connect_status
 
 
 def valid_retry_after(code, retry_after):
@@ -228,8 +228,8 @@ def _drive(transport, ui, progress, credentials, key, paths, remaining):
         if ui.cancelled():
             raise _Stop('cancelled')
         if state is AuthorizationState.PARAMETERS:
-            transport.set_parameters(credentials, key, database_directory=str(paths.session / 'db'),
-                files_directory=str(paths.session / 'files'), application_version=__version__,
+            transport.set_parameters(credentials, key, database_directory=str(paths.account.database),
+                files_directory=str(paths.account.files), application_version=__version__,
                 timeout=remaining(_STEP))
         elif state is AuthorizationState.ENCRYPTION:
             transport.check_database_key(key, timeout=remaining(_STEP))
@@ -363,7 +363,7 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
                     credentials = identity.credentials
                     record, key = enrollment.create(store, bound=identity)
                 _ensure_policy(paths)
-                for directory in (paths.session / 'db', paths.session / 'files'):
+                for directory in (paths.account.database, paths.account.files):
                     fd = open_private_directory(directory, create=True)
                     os.close(fd)
                 lease.check()
