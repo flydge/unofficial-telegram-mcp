@@ -178,6 +178,12 @@ class SkillCoverageTests(unittest.TestCase):
         self.assertEqual(keys, ['name', 'description'])
         self.assertIn('name: telegram-search\n', match.group(1) + '\n')
 
+    def test_no_code_span_crosses_a_line(self):
+        # A span split over two lines would pair the wrong backticks and hide names from the checks below.
+        for number, line in enumerate(self.text.splitlines(), 1):
+            with self.subTest(line=number):
+                self.assertEqual(line.count('`') % 2, 0)
+
     # Forward direction: everything the skill names exists.
 
     def test_every_snake_case_word_is_on_the_surface(self):

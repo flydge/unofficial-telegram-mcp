@@ -78,10 +78,11 @@ For a fact about a person, plan or event:
 - **Evidence.** Read the matching message and enough context (`get_message_context`, `read_messages`,
   `read_reply_chain`) to tell question from answer and plan from booking. For a plan that can change,
   check later messages in every confirmed account.
-- **Budget.** Plan at most 16 final-search calls across targets, continuation pages included. A first
-  pass per lane: `search_correspondence(limit=20, require_complete=true, context_messages=0)`, then
-  `context_messages=2` for chosen hits. Stop once the answer is checked; never repeat identical calls or
-  restart an exhausted scope to spend budget.
+- **Budget.** Plan at most 16 final-search calls across targets, continuation pages included. A lane on
+  `search_correspondence` starts with
+  `search_correspondence(limit=20, require_complete=true, context_messages=0)` and uses
+  `context_messages=2` only for chosen hits. Stop once the answer is checked; never repeat identical calls
+  or restart an exhausted scope to spend budget.
 - **Coverage.** Say "no results" only when every planned lane completed with complete coverage. Otherwise
   say partial or undetermined and name the targets, lanes and pages left unprocessed.
 
