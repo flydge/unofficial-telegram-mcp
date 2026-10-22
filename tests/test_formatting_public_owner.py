@@ -150,14 +150,14 @@ class OwnerFormattingTests(unittest.TestCase):
   # 0.54 layout, regenerated from the 06f68bad baselines: summary, gutter payloads, technical block. Every
   # fact of the baseline stays; the topic name and the reply evidence lose their raw marker prefix to a
   # label, and both texts now sit behind the payload gutter; the target's sanitized flag stays directly under
-  # its evidence. DECLINED mock, no owner side effect.
+  # its evidence, which is always labelled a rendering. DECLINED mock, no owner side effect.
   text_sha = '6bc441d67a3e8a2c44e8156abfb2df5a95b0b32a3cbbc9fdcdf6508d73e4484d'
   topic_sha = 'dccb9739ac11238eeb34b6c9519ab3d54e54e1901c36c52c756241f8d60058fb'
   head = 'Account: 7\nExpires: 2030-01-02T03:04:05+00:00\n'
   topic_line = 'Topic [untrusted Telegram evidence]: «Topic» (topic 41)\n'
   topic_facts = ('Topic type: forum_supergroup; peer: 7', 'Topic created: 1700000000; creator: user 7',
                  'Topic general: False; outgoing: False; closed: False; hidden: False', f'Topic SHA-256: {topic_sha}')
-  replied = ('\nIn reply to message 55 in chat -1007 [untrusted Telegram evidence]:\n│ «Source»\n'
+  replied = ('\nIn reply to message 55 in chat -1007 [untrusted Telegram evidence] (rendering):\n│ «Source»\n'
              'Target sanitized: False; truncated: False\n\nReply text (exact):\n│ «A😀B cafe»\n')
   target_facts = ('Target source SHA-256: ' + 'a' * 64,)
   reply_closing = 'Unofficial Telegram MCP will revalidate cached target evidence and make one reply attempt.'

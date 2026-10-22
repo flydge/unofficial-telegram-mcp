@@ -631,8 +631,10 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(len(captured), 1)
             rendered = logical(captured[0][-1])
             anchor = prepared.reply.reply_target.anchor
+            # A styled target is a JSON rendering even when nothing was cleaned (0.54 label rule).
+            label = " (rendering, cleaned, not exact)" if prepared.reply.reply_target.sanitized else " (rendering)"
             shown = payload_under(rendered, f"In reply to message {anchor.message_id} in chat {anchor.chat_id} "
-                                            "[untrusted Telegram evidence]:")
+                                            f"[untrusted Telegram evidence]{label}:")
             self.assertEqual(re.sub("⟦U\\+([0-9A-F]{4,6})⟧", lambda m: chr(int(m.group(1), 16)), shown),
                              prepared.reply.reply_target.text.removeprefix("[untrusted Telegram evidence] "))
             self.assertIn(prepared.reply.reply_target.source_sha256, rendered)

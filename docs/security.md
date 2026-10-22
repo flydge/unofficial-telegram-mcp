@@ -2192,9 +2192,10 @@ native video, archive move and own text edit. Untrusted strings are rendered und
 - Rows are split at 96 columns (wide characters count two) onto rows that start with the marker `┆`
   plus exactly one space. Any further space after the marker is text: a split before a space leaves it
   visible (`┆  word`), while a long word or URL split at the width continues directly (`┆ xxxx`).
-- The reply target is the bound rendering of the message replied to, not Telegram's raw text. When
-  cleaning changed it, its label says `(cleaned rendering, not exact)`, and its sanitized flag always
-  sits directly under it.
+- The reply target is the bound rendering of the message replied to, not Telegram's raw text (styled
+  and media targets are JSON renderings even when nothing was cleaned), so its label always says
+  `(rendering)`, and `(rendering, cleaned, not exact)` when cleaning changed it; its sanitized flag
+  always sits directly under it.
 
 No untrusted string can begin a row that looks like a dialog line. The topic, reply and artifact
 dialogs no longer print raw Telegram text, as they did in 0.53. Each preview is revalidated by its

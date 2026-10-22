@@ -454,7 +454,7 @@ Account: <ID>
 Expires: <time>
 [Topic [untrusted Telegram evidence]: «<topic name>» (topic <ID>)]
 
-In reply to message <ID> in chat <ID> [untrusted Telegram evidence][ (cleaned rendering, not exact)]:
+In reply to message <ID> in chat <ID> [untrusted Telegram evidence] (rendering[, cleaned, not exact]):
 │ «<the message replied to>»
 Target sanitized: True|False; truncated: False
 
@@ -476,8 +476,9 @@ Unofficial Telegram MCP will revalidate cached target evidence and make one repl
 ```
 
 The reply evidence is the bound rendering of the message replied to (`render_content` or
-`sanitize_telegram_text`), not Telegram's raw text. When cleaning changed it (`sanitized` true), its label
-says `(cleaned rendering, not exact)`; the sanitized flag always sits directly under the evidence.
+`sanitize_telegram_text`), not Telegram's raw text: styled and media targets are JSON renderings even when
+nothing was cleaned. Its label therefore always says `(rendering)`, and `(rendering, cleaned, not exact)`
+when cleaning changed it (`sanitized` true); the sanitized flag always sits directly under the evidence.
 
 A reply with a document, photo or voice note uses the same reply block, then the file lines of a plain
 file send. Its heading is `Send a document|photo|voice note reply to …`. A voice reply adds

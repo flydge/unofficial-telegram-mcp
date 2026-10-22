@@ -554,14 +554,14 @@ class TopicReplyTests(unittest.TestCase):
         marker = '[untrusted Telegram evidence] '
         for evidence in (f'\nReply text (exact):\n│ «{BODY}»\n', 'Account: 7',
             f"\nTopic [untrusted Telegram evidence]: «{topic['name'].removeprefix(marker)}» (topic 41)\n",
-            f'\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:\n', expires,
+            f'\nIn reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering):\n', expires,
             f"Topic type: {topic['chat_type']}; peer: {topic['peer_id']}",
             f"Topic created: {topic['creation_date']}; creator: {topic['creator_kind']} {topic['creator_id']}",
             f"Topic general: {topic['is_general']}; outgoing: {topic['is_outgoing']}; closed: {topic['is_closed']}; hidden: {topic['is_hidden']}",
             preview['draft']['topic']['source_sha256'], preview['reply_target']['source_sha256'],
             preview['preview_sha256'], preview['draft']['sha256'], h.current_id):
           self.assertIn(evidence, shown)
-        self.assertEqual(payload_under(shown, f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence]:'),
+        self.assertEqual(payload_under(shown, f'In reply to message 55 in chat {CHAT} [untrusted Telegram evidence] (rendering):'),
                          preview['reply_target']['text'].removeprefix(marker))
         self.assertNotIn('no reply', shown.lower())
         self.assertEqual(shown.count('Preview SHA-256:'), 1)
