@@ -91,7 +91,8 @@ class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
             await client.call_tool('_manifest', {'expected_schema_fingerprint': '0' * 64})
             result = await client.call_tool('get_message_context', {'anchor': {'chat_id': 7, 'message_id': 8}})
         self.assertRefused(result, 'get_message_context',
-                           'client_schema_mismatch (refresh tools/list, then recheck _manifest)')
+                           'client_schema_mismatch (refresh tools/list, then call _manifest with '
+                           'expected_schema_fingerprint set to the current schema_fingerprint)')
 
     async def test_config_stale_reason(self):
         with tempfile.TemporaryDirectory() as parent:

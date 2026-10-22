@@ -61,6 +61,28 @@ class InstructionsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(seen), 1)
 
 
+class CheckBrokerWordingTests(unittest.TestCase):
+    """A compatible _manifest checks the proxy, broker and contract only, never Telegram authorization, which
+    first shows as blocked with next_action connect_account on a read (0.54 surface finding)."""
+
+    def test_no_text_claims_the_broker_check_covers_the_account(self):
+        import inspect
+        from telegram_search_mcp import server as server_module
+        from telegram_search_mcp.broker_client import BrokerClient
+        skill = (Path(__file__).parents[1] / 'skills/telegram-search/SKILL.md').read_text()
+        gate = skill.split('## Start gate', 1)[1].split('\n## ', 1)[0]
+        field = server_module._FIELD_DOCS['check_broker']
+        self.assertNotIn('account;', field)
+        self.assertIn('not Telegram authorization', field)
+        compatible = inspect.getsource(BrokerClient.diagnostics).split('"compatible"', 1)[1].split('except', 1)[0]
+        self.assertIn('authorization', compatible)
+        for name, text in (('prompt', server_module._render_prompt('check_connection')), ('skill', gate)):
+            with self.subTest(text=name):
+                self.assertIn('authorization', text)
+                self.assertIn('blocked', text)
+                self.assertIn('connect_account', text)
+
+
 class ManifestAvailabilityTests(unittest.IsolatedAsyncioTestCase):
     async def manifest(self, policy):
         async with Client(server(policy)) as client:

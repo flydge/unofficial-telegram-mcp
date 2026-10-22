@@ -441,7 +441,8 @@ class BrokerClient(SelectionClientMixin):
     def diagnostics(self) -> dict[str, Any]:
         try:
             return {"status": "compatible", "broker": self.handshake(),
-                    "detail": "loaded proxy and broker agree; refresh tools/list if the consumer listing differs"}
+                    "detail": "loaded proxy and broker agree; Telegram authorization is not checked here; refresh "
+                              "tools/list if the consumer listing differs"}
         except BrokerCompatibilityError as error:
             return {"status": error.code, "broker": None,
                     "detail": "no operation dispatched; install and restart matching proxy, broker, and trusted policy"}

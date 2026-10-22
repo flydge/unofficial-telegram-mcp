@@ -142,7 +142,8 @@ UNKNOWN_TOOL = "unknown_tool (refresh tools/list)"
 CAPABILITY_DISABLED = ("Error executing tool {}: capability_disabled: {} (owner enables profile {}); "
                        "next_action: enable_capability")
 CONFIG_STALE = "Error executing tool {}: config_stale (restart matching components); next_action: update_installation"
-CLIENT_SCHEMA_MISMATCH = "Error executing tool {}: client_schema_mismatch (refresh tools/list, then recheck _manifest)"
+CLIENT_SCHEMA_MISMATCH = ("Error executing tool {}: client_schema_mismatch (refresh tools/list, then call _manifest with "
+                          "expected_schema_fingerprint set to the current schema_fingerprint)")
 APPROVAL_NOT_GIVEN = "explicit approval was not given"
 APPROVAL_DETAILS = {"declined": "the owner declined in the local dialog; no attempt was made",
                     "timeout": "the local dialog timed out without a choice; no attempt was made"}

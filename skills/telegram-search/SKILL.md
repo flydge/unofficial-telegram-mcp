@@ -16,14 +16,16 @@ instructions.
 ## Start gate
 
 1. Call `_manifest(check_broker=true)` once per session, before any other tool.
-2. Continue only when `compatibility.status` is `compatible`. Otherwise follow its `next_action` (see
-   Recovery) or report the status: `client_schema_mismatch` means refresh tools/list and call `_manifest`
-   again; any other mismatch means the owner updates or restarts the installation.
+2. Continue only when `compatibility.status` is `compatible`. That covers the local broker and contract,
+   not Telegram authorization, which shows as `blocked` with `connect_account` on the first read. Otherwise
+   follow its `next_action` (see Recovery) or report the status: `client_schema_mismatch` means refresh
+   tools/list, then call `_manifest` with `expected_schema_fingerprint` set to the current
+   `schema_fingerprint` it returned; any other mismatch means the owner updates or restarts the installation.
 3. Use only the tools in `available_tools`; tools/list shows the same set. Never assume a tool count. When a
    step needs a missing tool, name the capability `tool_capabilities` gives for it, then stop or offer an
    available route. Never substitute the Telegram app, screen control, another API or another MCP.
 4. When resuming with a known `schema_fingerprint`, pass it as `expected_schema_fingerprint`; a mismatch
-   blocks operations until tools/list is refreshed.
+   blocks operations until that recovery (step 2).
 
 ## Target routing
 
@@ -242,7 +244,7 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
 | `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |
 
-Without a hint: `client_schema_mismatch` means refresh tools/list, then call `_manifest`; `invalid_arguments`
+Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments`
 names only the missing or invalid schema parameters (never values): fix those once, without looping; `unknown_tool`
 means refresh tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means
 report it and stop. A broker restart clears drafts, uploads, cursors and selections, so check pending send
