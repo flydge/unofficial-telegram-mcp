@@ -52,8 +52,8 @@ Package version 0.53.0rc2, public contract version 1. The tool schemas are uncha
 
 ## Known limits
 
-- **Critic gate open:** spec criterion 14 is not met until an independent review of this round's changes
-  finds no unresolved high issue; releasing.md pre-cut condition 2 is disclosed here instead.
+- **Critic gate:** the independent re-review of this round (23.10.2026) found no high or medium issue; its
+  three lows are listed below.
 - **Owner-session rows:** the Developer ID signed and notarized build and its Gatekeeper observation
   (`Install.command` is not code-signed), the clean-user install, the owner's migration (Claude Desktop and
   Codex still point at older installs), the product name, the application identity of the public bundle,
