@@ -147,7 +147,7 @@ class AbsoluteBoundaryTests(unittest.TestCase):
             self.prepared(family)
         self.assertEqual(self.dialogs, []); self.no_effects()
 
-    def test_each_capability_revoked_before_inspect_update_refresh_or_send_refuses_without_read(self):
+    def test_each_capability_revoked_before_inspect_update_refresh_or_send_refuses(self):
         # Break: assuming capabilities are only required at preparation.
         for family in ("text", "artifact"):
             for missing in SOURCE_CAPABILITIES:
@@ -158,9 +158,11 @@ class AbsoluteBoundaryTests(unittest.TestCase):
                 with self.subTest(family=family, missing=missing):
                     self.assertEqual(disabled(self.inspect(draft_id, family)),('capability_disabled',[missing]))
                     self.assertEqual(disabled(self.revise(draft_id, family)),('capability_disabled',[missing]))
+                    self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests), before)
+                    # A refresh reads the source once and names what that newly read source needs (0.54).
                     self.assertEqual(disabled(self.revise(draft_id, family, True)),('capability_disabled',[missing]))
                     self.assertEqual(self.send(draft_id, family).status, "expired")
-                    self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests), before)
+                    self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests), before + 1)
         self.assertEqual(self.dialogs, []); self.no_effects()
 
     def test_each_capability_revoked_during_owner_confirmation_prevents_claim_and_staging(self):

@@ -485,8 +485,8 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(self.send(old, family).status, "expired")
         self.assertEqual(self.effects(), [])
 
-    def test_refresh_requires_old_and_new_source_authority_before_invalidating_old(self):
-        # Break: laundering old authority through refresh or accepting a newly introduced family.
+    def test_refresh_requires_the_new_sources_authority_before_invalidating_old(self):
+        # Break: accepting a newly introduced family, or invalidating the old draft on a refused refresh.
         for family in ("text", "artifact"):
             with self.subTest(family=family):
                 self.raw.source = message()
@@ -497,8 +497,9 @@ class LifecycleTests(unittest.TestCase):
                     lambda: self.broker._revise_reply_artifact_draft(RefreshReplyArtifactDraftRequest(draft_id=old), client_id=CLIENT))
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_datetime_targets"))
                 before = len(self.raw.requests)
+                # The newly read source still needs DateTime authority, so the refresh names it after one read (0.54).
                 self.assertEqual(disabled(refresh()),('capability_disabled',['reply_datetime_targets']))
-                self.assertFalse(any(r["@type"] == "getMessage" for r in self.raw.requests[before:]))
+                self.assertEqual(sum(r["@type"] == "getMessage" for r in self.raw.requests[before:]), 1)
                 self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPABILITIES if c != "reply_identity_targets"))
                 self.raw.source = message("Date@user", [entity(), entity("textEntityTypeMention", offset=4, length=5)])
                 self.assertEqual(disabled(refresh()),('capability_disabled',['reply_identity_targets']))

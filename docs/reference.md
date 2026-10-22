@@ -1529,9 +1529,13 @@ before Telegram is read; then what the selected source needs, in its family orde
 source's version, then every other present family in the order bank card, phone,
 email, URL, DateTime, lexical, identity), with `topic_text_send` last for a source in
 a forum topic. The guard and the broker refuse the tool's own capability and `send`
-first, so in practice the list names options and source families. A refresh names
-what the newly read source needs. Naming the families reveals which entity kinds the
-chosen message contains; the client chose that message and already has read access.
+first, so in practice the list names options and source families. A refresh asks
+for the draft's own options before Telegram is read, then names what the newly read
+source needs; it no longer asks for the stored source it replaces, which it never
+shows again, so a refresh from a styled source to a plain one needs no family at all.
+Get and update keep asking for the stored source's families. Naming the families
+reveals which entity kinds the chosen message contains; the client chose that
+message and already has read access.
 
 Only capability-driven refusals change. A foreign or unknown draft, an account or
 session switch, expiry, a recipient that differs from the anchor and every
@@ -1639,8 +1643,8 @@ markup, topics and ephemeral/deleting targets remain unavailable. Preparation
 never downloads media or opens provider file paths.
 
 Media opt-in remains required for inspection, outgoing update, refresh, owner
-confirmation and sent/failed/unknown receipt replay. Refresh checks both the stored
-and newly read source, including text-to-media and media-to-text transitions.
+confirmation and sent/failed/unknown receipt replay. Refresh checks the newly read
+source, including text-to-media and media-to-text transitions.
 Send-only list/cancel/status retain their metadata semantics. Revalidation under
 the provider lock compares the entire immutable source hash. False or raised final
 guards discard unattempted observations and record `local_failed` before transport.
@@ -1705,7 +1709,7 @@ Telegram delivery, owner-dialog approval or broader consumer readiness.
 Enable both `reply_media_targets` and `reply_formatted_targets`, plus `send` and
 the outgoing workflow's `reply_text_send` or `reply_artifact_send`. A nonempty
 styled caption requires both source capabilities throughout preparation,
-inspection/update, both sides of refresh, owner confirmation, final transport
+inspection/update, the freshly read refresh source, owner confirmation, final transport
 guards and sent/failed/unknown receipt replay. Removing either source opt-in
 makes the styled source unavailable. Empty and whitespace-only plain captions
 retain the media-only path.
@@ -1784,7 +1788,7 @@ Overflow refuses rather than truncates. Existing entity overlap exclusions,
 closed media shapes and identity requirements remain in force.
 
 All three source capabilities are checked at preparation, inspection/revision,
-both sides of refresh, before and after owner confirmation, after fresh provider
+the freshly read refresh source, before and after owner confirmation, after fresh provider
 facts and after observation registration before raw transport, and on terminal
 replay. Singular authority accessors refuse these conjunctive sources. Owner,
 account, TTL and original provider/epoch boundaries remain in force. Outgoing
@@ -1825,7 +1829,7 @@ caps at 4096 characters. Escaping and sanitation are explicitly reflected in the
 preview; overflow refuses before registry mutation rather than truncating.
 
 All required source capabilities are checked during preparation, pending
-inspection/revision, both sides of refresh, before/after owner confirmation,
+inspection/revision, the freshly read refresh source, before/after owner confirmation,
 after fresh provider checks, after observation registration before raw transport,
 and on terminal replay. Source ID edits observed during provider revalidation
 refuse the send. Explicit text styles require `formatted_text_send`; attachment captions retain
@@ -1859,7 +1863,7 @@ complete marker-inclusive display caps at 4096 characters. Sanitation is flagged
 overflow refuses before registry mutation and never produces a partial preview.
 
 The complete capability tuple is enforced through preparation, inspection,
-revision, both sides of refresh, owner decision, final provider checks and
+revision, the freshly read refresh source, owner decision, final provider checks and
 registration-before-wire guards, and terminal replay. A user-ID-only edit or a
 stable media identity edit invalidates the source digest. An already changed
 source can still reach the immutable stored owner preview before the final source
@@ -1926,7 +1930,7 @@ under an incompatible version refuses. Supported DateTime captions use the
 separate v10/v12/v14 boundary below.
 
 The exact capability tuple follows both reply lifecycles through preparation,
-inspection/update, old/new refresh, owner decision, final provider checks,
+inspection/update, the freshly read refresh source, owner decision, final provider checks,
 registration before raw send and terminal replay. Updating outgoing content
 preserves the immutable source without rereading it. Refresh replaces it and
 invalidates the old revision and approval, including transitions between v13,
@@ -2030,7 +2034,7 @@ authority remain unchanged. Media helper URL parsing, validation and rendering
 remain default-off with `url=False`. No source media is downloaded.
 
 The full capability conjunction applies to preparation, stored inspection/update,
-both old and new refresh sources, owner confirmation, final source/properties
+the freshly read refresh source, owner confirmation, final source/properties
 guards, the immediate prewire boundary and terminal replay. Update preserves
 the source without rereading; refresh replaces the snapshot and invalidates old
 IDs and approvals, including transitions to/from older supported sources.
@@ -2092,7 +2096,7 @@ truncation. Public schemas, annotations, operation mappings, contract 1, IPC 2
 and schema fingerprint remain unchanged.
 
 The existing complete authority conjunction applies through prepare, get/update,
-both old/new refresh sources, owner confirmation, final source/properties checks,
+the freshly read refresh source, owner confirmation, final source/properties checks,
 immediate prewire checks and terminal replay. Get/update use stored evidence
 without rereading the provider; refresh binds a new source and invalidates the
 old ID and approval. Missing authority or owner-callback revocation refuses
@@ -2145,7 +2149,7 @@ restrictions, not claims about TDLib validity. Message4096/caption1024 scalars,
 bounds remain unchanged; overflow refuses without truncation.
 
 Get/update use the immutable stored source without a provider reread. Refresh
-requires both old and new capability conjunctions and invalidates prior IDs and
+requires the newly read source's conjunction and invalidates prior IDs and
 approval. Forged older phone tags and phone-less v19/v20 refuse; v19 remains
 messageText only. Earlier v1–v19 canonical/display bytes and authority, public schemas,
 annotations/mappings, contract1, IPC2 and schema fingerprint remain unchanged.
@@ -2187,7 +2191,7 @@ message4096/caption1024 scalar,32entity,projection65536 character/UTF8-byte and
 complete display4096 bounds remain; overflow refuses without truncation.
 
 The full present-family conjunction is enforced at preparation, immutable
-get/update, both old/new refresh sources, owner confirmation, final source/
+get/update, the freshly read refresh source, owner confirmation, final source/
 properties guards, immediate prewire and terminal replay. Missing authority or
 owner-callback revocation refuses before claim/staging. Later properties/prewire
 revocation or source drift may claim and transiently stage an artifact, but

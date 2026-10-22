@@ -1059,7 +1059,7 @@ class Broker(SelectionBrokerMixin):
             topic=draft.topic,
         )
 
-    def _require_topic_policy(self, draft_id: str, owner: DraftOwner) -> None:
+    def _require_topic_policy(self, draft_id: str, owner: DraftOwner, *, stored_source: bool = True) -> None:
         kind = self._drafts.kind(draft_id, owner=owner)
         if kind == 'forward':
             self._require_forward_policy()  # Status and receipts stay bound to forward_send.
@@ -1074,7 +1074,7 @@ class Broker(SelectionBrokerMixin):
         self._require_capabilities('send')
         provider = self._shared_client()
         self._require_capabilities(*self._drafts.source_required_capabilities(draft_id, owner=owner,
-            provider=provider, provider_epoch=provider.send_observation_epoch))
+            provider=provider, provider_epoch=provider.send_observation_epoch, stored_source=stored_source))
 
     def _require_capabilities(self, *required: str) -> None:
         """Refuse with only the missing names, in requirement order; reply tools return them typed."""
@@ -1109,9 +1109,10 @@ class Broker(SelectionBrokerMixin):
             required.add('topic_text_send')
         if old.outgoing_entities or new_formatted:
             required.add('formatted_text_send')
-        for selected_source in (old.reply_source, source):
-            if selected_source is not None:
-                required.update(('reply_text_send', *selected_source.required_capabilities))
+        # The source the revision installs: a refresh replaces the stored one, which is never shown again.
+        installed = old.reply_source if source is None else source
+        if installed is not None:
+            required.update(('reply_text_send', *installed.required_capabilities))
         def guard():
             # Called under registry lock: captured immutable/local facts only.
             require_current(self._policy)
@@ -1439,7 +1440,12 @@ class Broker(SelectionBrokerMixin):
     def _revise_reply_artifact_draft(self,request,*,client_id: str):
         try:
             owner=self._reply_artifact_owner(client_id);old=self._drafts.peek(request.draft_id,owner=owner)
-            self._reply_artifact_preview(old,owner);provider=self._shared_client()
+            if isinstance(request,RefreshReplyArtifactDraftRequest):
+                # A refresh names what the newly read source needs; the stored source it replaces is not asked.
+                if old.reply_source is None or old.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
+                self._require_capabilities('reply_artifact_send','send')
+            else:self._reply_artifact_preview(old,owner)
+            provider=self._shared_client()
             if isinstance(request,RefreshReplyArtifactDraftRequest):
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get('title'),max_length=255) or str(old.recipient)
@@ -1554,7 +1560,15 @@ class Broker(SelectionBrokerMixin):
                 self._require_capabilities('reply_text_send', 'send', 'formatted_text_send')
             owner=self._reply_owner(client_id)
             old=self._drafts.peek(request.draft_id,owner=owner)
-            self._reply_preview(old,owner)
+            if refresh:
+                # A refresh names what the newly read source needs: the draft's options now, the new
+                # source's families once it is read; the stored source it replaces is never asked.
+                if old.reply_source is None or old.kind != "text":
+                    raise DraftError("reply draft is unavailable")
+                self._require_reply_draft_options(old)
+                self._require_topic_policy(old.draft_id, owner, stored_source=False)
+            else:
+                self._reply_preview(old,owner)
             provider=self._shared_client()
             epoch = provider.send_observation_epoch
             if refresh:
@@ -1575,7 +1589,7 @@ class Broker(SelectionBrokerMixin):
                     else self._draft_entity_rows(old))
             if rows:
                 self._require_formatting_capability()
-            self._require_topic_policy(old.draft_id, owner)
+            self._require_topic_policy(old.draft_id, owner, stored_source=not refresh)
             local_admission_guard = self._text_revision_guard(old, provider, epoch,
                 new_formatted=bool(rows), source=source)
             revised=self._drafts.revise(request.draft_id,owner=owner,recipient_title=title,reply=True,

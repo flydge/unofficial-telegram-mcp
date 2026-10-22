@@ -382,19 +382,19 @@ class LexicalLifecycleRisks:
             self.assertEqual(self.send(did)['status'], 'expired')
         self.assertEqual((len(self.sends()), len(self.approvals)), (1, 1))
 
-    def test_revision_and_style_lexical_refresh_check_old_and_new_capabilities(self):
+    def test_revision_and_style_lexical_refresh_check_the_new_sources_capabilities(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
         revision = self.dispatch(self.ops[1], dict(draft_id=did, **self.extra()))['reply']
         self.assertEqual(revision['reply_target'], preview['reply_target'])
         self.assertNotEqual(revision['preview_sha256'], preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired'); did = revision['draft']['draft_id']
-        style = lexical(TEXT, [entity('Bold', 0, 16)])
-        for missing in CAPS:
-            self.raw.source = style
-            self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != missing))
-            self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[missing]))
-        self.broker._policy = POLICY
+        # Lexical -> style needs only the new styled authority; the stored lexical family is not asked (0.54).
+        self.raw.source = lexical(TEXT, [entity('Bold', 0, 16)])
+        self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != CAPS[0]))
+        self.assertEqual(disabled(self.dispatch(self.ops[2], {'draft_id': did})),('capability_disabled',[CAPS[0]]))
+        self.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in POLICY.enabled_capabilities if c != CAPS[1]))
         styled = self.dispatch(self.ops[2], {'draft_id': did})['reply']
+        self.broker._policy = POLICY
         self.assertNotEqual(styled['reply_target']['source_sha256'], preview['reply_target']['source_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired'); did = styled['draft']['draft_id']
         self.raw.source = lexical()

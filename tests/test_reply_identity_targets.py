@@ -407,11 +407,10 @@ class IdentityLifecycle:
         self.assertEqual(self.send(revised['draft']['draft_id'])['status'], 'expired')
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
 
-    def test_refresh_requires_old_identity_authority_and_new_lexical_authority(self):
+    def test_refresh_requires_only_the_new_sources_identity_or_lexical_authority(self):
         did = self.prepare()['draft']['draft_id']; self.raw.source = target('abc', [entity('Bold')])
+        # Identity -> style needs only styled authority; the stored identity family is not asked (0.54).
         self.broker._policy = RuntimePolicy(enabled_capabilities=BASE + ('reply_formatted_targets',))
-        self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': did})),('capability_disabled',['reply_identity_targets']))
-        self.broker._policy = POLICY
         styled = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.raw.source = target()
         self.raw.source['content']['text']['entities'].append(entity('Hashtag', 12, 4))
         self.broker._policy = RuntimePolicy(enabled_capabilities=BASE + CAPS)

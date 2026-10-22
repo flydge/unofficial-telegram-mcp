@@ -296,14 +296,14 @@ class FormattedLifecycleRisks:
                 with self.assertRaises(DraftError):registry.source_required_capability(did,owner=owner)
                 self.assertEqual(self.send(did)['status'],'expired');self.assertEqual(len(self.sends()),count)
                 self.assertEqual(self.dispatch('get_send_status',{'draft_id':did})['evidence'],'none')
-    def test_update_refresh_both_old_and_new_source_capabilities(self):
+    def test_update_refresh_the_new_source_capabilities(self):
         preview=self.prepare();did=preview['draft']['draft_id']
         revised=self.dispatch(self.ops[1],dict(draft_id=did,**self.revision_extra()))['reply']
         self.assertEqual(revised['reply_target'],preview['reply_target']);self.assertNotEqual(revised['preview_sha256'],preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'],'expired')
+        # Styled -> plain needs nothing more; the stored source's families are not asked (0.54).
         did=revised['draft']['draft_id'];self.raw.source=target();self.broker._policy=BASE_POLICY
-        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
-        self.broker._policy=STYLE_POLICY;plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
+        plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
         self.raw.source=styled();self.broker._policy=BASE_POLICY
         self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
         self.broker._policy=STYLE_POLICY;new=self.dispatch(self.ops[2],{'draft_id':did})['reply']

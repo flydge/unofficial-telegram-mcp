@@ -40,7 +40,15 @@ def styled_source():
         entity('textEntityTypeHashtag', len(SENTINEL) + 7, 4)]}})
 
 
+def lexical_source():
+    # A hashtag alone: lexical text, which needs reply_formatted_targets and reply_lexical_targets (v5).
+    text = SENTINEL + ' #tag'
+    return target(text, content={'@type': 'messageText', 'text': {'@type': 'formattedText', 'text': text, 'entities': [
+        entity('textEntityTypeHashtag', len(SENTINEL) + 1, 4)]}})
+
+
 STYLED_REQUEST = {'outgoing_entities': [{'offset': 0, 'length': 5, 'type': {'@type': 'textEntityTypeBold'}}]}
+LEXICAL_FAMILIES = ('reply_formatted_targets', 'reply_lexical_targets')
 
 
 def disabled(*missing):
@@ -130,6 +138,31 @@ class TextReplyCapabilityTests(ReplyFixture, unittest.TestCase):
     def reads(self):
         return sum(r['@type'] == 'getMessage' for r in self.raw.sent)
 
+    def test_a_refresh_never_names_the_stored_sources_families(self):
+        # Old source styled, new source plain: the stored source is replaced, so only the new one is asked.
+        self.policy(*STYLED_FAMILIES)
+        did = self.prepare_raw()['reply']['draft']['draft_id']
+        self.policy()
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did}), disabled(*STYLED_FAMILIES))
+        # A new source that needs only some families names exactly those, after reading it once.
+        self.raw.source = lexical_source()
+        reads = self.reads()
+        self.assertEqual(self.dispatch('refresh_reply_draft', {'draft_id': did}), revised_disabled(*LEXICAL_FAMILIES))
+        self.assertEqual(self.reads(), reads + 1)
+        self.policy(*STYLED_FAMILIES)
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
+        self.policy()
+        self.raw.source = target()
+        refreshed = self.dispatch('refresh_reply_draft', {'draft_id': did})
+        self.assertEqual((refreshed['status'], refreshed['previous_draft_id']), ('revised', did))
+        self.assertNotIn('missing_capabilities', refreshed)
+        self.assertEqual(refreshed['reply']['reply_target']['text'], '[untrusted Telegram evidence] Source full text')
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': refreshed['reply']['draft']['draft_id']})['status'],
+                         'pending')
+        self.policy(*STYLED_FAMILIES)
+        self.assertEqual(self.dispatch('get_reply_draft', {'draft_id': did})['status'], 'unavailable')
+        self.assertEqual((self.sends(), self.approvals), ([], []))
+
     def test_prepare_get_update_and_refresh_name_the_same_capabilities_on_one_policy(self):
         # The documented order: the tool, send, the request's or draft's options, then the source's families.
         self.policy('formatted_text_send', *STYLED_FAMILIES)
@@ -216,6 +249,20 @@ class ArtifactReplyCapabilityTests(ArtifactReplyFixture, unittest.TestCase):
             with self.subTest(operation=operation):
                 self.assertEqual(self.dispatch(operation, payload), revised_disabled(*STYLED_FAMILIES[1:]))
         self.assertEqual(self.dispatch('send_prepared_artifact', {'draft_id': did, 'approved': True})['status'], 'expired')
+        self.assertEqual(self.sends(), [])
+
+    def test_an_artifact_refresh_names_only_what_the_newly_read_source_needs(self):
+        self.broker._policy = RuntimePolicy(enabled_capabilities=(*BASE, *STYLED_FAMILIES))
+        did = self.prepare_raw()['reply']['draft']['draft_id']
+        self.broker._policy = RuntimePolicy(enabled_capabilities=BASE)
+        self.assertEqual(self.dispatch('get_reply_artifact_draft', {'draft_id': did}), disabled(*STYLED_FAMILIES))
+        self.raw.source = lexical_source()
+        self.assertEqual(self.prepare_raw(), disabled(*LEXICAL_FAMILIES))
+        self.assertEqual(self.dispatch('refresh_reply_artifact_draft', {'draft_id': did}), revised_disabled(*LEXICAL_FAMILIES))
+        self.raw.source = target()
+        refreshed = self.dispatch('refresh_reply_artifact_draft', {'draft_id': did})
+        self.assertEqual((refreshed['status'], refreshed['previous_draft_id']), ('revised', did))
+        self.assertEqual(refreshed['reply']['reply_target']['text'], '[untrusted Telegram evidence] Source full text')
         self.assertEqual(self.sends(), [])
 
 

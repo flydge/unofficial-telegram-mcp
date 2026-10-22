@@ -429,16 +429,16 @@ class IdentityMediaLifecycle:
         self.assertEqual(self.broker._drafts.known_ids(), before)
         self.assertEqual((len(self.sends()), len(self.approvals)), (0, 0))
 
-    def test_revision_invalidates_old_approval_and_refresh_requires_old_and_new_authority(self):
+    def test_revision_invalidates_old_approval_and_refresh_requires_the_new_sources_authority(self):
         preview = self.prepare(); did = preview['draft']['draft_id']
         revision = self.dispatch(self.operations[1], {'draft_id': did, **self.revision})['reply']
         self.assertEqual(revision['reply_target'], preview['reply_target'])
         self.assertNotEqual(revision['preview_sha256'], preview['preview_sha256'])
         self.assertEqual(self.send(did)['status'], 'expired')
         did = revision['draft']['draft_id']; self.raw.source = source_shell('plain', [])
-        for missing in CAPS:
-            self.revoke(missing); self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': did})),('capability_disabled',[missing])); self.broker._policy = POLICY
-        plain = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.assertEqual(self.send(did)['status'], 'expired')
+        # Identity media -> plain needs nothing; the stored source's families are not asked (0.54).
+        self.revoke(*CAPS); plain = self.dispatch(self.operations[2], {'draft_id': did})['reply']; self.broker._policy = POLICY
+        self.assertEqual(self.send(did)['status'], 'expired')
         did = plain['draft']['draft_id']; self.raw.source = caption_source(lexical=True)
         for missing in MIXED_CAPS:
             self.revoke(missing); self.assertEqual(disabled(self.dispatch(self.operations[2], {'draft_id': did})),('capability_disabled',[missing])); self.broker._policy = POLICY

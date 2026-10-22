@@ -408,9 +408,11 @@ class PhoneNumberLifecycleTests(unittest.TestCase):
                 reads=sum(r['@type']=='getMessage' for r in self.raw.requests)
                 self.assertEqual(disabled(self.dispatch(self.operation('get',family),{'draft_id':did})),('capability_disabled',[missing]))
                 self.assertEqual(disabled(self.revise(did,family)),('capability_disabled',[missing]))
+                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
+                # A refresh reads the source once and names what that newly read source needs (0.54).
                 self.assertEqual(disabled(self.revise(did,family,True)),('capability_disabled',[missing]))
                 self.assertEqual(self.send(did,family)['status'],'expired')
-                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
+                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads+1)
         self.assertEqual(self.dialogs,[])
         self.assertEqual(self.history, [], 'already absent/revoked capability must refuse before claim/staging')
         self.no_effects()
@@ -481,7 +483,7 @@ class PhoneNumberLifecycleTests(unittest.TestCase):
                 self.assertEqual(self.dispatch(self.operation('get',family),{'draft_id':did})['status'],'unavailable')
         self.no_effects()
 
-    def test_update_is_immutable_refresh_requires_old_and_new_authority_and_invalidates_ids(self):
+    def test_update_is_immutable_refresh_requires_new_source_authority_and_invalidates_ids(self):
         # Break: rereading source on update or transferring approval across PHONE/legacy refresh.
         for family in ('text','artifact'):
             self.broker._policy=POLICY; self.raw.source=mixed(); original=self.prepared(family)
@@ -494,10 +496,10 @@ class PhoneNumberLifecycleTests(unittest.TestCase):
             self.assertEqual(revised['reply_target'],original['reply_target'])
             self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
             self.assertEqual(self.send(did,family)['status'],'expired')
+            # A refresh needs only what the newly read source needs, never the stored source's families (0.54).
             self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_formatted_targets','reply_email_targets'))
-            self.assertEqual(disabled(self.revise(revised['draft']['draft_id'],family,True)),('capability_disabled',['reply_phone_targets','reply_url_targets','reply_datetime_targets','reply_lexical_targets','reply_identity_targets']))
-            self.broker._policy=POLICY
             older=self.revise(revised['draft']['draft_id'],family,True)['reply']
+            self.broker._policy=POLICY
             self.assertNotEqual(older['reply_target']['source_sha256'],original['reply_target']['source_sha256'])
             self.assertEqual(self.send(revised['draft']['draft_id'],family)['status'],'expired')
             self.raw.source=mixed(); self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_formatted_targets','reply_email_targets'))

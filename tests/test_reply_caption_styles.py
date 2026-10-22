@@ -310,14 +310,15 @@ class CaptionLifecycleRisks:
             self.assertEqual(self.send(did)['status'],'expired')
         self.assertEqual(len(self.sends()),1)
 
-    def test_v2_to_v4_and_v4_to_v2_refresh_checks_both_old_and_new_authority(self):
+    def test_v2_to_v4_and_v4_to_v2_refresh_checks_the_new_sources_authority(self):
         preview=self.prepare();did=preview['draft']['draft_id']
         revision=self.dispatch(self.ops[1],dict(draft_id=did,**self.extra()))['reply']
         self.assertEqual(revision['reply_target'],preview['reply_target']);self.assertEqual(self.send(did)['status'],'expired')
         did=revision['draft']['draft_id'];self.raw.source=raw_caption(entities=[])
+        # v4 -> v2 needs only the new v2 authority; the stored source's families are not asked (0.54).
         self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_media_targets',))
-        self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))
-        self.broker._policy=POLICY;plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
+        plain=self.dispatch(self.ops[2],{'draft_id':did})['reply'];did=plain['draft']['draft_id']
+        self.broker._policy=POLICY
         self.assertNotEqual(plain['reply_target']['source_sha256'],preview['reply_target']['source_sha256'])
         self.raw.source=raw_caption();self.broker._policy=RuntimePolicy(enabled_capabilities=BASE+('reply_media_targets',))
         self.assertEqual(disabled(self.dispatch(self.ops[2],{'draft_id':did})),('capability_disabled',['reply_formatted_targets']))

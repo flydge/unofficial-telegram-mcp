@@ -1053,7 +1053,7 @@ both reply workflows. Private projection v3 retains the raw messageText shell
 and canonical nonempty entities; v1 plain-text and v2 media canonical bytes stay
 unchanged, and `is_media` includes v2, styled-caption v4 and lexical-caption v6. No public schema, tool annotation,
 operation mapping, contract version or IPC version changes. Preparation,
-inspection/update, both sides of refresh, approval, send/replay and pretransport
+inspection/update, the freshly read refresh source, approval, send/replay and pretransport
 guards enforce every source-required capability. Gated v2/v3/v4/v5/v6 terminal replay checks
 original provider instance/epoch as well as owner/account and monotonic retention
 under the registry lock. Pending lifetime uses wall expiry; terminal retention
@@ -1126,10 +1126,12 @@ lexical text (reply_formatted_targets, reply_lexical_targets), or lexical media
 Every production policy check requires every member. Legacy singular classifiers
 refuse v4/v5/v6 rather than returning incomplete authority. The registry classifier
 retains owner/account, pending wall expiry, attempted monotonic retention and
-original provider/epoch checks. Both stored and freshly read sources require
-their complete tuples during refresh. Revoking either source capability blocks
-preparation, inspection/revision, owner confirmation, final transport guards and
-terminal replay. Send/status metadata rules and all public schemas remain
+original provider/epoch checks. Stored inspection and update require the stored
+source's complete tuple; a refresh requires the freshly read source's complete
+tuple and, since the 0.54 candidate, no longer asks for the stored source it
+replaces and never shows again. Revoking a source capability blocks preparation,
+inspection/update, a refresh whose new source needs it, owner confirmation, final
+transport guards and terminal replay. Send/status metadata rules and all public schemas remain
 unchanged. No source attachment is downloaded or styling copied. Explicit text styles
 require `formatted_text_send`; outgoing attachment caption entities remain empty.
 
@@ -1162,7 +1164,7 @@ Provider labels and source syntax remain untrusted evidence. They authorize no
 execution, resolution, navigation or account selection. Raw shell/text/entities
 bind the source digest; text, range, kind or metadata edits invalidate approval,
 while entity permutation and irrelevant volatile fields do not. Every existing
-plural lifecycle guard checks both capabilities, including old/new refresh and
+plural lifecycle guard checks both capabilities, including the freshly read refresh source and
 post-owner/register-before-wire boundaries. Owner/account, finite TTL and original
 provider/epoch checks remain in force. False or raising pretransport guards discard
 unattempted observations; unknown attempts retain uncertainty and exact late
@@ -1193,7 +1195,7 @@ V6 requires (`reply_media_targets`, `reply_formatted_targets`,
 All three source capabilities remain default-off. The source is media, and
 singular source/registry accessors refuse to underreport its authority. Existing
 plural guards enforce the exact tuple for preparation, pending get/update,
-old/new refresh, terminal replay, before/after owner decision, after fresh provider
+the freshly read refresh source, terminal replay, before/after owner decision, after fresh provider
 properties and after observation registration before wire. Owner/account, wall
 expiry, terminal monotonic retention and original provider/epoch checks are
 unchanged. No guard or public operation/schema/IPC contract is broadened.
@@ -1235,7 +1237,7 @@ Every v7 source requires (`reply_formatted_targets`, `reply_identity_targets`);
 any lexical entity appends `reply_lexical_targets`. These capabilities remain
 default-off and augment `send` plus the selected reply path. Existing plural
 registry/Broker/provider guards enforce the exact conjunction on preparation,
-get/update, old/new refresh, before/after owner decision, after fresh source and
+get/update, the freshly read refresh source, before/after owner decision, after fresh source and
 properties checks, after observation registration before wire, and terminal
 replay. Singular authority accessors refuse conjunctive sources. Owner/account,
 finite expiry, terminal retention and original provider/epoch checks are retained.
@@ -1281,8 +1283,8 @@ Every v8 source requires (`reply_media_targets`, `reply_formatted_targets`,
 `reply_identity_targets`); exactly when any lexical entity is present,
 `reply_lexical_targets` is appended. The default-off source capabilities augment
 send and the chosen reply path. Existing plural server/registry/Broker/provider
-guards retain their complete conjunction at preparation, get/update, old/new
-refresh, before/after owner decision, final provider checks, observation
+guards retain their complete conjunction at preparation, get/update, the freshly
+read refresh source, before/after owner decision, final provider checks, observation
 registration before raw transport and terminal replay. No new capability or
 operation is introduced. Singular authority accessors refuse conjunctive sources.
 
@@ -1353,7 +1355,7 @@ Every DateTime text source requires `reply_formatted_targets` and default-off
 `reply_datetime_targets`, adding `reply_lexical_targets` exactly when lexical
 entities coexist and `reply_identity_targets` exactly when identity entities
 coexist. Existing plural source-policy guards enforce that conjunction during
-preparation, inspection/update, old/new refresh, owner decision, final source
+preparation, inspection/update, the freshly read refresh source, owner decision, final source
 and properties checks, observation registration before raw transport and terminal
 replay. Send/reply-path, owner/account, finite retention and original provider/epoch
 constraints remain in force. Status/list/cancel retain send-only authority.
@@ -1419,7 +1421,7 @@ marker-inclusive 4096 display bounds refuse overflow without truncation.
 No source media is downloaded; volatile local paths and provider file IDs stay
 outside the stable evidence.
 
-Checks at preparation, inspection/update, old/new refresh, owner rendering, final
+Checks at preparation, inspection/update, the freshly read refresh source, owner rendering, final
 provider read, pretransport registration and terminal replay retain the complete
 capability conjunction and existing refusal semantics. Update keeps the source
 snapshot without rereading. Refresh rebuilds it, including v14/v12/v10 transitions;
@@ -1455,7 +1457,7 @@ default-off trusted capabilities. DateTime, lexical and
 identity capabilities are appended exactly when their validated entities
 coexist. The singular capability accessor refuses conjunctions. Existing plural
 registry, Broker and provider guards enforce the complete authority at prepare,
-get/update, old/new refresh, owner decision, final source/properties checks,
+get/update, the freshly read refresh source, owner decision, final source/properties checks,
 before wire and terminal replay. No known capability, public tool, schema,
 annotation, operation mapping or IPC field is added by v16.
 
@@ -1515,7 +1517,7 @@ Every v17 source requires both default-off `reply_formatted_targets` and
 `reply_email_targets`. URL, DateTime, lexical and identity authorities are added
 exactly when their validated entities coexist. Existing plural registry, broker
 and provider guards enforce the conjunction at preparation, stored inspection
-and update, both old/new refresh sources, owner/final source/properties checks,
+and update, the freshly read refresh source, owner/final source/properties checks,
 immediate prewire and terminal replay. V18 reuses the existing email capability;
 public input/output schemas, annotations, operation mappings, contract 1, IPC 2
 and the schema fingerprint are unchanged. Tool descriptions are outside that
@@ -1537,7 +1539,7 @@ constraints, not claims of TDLib semantics. Unchanged 4096 text/1024 caption-sca
 4096 display bounds refuse overflow without truncation.
 
 Get/update retain the immutable stored source without provider reread; refresh
-requires both source conjunctions and invalidates old IDs and approvals. Missing
+requires the newly read source's conjunction and invalidates old IDs and approvals. Missing
 authority or owner-callback revocation refuses before claim/staging. Later
 properties/prewire revocation or source drift can follow claim and transient
 artifact staging, but terminal-fails, retires staging and blocks raw transport.
@@ -1588,7 +1590,7 @@ projection65536 characters/UTF8 bytes and complete display4096 bounds are
 unchanged; incomplete/truncated evidence never becomes a draft.
 
 Existing plural registry, broker and provider guards preserve all source
-capabilities through preparation, immutable get/update, old/new refresh,
+capabilities through preparation, immutable get/update, the freshly read refresh source,
 owner/final source/properties checks, immediate prewire and terminal replay.
 Missing authority or owner-callback revocation refuses before claim/staging.
 Late properties/prewire revocation or source drift may claim and transiently
@@ -1629,7 +1631,7 @@ projection65536 characters/UTF8 bytes and complete display4096 bounds remain;
 overflow refuses without truncation.
 
 Existing plural guards enforce every present family through preparation,
-immutable get/update, both old/new refresh sources, owner confirmation, final
+immutable get/update, the freshly read refresh source, owner confirmation, final
 source/properties checks, immediate prewire and terminal replay. Missing
 authority or owner-callback revocation refuses before claim/staging. Later
 properties/prewire revocation or source drift may claim and transiently stage
@@ -1674,7 +1676,7 @@ labels. Complete marker-inclusive display4096, 32entities and projection65536
 characters/UTF-8 bytes remain; overflow refuses without truncation.
 
 Exact hidden-only substitution changes source identity and preview digest.
-Existing plural guards cover preparation, get/update, old/new refresh authority,
+Existing plural guards cover preparation, get/update, the freshly read refresh source's authority,
 owner return, properties, immediate prewire and terminal replay. Missing/owner-
 revoked authority refuses before claim/staging; later revocation/drift may claim
 and transiently stage, then local-fail before raw transport. Retirement is best

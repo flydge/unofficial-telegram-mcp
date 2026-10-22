@@ -688,8 +688,13 @@ class OutgoingDraftRegistry:
                 entry.draft.topic_provider_epoch is provider_epoch)
 
     def source_required_capabilities(self, draft_id: str, *, owner: DraftOwner,
-                                   provider: object | None = None, provider_epoch: object | None = None) -> tuple[str, ...]:
-        """Classify gated sources under the owner/account, lifetime and epoch lock."""
+                                   provider: object | None = None, provider_epoch: object | None = None,
+                                   stored_source: bool = True) -> tuple[str, ...]:
+        """Classify gated sources under the owner/account, lifetime and epoch lock.
+
+        stored_source=False keeps the draft's own options but leaves out the stored source's families:
+        a refresh replaces that source and names what the newly read one needs. Every check still runs.
+        """
         with self._lock:
             entry=self._get(draft_id,owner)
             source=entry.draft.reply_source
@@ -716,6 +721,10 @@ class OutgoingDraftRegistry:
             if entry.attempted_at is not None and (provider is not None or provider_epoch is not None):
                 if entry.provider is not provider or entry.provider_epoch is not provider_epoch:
                     raise DraftError("draft is unavailable")
+            if not stored_source and source is not None:
+                # A selected topic stays an option of the draft even though a forum source also names it.
+                stored = set(source.required_capabilities) - ({'topic_text_send'} if entry.draft.topic is not None else set())
+                capabilities = tuple(name for name in capabilities if name not in stored)
             return capabilities
 
     def source_required_capability(self, draft_id: str, *, owner: DraftOwner,

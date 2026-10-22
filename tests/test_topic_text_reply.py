@@ -361,10 +361,13 @@ class TopicReplyTests(unittest.TestCase):
         with self.subTest(missing=missing):
           h.broker._policy = RuntimePolicy(enabled_capabilities=tuple(c for c in CAPS if c not in missing))
           results = (h.prepare_result(), h.dispatch('get_reply_draft', {'draft_id': did}),
-                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Revision'}),
-                     h.dispatch('refresh_reply_draft', {'draft_id': did}))
+                     h.dispatch('update_reply_draft', {'draft_id': did, 'text': 'Revision'}))
           self.assertEqual([(r['status'], r.get('missing_capabilities')) for r in results],
-                           [('capability_disabled', expected)] * 4)
+                           [('capability_disabled', expected)] * 3)
+          # A topic reply has no refresh: only its own option is named, never the stored source's families.
+          refreshed = h.dispatch('refresh_reply_draft', {'draft_id': did})
+          self.assertEqual((refreshed['status'], refreshed.get('missing_capabilities')),
+                           ('capability_disabled', expected) if 'topic_text_send' in missing else ('unavailable', None))
       h.broker._policy = RuntimePolicy(enabled_capabilities=CAPS)
       self.assertEqual(h.dispatch('get_reply_draft', {'draft_id': did})['status'], 'pending')
       self.assertEqual((h.sends(), h.approvals, h.register_count), ([], [], 0))
@@ -388,6 +391,11 @@ class TopicReplyTests(unittest.TestCase):
             with self.assertRaises(CompatibilityError) as caught:
               h.dispatch(operation, {'draft_id': did, **extra})
             self.assertEqual(caught.exception.code, 'capability_disabled')
+          elif operation == 'refresh_reply_draft' and capability == 'reply_formatted_targets':
+            # A refresh never asks for the stored source's families, and a topic reply has no refresh (0.54).
+            result = h.dispatch(operation, {'draft_id': did, **extra})
+            self.assertEqual((result['status'], result.get('reply'), result.get('missing_capabilities')),
+                             ('unavailable', None, None))
           else:
             result = h.dispatch(operation, {'draft_id': did, **extra})
             self.assertEqual((result['status'], result.get('reply'), result['missing_capabilities']),

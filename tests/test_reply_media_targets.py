@@ -164,15 +164,15 @@ class MediaLifecycleTests(MediaReplyFixture, unittest.TestCase):
             self.assertEqual(disabled(self.dispatch(op,dict(draft_id=did,**extra))),MEDIA_OFF)
         self.assertEqual(disabled(self.dispatch('prepare_reply_text_send',{'recipient':123,'text':'x','reply_to':ANCHOR})),MEDIA_OFF)
         self.raw.source=target();self.assertEqual(self.dispatch('prepare_reply_text_send',{'recipient':123,'text':'x','reply_to':ANCHOR})['status'],'prepared')
-    def test_refresh_checks_old_and_new_media_and_revision_ownership(self):
+    def test_refresh_checks_the_new_sources_media_and_revision_ownership(self):
         did=self.prepare()['draft']['draft_id']
         self.assertEqual(self.dispatch('get_reply_draft',{'draft_id':did},client=FOREIGN)['status'],'unavailable')
         old=self.dispatch('get_reply_draft',{'draft_id':did})['reply']
         revised=self.dispatch('update_reply_draft',{'draft_id':did,'text':'New reply'})['reply']
         self.assertEqual(old['reply_target'],revised['reply_target']);self.assertNotEqual(did,revised['draft']['draft_id'])
         self.raw.source=target();self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_text_send'))
-        rid=revised['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_draft',{'draft_id':rid})),MEDIA_OFF)
-        self.broker._policy=MEDIA_POLICY;plain=self.dispatch('refresh_reply_draft',{'draft_id':rid})['reply']
+        # Media -> plain needs no media authority; the stored source's families are not asked (0.54).
+        rid=revised['draft']['draft_id'];plain=self.dispatch('refresh_reply_draft',{'draft_id':rid})['reply']
         self.assertEqual(plain['reply_target']['text'],EVIDENCE_MARKER+'Source full text')
         self.raw.source=target(content=content_fixture('photo'));self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_text_send'))
         pid=plain['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_draft',{'draft_id':pid})),MEDIA_OFF)
@@ -317,8 +317,8 @@ class AdditionalMediaArtifactTests(ArtifactSendFixture, unittest.TestCase):
         self.assertEqual(update['reply_target'],preview['reply_target']);self.assertNotEqual(update['draft']['draft_id'],did)
         self.assertEqual(self.send(did)['status'],'expired')
         self.raw.source=target();self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_artifact_send'))
-        new=update['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})),MEDIA_OFF)
-        self.broker._policy=MEDIA_POLICY;plain=self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})['reply']
+        # Media -> plain needs no media authority; the stored source's families are not asked (0.54).
+        new=update['draft']['draft_id'];plain=self.dispatch('refresh_reply_artifact_draft',{'draft_id':new})['reply']
         self.assertEqual(plain['draft']['sha256'],preview['draft']['sha256'])
         self.raw.source=target(content=content_fixture('voice_note'));self.broker._policy=RuntimePolicy(enabled_capabilities=('send','reply_artifact_send'))
         pid=plain['draft']['draft_id'];self.assertEqual(disabled(self.dispatch('refresh_reply_artifact_draft',{'draft_id':pid})),MEDIA_OFF)

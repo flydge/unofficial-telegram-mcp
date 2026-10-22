@@ -175,9 +175,11 @@ class AbsoluteCaptionBrokerTests(unittest.TestCase):
                     with self.subTest(source=source_kind, family=family, missing=missing):
                         self.assertEqual(disabled(self.inspect(draft, family)),('capability_disabled',[missing]))
                         self.assertEqual(disabled(self.revise(draft, family)),('capability_disabled',[missing]))
+                        self.assertEqual(self.reads(), reads)
+                        # A refresh reads the source once and names what that newly read source needs (0.54).
                         self.assertEqual(disabled(self.revise(draft, family, True)),('capability_disabled',[missing]))
                         self.assertEqual(self.send(draft, family).status, 'expired')
-                        self.assertEqual(self.reads(), reads); self.assertEqual(len(self.dialogs), dialogs)
+                        self.assertEqual(self.reads(), reads + 1); self.assertEqual(len(self.dialogs), dialogs)
                     self.broker._policy = RuntimePolicy(enabled_capabilities=CAPABILITIES)
                     draft = self.prepared(family).reply.draft.draft_id
                     def revoke(): self.broker._policy = denied; return True

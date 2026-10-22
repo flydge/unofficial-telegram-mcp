@@ -323,9 +323,11 @@ class BankCardLifecycleTests(unittest.TestCase):
                 reads=sum(r['@type']=='getMessage' for r in self.raw.requests)
                 self.assertEqual(disabled(self.dispatch(self.operation('get',family),{'draft_id':did})),('capability_disabled',[cap]))
                 self.assertEqual(disabled(self.revise(did,family)),('capability_disabled',[cap]))
+                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
+                # A refresh reads the source once and names what that newly read source needs (0.54).
                 self.assertEqual(disabled(self.revise(did,family,True)),('capability_disabled',[cap]))
                 self.assertEqual(self.send(did,family)['status'],'expired')
-                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
+                self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads+1)
         self.assertEqual(self.dialogs,[]);self.assertEqual(self.history,[]);self.no_effects()
 
     def test_owner_properties_and_prewire_revocation_refuse_with_actual_staging_retirement(self):
@@ -389,8 +391,8 @@ class BankCardLifecycleTests(unittest.TestCase):
                 self.assertEqual(self.dispatch(self.operation('get',family),{'draft_id':did})['status'],'unavailable')
         self.no_effects()
 
-    def test_update_immutable_refresh_checks_old_new_authority_and_fresh_approval(self):
-        # Break: source reread during update, missing old/new authority, or prior approval survives revision.
+    def test_update_immutable_refresh_checks_new_source_authority_and_fresh_approval(self):
+        # Break: source reread during update, missing new-source authority, or prior approval survives revision.
         legacy_policy=RuntimePolicy(enabled_capabilities=BASE+('reply_formatted_targets','reply_email_targets'))
         for family in ('text','artifact'):
             self.broker._policy=POLICY;self.raw.source=mixed();original=self.prepared(family);did=original['draft']['draft_id']
@@ -400,9 +402,9 @@ class BankCardLifecycleTests(unittest.TestCase):
             self.assertEqual(revised['reply_target'],original['reply_target'])
             self.assertEqual(sum(r['@type']=='getMessage' for r in self.raw.requests),reads)
             self.assertEqual(self.send(did,family)['status'],'expired')
-            self.broker._policy=legacy_policy
-            self.assertEqual(disabled(self.revise(revised['draft']['draft_id'],family,True)),('capability_disabled',['reply_bank_card_targets','reply_phone_targets','reply_url_targets','reply_datetime_targets','reply_lexical_targets','reply_identity_targets']))
-            self.broker._policy=POLICY;older=self.revise(revised['draft']['draft_id'],family,True)['reply']
+            # A refresh needs only what the newly read source needs, never the stored source's families (0.54).
+            self.broker._policy=legacy_policy;older=self.revise(revised['draft']['draft_id'],family,True)['reply']
+            self.broker._policy=POLICY
             self.assertNotEqual(older['reply_target']['source_sha256'],original['reply_target']['source_sha256'])
             self.assertEqual(self.send(revised['draft']['draft_id'],family)['status'],'expired')
             self.raw.source=mixed();self.broker._policy=legacy_policy
