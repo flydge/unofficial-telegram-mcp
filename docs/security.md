@@ -1909,14 +1909,25 @@ The shim only chooses a candidate path. The launcher then re-admits the receipt,
 file of that release tree by hash before importing anything, and it admits only the release the
 receipt names, so a pointer to any other tree fails there.
 
+**What the plugin trusts.** Every plugin file, `bin/install`, `bin/mcp-entry`, `.mcp.json` and
+`release-pins.json` alike, comes from one commit: whatever commit of this repository's branch the user's
+marketplace clone last added or updated to. The marketplace entry names the plugin by a relative path
+with no ref or commit, nothing pins a plugin commit, and a marketplace update can change the scripts and
+the pins together without a separate review. The trust root of the plugin path is therefore that branch.
+Claude Code runs `bin/mcp-entry` as soon as the plugin is enabled, before any check of `release-pins.json`
+the user makes, and `bin/install` runs when the user starts it; both run as the user, and no signature,
+Team ID or pin covers either script. The Team ID check binds the downloaded seed, not the scripts that
+download and run it: a branch with tampered scripts and matching pins passes every pin check. The only
+check is to read the files (both scripts are short POSIX `sh`) before installing or enabling the plugin,
+and to compare every plugin file with `plugins/telegram-local/` at the release tag
+([Claude Code plugin](install.md#claude-code-plugin), step 3). That comparison shows the clone is at the
+tag; it does not protect against whoever can push to the repository, who can move the tag too.
+
 **The runtime installer.** `bin/install` takes no argument. Its trust input is the plugin's own files,
-`bin/install` and `release-pins.json`, as the user's marketplace clone holds them. The marketplace entry
-names the plugin by a relative path in this repository with no ref or commit, so that is whatever commit
-the clone last added or updated to, and a marketplace update can change both the installer and its pins
-without a separate review. Nothing pins a plugin commit. In a release, `release-pins.json` is the
-release build's own file, copied byte for byte in the release commit, which carries the tag
-([releasing](releasing.md), section 4), so the plugin copy at the tag `v<version>` is the reference to
-compare with. Before running the installer, inspect `<plugin root>/release-pins.json`: `team_id` must be
+`bin/install` and `release-pins.json`, as the user's marketplace clone holds them (above). In a release,
+`release-pins.json` is the release build's own file, copied byte for byte in the release commit, which
+carries the tag ([releasing](releasing.md), section 4), so the plugin copy at the tag `v<version>` is the
+reference to compare with. Before running the installer, inspect `<plugin root>/release-pins.json`: `team_id` must be
 the publisher Team ID `256X5MUA6S` stated in the README and the install guide, and `version` the release
 you expect; compare the file with `plugins/telegram-local/release-pins.json` at that tag. No environment
 value, argument or downloaded byte selects a URL, pin or path. The pins file must be exactly the
@@ -2099,7 +2110,15 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   foreign entry or plist (Codex, Claude Code user scope, Claude Desktop, the broker plist) is replaced
   only after its exact bytes (at most 1 MiB each, at most 64 records) are recorded in the transaction,
   `adopted.json` and the receipt. A foreign broker passes the pending-send gate first. `uninstall` moves
-  every backup beside the removed root and reports it as `legacy_backups`.
+  every backup beside the removed root and reports it as `legacy_backups`. Adoption checks nothing about
+  what it replaces beyond its size and, for the plist, that its bytes stay the backed-up ones until they
+  are replaced: whatever `telegram_search` entry and broker plist it finds is backed up and replaced, not
+  only a 0.51 or 0.52 one. The pending-send gate runs the interpreter the foreign plist names, so adopting
+  trusts that interpreter. The `--adopt-legacy` recipe adds no check of its own: it runs `bootstrap.sh`
+  from the kit folder as given, so the release is checked only as far as the user first checks the four
+  kit files and the Team ID against the pins from the trust root, as on the curl path; `bootstrap.sh` then
+  checks the seed (sha256, size, Developer ID requirement for that Team ID), and the seed the index and
+  every archive member. Backups are kept, never restored automatically.
 - **Leftovers only when provably the installer's.** Beside the root, under the parent directory's lock, a
   killed first install's staged root is removed only when every entry in it is one the installer creates
   (an empty one only under one of its fixed attempt names), an older intent temporary only when it parses

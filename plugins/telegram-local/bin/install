@@ -10,10 +10,12 @@
 # upgrade or its repeat (upgraded with installation upgraded or reused), or the repeat of the release a finished
 # rollback went back to (rolled_back with installation reused); any other result refuses as result_invalid.
 # The directory is removed on success and kept on failure.
-# Trust input: this plugin's files (this script and release-pins.json, the release build's file copied byte
-# for byte in the release commit) as the user's marketplace clone holds them. The marketplace names the
-# plugin by a relative path with no ref, so that is whatever commit the clone last updated to, and a
-# marketplace update can change both; inspect release-pins.json (team_id, version) before running this.
+# Trust input: this plugin's files (this script, bin/mcp-entry and release-pins.json, the release build's
+# file copied byte for byte in the release commit) as the user's marketplace clone holds them. The
+# marketplace names the plugin by a relative path with no ref, so that is whatever commit of the branch the
+# clone last updated to, and a marketplace update can change them all; no pin covers either script. Read
+# both scripts and compare every plugin file with the release tag (docs/install.md, Claude Code plugin,
+# step 3), release-pins.json's team_id and version included, before running this.
 # No environment value, argument or downloaded byte selects a URL, pin or path. Published pins must carry
 # a Team ID (an empty one refuses before any download): curl sets no quarantine, so Gatekeeper never
 # evaluates the downloaded seed; bootstrap.sh's --seed-team check of its Developer ID designated

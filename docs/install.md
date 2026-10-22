@@ -339,7 +339,9 @@ A signed release carries it on the DMG, the seed and every Mach-O of the payload
   published next to the assets, or inside a kit, holds the same bytes but proves nothing: whoever can
   replace the assets can replace it too. The plugin path reads the plugin's own copy in your marketplace
   clone, which holds the same bytes only while the clone is at that tag; compare the two before
-  installing ([Claude Code plugin](#claude-code-plugin), step 3).
+  installing ([Claude Code plugin](#claude-code-plugin), step 3). The plugin's scripts come from that same
+  clone and no pin covers them, so for the plugin path the trust root is the repository branch the clone
+  holds.
 - **The pins** bind `bootstrap.sh`, the seed (`bootstrap-verifier`), `release-index.json` and
   `release.tar.gz` by sha256 and size, and name the Team ID. Compare `team_id` with `256X5MUA6S` as
   printed here, in a copy of this guide or the README you trust. The tag is only as trustworthy as the
@@ -530,10 +532,15 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
 1. In Claude Code, add the marketplace and install the plugin:
    `/plugin marketplace add flydge/unofficial-telegram-mcp`, then
    `/plugin install telegram-local@unofficial-telegram-mcp`. The repository is not published yet, and
-   this guide does not verify Claude Code's own command syntax. The plugin's files, `bin/install` and
-   its `release-pins.json` included, are whatever commit your marketplace clone holds: the marketplace
-   names the plugin by a relative path with no ref, and a marketplace update can change both. Nothing
-   pins a plugin commit.
+   this guide does not verify Claude Code's own command syntax. The plugin's files, `bin/install`,
+   `bin/mcp-entry` and its `release-pins.json` included, are whatever commit of the repository's branch
+   your marketplace clone holds: the marketplace names the plugin by a relative path with no ref, and a
+   marketplace update can change all of them together. Nothing pins a plugin commit, so that branch is
+   the trust root of this path. Claude Code runs `bin/mcp-entry` as soon as the plugin is enabled, and
+   `bin/install` runs in step 3; both are shell scripts that run as you, and no signature, Team ID or pin
+   covers them. Read both (each is a short POSIX `sh` script) and compare the plugin with the release tag
+   (step 3) before you install or enable it; where Claude Code keeps the marketplace clone before that
+   is Claude Code's behaviour and is not verified here.
 2. Until the runtime is installed, the plugin's server `tg` stops at once with
    `{"schema_version":1,"error_code":"runtime_not_installed"}` on stderr.
 3. Before installing the runtime, inspect `<plugin root>/release-pins.json`, where `<plugin root>` is
@@ -547,6 +554,21 @@ name `tg`, are placeholders until the product is renamed. The plugin carries the
      "https://raw.githubusercontent.com/flydge/unofficial-telegram-mcp/v<version>/plugins/telegram-local/release-pins.json" |
      /usr/bin/cmp - "<plugin root>/release-pins.json" && echo same
    ```
+
+   The pins match is not enough: a branch with changed scripts and the right pins passes it. Compare every
+   plugin file with the tag the same way, which prints one line per file and `same` for each match:
+
+   ```bash
+   for f in .mcp.json .claude-plugin/plugin.json bin/install bin/mcp-entry release-pins.json \
+       skills/telegram-search/SKILL.md skills/telegram-setup/SKILL.md; do
+     /usr/bin/curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --location \
+       "https://raw.githubusercontent.com/flydge/unofficial-telegram-mcp/v<version>/plugins/telegram-local/$f" |
+       /usr/bin/cmp -s - "<plugin root>/$f" && echo "same $f" || echo "DIFFERENT $f"
+   done
+   ```
+
+   Only `same` lines show that the clone is at the tag. That still trusts the repository: whoever can push
+   to it can move the tag too. The Team ID check below binds the downloaded seed, not these scripts.
 
    Then install the runtime with `/bin/sh -p "<plugin root>/bin/install"` and no arguments.
    The script refuses `plugin_invalid` unless it is started by an absolute path ending in
@@ -764,6 +786,15 @@ the [curl path](#curl-path):
 ```
 
 then the printed activation command. It applies to a first install and to an upgrade, not to `rollback`.
+
+What it checks and what it does not: the recipe itself adds no check. It runs `bootstrap.sh` from the
+kit folder as given, so the release is checked only as far as you first checked the four files and the
+Team ID against the pins from the trust root (as in the curl recipe); `bootstrap.sh` then checks the
+seed's sha256, size and Developer ID requirement for that Team ID, and the seed the index and every
+archive member. Adoption does not check that what it replaces belongs to a 0.51 or 0.52 install:
+whatever `telegram_search` entry and broker plist it finds is backed up and replaced. The pending-send
+gate runs the interpreter that the old broker's plist names, so adopting trusts that interpreter. The
+backups are kept, never restored automatically.
 
 - Before anything is created, each foreign entry's exact bytes (at most 1 MiB each) are saved in the
   transaction and listed in `adopted.json` in the installation root and in the receipt. The result
