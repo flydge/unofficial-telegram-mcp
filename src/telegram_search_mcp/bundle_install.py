@@ -946,12 +946,19 @@ class _Service:
         return code if state=='restoring' else None
 
     def restore(self, j, code, undo):
-        """Before the refusal `code`, raised after the stop and short of the commit: `undo()` (the runtime.toml
-        version line back), then the previous definition back, byte for byte, and the previous broker
-        bootstrapped again when it was loaded, so the old release keeps serving. Idempotent: every effect is
-        decided from the files and launchd; a definition changed since the stop is never overwritten
-        (`service_conflict`). A cycle whose stop changed nothing restores nothing. The closing record drops the
-        cycle's write records, whose temporaries the restore has discarded."""
+        """Before the refusal `code`, raised after the stop and short of the commit: the target's broker booted
+        out if one is loaded, `undo()` (the runtime.toml version line back), then the previous definition back,
+        byte for byte, and the previous broker bootstrapped again when it was loaded before the change, so the
+        old release keeps serving.
+
+        Idempotent by state, like the stop: every effect is decided from the files and launchd, whatever an
+        earlier run left. A login since the plist rewrite loads the target's plist, so the target's broker may
+        be loaded: it is booted out first (no pending-send gate: short of the commit its release is not admitted,
+        `current.json` not naming it, so it serves no session). The previous broker loaded again (a login after
+        the definition is back) stays. A loaded broker that is neither stays as well and refuses
+        `service_conflict`, as does a definition changed since the stop, which is never overwritten. A cycle
+        whose stop changed nothing restores nothing. The closing record drops the cycle's write records, whose
+        temporaries the restore has discarded."""
         number,state,_=self.cycle(j)
         if state!='restoring':
             if state!='stopped':
@@ -959,18 +966,21 @@ class _Service:
                 number+=1  # This run's bootout came before its cycle's record.
             j.update(put=('service_cycle',{'cycle':number,'state':'restoring','code':code}))
             j.checkpoint('recorded:service_restore')
-        undo()
         observed=self._observed(j)
+        live=_live(self.runner,self.label)
+        if live is not None and observed['plist']!='to' and _matches_live(live,self.plist,self.target):
+            _bootout(self.runner,self.label);live=None
+        undo()
         if observed['plist']!='absent':
             j.discard('plist',self.plist);j.discard('plist_restore',self.plist)
             kind,data,_=self.kind()
             if kind=='to' and observed['plist']!='to':
                 j.write('plist_restore',self.plist,self._kept(j),data,existed=True,maximum=MAX_PLIST_BYTES)
-        if observed['loaded']:
-            live=_live(self.runner,self.label)
+        if live is None:
+            if observed['loaded']:_bootstrap(self.runner,self.plist)
+        else:
             kind,_,payload=self.kind()
-            if live is None:_bootstrap(self.runner,self.plist)
-            elif kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):
+            if kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):
                 raise InstallError('service_conflict')
         j.update(put=('service_cycle',{'cycle':number,'state':'restored'}),clear=_CYCLE_WRITES)
         j.checkpoint('restored:service')

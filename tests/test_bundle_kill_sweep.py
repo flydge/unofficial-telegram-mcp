@@ -218,12 +218,19 @@ def differences(expected, actual, limit=4):
 
 # --- scenarios ---------------------------------------------------------------------------------------------
 
+EFFECTS = (frozenset({'create', 'replace', 'renameatx', 'launchctl'}), 50)
+# A repeat that only finishes a restore publishes no packet (its release is already copied) and has fewer effects.
+RESTORE_EFFECTS = (frozenset({'create', 'replace', 'launchctl'}), 15)
+
+
 class Scenario:
     """`final(h)`, when given, lists what is wrong with the state after the uninterrupted run and after every
-    resume (beyond the comparison with the uninterrupted run's state)."""
+    resume (beyond the comparison with the uninterrupted run's state). `effects`: the effect kinds the
+    uninterrupted run must include and the number of effects it must exceed."""
 
-    def __init__(self, prepare, action, check, write_ahead=True, final=None):
+    def __init__(self, prepare, action, check, write_ahead=True, final=None, effects=EFFECTS):
         self.prepare, self.action, self.check, self.write_ahead, self.final = prepare, action, check, write_ahead, final
+        self.effects = effects
 
 
 def _upgrade_prepare(h):
@@ -523,6 +530,116 @@ def _codex_write_refusal_check(h, result):
     h.assertEqual(_one_release(h), [])
 
 
+def _die(h, action, at=None, effect=None):
+    """Run `action(checkpoint)` in a forked child that hard-exits at checkpoint `at`, or right after the first
+    durable effect `effect(kind, where)` selects; launchd's fake state outlives it."""
+    pid = os.fork()
+    if pid == 0:
+        try:
+            def checkpoint(value):
+                if value == at:
+                    os._exit(9)
+
+            def hook(count, kind, where):
+                if effect is not None and effect(kind, where):
+                    os._exit(9)
+            with Effects(h.base, hook).patched():
+                action(checkpoint)
+        finally:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    h.assertEqual(os.waitstatus_to_exitcode(status), 9)
+
+
+def _at_stage(h, stage, ours, changed):
+    """A checkpoint that changes our Codex table (or the adopted one) at `stage`, once it is not already changed."""
+    config = h.codex / 'config.toml'
+
+    def checkpoint(value):
+        if value == stage and ours in config.read_bytes():
+            config.write_bytes(config.read_bytes().replace(ours, changed))
+    return checkpoint
+
+
+def _user_skill(h):
+    """At the Codex step's end: a `telegram-search` skill directory of the user's where ours goes (completed by a
+    resume when a kill came right after its mkdir, which the sweep counts as an effect)."""
+    skill = h.skills / 'telegram-search'
+
+    def checkpoint(value):
+        if value == 'registration' and not (skill / 'SKILL.md').exists():
+            skill.mkdir(mode=0o700, exist_ok=True)
+            (skill / 'SKILL.md').write_bytes(b'mine')
+    return checkpoint
+
+
+def _login(h, release_root):
+    """launchd at login loads the plist on disk: after a kill past the plist rewrite, the target release's."""
+    h.assertIsNone(h.launchctl.loaded)
+    h.launchctl.load()
+    h.assertEqual(h.launchctl.loaded[4], str(Path(release_root) / 'launcher.py'))
+
+
+def _login_upgrade_prepare(h):
+    """0.53 critic round 4: an upgrade killed after its plist rewrite, then a login starts the new broker."""
+    _late_upgrade_prepare(h)
+    _die(h, lambda checkpoint: h.install(h.new, checkpoint=checkpoint), at='published:plist')
+    _login(h, h.runtime / 'releases' / h.new[3])
+
+
+def _login_rollback_prepare(h):
+    _rollback_prepare(h)
+    h.served = (h.plist.read_bytes(), h.launchctl.loaded)
+    h.target = Path(h.pointer()['release_root'])
+    _die(h, lambda checkpoint: h.change('rollback', checkpoint=checkpoint), at='published:plist')
+    _login(h, h.previous['release_root'])
+
+
+def _login_restore_check(h, result, finish):
+    """The late refusal booted the target's broker out and put the previous plist and broker back; once our
+    table is put back the repeat (`finish`) ends on one release."""
+    h.assertEqual(result, {'refused': 'target_conflict', 'pending_action': None})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)
+    h.assertEqual(h.launchctl.verbs()[-2:], ['print', 'bootstrap'])
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+    finish()
+
+
+def _login_upgrade_check(h, result):
+    _login_restore_check(h, result, lambda: _upgrade_check(h, h.install(h.new)))
+
+
+def _login_rollback_check(h, result):
+    _login_restore_check(h, result, lambda: _rollback_check(h, h.change('rollback')))
+
+
+def _login_adopt_prepare(h):
+    _late_adopt_prepare(h)
+    h.target = None  # No installed release yet: the legacy broker keeps serving.
+    _die(h, lambda checkpoint: h.install(h.packet, adopt_legacy=True, checkpoint=checkpoint), at='published:plist')
+    _login(h, h.runtime / 'releases' / h.packet[3])
+
+
+def _login_adopt_check(h, result):
+    h.assertEqual(result, {'refused': 'foreign_telegram-search', 'pending_action': None})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)  # The legacy plist and broker, not the new.
+    h.assertEqual(h.plist.read_bytes(), h.backups['service'])
+    h.assertFalse((h.runtime / 'current.json').exists())
+    skill = h.skills / 'telegram-search'
+    (skill / 'SKILL.md').unlink()
+    skill.rmdir()
+    _adopt_first_check(h, h.install(h.packet, adopt_legacy=True))
+    h.target = h.runtime / 'releases' / h.packet[3]
+    h.assertEqual(_one_release(h), [])
+
+
+def _legacy_served(h):
+    """The legacy plist and broker exactly as before the adopting first install (no release named yet)."""
+    plist, loaded = h.served
+    return [] if (h.plist.read_bytes(), h.launchctl.loaded) == (plist, loaded) else ['the legacy service is not back']
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -565,6 +682,17 @@ SCENARIOS = {
     'late_refusal_after_the_codex_write': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_after_codex_write(h))), _codex_write_refusal_check,
         write_ahead=False, final=_one_release),
+    # 0.53 critic round 5: a late refusal after a kill past the plist rewrite and a login (the target's broker
+    # loaded).
+    'restore_after_a_login_upgrade': Scenario(_login_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))), _login_upgrade_check,
+        write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
+    'restore_after_a_login_rollback': Scenario(_login_rollback_prepare, lambda h, lc, cl: _refusal(h, lambda: h.change(
+        'rollback', launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))),
+        _login_rollback_check, write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
+    'restore_after_a_login_adopt_first_install': Scenario(_login_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
+        h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_user_skill(h))), _login_adopt_check,
+        write_ahead=False, final=_legacy_served, effects=RESTORE_EFFECTS),
 }
 
 
@@ -739,10 +867,11 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
         trace = self.reference(scenario).trace
         total = len(trace)
         kinds = {kind for kind, *_ in trace}
-        self.assertTrue({'create', 'replace', 'renameatx', 'launchctl'} <= kinds, kinds)
+        required, minimum = scenario.effects
+        self.assertTrue(required <= kinds, kinds)
         if scenario.write_ahead:
             self.assertTrue('claude' in kinds and any(window for _, _, window, _ in trace))
-        self.assertGreater(total, 50)
+        self.assertGreater(total, minimum)
         workers = []
         for index in range(WORKERS):
             read, write = os.pipe()
@@ -826,6 +955,15 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_late_refusal_after_the_codex_write_refuses_with_its_documented_code(self):
         self.sweep('late_refusal_after_the_codex_write')
+
+    def test_restore_after_a_login_boots_the_new_broker_out_for_an_upgrade(self):
+        self.sweep('restore_after_a_login_upgrade')
+
+    def test_restore_after_a_login_boots_the_new_broker_out_for_a_rollback(self):
+        self.sweep('restore_after_a_login_rollback')
+
+    def test_restore_after_a_login_puts_the_legacy_broker_back_for_an_adopting_first_install(self):
+        self.sweep('restore_after_a_login_adopt_first_install')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

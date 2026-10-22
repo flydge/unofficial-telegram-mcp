@@ -728,5 +728,146 @@ class CodexWriteWindowTests(ParkedHarness, unittest.TestCase):
         self.assertOneRelease(self.runtime / 'releases' / new[3])
 
 
+class LoginRestoreTests(ParkedHarness, unittest.TestCase):
+    """0.53 critic round 4: launchd loads the plist on disk at login, so after a kill past the plist rewrite a
+    login starts the target release's broker. The restore is idempotent by state, like the stop: the target's
+    broker it finds loaded is booted out before the previous plist is written back, and the previous broker is
+    bootstrapped again when it was running before the change; a loaded broker that is neither ours stays and
+    refuses `service_conflict`. Before the fix every later repeat refused `service_conflict` and uninstall
+    `transaction_pending` (the reviewer's `R4`, `R4c` and `R4d`)."""
+
+    def prepare(self, kind):
+        """(action, target, edit, clear): `edit` is a checkpoint that makes the repeat refuse late (our Codex table
+        changed at `service`; for an adopting first install a skill directory of the user's at `registration`)."""
+        skill = self.skills / 'telegram-search'
+        if kind == 'adopting first install':
+            self.legacy()
+            packet = self.build('a')
+            action = lambda **kwargs: self.install(packet, adopt_legacy=True, **kwargs)
+            target = self.runtime / 'releases' / packet[3]
+
+            def edit(stage):
+                if stage == 'registration' and not skill.exists():
+                    skill.mkdir(mode=0o700)
+                    (skill / 'SKILL.md').write_bytes(b'mine')
+
+            def clear():
+                (skill / 'SKILL.md').unlink()
+                skill.rmdir()
+            code = 'foreign_telegram-search'
+        else:
+            _, old = self.full()
+            new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+            if kind == 'rollback':
+                self.install(new)
+            target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+            action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                lambda **kwargs: self.change('rollback', **kwargs))
+
+            def edit(stage):
+                if stage == 'service':
+                    self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+
+            def clear():
+                self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+            code = 'target_conflict'
+        self.claude()
+        self.served = self.service_state()
+        self.pin = (self.session_root / 'runtime.toml').read_bytes()
+        return action, target, edit, clear, code
+
+    def login(self, target):
+        """launchd at login: the plist on disk, here the target's, is loaded."""
+        self.assertIsNone(self.launchctl.loaded)
+        self.launchctl.load()
+        self.assertEqual(self.launchctl.loaded[4], str(target / 'launcher.py'))
+
+    def assertServed(self):
+        """The old service exactly as before the change: plist bytes, loaded broker and runtime.toml pin."""
+        self.assertEqual((self.service_state(), (self.session_root / 'runtime.toml').read_bytes()), (self.served, self.pin))
+        self.assertEqual(self.temporaries(), [])
+
+    def assertFinishes(self, action, target):
+        result = action()
+        self.assertEqual(result['service'], 'restarted')
+        self.assertOneRelease(target)
+        self.assertEqual(self.change('uninstall')['service'], 'removed')
+        self.assertFalse(self.runtime.exists() or self.plist.exists())
+        self.assertIsNone(self.launchctl.loaded)
+
+    def test_a_login_after_a_kill_past_the_plist_rewrite_then_a_late_refusal_restores_the_old_broker(self):
+        for kind in ('upgrade', 'rollback'):
+            for at in ('published:plist', 'service', 'registration', 'claude_code', 'policy'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    action, target, edit, clear, code = self.prepare(kind)
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                    self.login(target)
+                    boots = self.launchctl.verbs().count('bootout')
+                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), code)
+                    self.assertServed()
+                    self.assertEqual(self.launchctl.verbs().count('bootout'), boots + 1)  # The target's broker.
+                    self.assertEqual(self.launchctl.verbs()[-2:], ['print', 'bootstrap'])
+                    # Parked: uninstall would go over it; another kit names it.
+                    self.assertPending(lambda: self.install(self.build('c', launcher=b'# third release\n')), kind)
+                    clear()
+                    self.assertFinishes(action, target)
+
+    def test_a_login_after_a_kill_inside_the_restore_is_finished_by_the_repeat(self):
+        """Killed inside the restore, before or after the previous plist is back: the login loads the plist on
+        disk, the target's or the previous one; the repeat finishes the restore with the same code."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('recorded:service_restore', 'recorded:plist_restore', 'published:plist_restore'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    action, target, edit, clear, code = self.prepare(kind)
+
+                    def die(checkpoint):
+                        def both(value):
+                            edit(value)
+                            checkpoint(value)
+                        action(checkpoint=both)
+                    self.die(die, at=at)
+                    self.assertIsNone(self.launchctl.loaded)
+                    self.launchctl.load()
+                    clear()
+                    self.assertPending(lambda: self.change('uninstall'), kind)  # Not parked until the restore ends.
+                    self.assertEqual(self.refused(action), code)
+                    self.assertServed()
+                    self.assertFinishes(action, target)
+
+    def test_an_adopting_first_install_puts_the_legacy_broker_back_not_the_new_one(self):
+        for at in ('published:plist', 'registration'):
+            with self.subTest(at=at):
+                self.setUp()
+                action, target, edit, clear, code = self.prepare('adopting first install')
+                self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                self.login(target)
+                self.assertEqual(self.refused(lambda: action(checkpoint=edit)), code)
+                self.assertServed()  # The legacy plist with the legacy broker loaded.
+                self.assertFalse((self.runtime / 'current.json').exists())
+                clear()
+                result = action()
+                self.assertEqual((result['status'], result['service']), ('activation_required', 'restarted'))
+                self.assertOneRelease(target)
+
+    def test_a_broker_neither_ours_stays_loaded_and_refuses(self):
+        """Neither the target's nor the previous broker: never booted out, `service_conflict` until it is gone;
+        then the repeat finishes the restore with the recorded code, and the next one the change."""
+        action, target, edit, clear, code = self.prepare('upgrade')
+        self.die(lambda checkpoint: action(checkpoint=checkpoint), at='published:plist')
+        foreign = ['/foreign/python', 'x']
+        self.launchctl.loaded = foreign
+        boots = self.launchctl.verbs().count('bootout')
+        self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'service_conflict')
+        self.assertEqual((self.launchctl.loaded, self.launchctl.verbs().count('bootout')), (foreign, boots))
+        self.assertEqual(self.refused(action), 'service_conflict')
+        self.launchctl.loaded = None  # The user stops the foreign job.
+        clear()
+        self.assertEqual(self.refused(action), code)
+        self.assertServed()
+        self.assertFinishes(action, target)
+
+
 if __name__ == '__main__':
     unittest.main()
