@@ -702,7 +702,8 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   up), with one exact bound: each skill copy is written at most eight times within one upgrade, the first
   write included, so a repeat that would write it a ninth time (you removed or replaced it before each of
   eight repeats of one unfinished upgrade) refuses `recovery_limit`, and so does every repeat after it;
-  `uninstall` still ends that upgrade. Every run before `current.json` switches decides the service from
+  `uninstall` still ends that upgrade (for an unfinished first install it does not: put the skill copy
+  back by hand, then repeat). Every run before `current.json` switches decides the service from
   what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist
   on disk: the old release's, or after a kill past the plist rewrite the new release's). A run that goes
   on stops an old broker started again meanwhile (gated first), also when none ran as the upgrade began,
@@ -720,9 +721,12 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   `connect` or a manual `launchctl bootstrap` running at that moment) is not a conflict either: it is
   recognised by the plist bytes the upgrade kept, gated and stopped, also by the restart after the switch.
   A plist removed by hand (`rm`, with or without `launchctl bootout`) is not a conflict: the repeat writes
-  the new release's plist anew, and after the switch writes it again if it is gone. A broker still loaded
+  the new release's plist anew, and after the switch writes it again if it is gone and a broker ran as the
+  change began (otherwise the change finishes `not_loaded` and `connect` writes it). A broker still loaded
   from that plist's path that runs either release is the installation's own: the repeat gates and stops it
-  like any other, and `uninstall` boots it out.
+  like any other, and `uninstall` boots it out. A broker loaded by a concurrent `connect` or a login in the
+  instant of `uninstall`'s own stop stays loaded after `uninstall` reports `removed`: stop it with the
+  `launchctl bootout` command above.
 - **`uninstall`.** It goes over the parked upgrade: it removes what the installed release owns and
   everything the upgrade already wrote (the Codex entry, skill copies, and Claude Code and Claude Desktop
   entries that name the new release), each only while it is exactly what was written, then the broker,

@@ -22,7 +22,8 @@ Everything listed for [0.53.0rc1](release-notes-0.53.0rc1.md#available-behavior)
   install as well as an upgrade or rollback; after an upgrade's or rollback's commit a changed Codex table
   no longer stops it either. A broker plist removed by hand while a change is unfinished is written anew by
   the repeat, or restored from the transaction's copy by a refused repeat's restore. The previous plist
-  bootstrapped again between the stop and the rewrite (a concurrent `connect`) is stopped like any other.
+  bootstrapped again between the stop and the rewrite (a concurrent `connect`) is stopped by an upgrade or
+  rollback like any other (not by `uninstall`; see Known limits).
   Repeated refusals in the instant of the Codex write no longer use up its attempts.
 - **Uninstall over a parked change** removes a Claude Code or Claude Desktop entry the change wrote before
   an interruption cut off its outcome record, while it is exactly what was written.
@@ -60,9 +61,17 @@ Package version 0.53.0rc2, public contract version 1. The tool schemas are uncha
 - The plugin's files come from whatever commit the user's marketplace clone holds; the docs say how to
   inspect them against the release tag.
 - A parked change (refused after the broker stop) is finished by repeating the command or by `uninstall`;
-  `rollback` refuses until then. Each skill copy is written at most eight times within one upgrade: removing
-  or replacing the same copy before each of eight repeats of one unfinished upgrade leaves `uninstall` as
-  the only way to end it (`recovery_limit`).
+  `rollback` refuses until then. Each skill copy is written at most eight times within one change: removing
+  or replacing the same copy before each of eight repeats of one unfinished upgrade or rollback leaves
+  `uninstall` as the only way to end it (`recovery_limit`). For an unfinished **first install** the same
+  case has no way out (the repeat refuses `recovery_limit`, `uninstall` refuses `transaction_pending`)
+  until the copy is restored by hand; it needs eight kills inside the install, each followed by removing
+  that copy.
+- A broker loaded from its plist by a concurrent `connect` or a login in the instant of `uninstall`'s stop
+  stays loaded after `uninstall` reports `removed`; stop it with
+  `launchctl bootout gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker`.
+- A broker plist removed by hand after a change committed, when no broker ran as the change began, is not
+  written again by that change (it finishes `not_loaded`); `connect` writes it.
 - Open lows from earlier reviews: after a `_manifest` schema mismatch `tools/list` still lists every enabled
   tool; the server instructions' recovery line names the telegram-setup skill (absent in Claude Desktop)
   and has no `config_stale` step; a v1 native lock is admitted outside the approved-pin table;
