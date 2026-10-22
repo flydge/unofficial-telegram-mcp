@@ -933,16 +933,18 @@ class _Service:
         new cycle's stop leaves every client entry unchanged: the service becomes the target's whatever stage the
         journal records. A new cycle boots out a still-loaded exact registration, gated again right before, and
         records its stop. While a cycle's stop is in effect, a previous definition loaded again (a login loads the
-        plist on disk) is gated and booted out again. Then the plist is rewritten, its exact previous bytes kept
-        first, until it is the target's."""
+        plist on disk) is gated and booted out again. Both by state, not by the observation: a broker a login
+        started in a change that found none running is stopped too (and, as none ran before, `restart` starts
+        none), so the previous broker never runs on the target's plist and pin. Then the plist is rewritten, its
+        exact previous bytes kept first, until it is the target's."""
         observed=self._observed(j)
         number,state,_=self.cycle(j)
         if state=='restoring':raise InstallError('transaction_conflict')  # `restore` finishes it first.
         if state!='stopped':
-            if observed['loaded'] and self._recheck():
+            if self._recheck():
                 self.stopping=True;_bootout(self.runner,self.label)
             j.update(put=('service_cycle',{'cycle':number+1,'state':'stopped'}));j.checkpoint('stopped:service')
-        elif observed['loaded'] and self.kind()[0]!='to' and self._recheck():
+        elif self.kind()[0]!='to' and self._recheck():
             self.stopping=True;_bootout(self.runner,self.label)
         if observed['plist']!='absent':
             j.discard('plist',self.plist)

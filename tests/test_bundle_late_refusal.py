@@ -852,6 +852,36 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
                 self.assertEqual((result['status'], result['service']), ('activation_required', 'restarted'))
                 self.assertOneRelease(target)
 
+    def test_an_old_broker_a_login_started_in_a_change_that_found_none_running_is_stopped_again(self):
+        """The change began with no broker running; a login since loaded the plist on disk, the old release's
+        (the change parked by a late refusal, or killed after its stop record). The next run gates that broker
+        and stops it before the plist rewrite, and the commit starts none, as none ran before the change: the old
+        broker never serves on the new pin, and the next login starts the new release's."""
+        for how in ('parked', 'killed'):
+            with self.subTest(how=how):
+                self.setUp()
+                _, old = self.full(loaded=False)
+                new = self.build('b', launcher=b'# second release\n')
+                target = self.runtime / 'releases' / new[3]
+                if how == 'parked':
+                    self.assertEqual(self.refused(lambda: self.install(new, checkpoint=self.at_copy(
+                        lambda data: data.replace(OURS, CHANGED)))), 'target_conflict')
+                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                else:
+                    self.die(lambda checkpoint: self.install(new, checkpoint=checkpoint), at='stopped:service')
+                self.assertIsNone(self.launchctl.loaded)
+                self.launchctl.load()
+                self.assertEqual(self.launchctl.loaded[4], str(Path(old['release_root']) / 'launcher.py'))
+                served = self.service_state()
+                self.answers = ['pending']  # Gated before it is stopped: a pending send refuses, nothing changed.
+                self.assertEqual(self.refused(lambda: self.install(new)), 'pending_send_unresolved')
+                self.assertEqual(self.service_state(), served)
+                result = self.install(new)
+                self.assertEqual((result['status'], result['service']), ('upgraded', 'not_loaded'))
+                self.assertIsNone(self.launchctl.loaded)
+                self.launchctl.load()  # The next login.
+                self.assertOneRelease(target)
+
     def test_a_broker_neither_ours_stays_loaded_and_refuses(self):
         """Neither the target's nor the previous broker: never booted out, `service_conflict` until it is gone;
         then the repeat finishes the restore with the recorded code, and the next one the change."""

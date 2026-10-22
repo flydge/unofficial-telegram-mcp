@@ -670,6 +670,30 @@ def _parked_desktop_temporary_prepare(h):
     config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
 
 
+def _not_running_prepare(h):
+    """0.53 critic round 5: an upgrade that found no broker running, parked by a late refusal; then a login loads
+    the plist on disk, the installed release's."""
+    h.full(loaded=False)
+    h.new = h.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+    h.claude()
+    h.target = h.runtime / 'releases' / h.new[3]
+    _late_codex(h, lambda **kwargs: h.install(h.new, **kwargs), OURS, CHANGED, 'target_conflict')
+    _login(h, h.pointer()['release_root'])
+
+
+def _not_running_check(h, result):
+    """The repeat stopped the old broker the login started and, as none ran when the change began, started none."""
+    h.assertEqual((result['status'], result['service']), ('upgraded', 'not_loaded'))
+    h.launchctl.load()  # The next login.
+    h.assertEqual(_one_release(h), [])
+
+
+def _stopped_on_target(h):
+    """current.json, the pin and the plist name `h.target`, and no broker runs (none did when the change began)."""
+    out = [p for p in _one_release(h) if not p.startswith('loaded broker')]
+    return out + (['a broker is loaded'] if h.launchctl.loaded is not None else [])
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -713,7 +737,8 @@ SCENARIOS = {
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_after_codex_write(h))), _codex_write_refusal_check,
         write_ahead=False, final=_one_release),
     # 0.53 critic round 5: a late refusal after a kill past the plist rewrite and a login (the target's broker
-    # loaded), and an uninstall over a change parked with our Claude Desktop temporary beside the user's config.
+    # loaded); a repeat after a login in a change that found no broker running; client temporaries a kill left,
+    # removed by a late refusal's restore and by an uninstall over a change parked with one.
     'restore_after_a_login_upgrade': Scenario(_login_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))), _login_upgrade_check,
         write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
@@ -723,6 +748,9 @@ SCENARIOS = {
     'restore_after_a_login_adopt_first_install': Scenario(_login_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_user_skill(h))), _login_adopt_check,
         write_ahead=False, final=_legacy_served, effects=RESTORE_EFFECTS),
+    'repeat_stops_a_broker_a_login_started_in_a_change_that_found_none': Scenario(
+        _not_running_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _not_running_check,
+        final=_stopped_on_target),
     'late_refusal_after_a_kill_in_the_desktop_write': Scenario(_desktop_temporary_prepare, lambda h, lc, cl: _refusal(
         h, lambda: h.install(h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))),
         _desktop_temporary_check, write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
@@ -1000,6 +1028,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_restore_after_a_login_puts_the_legacy_broker_back_for_an_adopting_first_install(self):
         self.sweep('restore_after_a_login_adopt_first_install')
+
+    def test_repeat_stops_an_old_broker_a_login_started_in_a_change_that_found_none_running(self):
+        self.sweep('repeat_stops_a_broker_a_login_started_in_a_change_that_found_none')
 
     def test_late_refusal_after_a_kill_in_the_desktop_write_removes_its_temporary(self):
         self.sweep('late_refusal_after_a_kill_in_the_desktop_write')
