@@ -759,16 +759,24 @@ MAX_POLICY_BYTES = 16384
 MAX_PLIST_BYTES = 1024 * 1024
 MAX_CHANGES = 999
 # Run under the interpreter of the broker it asks: only that release's own client passes the
-# broker's version handshake. Any client context may hold a draft or an unresolved send outcome.
-# It uses only what every broker this installer adopts or upgrades ships, a 0.51 or 0.52 source
-# venv included: config.BROKER_SOCKET_PATH and load_runtime_policy, broker_client.BrokerClient,
-# its health() and close().
+# broker's version handshake. It uses only what every broker this installer adopts or upgrades
+# ships, a 0.51 or 0.52 source venv included: config.BROKER_SOCKET_PATH and load_runtime_policy,
+# broker_client.BrokerClient, its health() and close(). From 0.53.0rc2 health counts the pending
+# sends (`pending_sends`: sends in flight, approval dialogs open, outcomes get_send_status could
+# still settle): any of them, or a client context, is 'pending'. A 0.51 or 0.52 broker counts only
+# client contexts, which never show a send: there any context is 'unknown'.
 _PENDING_PROBE = ("import sys\nsys.path[:0]=[p for p in sys.argv[1:2] if p]\n"
                   "from telegram_search_mcp.config import BROKER_SOCKET_PATH,load_runtime_policy\n"
                   "from telegram_search_mcp.broker_client import BrokerClient\n"
                   "c=BrokerClient(socket_path=BROKER_SOCKET_PATH,policy=load_runtime_policy(),request_timeout=5,\n"
                   " restart_callback=lambda:None,retry_backoff_seconds=0)\ntry:\n h=c.health()\n"
-                  " print('none' if type(h.get('active_clients')) is int and h['active_clients']==0 else 'pending')\n"
+                  " a=h.get('active_clients');p=h.get('pending_sends',False)\n"
+                  " k=('in_flight','approval_dialogs','unreconciled_receipts')\n"
+                  " if type(a) is not int or a<0:print('unknown')\n"
+                  " elif p is False:print('none' if a==0 else 'unknown')\n"
+                  " elif type(p) is not dict or sorted(p)!=sorted(k) or any(type(p[n]) is not int or p[n]<0 for n in k):"
+                  "print('unknown')\n"
+                  " else:print('pending' if a or any(p[n] for n in k) else 'none')\n"
                   "finally:\n c.close()\n")
 
 

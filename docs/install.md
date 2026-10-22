@@ -646,16 +646,20 @@ restart_mcp_clients`. Reconnect every client: a running proxy that loaded the ol
 are not written.
 
 **Pending-send gate.** If the broker is running, the installer asks it, through its own release's
-client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether any client
-context is connected. A context may hold a draft or an unresolved send outcome, and an unknown answer
-counts as pending. It asks before the transaction exists, again once the new release is copied, and a
+client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether a send is
+pending: a send or apply request in flight, an approval dialog open, or a send outcome `get_send_status`
+could still settle (an `outcome_unknown` within its 15-minute status window), and whether any client
+context is connected. Any of them counts as pending. A 0.51 or 0.52 broker reports only client contexts,
+which never show a send, so there a connected context is an unknown answer, and an unknown answer counts
+as pending too. It asks before the transaction exists, again once the new release is copied, and a
 last time right before the broker is stopped, which comes before any client file is written. Any such
 answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
 session unchanged. A refusal at the first check changes nothing at all; at a later one the new release
 tree is already copied and the upgrade stays unfinished, so `rollback` and another kit refuse as
 `transaction_pending` (`pending_action: upgrade`) until the same command is repeated (or `uninstall`,
-which goes over the unfinished upgrade, removes the installation). Quit the
-MCP clients, wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send
+which goes over the unfinished upgrade, removes the installation). Settle any open dialog and any
+`outcome_unknown` send first (`get_send_status`), quit the MCP clients, wait for their contexts to idle
+out (300 seconds by default), and repeat. An uncertain send
 is never retried by an upgrade. From the broker stop until the upgrade finishes, or until a refusal
 restores the broker (below), running MCP clients cannot reach the broker.
 

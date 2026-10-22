@@ -2070,8 +2070,12 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 - **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
   right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
   through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
-  whether any client context is connected. A context may hold a draft or an unresolved send outcome.
-  Anything but "none" (including an unknown answer) refuses (`pending_send_unresolved`). The bootout
+  whether a send is pending: health's `pending_sends` counts the send and apply requests in flight, the
+  approval dialogs open and the attempts `get_send_status` could still settle (claimed and unfinished, or
+  `outcome_unknown`, within the 900-second receipt retention), all of which a restart would cut off or lose,
+  and any connected client context counts as well. A 0.51 or 0.52 broker has no such count, so there any
+  context is an unknown answer. Anything but "none" (including an unknown answer) refuses
+  (`pending_send_unresolved`). The bootout
   follows the last check directly and precedes every client write, so a refusal leaves every client
   entry, the plist and the session unchanged; after the first check, the copied release tree and the
   unfinished transaction stay until the same command is repeated. Only the exact label is

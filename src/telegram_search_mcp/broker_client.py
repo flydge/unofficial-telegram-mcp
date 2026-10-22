@@ -1858,8 +1858,13 @@ class BrokerClient(SelectionClientMixin):
             "error_count",
             "peak_overlap",
             "serialization_wait_count",
+            "pending_sends",
         }
         if set(result) != expected:
+            raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
+        pending = result["pending_sends"]
+        if (type(pending) is not dict or set(pending) != {"in_flight", "approval_dialogs", "unreconciled_receipts"}
+                or any(type(value) is not int or value < 0 for value in pending.values())):
             raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         if type(result["uptime_seconds"]) not in (int, float) or result[
             "uptime_seconds"
@@ -1867,7 +1872,7 @@ class BrokerClient(SelectionClientMixin):
             raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         if any(
             type(result[name]) is not int or result[name] < 0
-            for name in expected - {"uptime_seconds"}
+            for name in expected - {"uptime_seconds", "pending_sends"}
         ):
             raise BrokerUnavailable(f"{identity.DISPLAY_NAME} broker returned an invalid response")
         return result

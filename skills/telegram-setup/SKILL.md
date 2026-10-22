@@ -110,12 +110,13 @@ Installer results:
 ## Upgrade, rollback and uninstall
 
 Only when the user asks, and best in the user's own native Terminal. Before it stops the broker, and
-before it changes any client entry, the installer asks the broker whether any client context is
-connected, and an open MCP client can count as one. It then refuses with `pending_send_unresolved`: no
+before it changes any client entry, the installer asks the broker whether a send is in flight, an
+approval dialog is open, a send outcome is not yet settled, or any client context is connected (an open
+MCP client can count as one). It then refuses with `pending_send_unresolved`: no
 client entry, broker or session has changed, but an upgrade or rollback may stay unfinished, and then
-other actions refuse with `transaction_pending` until the same command runs again. Ask the user to quit
-every MCP client (or leave the Telegram tools unused for about five minutes) and run the same command
-again; stop after two refusals and tell the user that this same command finishes it later.
+other actions refuse with `transaction_pending` until the same command runs again. Ask the user to settle
+any open dialog and any `outcome_unknown` send (`get_send_status`), quit every MCP client (or leave the
+Telegram tools unused for about five minutes) and run the same command again; stop after two refusals and tell the user that this same command finishes it later.
 
 - **Upgrade:** the user runs the newer kit's `Install.command`, the same `bootstrap.sh` command with the
   newer pins (without `--claude-code`, or with the installed mode), or in plugin mode a newer plugin's
