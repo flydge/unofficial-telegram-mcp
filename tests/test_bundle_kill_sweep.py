@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import shutil
 import stat
@@ -214,8 +215,11 @@ def differences(expected, actual, limit=4):
 # --- scenarios ---------------------------------------------------------------------------------------------
 
 class Scenario:
-    def __init__(self, prepare, action, check, write_ahead=True):
-        self.prepare, self.action, self.check, self.write_ahead = prepare, action, check, write_ahead
+    """`final(h)`, when given, lists what is wrong with the state after the uninterrupted run and after every
+    resume (beyond the comparison with the uninterrupted run's state)."""
+
+    def __init__(self, prepare, action, check, write_ahead=True, final=None):
+        self.prepare, self.action, self.check, self.write_ahead, self.final = prepare, action, check, write_ahead, final
 
 
 def _upgrade_prepare(h):
@@ -342,6 +346,7 @@ def _merged_check(h, result):
 def _late_upgrade_prepare(h):
     _upgrade_prepare(h)
     h.served = (h.plist.read_bytes(), h.launchctl.loaded)
+    h.target = Path(h.pointer()['release_root'])  # A late refusal leaves the installed release serving.
 
 
 def _late_upgrade_check(h, result):
@@ -392,6 +397,68 @@ def _late_adopt_check(h, result):
     _adopt_first_check(h, h.install(h.packet, adopt_legacy=True))
 
 
+def _one_release(h):
+    """current.json, the runtime.toml pin, the plist and the loaded broker all name `h.target` (0.53 critic round
+    4: a kill in a repeat's stop left the old broker on the new pin)."""
+    launcher = str(h.target / 'launcher.py')
+    version = json.loads((h.target / 'manifest/release.json').read_text())['package_version']
+    loaded = h.launchctl.loaded
+    named = {'current.json': json.loads((h.runtime / 'current.json').read_text())['release_root'] == str(h.target),
+             'pin': ('expected_package_version = "%s"' % version).encode() in (h.session_root / 'runtime.toml').read_bytes(),
+             'plist': h.plist.exists() and plistlib.loads(h.plist.read_bytes())['ProgramArguments'][4] == launcher,
+             'loaded broker': loaded is not None and loaded[4] == launcher}
+    return ['%s does not name %s' % (k, h.target.name) for k, ok in named.items() if not ok]
+
+
+def _late_codex(h, action, ours, changed, code):
+    """A late refusal from our Codex table changed during the copy, then the table put back: the change is parked."""
+    h.assertEqual(_refusal(h, lambda: action(checkpoint=_at_copy(h, lambda d: d.replace(ours, changed))))['refused'], code)
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(changed, ours))
+
+
+def _repeat_upgrade_prepare(h):
+    _upgrade_prepare(h)
+    h.target = h.runtime / 'releases' / h.new[3]
+    _late_codex(h, lambda **kwargs: h.install(h.new, **kwargs), OURS, CHANGED, 'target_conflict')
+
+
+def _repeat_rollback_prepare(h):
+    _rollback_prepare(h)
+    h.target = Path(h.previous['release_root'])
+    _late_codex(h, lambda **kwargs: h.change('rollback', **kwargs), OURS, CHANGED, 'target_conflict')
+
+
+def _repeat_adopt_prepare(h):
+    _adopt_first_prepare(h)
+    h.target = h.runtime / 'releases' / h.packet[3]
+    _late_codex(h, lambda **kwargs: h.install(h.packet, adopt_legacy=True, **kwargs), LEGACY, LEGACY_CHANGED,
+                'foreign_registration')
+
+
+def _skill_edited(h):
+    """At the copy, once: our search skill copy edited by hand, so the change refuses after its Codex write."""
+    skill = h.skills / 'telegram-search' / 'SKILL.md'
+
+    def checkpoint(stage):
+        if stage == 'release' and skill.read_bytes() != b'mine':
+            skill.chmod(0o600)
+            skill.write_bytes(b'mine')
+    return checkpoint
+
+
+def _many_refusals_prepare(h):
+    """Nine `skill_conflict` refusals after the Codex write (more than the eight cycles 0.53 round 3 allowed),
+    then the edited copy removed: the repeat publishes its own."""
+    _upgrade_prepare(h)
+    h.target = h.runtime / 'releases' / h.new[3]
+    for _ in range(9):
+        h.assertEqual(_refusal(h, lambda: h.install(h.new, checkpoint=_skill_edited(h)))['refused'], 'skill_conflict')
+    skill = h.skills / 'telegram-search'
+    (skill / 'SKILL.md').unlink()
+    skill.rmdir()
+
+
 SCENARIOS = {
     'upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check),
     'rollback': Scenario(_rollback_prepare, lambda h, lc, cl: h.change('rollback', launchctl=lc, claude_runner=cl),
@@ -412,12 +479,21 @@ SCENARIOS = {
         _merged_check),
     'late_refusal_upgrade': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_copy(h, lambda d: d.replace(OURS, CHANGED)))),
-        _late_upgrade_check, write_ahead=False),
+        _late_upgrade_check, write_ahead=False, final=_one_release),
     'late_refusal_after_policy': Scenario(_late_policy_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
-        h.new, launchctl=lc, claude_runner=cl, checkpoint=_receipt_changed(h))), _late_policy_check),
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_receipt_changed(h))), _late_policy_check, final=_one_release),
     'late_refusal_adopt_first_install': Scenario(_late_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl,
         checkpoint=_at_copy(h, lambda d: d.replace(LEGACY, LEGACY_CHANGED)))), _late_adopt_check, write_ahead=False),
+    # 0.53 critic round 4: the successful repeat after a late refusal, killed anywhere (its broker stop included).
+    'repeat_after_late_refusal_upgrade': Scenario(_repeat_upgrade_prepare, lambda h, lc, cl: h.install(
+        h.new, launchctl=lc, claude_runner=cl), _upgrade_check, final=_one_release),
+    'repeat_after_late_refusal_rollback': Scenario(_repeat_rollback_prepare, lambda h, lc, cl: h.change(
+        'rollback', launchctl=lc, claude_runner=cl), _rollback_check, final=_one_release),
+    'repeat_after_late_refusal_adopt_first_install': Scenario(_repeat_adopt_prepare, lambda h, lc, cl: h.install(
+        h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl), _adopt_first_check, final=_one_release),
+    'repeat_after_many_late_refusals': Scenario(_many_refusals_prepare, lambda h, lc, cl: h.install(
+        h.new, launchctl=lc, claude_runner=cl), _upgrade_check, final=_one_release),
 }
 
 
@@ -496,6 +572,8 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
         result = self.run_action(scenario, hook)
         reference = Reference(trace, normal(result, str(self.base), {}), snapshot(self.base), attempts(self.base))
         self.assertEqual(orphans(self.base), [])
+        if scenario.final is not None:
+            self.assertEqual(scenario.final(self), [])
         scenario.check(self, result)
         return reference
 
@@ -576,6 +654,8 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                     continue
                 window = ('<absent>' if document is None else document) if window else None
                 found.extend('%s: %s' % (at, p) for p in self.problems(reference, result, window))
+                if scenario.final is not None:
+                    found.extend('%s: %s' % (at, p) for p in scenario.final(self))
             except Exception as error:
                 found.append('%d: the sweep raised %r' % (n, error))
             finally:
@@ -654,6 +734,18 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_late_refusal_restores_the_adopted_broker_of_a_first_install(self):
         self.sweep('late_refusal_adopt_first_install')
+
+    def test_repeat_after_a_late_refusal_of_an_upgrade_ends_on_one_release(self):
+        self.sweep('repeat_after_late_refusal_upgrade')
+
+    def test_repeat_after_a_late_refusal_of_a_rollback_ends_on_one_release(self):
+        self.sweep('repeat_after_late_refusal_rollback')
+
+    def test_repeat_after_a_late_refusal_of_an_adopting_first_install_ends_on_one_release(self):
+        self.sweep('repeat_after_late_refusal_adopt_first_install')
+
+    def test_repeat_after_more_late_refusals_than_any_bound_finishes(self):
+        self.sweep('repeat_after_many_late_refusals')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

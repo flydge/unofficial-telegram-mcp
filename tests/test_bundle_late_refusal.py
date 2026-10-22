@@ -56,6 +56,15 @@ class LateHarness(AdoptionHarness, SafetyHarness):
         self.assertTrue(data.startswith(NEIGHBOUR_CODEX) and data.endswith(added), data)
         self.assertNotIn(b'telegram_search', data)
 
+    def assertOneRelease(self, target):
+        """current.json, the runtime.toml pin, the plist and the loaded broker all name `target`."""
+        launcher = str(Path(target) / 'launcher.py')
+        version = json.loads((Path(target) / 'manifest/release.json').read_text())['package_version']
+        self.assertEqual((self.pointer()['release_root'],
+                          plistlib.loads(self.plist.read_bytes())['ProgramArguments'][4], self.launchctl.loaded[4]),
+                         (str(target), launcher, launcher))
+        self.assertIn(('expected_package_version = "%s"' % version).encode(), (self.session_root / 'runtime.toml').read_bytes())
+
     def assertPending(self, action, pending):
         with self.assertRaises(self.module().InstallError) as caught:
             action()
@@ -304,7 +313,12 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                     if value == stage:
                         tamper()
                 self.assertEqual(self.refused(lambda: action(checkpoint=edit)), code)
-                self.assertEqual(len(self.journal(tx)['publications']['policy']), 1)  # The new pin was written.
+                # The new pin was written (its previous value journaled first), then put back by the restore, whose
+                # closing record drops the cycle's write records.
+                publications = self.journal(tx)['publications']
+                self.assertEqual((publications['policy_previous'], 'policy' in publications, 'policy_restore' in publications),
+                                 ([{'version': pin.split(b'expected_package_version = "')[1].split(b'"')[0].decode()}],
+                                  False, False))
                 self.assertEqual((policy.read_bytes(), self.service_state()), (pin, service))
                 self.assertEqual(self.temporaries(), [])
                 untamper()
@@ -328,12 +342,14 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                         checkpoint(value)
                     self.install(new, checkpoint=both)
                 self.die(die, at=stage)
+                self.assertEqual(self.journal('change_1')['publications']['service_cycle'],
+                                 [{'cycle': 1, 'state': 'restoring', 'code': 'target_conflict'}])
                 self.assertEqual(self.refused(lambda: self.install(new)), 'target_conflict')
                 self.assertEqual(self.service_state(), service)
                 self.assertEqual(self.temporaries(), [])
                 journal = self.journal('change_1')['publications']
-                self.assertEqual((len(journal['service_restoring']), len(journal['service_restored'])), (1, 1))
-                self.assertEqual(journal['service_restoring'][0]['code'], 'target_conflict')
+                self.assertEqual(journal['service_cycle'], [{'cycle': 1, 'state': 'restored'}])
+                self.assertFalse({'plist', 'plist_restore'} & set(journal))  # A finished restore ends its cycle's records.
 
     def test_a_failed_bootout_leaves_the_broker_serving_and_the_repeat_finishes(self):
         self.full()
@@ -359,17 +375,24 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
         self.assertEqual(self.plist.read_bytes(), foreign)
         self.assertNotIn('bootstrap', self.launchctl.verbs())
 
-    def test_late_refusals_are_bounded_and_the_last_refuses_before_any_stop(self):
-        self.full()
+    def test_any_number_of_late_refusals_keeps_the_journal_bounded_and_the_repeat_finishes(self):
+        """Each repeat is a separate user-initiated run: no cycle limit, and every cycle reuses the same journal
+        records, so the journal does not grow with the number of refusals."""
+        _, old = self.full()
         new = self.build('b', launcher=b'# second release\n')
         service = self.service_state()
         edit = self.at_copy(lambda data: data.replace(OURS, CHANGED))
-        for _ in range(8):
+        shapes = []
+        for _ in range(12):
             self.assertEqual(self.refused(lambda: self.install(new, checkpoint=edit)), 'target_conflict')
-        boots = self.launchctl.verbs().count('bootout')
-        self.assertEqual(self.refused(lambda: self.install(new)), 'recovery_limit')
-        self.assertEqual(self.launchctl.verbs().count('bootout'), boots)
-        self.assertEqual(self.service_state(), service)
+            self.assertEqual(self.service_state(), service)
+            shapes.append({k: len(v) for k, v in self.journal('change_1')['publications'].items()})
+        self.assertEqual(shapes[2:], [shapes[1]] * 10)
+        self.assertEqual(self.journal('change_1')['publications']['service_cycle'], [{'cycle': 12, 'state': 'restored'}])
+        self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+        result = self.install(new)
+        self.assertEqual((result['status'], result['service']), ('upgraded', 'restarted'))
+        self.assertOneRelease(self.runtime / 'releases' / new[3])
 
     def test_a_pending_send_at_the_stop_restores_nothing_and_changes_nothing(self):
         self.full()
@@ -380,7 +403,125 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
         self.assertEqual(self.client_files(), before)
         self.assertNotIn('bootstrap', self.launchctl.verbs()[verbs:])
         publications = self.journal('change_1')['publications']
-        self.assertFalse({'service_restoring', 'service_restored', 'service_stopped'} & set(publications))
+        self.assertNotIn('service_cycle', publications)
+
+
+class ParkedHarness(LateHarness):
+    """A change (or adopting first install) parked by a late refusal: the old service restored, the change open."""
+
+    def parked(self, kind, cause='codex'):
+        """Park `kind` with a late refusal of `cause` and resolve its conflict unless `cause` stays; returns
+        (action, target release root). `codex`: our Codex table changed during the copy (before any client
+        write). `receipt`: receipt.json changed at the policy step (every client already names the target);
+        it is put back. `skill`: our search skill copy edited during the copy (after the Codex write); it stays."""
+        if kind == 'adopting first install':
+            self.legacy()
+            packet = self.build('a')
+            action = lambda **kwargs: self.install(packet, adopt_legacy=True, **kwargs)
+            target = self.runtime / 'releases' / packet[3]
+            ours, changed, code = LEGACY_ARGS, LEGACY_CHANGED, 'foreign_registration'
+        else:
+            _, old = self.full()
+            new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+            if kind == 'rollback':
+                self.install(new)
+            target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+            action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                lambda **kwargs: self.change('rollback', **kwargs))
+            ours, changed, code = OURS, CHANGED, 'target_conflict'
+        self.claude()
+        self.served = self.service_state()
+        if cause == 'codex':
+            self.assertEqual(self.refused(lambda: action(checkpoint=self.at_copy(lambda d: d.replace(ours, changed)))), code)
+            self.config.write_bytes(self.config.read_bytes().replace(changed, ours))
+        elif cause == 'receipt':
+            receipt = self.runtime / 'receipt.json'
+            saved = receipt.read_bytes()
+
+            def tamper(stage):
+                if stage == 'policy':
+                    receipt.write_bytes(saved + b' ')
+            self.assertEqual(self.refused(lambda: action(checkpoint=tamper)), 'metadata_conflict')
+            receipt.write_bytes(saved)
+        else:
+            skill = self.skills / 'telegram-search'
+
+            def edit(stage):
+                if stage == 'release' and (skill / 'SKILL.md').read_bytes() != b'mine':
+                    (skill / 'SKILL.md').chmod(0o600)
+                    (skill / 'SKILL.md').write_bytes(b'mine')
+            self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'skill_conflict')
+        self.assertEqual(self.service_state(), self.served)
+        return action, target
+
+    def assertRemoved(self, result, *, kept_skill=None):
+        """Uninstall removed every owned object, the parked change's entries included; neighbours stay."""
+        self.assertEqual((result['status'], result['service'], result['codex'], result['claude_code'], result['claude_desktop']),
+                         ('uninstalled', 'removed', 'removed', 'removed', 'removed'))
+        self.assertEqual({k for k, v in result['skills'].items() if v != 'removed'}, {kept_skill} - {None})
+        self.assertFalse(self.runtime.exists() or self.plist.exists())
+        self.assertIsNone(self.launchctl.loaded)
+        self.assertTrue(self.config.read_bytes().startswith(NEIGHBOUR_CODEX))
+        self.assertNotIn(b'telegram_search', self.config.read_bytes())
+        self.assertNotIn('telegram_search', self.claude().document().get('mcpServers', {}))
+        servers = json.loads(self.desktop_config.read_text())['mcpServers']
+        self.assertEqual((servers.get('weather'), 'telegram_search' in servers), ({'command': '/opt/w', 'args': []}, False))
+        self.assertEqual(self.temporaries(), [])
+
+
+class RepeatStopTests(ParkedHarness, unittest.TestCase):
+    """The service step is idempotent by state: until the commit, every run makes the loaded service the target's
+    (stopped again while the old definition is loaded, the plist rewritten until it is the target's), so a kill
+    anywhere in the repeat's stop still ends on one release."""
+
+    KINDS = ('upgrade', 'rollback', 'adopting first install')
+
+    def test_a_kill_in_the_repeats_stop_still_rewrites_the_plist(self):
+        kills = [dict(at='stopped:service'), dict(at='recorded:plist'), dict(at='published:plist'),
+                 dict(after='stopped:service', skip=0), dict(after='stopped:service', skip=1)]
+        for kind in self.KINDS:
+            for kill in kills:
+                with self.subTest(kind=kind, kill=kill):
+                    self.setUp()
+                    action, target = self.parked(kind)
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), **kill)
+                    result = action()
+                    self.assertEqual(result['service'], 'restarted')
+                    self.assertOneRelease(target)
+                    self.assertEqual(self.temporaries(), [])
+                    self.assertEqual(self.change('uninstall')['service'], 'removed')
+                    self.assertFalse(self.plist.exists())
+                    self.assertIsNone(self.launchctl.loaded)
+
+    def test_a_broker_loaded_again_after_the_stop_is_stopped_again(self):
+        """A login after the kill loads the old definition still on disk: the resume gates it and boots it out."""
+        for kind in self.KINDS:
+            with self.subTest(kind=kind):
+                self.setUp()
+                action, target = self.parked(kind)
+                self.die(lambda checkpoint: action(checkpoint=checkpoint), at='stopped:service')
+                self.assertIsNone(self.launchctl.loaded)
+                self.launchctl.load()
+                boots = self.launchctl.verbs().count('bootout')
+                self.answers = ['pending']
+                self.assertEqual(self.refused(action), 'pending_send_unresolved')
+                self.assertEqual(self.launchctl.verbs().count('bootout'), boots)
+                self.assertEqual(self.service_state(), self.served)  # Loaded again: nothing restored over it.
+                result = action()
+                self.assertEqual(self.launchctl.verbs().count('bootout'), boots + 1)
+                self.assertEqual(result['service'], 'restarted')
+                self.assertOneRelease(target)
+
+    def test_restart_starts_only_the_target_definition(self):
+        """After the commit only the target's plist is bootstrapped: another definition refuses, nothing started."""
+        _, old = self.full()
+        new = self.build('b', launcher=b'# second release\n')
+        self.die(lambda checkpoint: self.install(new, checkpoint=checkpoint), at='complete')
+        self.service(old['release_root'], loaded=False)
+        verbs = len(self.launchctl.verbs())
+        self.assertEqual(self.refused(lambda: self.install(new)), 'service_conflict')
+        self.assertNotIn('bootstrap', self.launchctl.verbs()[verbs:])
+        self.assertIsNone(self.launchctl.loaded)
 
 
 if __name__ == '__main__':

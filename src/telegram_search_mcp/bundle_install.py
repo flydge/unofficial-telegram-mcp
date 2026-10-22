@@ -510,7 +510,7 @@ class _Journal:
     def __getitem__(self, key):
         return self.value[key]
 
-    def update(self, stage=None, publication=None, single=None, amend=None):
+    def update(self, stage=None, publication=None, single=None, amend=None, put=None, clear=()):
         self.lease.check();next_value={**self.value}
         if stage is not None:next_value['stage']=stage
         if publication is not None:
@@ -530,6 +530,11 @@ class _Journal:
             name,value=single
             if name in self.value['publications']:raise InstallError('transaction_conflict')
             next_value['publications']={**self.value['publications'],name:[value]}
+        if put is not None:
+            # One fixed record replaced in place, with the per-cycle records `clear` names dropped in the same
+            # write: a record kept per cycle, so the journal stays the same size however many cycles there are.
+            name,value=put
+            next_value['publications']={**{k:v for k,v in next_value['publications'].items() if k not in clear},name:[value]}
         write(self.tx/'journal.json',encoded(next_value),expected=encoded(self.value),existed=True)
         self.value=next_value
 
@@ -779,16 +784,24 @@ def _uncommitted(path, previous):
     except (BundleError,OSError,ValueError):return False
 
 
+# The records of one stop cycle's writes (the plist and the runtime.toml version line, and their restores): a
+# finished restore drops them with its closing record, so every cycle starts them afresh.
+_CYCLE_WRITES = ('plist', 'plist_restore', 'policy', 'policy_restore')
+_CYCLE_STATES = ('stopped', 'restoring', 'restored')
+
+
 class _Service:
     """The exact receipt-bound (or adopted) broker LaunchAgent: stop, rewrite, restart, and restore.
 
     `known` maps each acceptable on-disk definition kind to its payload; `adopted` is the sha256 of an
     `--adopt-legacy` plist backup. Only the exact label is ever booted out or bootstrapped.
 
-    Stops and restores come in cycles, journaled as bounded lists: `service_stopped` once a cycle's stop is
-    done, `service_restoring` (write-ahead, with the refusal code) and `service_restored` around a restore. A
-    restore brings the previous definition back byte for byte (`service.previous`, kept before the first
-    rewrite) and bootstraps the previous broker when it was loaded; the next run starts a new cycle.
+    Stops and restores come in cycles, journaled in one fixed record, `service_cycle`, replaced in place:
+    `stopped` once a cycle's stop is done, `restoring` (write-ahead, with the refusal code) and `restored`
+    around a restore. A restore brings the previous definition back byte for byte (`service.previous`, kept
+    before the first rewrite) and bootstraps the previous broker when it was loaded; the next run starts a new
+    cycle. Every repeat is a run the user starts, so cycles are not limited, and the journal does not grow
+    with them: a finished restore drops its cycle's write records (`_CYCLE_WRITES`).
     """
 
     def __init__(self, plist, label, target, *, known=(), adopted=None, runner, pending, home):
@@ -840,13 +853,21 @@ class _Service:
         self.gate(payload)
         return True
 
-    def _counts(self, j):
-        return tuple(len(j.attempts(n)) for n in ('service_stopped','service_restoring','service_restored'))
+    def cycle(self, j):
+        """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
+        while `restoring`."""
+        record=j.recorded('service_cycle')
+        if record is None:return 0,None,None
+        number,state,code=record.get('cycle'),record.get('state'),record.get('code')
+        if (type(number) is not int or number<1 or state not in _CYCLE_STATES
+                or set(record)!=({'cycle','state','code'} if state=='restoring' else {'cycle','state'})
+                or state=='restoring' and (type(code) is not str or not _CODE.fullmatch(code))):
+            raise InstallError('transaction_conflict')
+        return number,state,code
 
     def stopped(self, j):
         """Whether this transaction's stop is in effect: done in the current cycle, and no restore begun since."""
-        stopped,restoring,restored=self._counts(j)
-        return stopped>restored==restoring
+        return self.cycle(j)[1]=='stopped'
 
     def observe(self, j):
         """Before the first client write: record the observation once; while a recorded loaded broker runs,
@@ -858,16 +879,21 @@ class _Service:
         if self._observed(j)['loaded'] and not self.stopped(j):self._recheck()
 
     def stop(self, j):
-        """Boot out only a still-loaded exact registration, gated again right before, then rewrite the plist (its
-        exact previous bytes kept first). Runs before the first client write, so a refusal here leaves every
-        client entry unchanged. At most eight cycles; the ninth refuses before any bootout."""
+        """Idempotent by state and run by every run until the commit, ahead of the client steps, so a refusal in a
+        new cycle's stop leaves every client entry unchanged: the service becomes the target's whatever stage the
+        journal records. A new cycle boots out a still-loaded exact registration, gated again right before, and
+        records its stop. While a cycle's stop is in effect, a previous definition loaded again (a login loads the
+        plist on disk) is gated and booted out again. Then the plist is rewritten, its exact previous bytes kept
+        first, until it is the target's."""
         observed=self._observed(j)
-        stopped,_,restored=self._counts(j)
-        if stopped==restored:
-            if stopped>=8:raise InstallError('recovery_limit')
+        number,state,_=self.cycle(j)
+        if state=='restoring':raise InstallError('transaction_conflict')  # `restore` finishes it first.
+        if state!='stopped':
             if observed['loaded'] and self._recheck():
                 self.stopping=True;_bootout(self.runner,self.label)
-            j.update(publication=('service_stopped',{'attempt':stopped+1}));j.checkpoint('stopped:service')
+            j.update(put=('service_cycle',{'cycle':number+1,'state':'stopped'}));j.checkpoint('stopped:service')
+        elif observed['loaded'] and self.kind()[0]!='to' and self._recheck():
+            self.stopping=True;_bootout(self.runner,self.label)
         if observed['plist']!='absent':
             j.discard('plist',self.plist)
             kind,data,_=self.kind()
@@ -893,25 +919,24 @@ class _Service:
         return data
 
     def unfinished(self, j):
-        """The refusal code of a restore a kill interrupted (its write-ahead record without `service_restored`), else
-        None. The run finishes that restore and raises the same code."""
-        _,restoring,restored=self._counts(j)
-        if restoring==restored:return None
-        code=j.attempts('service_restoring')[-1].get('code')
-        if restoring!=restored+1 or type(code) is not str or not _CODE.fullmatch(code):raise InstallError('transaction_conflict')
-        return code
+        """The refusal code of a restore a kill interrupted (its write-ahead `restoring` record), else None. The run
+        finishes that restore and raises the same code."""
+        _,state,code=self.cycle(j)
+        return code if state=='restoring' else None
 
     def restore(self, j, code, undo):
         """Before the refusal `code`, raised after the stop and short of the commit: `undo()` (the runtime.toml
         version line back), then the previous definition back, byte for byte, and the previous broker
         bootstrapped again when it was loaded, so the old release keeps serving. Idempotent: every effect is
         decided from the files and launchd; a definition changed since the stop is never overwritten
-        (`service_conflict`). A cycle whose stop changed nothing restores nothing."""
-        stopped,restoring,restored=self._counts(j)
-        if restoring==restored:
-            if stopped==restored and not self.stopping:return
-            if stopped==restored:j.update(publication=('service_stopped',{'attempt':stopped+1}))
-            j.update(publication=('service_restoring',{'attempt':restored+1,'code':code}))
+        (`service_conflict`). A cycle whose stop changed nothing restores nothing. The closing record drops the
+        cycle's write records, whose temporaries the restore has discarded."""
+        number,state,_=self.cycle(j)
+        if state!='restoring':
+            if state!='stopped':
+                if not self.stopping:return
+                number+=1  # This run's bootout came before its cycle's record.
+            j.update(put=('service_cycle',{'cycle':number,'state':'restoring','code':code}))
             j.checkpoint('recorded:service_restore')
         undo()
         observed=self._observed(j)
@@ -926,14 +951,17 @@ class _Service:
             if live is None:_bootstrap(self.runner,self.plist)
             elif kind=='absent' or kind!='adopted' and not _matches_live(live,self.plist,payload):
                 raise InstallError('service_conflict')
-        j.update(publication=('service_restored',{'attempt':restored+1}));j.checkpoint('restored:service')
+        j.update(put=('service_cycle',{'cycle':number,'state':'restored'}),clear=_CYCLE_WRITES)
+        j.checkpoint('restored:service')
 
     def restart(self, j):
-        """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded."""
+        """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
+        while the plist is the target's (the stop made it so before the commit); any other definition refuses."""
         observed=j.recorded('service')
         if observed is None or not observed['loaded']:return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded('service_restarted') is None:
+            if self.kind()[0]!='to':raise InstallError('service_conflict')
             live=_live(self.runner,self.label)
             if live is None:_bootstrap(self.runner,self.plist)
             elif not _matches_live(live,self.plist,self.target):raise InstallError('service_conflict')
@@ -1398,13 +1426,13 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 service.restore(j,unfinished,undo);raise InstallError(unfinished)
             try:
                 # Its observation, its pending-send gate and its stop all come before the first client write: a send
-                # that starts before the stop refuses with every client entry still as it was. After a restore the
+                # that starts before the stop refuses with every client entry still as it was. Every run until the
+                # commit makes the service the target's, whatever the stage (`_Service.stop`); after a restore the
                 # next run stops it again.
-                if not reached('service') or service is not None and not service.stopped(j):
-                    if service is not None:service.observe(j)
-                    j.advance('service_pending')
-                    if service is not None:service.stop(j)
-                    j.advance('service')
+                if service is not None and not reached('complete'):
+                    service.observe(j)
+                    j.advance('service_pending');service.stop(j)
+                j.advance('service_pending');j.advance('service')
                 if not reached('registration'):
                     if not reached('registration_pending'):update('registration_pending')
                     # Each attempt is journaled (and counted) before its temporary exists; the write goes over the
@@ -1837,10 +1865,11 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             service.restore(j,unfinished,undo);raise InstallError(unfinished)
         # The broker observation, its pending-send gate and the stop of a loaded broker (gated again right before it)
         # all come before the first client write: no session can start between the last gate and the stop, and a
-        # send that starts before it refuses with every client entry, the plist and the session unchanged. After a
-        # restore the next run stops it again.
+        # send that starts before it refuses with every client entry, the plist and the session unchanged. Every run
+        # until the commit makes the service the target's, whatever the stage (`_Service.stop`); after a restore
+        # the next run stops it again.
         try:
-            if not j.reached('service') or not service.stopped(j):
+            if not j.reached('complete'):
                 service.observe(j)
                 j.advance('service_pending');service.stop(j);j.advance('service')
             checkpoint('service')
