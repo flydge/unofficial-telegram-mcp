@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import plistlib
 import unittest
+from unittest import mock
 
 from claude_fake import entry
 from test_adopt_legacy import AdoptionHarness, LEGACY_PYTHON
@@ -870,33 +871,61 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
 
 
 class ParkedTemporaryTests(ParkedHarness, unittest.TestCase):
-    """0.53 critic round 4: a kill during the Claude Desktop write leaves our temporary beside the user's config;
-    a repeat refused before the Desktop step parks the change with it. Uninstall over the parked change removes
-    every temporary the change's journal binds beside each client file it touches (the reviewer's `R4e`)."""
+    """0.53 critic round 4: a kill during the Claude Desktop write leaves our temporary, a copy of the user's
+    config, beside it; a repeat refused before the Desktop step parked the change with it, and uninstall removed
+    the root but left the file for good (the reviewer's `R4e`). A late refusal's restore now removes every
+    temporary the change's journal binds beside each client file it touches, and so does every finishing action:
+    uninstall over a parked change (one an earlier build parked with it included) and the commit."""
 
-    def test_uninstall_over_a_parked_change_removes_its_client_temporaries(self):
+    def killed_in_a_client_write(self, kind, where):
+        """`kind` killed right after our temporary in `where` is created; returns (action, its directory)."""
+        _, old = self.full()
+        new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+        if kind == 'rollback':
+            self.install(new)
+        action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+            lambda **kwargs: self.change('rollback', **kwargs))
+        self.claude()
+        directory = {'desktop': self.desktop_config.parent, 'session': self.session_root, 'plist': self.plist.parent}[where]
+        self.die(lambda checkpoint: action(checkpoint=checkpoint), directory=directory)
+        self.assertEqual([Path(p).parent for p in self.temporaries()], [directory.relative_to(self.base)])
+        return action, directory
+
+    def refuse_at_codex(self, action):
+        def edit(stage):
+            if stage == 'service':
+                self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+        self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'target_conflict')
+        self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+
+    def test_a_late_refusal_after_a_kill_in_a_client_write_leaves_no_temporary(self):
         for kind in ('upgrade', 'rollback'):
             for where in ('desktop', 'session', 'plist'):
                 with self.subTest(kind=kind, where=where):
                     self.setUp()
-                    _, old = self.full()
-                    new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
-                    if kind == 'rollback':
-                        self.install(new)
-                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
-                        lambda **kwargs: self.change('rollback', **kwargs))
-                    self.claude()
-                    directory = {'desktop': self.desktop_config.parent, 'session': self.session_root,
-                                 'plist': self.plist.parent}[where]
-                    self.die(lambda checkpoint: action(checkpoint=checkpoint), directory=directory)
-                    self.assertEqual([Path(p).parent for p in self.temporaries()], [directory.relative_to(self.base)])
-
-                    def edit(stage):
-                        if stage == 'service':
-                            self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
-                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'target_conflict')
-                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                    action, _ = self.killed_in_a_client_write(kind, where)
+                    self.refuse_at_codex(action)
+                    self.assertEqual(self.temporaries(), [])
                     self.assertRemoved(self.change('uninstall'))
+
+    def test_uninstall_over_a_change_parked_with_a_client_temporary_removes_it(self):
+        """A change parked with the temporary (as the round-4 build's restore left it): uninstall removes it."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                action, directory = self.killed_in_a_client_write(kind, 'desktop')
+                with mock.patch.object(self.module(), '_client_temporaries'):
+                    self.refuse_at_codex(action)
+                self.assertEqual([Path(p).parent for p in self.temporaries()], [directory.relative_to(self.base)])
+                self.assertRemoved(self.change('uninstall'))
+
+    def test_the_repeat_of_a_change_parked_with_a_client_temporary_removes_it(self):
+        action, directory = self.killed_in_a_client_write('upgrade', 'desktop')
+        with mock.patch.object(self.module(), '_client_temporaries'):
+            self.refuse_at_codex(action)
+        self.assertEqual(len(self.temporaries()), 1)
+        self.assertEqual(action()['status'], 'upgraded')
+        self.assertEqual(self.temporaries(), [])
 
 
 if __name__ == '__main__':

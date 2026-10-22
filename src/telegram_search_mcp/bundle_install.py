@@ -693,10 +693,12 @@ _CLIENT_WRITES = (('registration', 'codex'), ('codex', 'codex'), ('claude_deskto
 
 
 def _client_temporaries(publications, home, config, plist, session_root):
-    """Before a finishing action ends: every temporary a transaction's journaled writes left beside the files it
-    touches outside the root (the Codex config, the Claude Desktop config, the broker plist and runtime.toml), each
-    provably ours (`_discard_journaled`). A step skipped since (its outcome recorded, or a parked change an
-    uninstall goes over) would otherwise leave a copy of a client file there for good."""
+    """Every temporary a transaction's journaled writes left beside the files it touches outside the root (the
+    Codex config, the Claude Desktop config, the broker plist and runtime.toml), each provably ours
+    (`_discard_journaled`). Run by a late refusal's restore and by every finishing action (install, upgrade and
+    rollback before the commit; uninstall for its own journal and a parked change's): a step skipped since (a
+    repeat refused before it, its outcome recorded, a parked change an uninstall goes over) would otherwise leave
+    a copy of a client file there for good."""
     paths={'codex':config,'desktop':claude_desktop_registration.config_path(home),'plist':plist,
            'policy':session_root/'runtime.toml'}
     def desktop(_, record):claude_desktop_registration.discard_temporary(home,record)
@@ -974,9 +976,10 @@ class _Service:
 
     def restore(self, j, code, undo):
         """Before the refusal `code`, raised after the stop and short of the commit: the target's broker booted
-        out if one is loaded, `undo()` (the runtime.toml version line back), then the previous definition back,
-        byte for byte, and the previous broker bootstrapped again when it was loaded before the change, so the
-        old release keeps serving.
+        out if one is loaded, `undo()` (the temporaries killed client writes left removed, `_client_temporaries`,
+        and the runtime.toml version line back), then the previous definition back, byte for byte, and the
+        previous broker bootstrapped again when it was loaded before the change, so the old release keeps
+        serving and a parked change leaves no copy of a client file beside it.
 
         Idempotent by state, like the stop: every effect is decided from the files and launchd, whatever an
         earlier run left. A login since the plist rewrite loads the target's plist, so the target's broker may
@@ -1504,7 +1507,9 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                              runner=launchctl,pending=probe,home=home) if 'service' in adopted else None
             # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
             unfinished=service.unfinished(j) if service is not None else None
-            def undo():_policy_back(j,session_root,manifest['package_version'])
+            def undo():
+                _client_temporaries(j.value['publications'],home,config,plist,session_root)
+                _policy_back(j,session_root,manifest['package_version'])
             if unfinished is not None:
                 service.restore(j,unfinished,undo);raise InstallError(unfinished)
             try:
@@ -1948,7 +1953,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                          runner=launchctl,pending=pending_sends,home=home)
         # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
         unfinished=service.unfinished(j)
-        def undo():_policy_back(j,session_root,to_manifest['package_version'])
+        def undo():
+            _client_temporaries(j.value['publications'],home,config,plist,session_root)
+            _policy_back(j,session_root,to_manifest['package_version'])
         if unfinished is not None:
             service.restore(j,unfinished,undo);raise InstallError(unfinished)
         # The broker observation, its pending-send gate and the stop of a loaded broker (gated again right before it)

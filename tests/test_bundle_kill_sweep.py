@@ -220,7 +220,7 @@ def differences(expected, actual, limit=4):
 
 EFFECTS = (frozenset({'create', 'replace', 'renameatx', 'launchctl'}), 50)
 # A repeat that only finishes a restore publishes no packet (its release is already copied) and has fewer effects.
-RESTORE_EFFECTS = (frozenset({'create', 'replace', 'launchctl'}), 15)
+RESTORE_EFFECTS = (frozenset({'create', 'replace', 'launchctl'}), 10)
 
 
 class Scenario:
@@ -640,15 +640,32 @@ def _legacy_served(h):
     return [] if (h.plist.read_bytes(), h.launchctl.loaded) == (plist, loaded) else ['the legacy service is not back']
 
 
-def _parked_desktop_temporary_prepare(h):
-    """0.53 critic round 4: an upgrade killed right after our Claude Desktop temporary is created, then a repeat
-    refused at the Codex step (before the Desktop step), our table put back: parked with the temporary."""
-    _upgrade_prepare(h)
+def _desktop_temporary_prepare(h):
+    """0.53 critic round 4: an upgrade killed right after our Claude Desktop temporary is created."""
+    _late_upgrade_prepare(h)
     _die(h, lambda checkpoint: h.install(h.new, checkpoint=checkpoint),
          effect=lambda kind, where: kind == 'create' and '/Claude/.telegram-search-' in '/' + where)
     h.assertEqual(len(list(h.desktop_config.parent.glob('.telegram-search-*'))), 1)
-    h.assertEqual(_refusal(h, lambda: h.install(h.new, checkpoint=_at_stage(h, 'service', OURS, CHANGED)))['refused'],
-                  'target_conflict')
+
+
+def _desktop_temporary_check(h, result):
+    """The repeat refused at the Codex step, before the Desktop step: its restore removed the temporary (the sweep's
+    leftover check) and put the old service back; uninstall then goes over the parked change."""
+    h.assertEqual(result, {'refused': 'target_conflict', 'pending_action': None, 'claude_code': 'registered'})
+    h.assertEqual((h.plist.read_bytes(), h.launchctl.loaded), h.served)
+    config = h.codex / 'config.toml'
+    config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+    _uninstall_parked_check(h, h.change('uninstall'))
+
+
+def _parked_desktop_temporary_prepare(h):
+    """Then that repeat refused with a restore that leaves the temporary, as the round-4 build's did: the change
+    is parked with it, and only the uninstall can remove it."""
+    _desktop_temporary_prepare(h)
+    with mock.patch.object(bundle_install, '_client_temporaries'):
+        h.assertEqual(_refusal(h, lambda: h.install(h.new, checkpoint=_at_stage(h, 'service', OURS, CHANGED)))['refused'],
+                      'target_conflict')
+    h.assertEqual(len(list(h.desktop_config.parent.glob('.telegram-search-*'))), 1)
     config = h.codex / 'config.toml'
     config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
 
@@ -706,6 +723,9 @@ SCENARIOS = {
     'restore_after_a_login_adopt_first_install': Scenario(_login_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_user_skill(h))), _login_adopt_check,
         write_ahead=False, final=_legacy_served, effects=RESTORE_EFFECTS),
+    'late_refusal_after_a_kill_in_the_desktop_write': Scenario(_desktop_temporary_prepare, lambda h, lc, cl: _refusal(
+        h, lambda: h.install(h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_stage(h, 'service', OURS, CHANGED))),
+        _desktop_temporary_check, write_ahead=False, final=_one_release, effects=RESTORE_EFFECTS),
     'uninstall_over_a_change_parked_with_a_desktop_temporary': Scenario(
         _parked_desktop_temporary_prepare, lambda h, lc, cl: h.change('uninstall', launchctl=lc, claude_runner=cl),
         _uninstall_parked_check, write_ahead=False, final=_nothing_left),
@@ -980,6 +1000,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_restore_after_a_login_puts_the_legacy_broker_back_for_an_adopting_first_install(self):
         self.sweep('restore_after_a_login_adopt_first_install')
+
+    def test_late_refusal_after_a_kill_in_the_desktop_write_removes_its_temporary(self):
+        self.sweep('late_refusal_after_a_kill_in_the_desktop_write')
 
     def test_uninstall_over_a_change_parked_with_a_desktop_temporary_removes_it(self):
         self.sweep('uninstall_over_a_change_parked_with_a_desktop_temporary')
