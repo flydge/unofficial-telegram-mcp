@@ -27,7 +27,7 @@
     "refresh_reply_artifact_draft": "output: optional next_action derived from the status; status capability_disabled with missing_capabilities from the closed capability set (next_action enable_capability)",
     "refresh_reply_draft": "output: optional next_action derived from the status; status capability_disabled with missing_capabilities from the closed capability set (next_action enable_capability)",
     "resolve_target": "output: optional next_action derived from the status; connect_account on blocked",
-    "retain_selection": "output: optional next_action derived from the status; search_again on selection_unavailable",
+    "retain_selection": "output: optional next_action derived from the status; search_again on selection_unavailable; the nested messages (ReadMessagesResponse) carry their own optional next_action, connect_account on blocked",
     "search_chats": "output: optional next_action derived from the status; restart_listing on invalid_cursor; check_connection on a lost broker; connect_account on blocked",
     "search_correspondence": "output: optional next_action derived from the status; connect_account on blocked",
     "search_messages": "output: optional next_action derived from the status; restart_listing on invalid_cursor; check_connection on a lost broker; connect_account on blocked",
