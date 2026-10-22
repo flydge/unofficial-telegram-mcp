@@ -137,7 +137,7 @@ def admit(root,index_path,pin,installed):
     value=_json(data)
     keys={'schema_version','target','release_version','archive_bytes','archive_sha256','unpacked_bytes','files'}
     if (type(value) is not dict or set(value)!=keys or type(value['schema_version']) is not int or value['schema_version']!=1
-            or value['target']!='macos-arm64' or value['release_version']!='0.53.0rc1'
+            or value['target']!='macos-arm64' or value['release_version']!='0.54.0.dev0'
             or not _hash(value['archive_sha256']) or type(value['archive_bytes']) is not int
             or not 1<=value['archive_bytes']<=1024**3 or type(value['unpacked_bytes']) is not int
             or not 0<=value['unpacked_bytes']<=2*1024**3
@@ -199,7 +199,7 @@ def status(root):
 def main(argv=None):
     args=list(sys.argv[1:] if argv is None else argv)
     if args==['--help']:
-        print('0.53.0rc1: mcp | broker | setup | resume | status | connect | wait | cancel | '
+        print('0.54.0.dev0: mcp | broker | setup | resume | status | connect | wait | cancel | '
               'api-credentials | rollback | uninstall. setup, resume and api-credentials require native Apple '
               'Terminal; connect, wait and cancel take no credentials.')
         return 0

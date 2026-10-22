@@ -20,7 +20,7 @@ class BundleArchiveTests(unittest.TestCase):
                 item=tarfile.TarInfo(name); item.size=len(data); item.type=kind; item.linkname='outside'
                 tar.addfile(item,io.BytesIO(data))
         archive=root/'archive.tar.gz'; archive.write_bytes(gzip.compress(buffer.getvalue()+trailing,mtime=0)); archive.chmod(0o400)
-        body=dict(schema_version=1,target='macos-arm64',release_version='0.53.0rc1',archive_bytes=archive.stat().st_size,
+        body=dict(schema_version=1,target='macos-arm64',release_version='0.54.0.dev0',archive_bytes=archive.stat().st_size,
             archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),unpacked_bytes=7,
             files=[dict(path='safe/value.txt',bytes=7,sha256=hashlib.sha256(b'checked').hexdigest(),executable=False)])
         return archive,load_archive_index(json.dumps(body).encode())
