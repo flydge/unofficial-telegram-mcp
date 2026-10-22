@@ -608,8 +608,9 @@ the repeat's) and exits 0; over a `user` or `skip` installation it refuses as `b
 the installer's own refusal line.
 Over a receipt-bound installation of another release, `bootstrap-install` runs an upgrade transaction
 instead of a first install. Refusals for a downgrade or a foreign or changed object come before the
-transaction exists, so they change nothing; for a pending send see the gate below. The steps, each
-journaled so that an interruption resumes by repeating the command:
+transaction exists, so they change nothing; for a pending send see the gate below, and for a refusal
+after the broker stop [its own section](#a-refusal-after-the-broker-stop). The steps, each journaled so
+that an interruption resumes by repeating the command:
 
 1. The new release tree is copied next to the current one; older release trees stay in `releases/`.
 2. The broker is observed and the pending-send gate runs (below). Right after it the exact receipt-bound

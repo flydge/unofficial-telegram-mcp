@@ -1,9 +1,10 @@
 """Kill sweep (CLIENTS-13): a hard kill (a forked child, `os._exit`) right after every filesystem create,
 rename, unlink, mkdir and rmdir and after every launchctl or claude CLI call of an upgrade, a rollback, an
-uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, and a
-late refusal (our Codex entry, or the adopted one, changed while the release is copied) whose journaled
-service restore runs after the broker stop of an upgrade or of an adopting first install; the parent then
-resumes the same action. A late refusal's resume refuses with the same code and leaves the same restored state.
+uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, an
+upgrade whose Codex write is planned again over a neighbour added while the release is copied, and a late
+refusal (our Codex entry, or the adopted one, changed while the release is copied) whose journaled service
+restore runs after the broker stop of an upgrade or of an adopting first install; the parent then resumes the
+same action. A late refusal's resume refuses with the same code and leaves the same restored state.
 
 The resumed final state must equal the uninterrupted run's: a normalised tree of the whole synthetic base, every
 publication binding resolved to the path that now holds that inode. Nothing may be left anywhere (no staging
@@ -296,13 +297,16 @@ def _kept_check(h, result):
     h.assertEqual(found, sorted(h.backups))
 
 
-def _late_edit(h, old, new):
-    """A checkpoint that changes the Codex entry by hand once the release is copied (once: a resume finds it done)."""
+def _at_copy(h, edit):
+    """A checkpoint that edits the Codex config by hand once the release is copied; `edit` returns the bytes
+    unchanged once its edit is there, so a resume finds it done."""
     config = h.codex / 'config.toml'
 
     def checkpoint(stage):
-        if stage == 'release' and old in config.read_bytes():
-            config.write_bytes(config.read_bytes().replace(old, new))
+        if stage == 'release':
+            data = config.read_bytes()
+            if edit(data) != data:
+                config.write_bytes(edit(data))
     return checkpoint
 
 
@@ -315,6 +319,13 @@ def _refusal(action):
 
 OURS, CHANGED = b'tool_timeout_sec = 600', b'tool_timeout_sec = 601'
 LEGACY, LEGACY_CHANGED = b'"telegram_search_mcp.server"]', b'"telegram_search_mcp.server", "--changed"]'
+WEATHER = b'\n[mcp_servers.weather]\ncommand = "/opt/w"\n'
+
+
+def _merged_check(h, result):
+    _upgrade_check(h, result)
+    data = (h.codex / 'config.toml').read_bytes()
+    h.assertTrue(data.startswith(NEIGHBOUR_CODEX) and data.endswith(WEATHER))
 
 
 def _late_upgrade_prepare(h):
@@ -361,12 +372,15 @@ SCENARIOS = {
     'uninstall_keeps_backups': Scenario(_kept_prepare,
                                         lambda h, lc, cl: h.change('uninstall', launchctl=lc, claude_runner=cl),
                                         _kept_check, write_ahead=False),
+    'merged_upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_copy(h, lambda d: d if WEATHER in d else d + WEATHER)),
+        _merged_check),
     'late_refusal_upgrade': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
-        h.new, launchctl=lc, claude_runner=cl, checkpoint=_late_edit(h, OURS, CHANGED))), _late_upgrade_check,
-        write_ahead=False),
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_copy(h, lambda d: d.replace(OURS, CHANGED)))),
+        _late_upgrade_check, write_ahead=False),
     'late_refusal_adopt_first_install': Scenario(_late_adopt_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
-        h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl, checkpoint=_late_edit(h, LEGACY, LEGACY_CHANGED))),
-        _late_adopt_check, write_ahead=False),
+        h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl,
+        checkpoint=_at_copy(h, lambda d: d.replace(LEGACY, LEGACY_CHANGED)))), _late_adopt_check, write_ahead=False),
 }
 
 
@@ -591,6 +605,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_uninstall_keeps_adoption_backups(self):
         self.sweep('uninstall_keeps_backups')
+
+    def test_upgrade_merging_a_codex_neighbour_added_during_the_copy(self):
+        self.sweep('merged_upgrade')
 
     def test_late_refusal_restores_the_service_of_an_upgrade(self):
         self.sweep('late_refusal_upgrade')

@@ -7,7 +7,6 @@ serving and the same command finishes the transaction once the named object is p
 CLI and the pending-send probe are fakes; nothing real is read or written.
 """
 import json
-import os
 from pathlib import Path
 import plistlib
 import unittest
