@@ -28,6 +28,10 @@ class MissingRuntimePath(RuntimePathError):
     """A safely traversed local metadata path has not been created yet."""
 
 
+class ChangedRuntimePath(RuntimePathError):
+    """Security metadata or a path binding changed while it was being checked: no answer about the object."""
+
+
 class UnsupportedRuntimePlatform(RuntimePathError):
     """The portable runtime has no approved artifact for this target."""
 
@@ -84,16 +88,22 @@ def _darwin_acl_api():
         raise RuntimePathError('portable ACL metadata is unavailable') from None
 
 
-def _descriptor_acl_snapshot(descriptor: int) -> bool:
+def _descriptor_acl_snapshot(descriptor: int) -> None:
     """Reject extended allow entries even when POSIX permissions look private.
 
     Darwin ACL_TYPE_EXTENDED is 0x100; its iterator returns zero for an entry
     and -1/EINVAL at the end. Missing ACL metadata is NULL/ENOENT. A deny-only
     ACL (including the normal home-directory deny-delete entry) is preserved.
     Other hosts retain the POSIX path checks used by the inert test harness.
+
+    acl_get_fd_np reads the ACL in one fstatx_np call, so its entries are one
+    consistent state. Across that read a directory keeps its binding identity
+    (device, inode, owner, group, mode, flags); its timestamps, size and link
+    count change with every unrelated child created or removed, which is not a
+    security change. A regular file keeps its whole identity.
     """
     if sys.platform != 'darwin':
-        return True
+        return
     api = _darwin_acl_api()
     before_metadata = os.fstat(descriptor)
     before = file_metadata_identity(before_metadata)
@@ -124,23 +134,18 @@ def _descriptor_acl_snapshot(descriptor: int) -> bool:
     if (_path_binding_identity(before_metadata) != _path_binding_identity(after_metadata)
             or not stat.S_ISDIR(before_metadata.st_mode)
             and before != file_metadata_identity(after_metadata)):
-        raise RuntimePathError('portable storage security metadata changed')
-    return before == file_metadata_identity(after_metadata)
+        raise ChangedRuntimePath('portable storage security metadata changed')
 
 
 def _validate_descriptor_acl(descriptor: int) -> None:
-    # Creating an unrelated child changes an ancestor directory's ctime. Recheck
-    # on this same descriptor, without relaxing ACL admission or path bindings.
-    # Allow/API errors fail immediately; continuously changing metadata is closed.
+    # One atomic ACL read on this descriptor, its binding identity unchanged around it (the launcher's admission
+    # reads it the same way). An ancestor's timestamps change with unrelated children (another app writing beside
+    # it), so they are no reason to refuse: a busy ~/Library/Application Support never refuses an install.
+    # Allow/API errors and a changed binding fail immediately.
     admitted = _path_binding_identity(os.fstat(descriptor))
-    for _ in range(3):
-        if _path_binding_identity(os.fstat(descriptor)) != admitted:
-            raise RuntimePathError('portable storage security metadata changed')
-        if _descriptor_acl_snapshot(descriptor):
-            if _path_binding_identity(os.fstat(descriptor)) != admitted:
-                raise RuntimePathError('portable storage security metadata changed')
-            return
-    raise RuntimePathError('portable storage ACL metadata changed')
+    _descriptor_acl_snapshot(descriptor)
+    if _path_binding_identity(os.fstat(descriptor)) != admitted:
+        raise ChangedRuntimePath('portable storage security metadata changed')
 
 
 def _path_binding_identity(metadata: os.stat_result) -> tuple:
@@ -178,10 +183,10 @@ def validate_owned_path(path: Path, *, regular: bool = False,
                 flags |= os.O_DIRECTORY
             descriptor = os.open(component, flags)
             if _path_binding_identity(metadata) != _path_binding_identity(os.fstat(descriptor)):
-                raise RuntimePathError('portable storage binding changed')
+                raise ChangedRuntimePath('portable storage binding changed')
             _validate_descriptor_acl(descriptor)
             if _path_binding_identity(component.lstat()) != _path_binding_identity(metadata):
-                raise RuntimePathError('portable storage binding changed')
+                raise ChangedRuntimePath('portable storage binding changed')
         except OSError:
             raise RuntimePathError('portable ACL metadata is unsafe or unavailable') from None
         finally:

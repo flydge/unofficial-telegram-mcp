@@ -25,7 +25,8 @@ import tomllib
 import uuid
 
 from .bundle_paths import (ensure_owned_private_directory, open_owned_directory,
-                           open_owned_file, validate_owned_path, object_binding, require_object_binding, RuntimePathError)
+                           open_owned_file, validate_owned_path, object_binding, require_object_binding, RuntimePathError,
+                           ChangedRuntimePath)
 from .bundle_runtime import (validate_tree, require_platform, read, unique_json, digest, BundleError,
                              CLAUDE_CODE_MODES, CLAUDE_MODE_STATUSES, CLAUDE_SKILLS_STATUSES, CLAUDE_DESKTOP_STATUSES,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
@@ -284,12 +285,14 @@ def _intent_temporary(root, name):
 
 def _retired_names(root, intent):
     """Names beside `root` of the root an uninstall retired: our closed name holding the exact directory the intent
-    binds (a directory's inode, and so its binding, survives the retiring rename). At most one."""
+    binds (a directory's inode, and so its binding, survives the retiring rename). At most one. A check that changed
+    under it answers nothing and refuses: taking the retired root for a lookalike would drop the intent, its proof."""
     retired=re.compile(re.escape('.'+root.name+'-removed-')+r'[0-9a-f]{32}\Z')
     with open_owned_directory(root.parent) as fd:names=[n for n in os.listdir(fd) if retired.fullmatch(n)]
     out=[]
     for name in names:
         try:require_object_binding(root.parent/name,intent['object'])
+        except ChangedRuntimePath:raise
         except RuntimePathError:continue
         out.append(name)
     return out
@@ -300,6 +303,7 @@ def _staged_ours(intent):
     yet published. A lookalike under that name is not (the published root holds the bound inode)."""
     if not os.path.lexists(intent['staged_root']):return False
     try:require_object_binding(Path(intent['staged_root']),intent['object'])
+    except ChangedRuntimePath:raise
     except RuntimePathError:return False
     return True
 
