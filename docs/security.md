@@ -2049,9 +2049,11 @@ checks are cooperative: they detect drift and refuse; they do not make arbitrary
 ## Retained-selection boundary (B2B candidate)
 
 The default-off `retained_selections` capability adds one closed issuer and exact
-source alternatives on existing operations. Request, proxy, broker and finalized
-SDK schemas enforce exactly one raw source or selection, plus an independent
-exactly-one reply source where applicable. Target capture additionally requires
+source alternatives on existing operations. Request models, the proxy's strict
+request check and the broker enforce exactly one raw source or selection, plus an
+independent exactly-one reply source where applicable. Since the 0.54 candidate the
+finalized SDK input schemas state the rule in the tool description instead of a
+top-level `allOf`/`oneOf`; enforcement is unchanged. Target capture additionally requires
 `verified_targets`; original operation capabilities remain required. Contract 1 and
 framing 2 remain, while the schema fingerprint honestly changes for 44 tools (at that slice).
 

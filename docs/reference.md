@@ -108,11 +108,17 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 
 `<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
-Since the 0.54 candidate, arguments that do not match a tool's input schema get one fixed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`):
+Since the 0.54 candidate, arguments that do not match a tool's input schema get one closed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`). It names what failed:
 
-- `Error executing tool <tool>: invalid_arguments (arguments must match the input schema)`
+- `Error executing tool <tool>: invalid_arguments: missing <names>; invalid <names>; <n> unexpected argument(s)`
 
-It never contains field paths, caller-chosen keys, values, pydantic text or documentation URLs. A call naming an unregistered tool gets `unknown_tool (refresh tools/list)` without the name. Argument validation runs before the guard, so invalid arguments to a disabled tool report `invalid_arguments`. Any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`.
+The three clauses come in this order, each only when it applies, separated by `; `:
+
+- `missing <names>`: the required parameters of the tool's published input schema that the call left out.
+- `invalid <names>`: the tool's declared parameters whose value failed validation; an error inside a nested value names its top-level parameter. A whole-request rule names the parameters it reads: both parameters of an exactly-one pair (a raw source and its retained selection, `content` and `content_base64`, `text` and `caption`) when both or neither are given, otherwise, for example, `date_from, date_to, mode` for a history scope or `outgoing_entities` for spans that do not fit the text.
+- `<n> unexpected argument(s)`: how many keys the schema does not declare.
+
+Names are sorted, separated by `, `, and taken only from the tool's own input schema; an undeclared key is only counted. The text never contains values, nested paths, caller-chosen keys, pydantic text or documentation URLs. For example, `prepare_reply_artifact_send` called with only `artifact_id`, `reply_to` and `caption` gets `Error executing tool prepare_reply_artifact_send: invalid_arguments: missing display_name, mime_type, recipient`. A failure that cannot be attributed to a parameter keeps the earlier fixed text `Error executing tool <tool>: invalid_arguments (arguments must match the input schema)`. A call naming an unregistered tool gets `unknown_tool (refresh tools/list)` without the name. Argument validation runs before the guard, so invalid arguments to a disabled tool report `invalid_arguments`. Any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`.
 
 ### Recovery hints (`next_action`)
 
@@ -668,9 +674,17 @@ would enter the schema fingerprint) and a short user-facing description: what th
 key inputs come from, the approval or retry rule, and that Telegram content is untrusted data. The eight
 reply tools share one text naming the source-dependent `reply_*_targets` capabilities. Every send and
 apply tool says that the owner approves in a local dialog and that `outcome_unknown` means calling
-`get_send_status` and never resending. The tools that accept a retained selection add that it expires
-after a bounded time set by the owner's policy. Each description is at most 1,500 characters and all of
-them together at most 30,000. Descriptions and titles are outside the schema fingerprint.
+`get_send_status` and never resending. The tools that accept a retained selection state the exactly-one
+source rule (for example `Give exactly one of artifact_id or selection_id.`) and add that a selection
+expires after a bounded time set by the owner's policy. Each description is at most 1,500 characters and
+all of them together at most 30,000. Descriptions and titles are outside the schema fingerprint.
+
+Every published input schema is a plain object (`type`, `properties`, `required`,
+`additionalProperties: false`, `$defs`) with no top-level `allOf`, `oneOf`, `anyOf` or `not`. Until the
+0.54 candidate the twelve tools that accept a retained selection published their exactly-one source rule
+as a top-level `allOf`/`oneOf`, which some MCP clients mishandle; the rule is now checked at runtime
+(refused as `invalid <source>, <selection>`, see [Runtime contract and compatibility](#runtime-contract-and-compatibility)) and stated in the
+description. This changed those twelve input schemas and the schema fingerprint.
 
 Key top-level inputs carry a short JSON Schema `description` (for example where a `draft_id`, an
 `anchor` or a `cursor` comes from); each such description changes that tool's input schema.
@@ -2318,6 +2332,12 @@ Files are existing B2A grants in the same client/session incarnation: downloaded
 created, uploaded through that client, or derived locally. Paths and foreign
 artifacts cannot be adopted. Legacy plain CLI upload receipts belong to that helper's independent client.
 For NEW bytes intended for this MCP owner, use the owner-issued workflow below.
+
+A tool that accepts a selection takes exactly one of its raw source (`anchor`, `anchors` or `artifact_id`)
+or `selection_id`, and a reply tool also exactly one of `reply_to` or `reply_selection_id`; null counts as
+absent. The proxy's strict request check, the request models and the broker enforce it. Since the 0.54
+candidate the published input schemas no longer carry it as a top-level `allOf`/`oneOf`: the description
+states it, and both or neither given is refused as `invalid_arguments: invalid <source>, <selection>`.
 
 A capture returns `selection_` plus 64 random hex characters, kind, fixed expiry,
 and bounded current message evidence or file hash, size, sanitized metadata and

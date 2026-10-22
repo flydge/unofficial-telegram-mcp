@@ -281,7 +281,7 @@ class EvidenceAnchor(BaseModel):
     message_id: MessageId
 
 
-from .selection_refs import SelectionId, SelectionRefusal, SelectedInput, source_schema
+from .selection_refs import SelectionId, SelectionRefusal, SelectedInput
 
 
 class AttachmentRequest(SelectedInput):

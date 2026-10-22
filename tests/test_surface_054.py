@@ -1,21 +1,26 @@
 """The 0.54 tool surface (spec A and B, criteria 2 and 3), observed through the official SDK client.
 
 Descriptions are short user-facing contracts within budget; every tool has a top-level title and the
-annotations of the 21.10 lead decision; key inputs are described; prompts guide without granting; and every
-argument refusal is one fixed, input-free text.
+annotations of the 21.10 lead decision; key inputs are described; prompts guide without granting; every
+published input schema is a plain object; and every argument refusal is one closed text that names only the
+tool's own parameters (missing, invalid) and counts undeclared keys, never echoing a caller key or value.
 """
 from __future__ import annotations
 
 import json
+import random
 import re
 import unittest
 
+from jsonschema import Draft202012Validator
 from mcp import Client
 from mcp.shared.exceptions import MCPError
+from pydantic import BaseModel
 
 from telegram_search_mcp import server as server_module
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, RuntimePolicy
 from telegram_search_mcp.selection_broker import selected_models
+from telegram_search_mcp.selection_refs import SelectedInput, SelectionRefusal, source_pairs
 from telegram_search_mcp.server import _TOOL_CAPABILITIES, _TOOL_NAMES, build_server
 from test_guard_refusals import CONNECT_DEFAULT
 from tool_listing import FULL_POLICY, full_listing
@@ -43,7 +48,54 @@ REPLY_TOOLS = ('prepare_reply_artifact_send', 'get_reply_artifact_draft', 'updat
                'refresh_reply_artifact_draft', 'prepare_reply_text_send', 'get_reply_draft', 'update_reply_draft',
                'refresh_reply_draft')
 CALLER_KEY, VALUE = 'caller_key_sentinel_7d2e', 'VALUE_SENTINEL_91c4'
-INVALID = 'Error executing tool {}: invalid_arguments (arguments must match the input schema)'
+# The closed argument refusal: these clauses in this order, each at most once and only when it applies.
+NAMES = r"[a-z_][a-z0-9_]*(?:, [a-z_][a-z0-9_]*)*"
+REFUSAL = re.compile(r"Error executing tool ([a-z_][a-z0-9_]*): invalid_arguments: (.+)")
+CLAUSES = (re.compile(f"missing ({NAMES})"), re.compile(f"invalid ({NAMES})"),
+           re.compile(r"([1-9][0-9]*) unexpected argument\(s\)"))
+FALLBACK = 'Error executing tool {}: invalid_arguments (arguments must match the input schema)'
+ART = 'artifact_' + 'a' * 32 + '_' + 'b' * 64 + '_1'
+SEL = 'selection_' + 'c' * 64
+ANCHOR = {'chat_id': -1001234567890, 'message_id': 77}
+# One valid raw-source call per tool that accepts a retained selection.
+RAW_SOURCES = {
+    'get_attachment': {'anchor': ANCHOR}, 'get_message_context': {'anchor': ANCHOR},
+    'read_reply_chain': {'anchor': ANCHOR}, 'read_messages': {'anchors': [ANCHOR]},
+    'read_attachment': {'artifact_id': ART}, 'analyze_media': {'artifact_id': ART},
+    'read_attachment_page': {'artifact_id': ART}, 'read_spreadsheet': {'artifact_id': ART},
+    'read_presentation': {'artifact_id': ART},
+    'prepare_artifact_send': {'artifact_id': ART, 'recipient': 7, 'display_name': 'report.pdf',
+                              'mime_type': 'application/pdf'},
+    'prepare_reply_text_send': {'recipient': -1001234567890, 'text': 'Thanks', 'reply_to': ANCHOR},
+    'prepare_reply_artifact_send': {'artifact_id': ART, 'recipient': -1001234567890, 'display_name': 'report.pdf',
+                                    'mime_type': 'application/pdf', 'reply_to': ANCHOR},
+}
+SELECTED_BY = {'artifact_id': 'selection_id', 'anchor': 'selection_id', 'anchors': 'selection_id',
+               'reply_to': 'reply_selection_id'}
+
+
+def refusal(tool, missing=(), invalid=(), unexpected=0):
+    clauses = ([f"missing {', '.join(sorted(missing))}"] if missing else []) + (
+        [f"invalid {', '.join(sorted(invalid))}"] if invalid else []) + (
+        [f'{unexpected} unexpected argument(s)'] if unexpected else [])
+    return f"Error executing tool {tool}: invalid_arguments: " + '; '.join(clauses)
+
+
+def parse_refusal(text):
+    """(tool, missing, invalid, unexpected) of a closed refusal, or None for any other text."""
+    match = REFUSAL.fullmatch(text)
+    if match is None:
+        return None
+    found, position = [None, None, None], 0
+    for part in match[2].split('; '):
+        while position < len(CLAUSES) and CLAUSES[position].fullmatch(part) is None:
+            position += 1
+        if position == len(CLAUSES):
+            return None
+        found[position] = CLAUSES[position].fullmatch(part)[1]
+        position += 1
+    names = lambda group: tuple(group.split(', ')) if group else ()
+    return match[1], names(found[0]), names(found[1]), int(found[2] or 0)
 
 
 class _Untouched:
@@ -172,6 +224,17 @@ class AnnotationAndFieldTests(unittest.IsolatedAsyncioTestCase):
                 if name.startswith('get_'):
                     self.assertTrue(hints.idempotent_hint)
 
+    def test_published_input_schemas_are_plain_objects(self):
+        """No top-level composition: a cross-field rule lives in runtime validation and the description."""
+        for name, tool in self.tools.items():
+            schema = tool.input_schema
+            with self.subTest(tool=name):
+                self.assertEqual(schema['type'], 'object')
+                self.assertIs(schema['additionalProperties'], False)
+                self.assertEqual(set(schema) - {'type', 'title', 'properties', 'required', 'additionalProperties',
+                                                '$defs'}, set())
+                self.assertLessEqual(set(schema.get('required', ())), set(schema['properties']))
+
     def test_key_inputs_are_described_briefly(self):
         documented = set(server_module._FIELD_DOCS.values())
         for name, tool in self.tools.items():
@@ -269,52 +332,229 @@ class PromptTests(unittest.IsolatedAsyncioTestCase):
 
 
 class InputRefusalTests(unittest.IsolatedAsyncioTestCase):
-    def assertInvalid(self, result, name):
+    def assertRefused(self, result, expected):
         self.assertTrue(result.is_error)
         self.assertIsNone(result.structured_content)
-        self.assertEqual([(block.type, block.text) for block in result.content], [('text', INVALID.format(name))])
+        self.assertEqual([(block.type, block.text) for block in result.content], [('text', expected)])
 
     def assertInputFree(self, text):
         for leak in ('errors.pydantic.dev', 'validation error', CALLER_KEY, VALUE, 'input_value', '[type='):
             self.assertNotIn(leak.casefold(), text.casefold())
 
-    async def test_every_tool_refuses_invalid_arguments_with_one_fixed_text(self):
+    async def test_every_tool_names_what_failed_in_one_closed_text(self):
+        """All 55 tools: missing names exactly the absent required parameters, invalid exactly the declared
+        parameters whose value failed, and undeclared keys are only counted."""
         tools = await full_listing()
         self.assertEqual(len(tools), len(_TOOL_NAMES))
         async with Client(server()) as client:
             for name, tool in tools.items():
-                properties = tool.input_schema['properties']
-                cases = [{CALLER_KEY: VALUE}]
+                schema = tool.input_schema
+                properties, required = schema['properties'], set(schema.get('required', ()))
+                accepts = lambda key, value: Draft202012Validator(
+                    {**properties[key], '$defs': schema.get('$defs', {})}).is_valid(value)
+                # (arguments, expected invalid; None when only a subset of the one named key is fixed).
+                cases = [({CALLER_KEY: VALUE}, ())]
                 for key in properties:
                     # A JSON string exercises the SDK's pre-parse; the extra key makes even a string input invalid.
-                    cases += [{key: {CALLER_KEY: VALUE}}, {key: json.dumps({CALLER_KEY: VALUE}), CALLER_KEY: VALUE},
-                              {key: [VALUE]}, {key: True, CALLER_KEY: VALUE}]
-                if tool.input_schema.get('required') or name in selected_models():
-                    cases.append({})
-                for arguments in cases:
+                    cases += [({key: {CALLER_KEY: VALUE}}, (key,)), ({key: [VALUE]}, (key,)),
+                              ({key: json.dumps({CALLER_KEY: VALUE}), CALLER_KEY: VALUE}, None),
+                              ({key: True, CALLER_KEY: VALUE}, () if accepts(key, True) else (key,))]
+                if required:
+                    cases.append(({}, ()))
+                elif name in selected_models():
+                    cases.append(({}, tuple(part for pair in source_pairs(selected_models()[name]) for part in pair)))
+                for arguments, invalid in cases:
                     with self.subTest(tool=name, arguments=arguments):
                         result = await client.call_tool(name, arguments)
-                        self.assertInvalid(result, name)
-                        self.assertInputFree(result.content[0].text)
+                        text = result.content[0].text
+                        self.assertInputFree(text)
+                        parsed = parse_refusal(text)
+                        self.assertIsNotNone(parsed, text)
+                        missing = tuple(sorted(required - set(arguments)))
+                        unexpected = sum(key not in properties for key in arguments)
+                        if invalid is None:
+                            self.assertEqual(parsed[:2] + parsed[3:], (name, missing, unexpected))
+                            self.assertLessEqual(set(parsed[2]), set(arguments) & set(properties))
+                            invalid = parsed[2]
+                        self.assertRefused(result, refusal(name, missing, invalid, unexpected))
 
-    async def test_strict_hooks_and_request_models_refuse_with_the_same_text(self):
-        cases = (('search_correspondence', {'target': -1001, 'query': '{"text":"' + VALUE + '"}'}),
-                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': '1750000000'}),
-                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_to': 1750000000}),
-                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': VALUE}),
-                 ('read_history', {'target': 7, 'mode': 'latest', 'date_from': '2026-01-01T00:00:00Z'}),
+    async def test_strict_hooks_and_request_models_name_what_failed(self):
+        cases = (('search_correspondence', {'target': -1001, 'query': '{"text":"' + VALUE + '"}'}, ('query',)),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': '1750000000'},
+                  ('date_from',)),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_to': 1750000000},
+                  ('date_to',)),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'}, 'date_from': VALUE},
+                  ('date_from',)),
+                 # A raw-shape refusal still names every other failing parameter in the same text.
+                 ('search_correspondence', {'target': {CALLER_KEY: VALUE}, 'query': VALUE, 'date_to': 5},
+                  ('date_to', 'query', 'target')),
+                 ('search_correspondence', {'target': -1001, 'query': {'text': 'x'},
+                                            'date_from': '2026-02-01T00:00:00Z', 'date_to': '2026-01-01T00:00:00Z'},
+                  ('date_from', 'date_to')),
+                 ('read_history', {'target': 7, 'mode': 'latest', 'date_from': '2026-01-01T00:00:00Z'},
+                  ('date_from', 'date_to', 'mode')),
                  ('search_messages', {'target': 7, 'query': {'all': [VALUE], 'nested': {CALLER_KEY: 1}},
-                                      'mode': 'latest'}),
-                 ('create_local_artifact', {'file_name': 'a.txt'}),
-                 ('create_local_artifact', {'file_name': 'a.txt', 'content': VALUE, 'content_base64': 'QQ=='}),
-                 ('get_attachment', {'anchor': {'chat_id': 7, 'message_id': 8}, 'selection_id': 'selection_' + 'a' * 64}),
-                 ('prepare_reply_text_send', {'recipient': 7, 'text': VALUE}))
+                                      'mode': 'latest'}, ('query',)),
+                 ('search_chats', {'targets': [7, 7], 'query': 'x', 'mode': 'latest'},
+                  ('date_from', 'date_to', 'mode', 'targets')),
+                 ('discover_targets', {'hypotheses': ['Garden club', 'garden  CLUB']}, ('hypotheses',)),
+                 ('read_messages', {'anchors': [ANCHOR, ANCHOR]}, ('anchors',)),
+                 ('prepare_forward_send', {'source_chat': 7, 'source_message_id': 8, 'recipient': 9, 'mode': 'forward',
+                                           'remove_caption': True}, ('mode', 'remove_caption')),
+                 ('create_local_artifact', {'file_name': 'a.txt'}, ('content', 'content_base64')),
+                 ('create_local_artifact', {'file_name': 'a.txt', 'content': VALUE, 'content_base64': 'QQ=='},
+                  ('content', 'content_base64')),
+                 ('update_draft', {'draft_id': 'draft_' + 'd' * 32}, ('caption', 'text')),
+                 ('update_draft', {'draft_id': 'draft_' + 'd' * 32, 'caption': VALUE,
+                                   'outgoing_entities': [{'type': 'bold', 'offset': 0, 'length': 1}]},
+                  ('outgoing_entities',)),
+                 ('get_attachment', {'anchor': ANCHOR, 'selection_id': SEL}, ('anchor', 'selection_id')),
+                 ('get_attachment', {'anchor': None, 'selection_id': None}, ('anchor', 'selection_id')),
+                 ('prepare_reply_text_send', {'recipient': 7, 'text': VALUE}, ('reply_selection_id', 'reply_to')))
         async with Client(server()) as client:
-            for name, arguments in cases:
+            for name, arguments, invalid in cases:
                 with self.subTest(tool=name, arguments=arguments):
                     result = await client.call_tool(name, arguments)
-                    self.assertInvalid(result, name)
+                    self.assertRefused(result, refusal(name, invalid=invalid))
                     self.assertInputFree(result.content[0].text)
+
+    async def test_the_six_run_file_reply_omission_names_the_missing_parameters(self):
+        """The first prepare_reply_artifact_send of six of six real Codex file-reply runs (spec E) omitted
+        recipient, display_name and mime_type; the refusal now names exactly those, so one retry succeeds."""
+        observed = []
+
+        class Recording(_Untouched):
+            def prepare_reply_artifact_send(self, request):
+                observed.append(request)
+                return SelectionRefusal()
+
+        async with Client(server(factory=Recording)) as client:
+            listed = {tool.name: tool for tool in (await client.list_tools()).tools}['prepare_reply_artifact_send']
+            self.assertEqual(sorted(listed.input_schema['required']), ['display_name', 'mime_type', 'recipient'])
+            first = {'artifact_id': ART, 'reply_to': ANCHOR, 'caption': 'Here is the report.'}
+            refused = await client.call_tool('prepare_reply_artifact_send', first)
+            retried = await client.call_tool('prepare_reply_artifact_send', {
+                **first, 'recipient': ANCHOR['chat_id'], 'display_name': 'report.pdf', 'mime_type': 'application/pdf'})
+        self.assertRefused(refused, 'Error executing tool prepare_reply_artifact_send: invalid_arguments: '
+                                    'missing display_name, mime_type, recipient')
+        self.assertFalse(retried.is_error)
+        self.assertEqual(retried.structured_content['result']['status'], 'selection_unavailable')
+        self.assertEqual([(request.recipient, request.display_name, request.mime_type) for request in observed],
+                         [(ANCHOR['chat_id'], 'report.pdf', 'application/pdf')])
+
+    async def test_exactly_one_source_is_enforced_at_runtime_and_stated_in_the_description(self):
+        tools = await full_listing()
+        self.assertEqual(set(RAW_SOURCES), set(selected_models()))
+        async with Client(server()) as client:
+            for name, raw in RAW_SOURCES.items():
+                pairs = source_pairs(selected_models()[name])
+                rule = 'Give exactly one of ' + ', and one of '.join(f'{a} or {b}' for a, b in pairs) + '.'
+                with self.subTest(tool=name):
+                    self.assertIn(rule + ' ' + server_module._SELECTION, tools[name].description)
+                    # Valid raw sources pass every check and reach the (untouched) provider.
+                    reached = await client.call_tool(name, raw)
+                    self.assertEqual(reached.content[0].text, f'Error executing tool {name}')
+                for source, selected in pairs:
+                    for arguments in ({**raw, selected: SEL}, {k: v for k, v in raw.items() if k != source},
+                                      {**raw, source: None, selected: None}):
+                        with self.subTest(tool=name, arguments=arguments):
+                            result = await client.call_tool(name, arguments)
+                            self.assertRefused(result, refusal(name, invalid=(source, selected)))
+
+    async def test_fuzzed_keys_and_values_never_reach_the_refusal(self):
+        """Random undeclared keys and random values for declared parameters, across all 55 tools: every
+        refusal parses under the closed grammar, names only declared parameters, counts the undeclared keys
+        exactly and contains no caller key or value."""
+        rng = random.Random(0x54_1)
+        tools = await full_listing()
+        refusals = 0
+
+        def key():
+            return rng.choice((f'{CALLER_KEY}_{rng.randrange(10**6)}', f'{CALLER_KEY} Ünï/../{rng.randrange(99)}',
+                               f'{CALLER_KEY.upper()}', f'{CALLER_KEY}\n{VALUE}'))
+
+        def value(depth=0):
+            kind = rng.randrange(9 if depth < 2 else 6)
+            if kind == 0:
+                return f'{VALUE}_{rng.randrange(10**6)}'
+            if kind == 1:
+                return 10**12 + rng.randrange(10**9)
+            if kind == 2:
+                return rng.randrange(10**9) + 0.5
+            if kind == 3:
+                return rng.random() < 0.5
+            if kind == 4:
+                return None
+            if kind == 5:
+                return json.dumps({key(): f'{VALUE}_{rng.randrange(10**6)}'})
+            if kind == 6:
+                return {key(): value(depth + 1) for _ in range(rng.randrange(3))}
+            if kind == 7:
+                return [value(depth + 1) for _ in range(rng.randrange(4))]
+            return {'chat_id': 10**12 + rng.randrange(10**6), 'message_id': 10**12 + rng.randrange(10**6),
+                    key(): value(depth + 1)}
+
+        def literals(node):
+            """Every caller-chosen key and every scalar value; fixed nested keys such as chat_id are not."""
+            if type(node) is dict:
+                return [part for item_key, item in node.items()
+                        for part in ([item_key] if CALLER_KEY.casefold() in item_key.casefold() else []) + literals(item)]
+            if type(node) is list:
+                return [part for item in node for part in literals(item)]
+            return [] if node is None or type(node) is bool else [str(node)]
+
+        async with Client(server()) as client:
+            for name, tool in tools.items():
+                schema = tool.input_schema
+                properties, required = schema['properties'], set(schema.get('required', ()))
+                for _ in range(24):
+                    declared = rng.sample(sorted(properties), rng.randrange(len(properties) + 1))
+                    extra = {key() for _ in range(rng.randrange(3))}
+                    arguments = {**{param: value() for param in declared}, **{param: value() for param in extra}}
+                    with self.subTest(tool=name, arguments=arguments):
+                        result = await client.call_tool(name, arguments)
+                        if not result.is_error:
+                            continue  # valid arguments: an ordinary result
+                        text = result.content[0].text
+                        for literal in literals(arguments):
+                            self.assertNotIn(literal, text)
+                        self.assertInputFree(text)
+                        if text == f'Error executing tool {name}':
+                            continue  # valid arguments reached the untouched provider
+                        parsed = parse_refusal(text)
+                        self.assertIsNotNone(parsed, text)
+                        refusals += 1
+                        self.assertEqual(parsed[0], name)
+                        self.assertEqual(parsed[1], tuple(sorted(required - set(arguments))))
+                        self.assertLessEqual(set(parsed[2]), set(properties) - set(parsed[1]))
+                        self.assertEqual(parsed[3], len(extra))
+                        for param in declared:
+                            if type(arguments[param]) is not str and not Draft202012Validator(
+                                    {**properties[param], '$defs': schema.get('$defs', {})}).is_valid(arguments[param]):
+                                self.assertIn(param, parsed[2])
+        self.assertGreater(refusals, 1000)
+
+    def test_whole_request_rules_name_declared_parameters(self):
+        """Every request model rule that runs after its fields (so fails without a location) has a closed
+        attribution, and every attributed name is a parameter some tool publishes."""
+        published = {name for tool in build_server()._tool_manager.list_tools() for name in tool.parameters['properties']}
+        models = {name: getattr(server_module, name) for name in server_module._REQUEST_MODELS}
+        ruled = {name for name, model in models.items() if model.__pydantic_decorators__.model_validators}
+        self.assertLessEqual(ruled, set(server_module._EXACTLY_ONE) | set(server_module._RULE_PARAMETERS))
+        for name, model in models.items():
+            if issubclass(model, SelectedInput):
+                self.assertEqual(server_module._EXACTLY_ONE[name], source_pairs(model))
+        for names in [*server_module._RULE_PARAMETERS.values(),
+                      *(tuple(n for pair in pairs for n in pair) for pairs in server_module._EXACTLY_ONE.values())]:
+            self.assertTrue(names)
+            self.assertLessEqual(set(names), published)
+        self.assertTrue(all(issubclass(model, BaseModel) for model in models.values()))
+
+    def test_an_unattributable_failure_keeps_the_bare_fixed_text(self):
+        text = server_module._argument_refusal('read_history', {'properties': {'target': {}}, 'required': ['target']},
+                                               {'target': 7}, server_module._InvalidArguments(CALLER_KEY))
+        self.assertEqual(text, FALLBACK.format('read_history'))
 
     async def test_unknown_tool_is_not_echoed(self):
         async with Client(server()) as client:
