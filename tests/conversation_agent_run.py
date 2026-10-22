@@ -191,11 +191,12 @@ class ClaudeCode:
         config.write_text(json.dumps({"mcpServers": {SERVER_NAME: {
             "command": sys.executable, "args": [str(SERVER), *rubrics.server_arguments(scenario, transcript)],
             "env": server_environment()}}}), "utf-8")
-        command = [self.binary, "-p", "--mcp-config", str(config), "--strict-mcp-config", "--output-format",
-                   "stream-json", "--verbose", "--max-turns", "40", "--allowedTools", f"mcp__{SERVER_NAME}"]
+        # The prompt goes first: --mcp-config and --allowedTools take several values and would swallow it.
+        command = [self.binary, "-p", rubrics.PREAMBLE + scenario.prompt, "--output-format", "stream-json",
+                   "--verbose", "--max-turns", "40", "--strict-mcp-config"]
         if self.model:
             command += ["--model", self.model]
-        return command + [rubrics.PREAMBLE + scenario.prompt], self.environment()
+        return command + ["--mcp-config", str(config), "--allowedTools", f"mcp__{SERVER_NAME}"], self.environment()
 
     @staticmethod
     def answer(workdir: Path, events: Path) -> str | None:
