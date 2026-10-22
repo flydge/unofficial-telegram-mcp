@@ -287,6 +287,19 @@ Open the next development line in one commit by the public identity, on top of t
 
 Release evidence is never edited: a corrected release is a new commit, a new `run` and a new tag.
 
+### Consumer matrix (from the 0.54 candidate)
+
+```bash
+.venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path>
+.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path>
+```
+
+`run` installs the wheel built from `git archive <sha>` with the pinned closure in a fresh venv and drives
+every synthetic cell of the [consumer matrix](plans/0.54-consumer-matrix-spec.md) through the official SDK
+against synthetic brokers; it writes the receipt only when every cell passed. `check` rebuilds the wheel
+and the schema census of the recorded commit and refuses any difference. The receipt is `acceptance:
+false`: owner and real-account cells stay `pending` and need their own records.
+
 ## Checklist
 
 | Step | Command or file |
@@ -298,6 +311,7 @@ Release evidence is never edited: a corrected release is a new commit, a new `ru
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |
 | Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` |
+| Consumer matrix (synthetic cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
 | History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |
 | Tag | `git tag -a v<version> -m ...` |
