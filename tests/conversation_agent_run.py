@@ -4,7 +4,7 @@ Not collected by pytest, and never run by the suite: it starts a real model. Syn
 agent's only Telegram server is tests/conversation_demo_server.py, which never reaches Telegram.
 
     python tests/conversation_agent_run.py --agent codex [--scenario NAME ...] [--timeout SECONDS]
-        [--model MODEL] [--out DIRECTORY]
+        [--model MODEL] [--out DIRECTORY]   (default: every scenario)
     python tests/conversation_agent_run.py --agent claude [--claude-bin PATH] ...
 
 codex: `codex exec --ignore-user-config` (documented in `codex exec --help`: the user's config.toml
@@ -280,11 +280,19 @@ def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
             "observed": observed, "directory": str(workdir)}
 
 
-def main(argv=None) -> int:
+def scenario_names(selected: list[str] | None) -> list[str]:
+    """Every scenario by default or with `all`; otherwise the ones named, once each, in order."""
+    if not selected or "all" in selected:
+        return list(rubrics.SCENARIOS)
+    return list(dict.fromkeys(selected))
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the conversation scenarios through a real agent.")
     parser.add_argument("--agent", choices=("codex", "claude"), required=True)
     parser.add_argument("--scenario", action="append", choices=sorted(rubrics.SCENARIOS) + ["all"],
-                        help="repeatable; default: the five core scenarios; all adds the approval variants")
+                        help="repeatable; default: every scenario (the same as all), the declined, timed-out and "
+                             "unresolved variants included")
     parser.add_argument("--timeout", type=float, default=420.0, help="seconds per scenario (default 420)")
     parser.add_argument("--model")
     parser.add_argument("--skills", choices=("none", "user"), default="none",
@@ -292,6 +300,11 @@ def main(argv=None) -> int:
     parser.add_argument("--codex-bin")
     parser.add_argument("--claude-bin")
     parser.add_argument("--out", type=Path, help="report directory (default: a new temporary directory)")
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
     arguments = parser.parse_args(argv)
     if not 30 <= arguments.timeout <= 1800:
         parser.error("--timeout must be 30..1800 seconds")
@@ -315,9 +328,7 @@ def main(argv=None) -> int:
     if report["version"] is None:
         report["unavailable"] = f"{agent.name} --version failed or the binary is missing"
     else:
-        names = arguments.scenario or list(rubrics.CORE)
-        names = list(rubrics.SCENARIOS) if "all" in names else names
-        for name in names:
+        for name in scenario_names(arguments.scenario):
             result = run_scenario(agent, rubrics.SCENARIOS[name], base, arguments.timeout)
             report["scenarios"].append(result)
             print(f"{name}: {'PASS' if result['passed'] else 'FAIL'} ({result['seconds']} s)", file=sys.stderr)
