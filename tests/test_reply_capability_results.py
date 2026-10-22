@@ -207,6 +207,9 @@ class TextReplyCapabilityTests(ReplyFixture, unittest.TestCase):
                                                                    'reply_to': ANCHOR, **STYLED_REQUEST}),
                          disabled('formatted_text_send'))
         self.assertEqual(self.reads(), reads)
+        self.raw.account = 8  # account switch: the option is still named first
+        self.assertEqual(update(did, **STYLED_REQUEST), option)
+        self.raw.account = 7
         # Without a disabled option the same requests keep their fixed unavailable result.
         plain = {'status': 'unavailable', 'previous_draft_id': None, 'reply': None, 'detail': UNAVAILABLE}
         self.assertEqual(update('draft_' + 'f' * 32), plain)

@@ -1522,16 +1522,19 @@ instead of `unavailable`:
 (The revision tools add `"previous_draft_id": null`.) `missing_capabilities` holds only
 names from the closed capability set, never input or source text, each once, in the
 order the refused check requires them, extending the guard's rule: the tool's own
-capability, then `send`, then the request's own options (`formatted_text_send` for
-outgoing styles, `topic_text_send` for a selected topic), which are checked together
-before Telegram is read; then what the selected source needs, in its family order
+capability, then `send`, then the reply's own options (`formatted_text_send` for
+outgoing styles, `topic_text_send` for a selected topic: those the request asks for
+and, for a stored draft, those the draft carries), which are checked together before
+Telegram is read; then what the source needs, in its family order
 (`reply_media_targets`, `reply_formatted_targets`, the family that selected the
 source's version, then every other present family in the order bank card, phone,
 email, URL, DateTime, lexical, identity), with `topic_text_send` last for a source in
 a forum topic. The guard and the broker refuse the tool's own capability and `send`
-first, so in practice the list names options and source families. A refresh asks
-for the draft's own options before Telegram is read, then names what the newly read
-source needs; it no longer asks for the stored source it replaces, which it never
+first, so in practice the list names options and source families. Stored drafts ask
+in the same order, so on one policy `get_reply_draft`, `update_reply_draft` and
+`refresh_reply_draft` name what `prepare_reply_text_send` names for the same options
+and source (a topic reply has no refresh). A refresh asks for the draft's own options
+before Telegram is read, then names what the newly read source needs; it no longer asks for the stored source it replaces, which it never
 shows again, so a refresh from a styled source to a plain one needs no family at all.
 Get and update keep asking for the stored source's families. Naming the families
 reveals which entity kinds the chosen message contains; the client chose that
@@ -1540,10 +1543,20 @@ message and already has read access.
 Only capability-driven refusals change. A foreign or unknown draft, an account or
 session switch, expiry, a recipient that differs from the anchor and every
 unsupported or malformed source still return `unavailable` with the fixed
-`reply draft is unavailable`. A send of a reply draft whose capability was disabled
-keeps the existing `expired` result. `missing_capabilities` and `next_action` are
-omitted from every other result, so those results are unchanged. The output schemas
-of the eight tools changed.
+`reply draft is unavailable`, with one exact exception. An option the request itself
+asks for (`formatted_text_send` for outgoing styles on `prepare_reply_text_send` or
+`update_reply_draft`, `topic_text_send` for a topic on `prepare_reply_text_send`) is
+checked first, before the draft is looked up, the account is resolved, the recipient
+is compared with the anchor or Telegram is read. When the policy disables it, the
+result is `capability_disabled` naming it, identically for an existing, foreign,
+unknown or expired draft, after an account switch, and for any recipient or source,
+so it reveals nothing about any of them. Everything else a reply needs (a stored
+draft's own options and the source's families) is checked only after the draft is
+found under the caller's owner and account, or after the recipient matched the anchor
+and the source was read, so those cases keep returning `unavailable`. A send of a
+reply draft whose capability was disabled keeps the existing `expired` result.
+`missing_capabilities` and `next_action` are omitted from every other result, so
+those results are unchanged. The output schemas of the eight tools changed.
 
 
 ## Artifact replies
