@@ -142,12 +142,13 @@ class DowngradeTests(SafetyHarness, unittest.TestCase):
         self.selection_check()
 
     def test_the_version_order_is_pep440_and_anything_else_refuses(self):
+        # The one release version grammar (tests/version_grammar.py); test_version_grammar holds the whole table.
         key = self.module()._version_key
-        ordered = ['0.52.9', '0.53.0.dev0', '0.53.0.dev1', '0.53.0a1', '0.53.0b2', '0.53.0rc1', '0.53.0',
-                   '0.53.0.post1.dev0', '0.53.0.post1', '0.53.1', '1.0']
+        ordered = ['0.52.9', '0.53.0.dev0', '0.53.0.dev1', '0.53.0a1', '0.53.0b2', '0.53.0rc1.dev0', '0.53.0rc1',
+                   '0.53.0', '0.53.1', '1.0.0']
         self.assertEqual(sorted(reversed(ordered), key=key), ordered)
-        self.assertEqual(key('0.53'), key('0.53.0'))
-        for value in ('', 'v0.53.0', '0.53.0+local', '01.2', '0.53.0-1', '0.53..0', None, 53, '0.53.0.dev'):
+        for value in ('', 'v0.53.0', '0.53.0+local', '01.2.0', '0.53.0-1', '0.53..0', None, 53, '0.53.0.dev',
+                      '0.53', '1.0', '0.53.0.post1', '0.53.0.post1.dev0'):
             with self.subTest(value=value):
                 with self.assertRaises(self.module().InstallError) as caught:
                     key(value)

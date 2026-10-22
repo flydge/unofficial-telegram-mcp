@@ -4,7 +4,7 @@
 
 **Existing installations:** the product was renamed from TelegramSearch. Keep your current installation folder and MCP configuration. The package, commands, skill identifier and local data paths retain their existing names for compatibility; new checkouts use `unofficial-telegram-mcp`.
 
-## Private bundle 0.53.0rc1
+## Private bundle 0.53.0rc2
 
 **Current behavior versus the 0.52 target:** the approved
 [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this
@@ -90,7 +90,10 @@ tree, index, receipt, pointer, transaction journal and home binding, and only th
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
 state cannot stop the installed runtime from starting; a repeat install verifies the Codex
-registration and the `~/.agents/skills` copies and refuses drift there.
+registration and refuses drift there. It verifies the `~/.agents/skills` copies only until its
+`receipt.json` is written: from then on the receipt records the copies the install wrote, and a copy you
+edit, replace or remove afterwards is yours (`uninstall` reports an edited one `kept`) and never stops a
+repeat.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
@@ -187,7 +190,7 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
 a `0700` directory) with `expected_package_version` set to the running package version
-(`"0.53.0rc1"` for this candidate),
+(`"0.53.0rc2"` for this candidate),
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: `send`,
 `forward_send`, `video_send`, `archive_chats`, `edit_own_text` and every extended reader are off. To enable more, edit that file
 yourself. Keep the pins as written and add only the capabilities you need from the
@@ -379,7 +382,7 @@ Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
 4. `bootstrap.sh` copies the seed to a private stage under `/private/tmp`, checks its sha256 and size,
    with `--seed-team` checks its Developer ID signature, and runs it. The seed authenticates the index
    and every archive member before extraction, and the installer from the extracted tree then does the
-   [bundle installation](#private-bundle-0530dev0) and client registrations above. The stage directory
+   [bundle installation](#private-bundle-0530rc2) and client registrations above. The stage directory
    is not removed by the scripts.
 5. `Install.command` prints the installer's JSON result and accepts exactly the results the installer
    returns for a kit. After a first install it continues only when `status` is `activation_required`
@@ -625,7 +628,12 @@ that an interruption resumes by repeating the command:
    byte for byte, and our entry removed meanwhile is added back. Only our own Codex table or skill copy
    changed since the upgrade started (or right after the upgrade wrote it) stops it there
    (`target_conflict`, `skill_conflict`; see [a refusal after the broker stop](#a-refusal-after-the-broker-stop));
-   a changed Claude Code or Claude Desktop entry is left alone and reported `failed`.
+   a changed Claude Code or Claude Desktop entry is left alone and reported `failed`. Once `receipt.json`
+   names the new release (step 5), the skill copies are done: the receipt records the copies the upgrade
+   wrote, and a repeat neither writes nor checks them again, so a copy you edit, replace or remove after
+   that stays as you left it and never stops the repeat (`uninstall` reports an edited one `kept`; the next
+   upgrade refuses an edited one as `skill_conflict` before anything changes, and writes a removed one
+   again). After `current.json` switches, the same holds for our Codex table.
 4. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
    `policy_conflict`.
@@ -638,16 +646,20 @@ restart_mcp_clients`. Reconnect every client: a running proxy that loaded the ol
 are not written.
 
 **Pending-send gate.** If the broker is running, the installer asks it, through its own release's
-client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether any client
-context is connected. A context may hold a draft or an unresolved send outcome, and an unknown answer
-counts as pending. It asks before the transaction exists, again once the new release is copied, and a
+client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether a send is
+pending: a send or apply request in flight, an approval dialog open, or a send outcome `get_send_status`
+could still settle (an `outcome_unknown` within its 15-minute status window), and whether any client
+context is connected. Any of them counts as pending. A 0.51 or 0.52 broker reports only client contexts,
+which never show a send, so there a connected context is an unknown answer, and an unknown answer counts
+as pending too. It asks before the transaction exists, again once the new release is copied, and a
 last time right before the broker is stopped, which comes before any client file is written. Any such
 answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
 session unchanged. A refusal at the first check changes nothing at all; at a later one the new release
 tree is already copied and the upgrade stays unfinished, so `rollback` and another kit refuse as
 `transaction_pending` (`pending_action: upgrade`) until the same command is repeated (or `uninstall`,
-which goes over the unfinished upgrade, removes the installation). Quit the
-MCP clients, wait for their contexts to idle out (300 seconds by default), and repeat. An uncertain send
+which goes over the unfinished upgrade, removes the installation). Settle any open dialog and any
+`outcome_unknown` send first (`get_send_status`), quit the MCP clients, wait for their contexts to idle
+out (300 seconds by default), and repeat. An uncertain send
 is never retried by an upgrade. From the broker stop until the upgrade finishes, or until a refusal
 restores the broker (below), running MCP clients cannot reach the broker.
 
@@ -682,9 +694,16 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   skill copy is written again, also one the upgrade had already written; a skill copy the upgrade wrote
   and you edited in place counts as its own again once that same file holds exactly what the upgrade
   wrote, with the same mode; an editor that saves by replacing the file makes it another file, so remove
-  that copy instead), then repeat the same command:
+  that copy instead; once `receipt.json` names the new release a skill copy no longer stops the repeat, see
+  step 3), then repeat the same command:
   it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
-  upgrade may be refused and repeated. Every run before `current.json` switches decides the service from
+  upgrade may be refused and repeated (a refusal's restore starts the next run's Codex write afresh, so our
+  table changed in the instant between that write's record and its replace, run after run, never uses it
+  up), with one exact bound: each skill copy is written at most eight times within one upgrade, the first
+  write included, so a repeat that would write it a ninth time (you removed or replaced it before each of
+  eight repeats of one unfinished upgrade) refuses `recovery_limit`, and so does every repeat after it;
+  `uninstall` still ends that upgrade (for an unfinished first install it does not: put the skill copy
+  back by hand, then repeat). Every run before `current.json` switches decides the service from
   what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist
   on disk: the old release's, or after a kill past the plist rewrite the new release's). A run that goes
   on stops an old broker started again meanwhile (gated first), also when none ran as the upgrade began,
@@ -698,6 +717,16 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   `service_conflict` until you resolve them and repeat: a plist changed by hand since the stop (below), and
   a broker loaded under the same label that is neither release's (not started from either plist), which you
   stop with `launchctl bootout gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker`.
+  The old release's broker loaded again from its plist between the stop's bootout and the rewrite (a
+  `connect` or a manual `launchctl bootstrap` running at that moment) is not a conflict either: it is
+  recognised by the plist bytes the upgrade kept, gated and stopped, also by the restart after the switch.
+  A plist removed by hand (`rm`, with or without `launchctl bootout`) is not a conflict: the repeat writes
+  the new release's plist anew, and after the switch writes it again if it is gone and a broker ran as the
+  change began (otherwise the change finishes `not_loaded` and `connect` writes it). A broker still loaded
+  from that plist's path that runs either release is the installation's own: the repeat gates and stops it
+  like any other, and `uninstall` boots it out. A broker loaded by a concurrent `connect` or a login in the
+  instant of `uninstall`'s own stop stays loaded after `uninstall` reports `removed`: stop it with the
+  `launchctl bootout` command above.
 - **`uninstall`.** It goes over the parked upgrade: it removes what the installed release owns and
   everything the upgrade already wrote (the Codex entry, skill copies, and Claude Code and Claude Desktop
   entries that name the new release), each only while it is exactly what was written, then the broker,
@@ -709,7 +738,10 @@ The same holds for a rollback (`pending_action: rollback`). For an adopting firs
 the repeat is the way out, since there is no installed release for `uninstall` to remove yet (it refuses
 as `transaction_pending`). A restore never overwrites a plist changed since the stop: then the refusal is
 `service_conflict` (or `service_restart_failed` when the bootstrap fails) and the broker stays stopped
-until a repeat succeeds. A broker loaded under the label that is neither release's also refuses the
+until a repeat succeeds; remove that changed plist and repeat, and the restore writes the previous one back.
+A plist removed since the stop comes back from the copy the transaction kept before its first rewrite (with
+the previous broker started again if it ran); removed before that copy existed, there is nothing to put back,
+so the restore leaves no plist and starts no broker. A broker loaded under the label that is neither release's also refuses the
 restore as `service_conflict` and keeps running; once you stop it, the repeat finishes the restore. A repeat
 after a kill during the restore, or after one of these refusals, finishes the restore and refuses with the
 first refusal's code; until that repeat has run, `uninstall` also refuses as `transaction_pending`. The
@@ -767,14 +799,18 @@ exactly that entry: the next upgrade replaces it and `uninstall` removes it. An 
 there (`reused` on a first install), one you wrote, and one you changed are never owned. That includes an
 entry you changed while an interrupted step was writing it: the resumed step ends `failed`, and the entry
 stays yours (`kept` by `uninstall`) even if you change it back to what the step wrote, until a later
-upgrade or rollback registers that client again. Ownership is read from the installation's own transaction
-journals, the same way for every receipt schema.
+upgrade or rollback registers that client again. An upgrade or rollback parked by a refusal after it wrote
+an entry but before it recorded that step's result (an interruption in between) owns the entry it wrote by
+the record it journals before every write, so `uninstall` over it removes the entry while it is exactly what
+was written. Ownership is read from the installation's own transaction journals, the same way for every
+receipt schema.
 
 ### Uninstall
 
 `uninstall` removes only objects the receipt owns. Run it the same way as `rollback`, with `uninstall`
 in place of `rollback`. In order it removes: the broker plist (the exact LaunchAgent label is booted out
-first, after the pending-send gate); the Codex subtree, only while it is exactly what the receipt
+first, after the pending-send gate; a broker of the installed release still loaded after you removed its
+plist by hand is booted out too, `removed`); the Codex subtree, only while it is exactly what the receipt
 recorded; the Claude Code user-scope entry (through the `claude` CLI, `user` mode only); the Claude
 Desktop entry, leaving its neighbours and the file's mode; the skill copies the receipt binds; and
 finally the installation root with all releases.

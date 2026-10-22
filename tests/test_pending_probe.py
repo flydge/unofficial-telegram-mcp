@@ -4,6 +4,10 @@ It must work against every broker the installer adopts or upgrades: a 0.51 or 0.
 --adopt-legacy) and a bundled one. So it may use only what those releases share: `config.BROKER_SOCKET_PATH`,
 `config.load_runtime_policy`, `broker_client.BrokerClient` with its health() and close(). Anything it cannot answer is
 `unknown`, which refuses (fail closed). Disposable homes only; the broker is a real one on a temporary socket.
+
+From 0.53.0rc2 a broker's health also counts `pending_sends` (sends in flight, approval dialogs open, outcomes not yet
+settled): any of them, or any client context, answers `pending`. A 0.51 or 0.52 broker counts only contexts, so there
+any context answers `unknown` (it may hold a send the probe cannot see) and none answers `none`.
 """
 import json
 import os
@@ -80,9 +84,9 @@ class StubSurfaceTests(unittest.TestCase):
         self.assertEqual(calls, [{'socket_path': str(self.home / SOCKET), 'request_timeout': 5,
                                   'policy': {'policy': str(self.home / SOCKET.parent.parent / 'runtime.toml')},
                                   'retry_backoff_seconds': 0, 'restart': True}, 'health', 'close'])
-        self.assertEqual(self.answer(2), 'pending')
+        self.assertEqual(self.answer(2), 'unknown')  # A context, and no pending-send count to say what it holds.
         self.assertEqual(self.answer(None), 'unknown')  # The client could not ask: fail closed.
-        self.assertEqual(self.answer(True), 'pending')  # Not an exact zero count: never 'none'.
+        self.assertEqual(self.answer(True), 'unknown')  # Not an exact zero count: never 'none'.
 
     def test_no_socket_is_none_and_no_interpreter_is_unknown(self):
         (self.run_dir / 'broker.sock').unlink()
@@ -123,7 +127,7 @@ class RealBrokerTests(unittest.TestCase):
         self.app = base / 'app'
         _bundled_app(self.app)
 
-    def broker(self, **policy_overrides):
+    def broker(self, *, client_factory=None, approval_prompt=None, **policy_overrides):
         from telegram_search_mcp.artifact_store import ArtifactStore
         from telegram_search_mcp.broker import Broker
         from telegram_search_mcp.config import RuntimePolicy, load_runtime_policy
@@ -131,9 +135,11 @@ class RealBrokerTests(unittest.TestCase):
         policy = load_runtime_policy(self.root / 'runtime.toml')
         if policy_overrides:
             policy = RuntimePolicy(**{**policy.__dict__, **policy_overrides})
-        broker = Broker(socket_path=self.home / SOCKET, client_factory=SerializedFakeTDLib, verify_peer_uid=False,
-                        policy=policy, artifact_store=ArtifactStore(cache_dir=self.root / 'artifacts'),
-                        download_source_root=self.root / 'tdlib' / 'files')
+        broker = Broker(socket_path=self.home / SOCKET, client_factory=client_factory or SerializedFakeTDLib,
+                        verify_peer_uid=False, policy=policy,
+                        artifact_store=ArtifactStore(cache_dir=self.root / 'artifacts'),
+                        download_source_root=self.root / 'tdlib' / 'files',
+                        **({} if approval_prompt is None else {'approval_prompt': approval_prompt}))
         thread = threading.Thread(target=broker.serve_forever)
         thread.start()
         self.addCleanup(thread.join, 5)
@@ -151,6 +157,79 @@ class RealBrokerTests(unittest.TestCase):
         with broker._service_lease('client_another_mcp_session'):
             self.assertEqual(self.probe(), 'pending')
         self.assertEqual(self.probe(), 'pending')  # An idle context may still hold a draft or an unresolved send.
+
+    def test_a_send_in_flight_an_open_dialog_and_an_unsettled_outcome_are_pending(self):
+        """0.53.0rc1 critic (safety, high): the probe counted client contexts only, and prepare, send and
+        get_send_status never create one, so it answered `none` with an approval dialog open, a send in flight or
+        an outcome_unknown receipt held; a restart then lost the receipt. Driven through a real BrokerClient over
+        the socket, as an MCP proxy sends; no client context exists at any step."""
+        from telegram_search_mcp.broker_client import BrokerClient
+        from telegram_search_mcp.config import load_runtime_policy
+        from telegram_search_mcp.schemas import PrepareTextSendRequest, SendPreparedTextRequest
+        from test_outgoing_text import TextSender
+
+        class Sender(TextSender):
+            def __init__(self):
+                super().__init__()
+                self.entered, self.release, self.fail = threading.Event(), threading.Event(), False
+
+            def send_text_message(self, chat_id, text, *, attempt_id=None):
+                self.entered.set()
+                self.release.wait(10)
+                if self.fail:
+                    raise RuntimeError('connection lost after the request')
+                return super().send_text_message(chat_id, text, attempt_id=attempt_id)
+
+            def close(self):
+                pass
+
+        sender, dialog, answer = Sender(), threading.Event(), threading.Event()
+
+        def prompt(**_):
+            dialog.set()
+            answer.wait(10)
+            return True
+        broker = self.broker(client_factory=lambda: sender, approval_prompt=prompt)
+        client = BrokerClient(socket_path=self.home / SOCKET, policy=load_runtime_policy(self.root / 'runtime.toml'),
+                              request_timeout=60, restart_callback=lambda: None, retry_backoff_seconds=0)
+        self.addCleanup(client.close)
+        self.addCleanup(answer.set)
+        self.addCleanup(sender.release.set)
+        counts = lambda: broker._health()['pending_sends']
+        idle = {'in_flight': 0, 'approval_dialogs': 0, 'unreconciled_receipts': 0}
+
+        def send(draft_id, out):
+            thread = threading.Thread(target=lambda: out.append(client.send_prepared_text(
+                SendPreparedTextRequest(draft_id=draft_id, approved=True))))
+            thread.start()
+            return thread
+        prepared = client.prepare_text_send(PrepareTextSendRequest(recipient=123, text='Hello'))
+        self.assertEqual((self.probe(), counts()), ('none', idle))  # A prepared draft is not a send.
+        out = []
+        thread = send(prepared.draft_id, out)
+        self.assertTrue(dialog.wait(10))
+        self.assertEqual(self.probe(), 'pending')
+        self.assertEqual(counts(), {'in_flight': 1, 'approval_dialogs': 1, 'unreconciled_receipts': 0})
+        answer.set()
+        self.assertTrue(sender.entered.wait(10))
+        self.assertEqual(self.probe(), 'pending')  # Approved and claimed: the provider call is in flight.
+        self.assertEqual(counts(), {'in_flight': 1, 'approval_dialogs': 0, 'unreconciled_receipts': 1})
+        sender.release.set()
+        thread.join(10)
+        self.assertEqual(out[0].status, 'sent')
+        self.assertEqual((self.probe(), counts()), ('none', idle))  # Settled.
+        self.assertEqual(broker._health()['active_clients'], 0)
+        sender.entered.clear()
+        sender.fail = True
+        prepared = client.prepare_text_send(PrepareTextSendRequest(recipient=123, text='Again'))
+        out = []
+        send(prepared.draft_id, out).join(10)
+        self.assertEqual(out[0].status, 'outcome_unknown')
+        self.assertEqual(self.probe(), 'pending')  # get_send_status could still settle it: a restart would lose it.
+        self.assertEqual(counts(), {'in_flight': 0, 'approval_dialogs': 0, 'unreconciled_receipts': 1})
+        clock = broker._drafts._attempt_clock
+        broker._drafts._attempt_clock = lambda: clock() + 900  # Past receipt retention: nothing left to settle.
+        self.assertEqual((self.probe(), counts()), ('none', idle))
 
     def test_a_broker_that_cannot_answer_is_unknown(self):
         self.broker(enabled_capabilities=('read',))  # Another policy: the handshake refuses.

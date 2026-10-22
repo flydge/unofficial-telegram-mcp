@@ -329,7 +329,7 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                 untamper()
                 result = action()
                 self.assertEqual(result['service'], 'restarted')
-                self.assertIn(b'expected_package_version = "0.53.0rc1"', policy.read_bytes())
+                self.assertIn(b'expected_package_version = "0.53.0rc2"', policy.read_bytes())
                 self.assertEqual(self.launchctl.loaded[4], str(Path(result['release_root']) / 'launcher.py'))
 
     def test_a_kill_inside_the_restore_is_finished_by_the_repeat_with_the_same_refusal(self):
@@ -708,6 +708,144 @@ class NoDeadEndTests(ParkedHarness, unittest.TestCase):
                 self.assertEqual(skill.read_bytes(), (target / 'skills/telegram-search/SKILL.md').read_bytes())
                 self.assertRemoved(self.change('uninstall'))
 
+    def test_a_skill_copy_touched_after_the_receipt_is_published_never_blocks(self):
+        """0.53.0rc1 re-review (R5h, seeds 10315 and 11124): a change killed once receipt.json names the target
+        (published, recorded, or committed and short of its restart), then our search skill copy edited, edited
+        and put back, or removed. The skill copies are no longer written once the change's receipt is in place:
+        the repeat finishes and leaves the copy as the user left it; uninstall then keeps an edited copy as the
+        user's and removes the rest. Before, the repeat re-staged the copy and refused `metadata_conflict` for
+        good, and after the commit uninstall refused `transaction_pending` too."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('published:receipt', 'receipt', 'complete'):
+                for touch in ('edit', 'put back', 'remove'):
+                    with self.subTest(kind=kind, at=at, touch=touch):
+                        self.setUp()
+                        _, old = self.full()
+                        new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+                        if kind == 'rollback':
+                            self.install(new)
+                        action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                            lambda **kwargs: self.change('rollback', **kwargs))
+                        target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                        self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                        skill = self.skills / 'telegram-search' / 'SKILL.md'
+                        written, mode = skill.read_bytes(), skill.stat().st_mode & 0o777
+                        if touch == 'remove':
+                            skill.unlink()
+                            skill.parent.rmdir()
+                        else:
+                            skill.chmod(0o600)
+                            skill.write_bytes(b'mine')
+                            if touch == 'put back':
+                                skill.write_bytes(written)
+                                skill.chmod(mode)
+                        result = action()
+                        self.assertEqual(result['status'], 'upgraded' if kind == 'upgrade' else 'rolled_back')
+                        self.assertOneRelease(target)
+                        self.assertEqual(skill.read_bytes() if skill.exists() else None,
+                                         {'edit': b'mine', 'put back': written, 'remove': None}[touch])
+                        self.assertEqual(action()['installation'], 'reused')
+                        removed = self.change('uninstall')
+                        self.assertRemoved(removed, kept_skill='telegram-search' if touch != 'put back' else None)
+                        self.assertEqual(removed['skills']['telegram-search'],
+                                         {'edit': 'kept', 'put back': 'removed', 'remove': 'absent'}[touch])
+
+    def test_a_first_install_with_a_skill_copy_touched_after_its_receipt_finishes(self):
+        """The same for a first install: killed once its receipt.json is published (or finished), then our search
+        skill copy edited or removed. Before, the repeat refused for good (`installation_refused` for an edit,
+        `metadata_conflict` for a removal) and uninstall named the unfinished install."""
+        for at in ('published:receipt', 'receipt', None):
+            for touch in ('edit', 'remove'):
+                with self.subTest(at=at, touch=touch):
+                    self.setUp()
+                    packet = self.build('a')
+                    self.claude()
+                    if at is None:
+                        self.install(packet)
+                    else:
+                        self.die(lambda checkpoint: self.install(packet, checkpoint=checkpoint), at=at)
+                    skill = self.skills / 'telegram-search' / 'SKILL.md'
+                    if touch == 'remove':
+                        skill.unlink()
+                        skill.parent.rmdir()
+                    else:
+                        skill.chmod(0o600)
+                        skill.write_bytes(b'mine')
+                    result = self.install(packet)
+                    self.assertEqual((result['status'], result['installation']),
+                                     ('activation_required', 'reused' if at is None else 'installed'))
+                    self.assertEqual(self.install(packet)['installation'], 'reused')
+                    self.assertEqual(skill.read_bytes() if skill.exists() else None, b'mine' if touch == 'edit' else None)
+                    removed = self.change('uninstall')
+                    self.assertEqual((removed['status'], removed['skills']['telegram-search']),
+                                     ('uninstalled', 'kept' if touch == 'edit' else 'absent'))
+                    self.assertFalse(self.runtime.exists())
+
+    def test_uninstall_over_a_parked_change_removes_a_client_entry_written_before_its_status(self):
+        """0.53.0rc1 re-review (R5j, R5k, seed 10387): killed right after the change wrote the Claude Desktop entry
+        (or ran `claude mcp add`) and before it recorded that client's outcome, then parked by a late refusal at
+        the repeat (our skill copy edited, then put back). Ownership comes from the change's write-ahead record,
+        so uninstall removes the entry while it is exactly what the change wrote (it was kept, naming the removed
+        release). Killed before the write, the older entry is the installation's and is removed as before (for
+        Claude Code the older entry was already removed then, write-ahead, so nothing is left: `absent`)."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('published:claude_desktop_add', 'recorded:claude_desktop_add', 'published:claude_add',
+                       'recorded:claude_add'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    _, old = self.full()
+                    new = self.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+                    if kind == 'rollback':
+                        self.install(new)
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                    self.claude()
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                    command, args = self.commands(target)
+                    written = ({'command': command, 'args': args} if 'desktop' in at else
+                               {'type': 'stdio', 'command': command, 'args': args})
+                    entry = (json.loads(self.desktop_config.read_text())['mcpServers'].get('telegram_search')
+                             if 'desktop' in at else self.claude().entry)
+                    self.assertEqual(entry == written, at.startswith('published:'))
+                    skill = self.skills / 'telegram-search' / 'SKILL.md'
+                    saved, mode = skill.read_bytes(), skill.stat().st_mode & 0o777
+                    skill.chmod(0o600)
+                    skill.write_bytes(b'mine')
+                    self.assertEqual(self.refused(action), 'skill_conflict')
+                    skill.write_bytes(saved)
+                    skill.chmod(mode)
+                    removed = self.change('uninstall')
+                    if at == 'recorded:claude_add':
+                        # Our older entry was removed (write-ahead) before the kill, and nothing was added.
+                        self.assertEqual(removed['claude_code'], 'absent')
+                        removed = {**removed, 'claude_code': 'removed'}
+                    self.assertRemoved(removed)
+
+    def test_our_codex_table_changed_after_the_commit_never_blocks_the_repeat(self):
+        """The same after the commit (killed short of its restart) for our Codex table: changed or removed, the
+        repeat finishes and leaves it; uninstall keeps a changed table as the user's."""
+        for kind in ('upgrade', 'rollback'):
+            for touch in ('change', 'remove'):
+                with self.subTest(kind=kind, touch=touch):
+                    self.setUp()
+                    _, old = self.full()
+                    new = self.build('b', launcher=b'# second release\n')
+                    if kind == 'rollback':
+                        self.install(new)
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at='complete')
+                    self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED) if touch == 'change'
+                                            else NEIGHBOUR_CODEX)
+                    self.assertEqual(action()['service'], 'restarted')
+                    self.assertOneRelease(target)
+                    removed = self.change('uninstall')
+                    self.assertEqual((removed['status'], removed['codex']),
+                                     ('uninstalled', 'kept' if touch == 'change' else 'absent'))
+                    self.assertFalse(self.runtime.exists() or self.plist.exists())
+
     def test_a_killed_uninstall_over_a_parked_change_is_finished_by_its_retry(self):
         for stage in ('stopped:service', 'registration', 'claude_code', 'claude_desktop', 'skills', 'retired'):
             with self.subTest(stage=stage):
@@ -757,6 +895,34 @@ class CodexWriteWindowTests(ParkedHarness, unittest.TestCase):
                     self.config.write_bytes(saved[0])
                     self.assertEqual(action()['service'], 'restarted')
                     self.assertOneRelease(target)
+
+    def test_refusals_in_the_codex_write_window_run_after_run_never_reach_recovery_limit(self):
+        """0.53.0rc1 re-review (R5a): our table changed between the write's record and its replace, then put back,
+        run after run. Every attempt stayed journaled, so from the ninth run on the repeat refused `recovery_limit`
+        for good (only uninstall ended it). A finished restore now keeps only the attempt that proves the change's
+        own write, so each run the user starts has fresh attempts: the plain repeat finishes."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full()
+                new = self.build('b', launcher=b'# second release\n')
+                if kind == 'rollback':
+                    self.install(new)
+                target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                    lambda **kwargs: self.change('rollback', **kwargs))
+
+                def edit(stage):
+                    if stage == 'recorded:registration':
+                        self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+                for _ in range(10):
+                    self.assertEqual(self.refused(lambda: action(checkpoint=edit)), 'target_conflict')
+                    self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+                name = max(self.changes(), key=lambda n: int(n[7:]))
+                self.assertLessEqual(len(self.journal(name)['publications'].get('registration', [])), 1)
+                self.assertEqual(action()['service'], 'restarted')
+                self.assertOneRelease(target)
+                self.assertEqual(self.change('uninstall')['codex'], 'removed')
 
     def test_a_neighbour_added_in_the_codex_write_window_is_merged(self):
         _, old = self.full()
@@ -924,6 +1090,61 @@ class LoginRestoreTests(ParkedHarness, unittest.TestCase):
                 self.launchctl.load()  # The next login.
                 self.assertOneRelease(target)
 
+    def test_the_previous_plist_bootstrapped_between_the_bootout_and_the_rewrite_is_stopped(self):
+        """0.53.0rc1 re-review (R5d): a concurrent `connect` or a manual bootstrap loads the previous plist right
+        after the stop's bootout, before the rewrite. The commit then found the previous broker loaded beside the
+        target's plist and refused `service_conflict` for good (uninstall named the change). It is the previous
+        definition the change kept, so it is gated and booted out like any other: the restart starts the target's
+        when a broker ran before, and none otherwise."""
+        for kind in ('upgrade', 'rollback'):
+            for loaded in (True, False):
+                with self.subTest(kind=kind, loaded=loaded):
+                    self.setUp()
+                    _, old = self.full(loaded=loaded)
+                    new = self.build('b', launcher=b'# second release\n')
+                    if kind == 'rollback':
+                        self.install(new)
+                        if not loaded:
+                            self.launchctl.loaded = None
+                    target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+                    action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                        lambda **kwargs: self.change('rollback', **kwargs))
+                    previous = self.plist.read_bytes()
+
+                    def bootstrap(stage):
+                        if stage == 'stopped:service' and self.launchctl.loaded is None:
+                            self.assertEqual(self.plist.read_bytes(), previous)
+                            self.launchctl.load()
+                    result = action(checkpoint=bootstrap)
+                    self.assertEqual(result['service'], 'restarted' if loaded else 'not_loaded')
+                    if not loaded:
+                        self.assertIsNone(self.launchctl.loaded)
+                        self.launchctl.load()  # The next login.
+                    self.assertOneRelease(target)
+                    self.assertEqual(self.change('uninstall')['service'], 'removed')
+                    self.assertIsNone(self.launchctl.loaded)
+
+    def test_with_no_broker_before_the_change_the_restart_reads_no_plist(self):
+        """The previous-broker check after the commit never turns a change that found no broker running into a
+        refusal: a plist changed by hand after a kill at `complete` is not read (`not_loaded`, as before)."""
+        for kind in ('upgrade', 'rollback'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                _, old = self.full(loaded=False)
+                new = self.build('b', launcher=b'# second release\n')
+                if kind == 'rollback':
+                    self.install(new)
+                    self.launchctl.loaded = None
+                action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+                    lambda **kwargs: self.change('rollback', **kwargs))
+                self.claude()
+                self.die(lambda checkpoint: action(checkpoint=checkpoint), at='complete')
+                payload = plistlib.loads(self.plist.read_bytes())
+                payload['ProcessType'] = 'Interactive'
+                self.plist.write_bytes(plistlib.dumps(payload))
+                self.assertEqual(action()['service'], 'not_loaded')
+                self.assertIsNone(self.launchctl.loaded)
+
     def test_a_broker_neither_ours_stays_loaded_and_refuses(self):
         """Neither the target's nor the previous broker: never booted out, `service_conflict` until it is gone;
         then the repeat finishes the restore with the recorded code, and the next one the change."""
@@ -998,6 +1219,104 @@ class ParkedTemporaryTests(ParkedHarness, unittest.TestCase):
         self.assertEqual(len(self.temporaries()), 1)
         self.assertEqual(action()['status'], 'upgraded')
         self.assertEqual(self.temporaries(), [])
+
+
+class RemovedPlistTests(ParkedHarness, unittest.TestCase):
+    """0.53.0rc1 re-review (R5f, R5g; reproduced on 05fee70): the broker plist removed by hand while a change is
+    unfinished after its stop. Every repeat refused `service_restart_failed` (the stop expected the plist to exist,
+    the restore bootstrapped a plist that was gone) and uninstall named the change, for good. A missing plist is
+    now nothing to stop: the stop writes the target's definition anew; the restore brings the previous one back
+    from its journaled copy (or, with none kept, starts nothing); after the commit the restart writes the target's
+    again. A registration still loaded from the removed plist's path that runs one of the two releases is ours."""
+
+    def kinds(self, kind, *, loaded=True):
+        _, old = self.full(loaded=loaded)
+        new = self.build('b', launcher=b'# second release\n')
+        if kind == 'rollback':
+            self.install(new)
+        action = (lambda **kwargs: self.install(new, **kwargs)) if kind == 'upgrade' else (
+            lambda **kwargs: self.change('rollback', **kwargs))
+        target = self.runtime / 'releases' / new[3] if kind == 'upgrade' else Path(old['release_root'])
+        previous = Path(old['release_root']) if kind == 'upgrade' else self.runtime / 'releases' / new[3]
+        self.claude()
+        return action, target, previous
+
+    def late(self, value):
+        if value == 'service':
+            self.config.write_bytes(self.config.read_bytes().replace(OURS, CHANGED))
+
+    def put_back(self):
+        self.config.write_bytes(self.config.read_bytes().replace(CHANGED, OURS))
+
+    def test_a_parked_change_whose_launchagent_was_removed_by_hand_finishes(self):
+        for kind in ('upgrade', 'rollback'):
+            for cleanup in ('bootout and remove', 'remove only'):
+                for follow in ('repeat', 'uninstall'):
+                    with self.subTest(kind=kind, cleanup=cleanup, follow=follow):
+                        self.setUp()
+                        action, target, _ = self.kinds(kind)
+                        self.assertEqual(self.refused(lambda: action(checkpoint=self.late)), 'target_conflict')
+                        self.put_back()
+                        if cleanup == 'bootout and remove':
+                            self.launchctl.loaded = None
+                        self.plist.unlink()
+                        if follow == 'repeat':
+                            result = action()
+                            self.assertEqual((result['status'], result['service']),
+                                             ('upgraded' if kind == 'upgrade' else 'rolled_back', 'restarted'))
+                            self.assertOneRelease(target)
+                        removed = self.change('uninstall')
+                        self.assertEqual(removed['status'], 'uninstalled')
+                        self.assertEqual(removed['service'], 'removed' if follow == 'repeat' or
+                                         cleanup == 'remove only' else 'absent')
+                        self.assertFalse(self.runtime.exists() or self.plist.exists())
+                        self.assertIsNone(self.launchctl.loaded)
+
+    def test_a_plist_removed_after_a_kill_past_the_stop_is_written_anew_by_the_repeat(self):
+        for kind in ('upgrade', 'rollback'):
+            for at in ('stopped:service', 'service', 'policy', 'complete'):
+                with self.subTest(kind=kind, at=at):
+                    self.setUp()
+                    action, target, _ = self.kinds(kind)
+                    self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                    self.plist.unlink()
+                    result = action()
+                    self.assertEqual(result['service'], 'restarted')
+                    self.assertOneRelease(target)
+                    self.assertEqual(self.change('uninstall')['service'], 'removed')
+                    self.assertFalse(self.runtime.exists() or self.plist.exists())
+
+    def test_a_plist_removed_after_a_kill_then_a_late_refusal_restores_the_kept_copy(self):
+        """Killed past the stop, the plist removed, then a repeat refused late: the restore writes the previous
+        definition back from the transaction's copy when the stop had kept one (and starts its broker, which ran
+        before), else it starts nothing; either way the change is parked, and its repeat or uninstall finishes."""
+        for kind in ('upgrade', 'rollback'):
+            for at in ('stopped:service', 'service', 'policy'):
+                for follow in ('repeat', 'uninstall'):
+                    with self.subTest(kind=kind, at=at, follow=follow):
+                        self.setUp()
+                        action, target, previous = self.kinds(kind)
+                        before = self.plist.read_bytes()
+                        self.die(lambda checkpoint: action(checkpoint=checkpoint), at=at)
+                        kept = (self.runtime / 'transactions').glob('change_*/service.previous')
+                        kept = [p for p in kept if p.read_bytes() == before]
+                        self.plist.unlink()
+                        self.assertEqual(self.refused(lambda: action(checkpoint=self.late)), 'target_conflict')
+                        if kept:
+                            self.assertEqual(self.plist.read_bytes(), before)
+                            self.assertEqual(self.launchctl.loaded[4], str(previous / 'launcher.py'))
+                        else:
+                            self.assertFalse(self.plist.exists())
+                            self.assertIsNone(self.launchctl.loaded)
+                        self.put_back()
+                        if follow == 'repeat':
+                            self.assertEqual(action()['service'], 'restarted')
+                            self.assertOneRelease(target)
+                        removed = self.change('uninstall')
+                        self.assertEqual((removed['status'], removed['service']),
+                                         ('uninstalled', 'removed' if kept or follow == 'repeat' else 'absent'))
+                        self.assertFalse(self.runtime.exists() or self.plist.exists())
+                        self.assertIsNone(self.launchctl.loaded)
 
 
 if __name__ == '__main__':

@@ -94,6 +94,9 @@ from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditS
     REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
+# The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
+SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
+                             'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit'})
 
 
 class BrokerStartupError(RuntimeError):
@@ -248,6 +251,19 @@ class Broker(SelectionBrokerMixin):
         self._peak_overlap = 0
         self._completed = 0
         self._errors = 0
+        # Pending sends a restart would cut off or lose (health `pending_sends`; the installer's gate reads them).
+        self._sends_in_flight = 0
+        self._approval_dialogs = 0
+
+    def _prompt_approval(self, **kwargs) -> bool:
+        """The owner's approval dialog, counted as open while it runs."""
+        with self._state_lock:
+            self._approval_dialogs += 1
+        try:
+            return self._approval_prompt(**kwargs)
+        finally:
+            with self._state_lock:
+                self._approval_dialogs -= 1
 
     def _acquire_owner_lock(self) -> int:
         from .session_owner import acquire_owner_lock, OwnerLeaseError
@@ -354,6 +370,7 @@ class Broker(SelectionBrokerMixin):
 
     def _health(self) -> dict[str, Any]:
         self._expire_contexts()
+        unsettled = self._drafts.unsettled_attempts()  # Its own lock, never nested in the state lock.
         with self._state_lock:
             wait_count = getattr(self._client, "serialization_wait_count", 0)
             if type(wait_count) is not int or wait_count < 0:
@@ -366,6 +383,14 @@ class Broker(SelectionBrokerMixin):
                 "error_count": self._errors,
                 "peak_overlap": self._peak_overlap,
                 "serialization_wait_count": wait_count,
+                # Counts only: a send or apply request being handled, an approval dialog open, and an attempt whose
+                # outcome get_send_status could still settle (claimed and unfinished, or outcome_unknown, within
+                # receipt retention). A restart cuts the first two off and loses the third.
+                "pending_sends": {
+                    "in_flight": self._sends_in_flight,
+                    "approval_dialogs": self._approval_dialogs,
+                    "unreconciled_receipts": unsettled,
+                },
             }
 
     def _artifact_account(self):
@@ -1755,7 +1780,7 @@ class Broker(SelectionBrokerMixin):
             reply_confirmation={("reply_preview" if text_only else "reply_artifact_preview"):reply_preview} if reply_preview is not None else {}
             if (entry.topic is not None or entry.outgoing_entities) and entry.reply_source is None:
                 reply_confirmation['topic_preview'] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(
+            if not self._prompt_approval(
                 recipient_title=expected_title, recipient=entry.recipient,
                 display_name=entry.display_name, size_bytes=entry.size_bytes,
                 sha256=entry.sha256, caption=entry.caption, kind=entry.kind, text=entry.text,
@@ -2043,7 +2068,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(FORWARD_UNAVAILABLE)
             preview = self._forward_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+            if not self._prompt_approval(recipient_title=expected_title, recipient=entry.recipient,
                     display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
                     caption='', kind='forward', forward_preview=preview):
                 return result('not_approved', 'local owner confirmation was declined or unavailable')
@@ -2215,7 +2240,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(VIDEO_UNAVAILABLE)
             preview = self._video_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+            if not self._prompt_approval(recipient_title=expected_title, recipient=entry.recipient,
                     display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
                     caption=entry.caption, kind='video', video_preview=preview):
                 return result('not_approved', 'local owner confirmation was declined or unavailable')
@@ -2401,7 +2426,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(ARCHIVE_UNAVAILABLE)
             preview = self._archive_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+            if not self._prompt_approval(recipient_title=expected_title, recipient=entry.recipient,
                     display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
                     caption='', kind='archive', archive_preview=preview):
                 return result('not_approved', 'local owner confirmation was declined or unavailable')
@@ -2570,7 +2595,7 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
-            if not self._approval_prompt(recipient_title=expected_title, recipient=entry.recipient,
+            if not self._prompt_approval(recipient_title=expected_title, recipient=entry.recipient,
                     display_name=entry.display_name, size_bytes=entry.size_bytes, sha256=entry.sha256,
                     caption='', kind='text_edit', text_edit_preview=preview):
                 return result('not_approved', 'local owner confirmation was declined or unavailable')
@@ -2674,7 +2699,16 @@ class Broker(SelectionBrokerMixin):
                             "request_id": request["request_id"], "ok": True, "result": result},
                             max_bytes=MAX_RESPONSE_BYTES)
                         response_sent = True
-                    result = self._dispatch(request, publish=publish)
+                    sending = request["operation"] in SEND_OPERATIONS
+                    if sending:
+                        with self._state_lock:
+                            self._sends_in_flight += 1
+                    try:
+                        result = self._dispatch(request, publish=publish)
+                    finally:
+                        if sending:
+                            with self._state_lock:
+                                self._sends_in_flight -= 1
                     response = {
                         "version": PROTOCOL_VERSION,
                         "request_id": request["request_id"],

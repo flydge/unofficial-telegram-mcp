@@ -601,6 +601,15 @@ class OutgoingDraftRegistry:
             return ClaimedDraft(draft=entry.draft, path=path, claim_token=entry.claim_token,
                                 provider=provider, provider_epoch=provider_epoch)
 
+    def unsettled_attempts(self) -> int:
+        """Content-free count of attempts get_send_status could still settle: claimed and not finished, or
+        finished `outcome_unknown`, within receipt retention."""
+        with self._lock:
+            now = self._attempt_clock()
+            return sum(1 for entry in self._entries.values()
+                       if entry.attempted_at is not None and now < entry.attempted_at + 900
+                       and (entry.receipt is None or entry.receipt.status == "outcome_unknown"))
+
     def attempt_outcome(self, draft_id: object, *, client_id: str, kinds: frozenset[str]) -> str | None:
         """Content-free routing after a lost authority: did this client consume the draft?
 

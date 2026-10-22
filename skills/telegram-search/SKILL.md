@@ -5,7 +5,7 @@ description: Use when the user asks to find, verify, correlate, transfer, read, 
 
 # Telegram Search
 
-Paired candidate: `0.53.0rc1`, contract 1. Installation alone remains
+Paired candidate: `0.53.0rc2`, contract 1. Installation alone remains
 `activation_required`; use the paired telegram-setup skill to connect the account
 (QR scanned on the owner's phone; native Terminal setup is the fallback for hidden
 input and resume). Require the actual installed manifest's package, contract,

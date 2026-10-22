@@ -3,7 +3,7 @@ import re
 import unittest
 from pathlib import Path
 
-from telegram_search_mcp import __version__
+from telegram_search_mcp import __version__, release_archive
 
 ROOT = Path(__file__).resolve().parents[1]
 DEV = re.fullmatch(r'\d+\.\d+\.\d+\.dev\d+', __version__) is not None
@@ -15,7 +15,8 @@ def read(relative: str) -> str:
 
 class VersionConsistencyTests(unittest.TestCase):
     def test_version_grammar(self):
-        self.assertRegex(__version__, r'\A\d+\.\d+\.\d+(\.dev\d+|rc\d+)?\Z')
+        # The one release version grammar (docs/releasing.md, Versions; tests/test_version_grammar.py).
+        self.assertIsNotNone(release_archive._VERSION.fullmatch(__version__))
 
     def test_launcher_admits_and_names_the_package_version(self):
         launcher = read('packaging/launcher.py')

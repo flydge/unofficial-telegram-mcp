@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.53.0rc2 — release candidate, 2026-10-22 (not published)
+
+Replaces 0.53.0rc1, whose own kit could not be installed by any path ([release notes](docs/release-notes-0.53.0rc2.md)).
+Fixes from the independent re-review of rc1; unit, synthetic and real-broker test evidence only, and this
+round's fixes are not re-reviewed yet. The owner-session rows of rc1 are unchanged.
+
+- One version grammar at every site: the native seed refused `0.53.0rc1` (it admitted only `X.Y.Z` and
+  `X.Y.Z.devN`). The seed, the plugin's `bin/install`, `release-pins.json`, the archive index, the
+  installer's order, the launcher generator and the release gate now admit exactly `X.Y.Z`, optionally
+  `aN`, `bN` or `rcN`, optionally `.devN`, with no leading zeros; tags are `v<version>` for a release or an
+  `rcN` candidate. A test compiles the shipping seed and runs it against one shared table of admitted and
+  refused versions, and `release_build.py` runs the kit's seed on the kit's index (`kit_failed`).
+- No installer dead ends: a skill copy touched after the change's `receipt.json` is written no longer stops
+  the repeat (and, after the commit, uninstall), for a first install too; after an upgrade's or rollback's
+  commit a changed Codex table no longer does either; a broker plist removed by hand while a change is
+  unfinished is written anew or restored from the transaction's copy; the previous plist bootstrapped again
+  between the stop and the rewrite is stopped; repeated refusals in the Codex write window no longer reach
+  `recovery_limit`.
+- `uninstall` over a parked change removes a Claude Code or Claude Desktop entry the change wrote before an
+  interruption cut off its outcome record.
+- The pending-send gate asks the broker for sends in flight, approval dialogs open and unsettled send
+  outcomes (new health field `pending_sends`), not only for client contexts.
+- Fixed links to the renamed private-bundle heading; a test checks every Markdown heading link.
+
 ## 0.53.0rc1 — release candidate, 2026-10-22 (not published)
 
 Release candidate of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md), [release notes](docs/release-notes-0.53.0rc1.md)).
