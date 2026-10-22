@@ -932,7 +932,8 @@ def build_server(
             "scan_capacity": 4,
             "persistent_private_index": False,
             "retained_selections": {
-                "default_enabled": False, "ttl_seconds": 300, "live_capacity_per_owner": 16,
+                "default_enabled": False, "ttl_seconds": runtime_policy.selection_ttl_seconds,
+                "live_capacity_per_owner": 16,
                 "active_capacity_per_owner": 4, "message_projection_bytes": 65536,
                 "capture_raw_characters": 100000, "persistent": False,
                 "refusal": "selection_unavailable", "recipient_or_send_authority": False,

@@ -84,6 +84,11 @@ class ManifestAvailabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(manifest['available_tools']) - set(CONNECT_TOOLS), SEND_TOOLS)
         self.assertFalse({name for name in manifest['available_tools'] if 'reply' in name or 'forward' in name})
 
+    async def test_retained_selection_lifetime_is_the_policy_value(self):
+        self.assertEqual((await self.manifest(CONNECT_DEFAULT))['retained_selections']['ttl_seconds'], 900)
+        policy = RuntimePolicy(enabled_capabilities=('read', 'artifacts'), selection_ttl_seconds=1200)
+        self.assertEqual((await self.manifest(policy))['retained_selections']['ttl_seconds'], 1200)
+
     def test_dependent_capabilities_need_their_bases(self):
         self.assertNotIn('prepare_chat_archive', available_tools(('send', 'archive_chats')))
         self.assertIn('prepare_chat_archive', available_tools(('send', 'archive_chats', 'read')))
