@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 _SPACE_RUN = re.compile(r"\s+")
 _EVIDENCE_PREFIX = "[untrusted Telegram evidence] "
+_LINK_HOSTS = frozenset({"t.me", "telegram.me"})
+MAX_TELEGRAM_LINK = 512
 
 
 def sanitize_telegram_text(value: object, *, max_length: int = 2000) -> str:
@@ -39,3 +42,24 @@ def render_evidence(value: object, *, max_length: int = 2000) -> str:
     if available < 1:
         raise ValueError("max_length is too small for the evidence marker")
     return _EVIDENCE_PREFIX + sanitize_telegram_text(value, max_length=available)
+
+
+def safe_telegram_link(value: object) -> str | None:
+    """Return a provider link only when it is an exact https t.me/telegram.me URL.
+
+    The one shared rule for chat and message links: a string of at most 512
+    characters that sanitization leaves unchanged (so never truncated or
+    rewritten), scheme https, and a bare host t.me or telegram.me with no
+    credentials or port. Anything else is no link at all.
+    """
+    if not isinstance(value, str) or not value or len(value) > MAX_TELEGRAM_LINK or not value.isascii():
+        return None
+    if sanitize_telegram_text(value, max_length=MAX_TELEGRAM_LINK) != value or " " in value:
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or parsed.netloc not in _LINK_HOSTS:
+        return None
+    return value

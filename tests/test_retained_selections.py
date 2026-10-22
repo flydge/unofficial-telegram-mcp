@@ -5,6 +5,7 @@ import importlib
 import unittest
 from datetime import datetime, timedelta, timezone
 from telegram_search_mcp.artifact_authority import ArtifactOwner
+from telegram_search_mcp.tdjson import AuthorizationBlocked, TDLibError
 from test_message_reader import message
 
 
@@ -219,6 +220,24 @@ class RetainedBrokerTests(unittest.TestCase):
         self.unavailable(self.selected('read_messages',token))
         self.provider.messages[11]['content']['text']['entities']=[]
         self.unavailable(self.selected('read_messages',token))
+
+    def test_capture_carries_validated_links_and_a_link_flip_never_refuses_or_revokes(self):
+        source={'kind':'messages','anchors':[{'chat_id':7,'message_id':12},{'chat_id':7,'message_id':11}]}
+        self.provider.links={11:'https://evil.example/c/7/11'}
+        first=self.retain(source)
+        self.assertEqual(first['status'],'retained')
+        self.assertEqual([r['message']['source']['telegram_url'] for r in first['messages']['results']],['https://t.me/c/7/12',None])
+        # A best-effort link is not a source fact: appearing or vanishing keeps the same token and expiry.
+        self.provider.links={12:TDLibError('private detail')}
+        again=self.retain(source)
+        self.assertEqual((again['selection_id'],again['expires_at']),(first['selection_id'],first['expires_at']))
+        self.assertEqual([r['message']['source']['telegram_url'] for r in again['messages']['results']],[None,'https://t.me/c/7/11'])
+        read=self.selected('read_messages',first['selection_id'])
+        self.assertEqual(read['status'],'complete')
+        self.assertEqual([r['message']['source']['telegram_url'] for r in read['results']],[None,'https://t.me/c/7/11'])
+        self.assertNotIn('evil.example',str((first,again,read)));self.assertNotIn('private detail',str((again,read)))
+        self.provider.links={11:AuthorizationBlocked('lost')}
+        self.unavailable(self.retain(source))
 
     def test_local_file_retention_and_all_local_readers_do_no_provider_work(self):
         from xlsx_fixtures import write_xlsx

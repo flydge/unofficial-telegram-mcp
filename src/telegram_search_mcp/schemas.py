@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator, model_serializer
 
-from .sanitize import render_evidence
+from .sanitize import render_evidence, safe_telegram_link
 from .boolean_query import normalize_search_text, boolean_matches, boolean_seeds
 
 
@@ -847,6 +847,15 @@ class SourceEvidence(BaseModel):
     telegram_url: str | None = None
     chat_url: str | None = None
     evidence_anchor: EvidenceAnchor
+
+    @model_validator(mode="after")
+    def validate_links(self) -> "SourceEvidence":
+        # The shared provider-link rule, enforced in code so the published schema
+        # stays unchanged; producers pass links through safe_telegram_link first.
+        for value in (self.telegram_url, self.chat_url):
+            if value is not None and safe_telegram_link(value) != value:
+                raise ValueError("invalid provider link")
+        return self
 
 
 class FileEvidence(BaseModel):

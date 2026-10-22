@@ -78,6 +78,10 @@ class SelectedProvider:
     def get_sender_identity(self, sender):
         return {'kind': 'user', 'id': 17, 'display_name': 'Synthetic Sender'}
 
+    def get_message_link(self, target, mid):
+        self.calls.append(('link', target, mid))
+        return f'https://t.me/c/{target}/{mid}'
+
 
 class SelectedSearchTests(unittest.TestCase):
     def setUp(self):
@@ -131,6 +135,18 @@ class SelectedSearchTests(unittest.TestCase):
         self.assertIsNone(c.has_more)
         self.assertEqual(provider.deadlines[0],provider.deadlines[1])
         self.assertEqual(provider.deadlines[2],provider.deadlines[3])
+
+    def test_selected_results_carry_validated_links_requested_for_the_hydrated_message(self):
+        provider = SelectedProvider(count=3)
+        provider.get_message_link = lambda target, mid: (provider.calls.append(('link', target, mid)) or
+            ('https://t.me/c/7/3' if mid == 3 else 'https://evil.example/c/7/2'))
+        response = self.reader(provider).read(self.request())
+        self.assertEqual([r.message.source.telegram_url for r in response.results], ['https://t.me/c/7/3', None])
+        self.assertTrue(all(r.issues == [] for r in response.results))
+        # Each link request follows the exact hydration of the same selected message.
+        links = [i for i, c in enumerate(provider.calls) if c[0] == 'link']
+        self.assertEqual([provider.calls[i] for i in links], [('link', 7, 3), ('link', 7, 2)])
+        self.assertTrue(all(('message',) + provider.calls[i][1:] in provider.calls[:i] for i in links))
 
     def test_preflight_wrong_secret_missing_and_unknown_chat_types_stop_before_content(self):
         for value, reason in (({'@type':'chat','id':9,'type':{'@type':'chatTypePrivate'}},'invalid_provider_chat'),

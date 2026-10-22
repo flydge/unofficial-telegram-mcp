@@ -299,6 +299,20 @@ class _GuardedClient:
             raise TargetGuardFailure("error")
         return value
 
+    def get_message_link(self, chat_id, message_id):
+        if chat_id != self.binding.chat_id:
+            raise TargetGuardFailure()
+        def link():
+            # A link is optional evidence: provider failures leave none, while
+            # lost authorization and account drift still fail the guarded read.
+            try:
+                return self.store._client.get_message_link(chat_id, message_id)
+            except AuthorizationBlocked:
+                raise
+            except (TDLibError, TimeoutError, OSError):
+                return None
+        return self._call(link, content=False)
+
     def _call(self, fn, *, missing: bool = False, content: bool = True):
         if content:self.store._hydrate(self.binding.chat_id, self.token, self.binding)
         self.store._account(self.token, self.binding)

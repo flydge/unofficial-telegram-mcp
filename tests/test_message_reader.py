@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 from telegram_search_mcp import schemas
-from telegram_search_mcp.tdjson import MessageNotFound, TDLibError
+from telegram_search_mcp.tdjson import AuthorizationBlocked, MessageNotFound, TDLibDeadlineExceeded, TDLibError
 
 
 def message(message_id=11, **changes):
@@ -21,6 +21,10 @@ def message(message_id=11, **changes):
     }
     value.update(changes)
     return value
+
+
+def link(chat_id, message_id):
+    return f'https://t.me/c/{abs(chat_id)}/{message_id}'
 
 
 class Provider:
@@ -52,6 +56,14 @@ class Provider:
         self.calls.append(('sender', sender['@type']))
         return {'kind': 'user', 'id': 17, 'display_name': 'Synthetic Reader'}
 
+    def get_message_link(self, chat_id, message_id):
+        # Synthetic links; a message ID mapped in ``links`` overrides or raises.
+        self.calls.append(('link', chat_id, message_id))
+        result = getattr(self, 'links', {}).get(message_id, link(chat_id, message_id))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
 
 class ReaderTests(unittest.TestCase):
     def setUp(self):
@@ -78,7 +90,10 @@ class ReaderTests(unittest.TestCase):
         self.assertTrue(item.message.is_outgoing)
         self.assertFalse(item.message.is_edited)
         self.assertEqual(item.message.source.evidence_anchor.model_dump(), {'chat_id': 7, 'message_id': 11})
-        self.assertEqual(provider.calls, [('ready',), ('chat', 7), ('message', 7, 11), ('sender', 'messageSenderUser')])
+        self.assertEqual(item.message.source.telegram_url, 'https://t.me/c/7/11')
+        # The best-effort link is one extra serialized call after the row validated.
+        self.assertEqual(provider.calls, [('ready',), ('chat', 7), ('message', 7, 11), ('sender', 'messageSenderUser'),
+                                          ('link', 7, 11)])
         self.assertIsNotNone(provider.deadline)
 
     def test_partial_batch_preserves_each_anchor_and_does_not_leak_wrong_chat(self):
@@ -161,6 +176,44 @@ class ReaderTests(unittest.TestCase):
         self.assertLessEqual(sum(len(r.message.text.value) for r in result.results if r.message and r.message.text), 100000)
         self.assertFalse(result.coverage_complete)
         self.assertEqual(result.results[-1].status, 'partial')
+
+    def test_provider_link_is_validated_by_the_shared_rule_and_never_an_issue(self):
+        cases = {11: 'https://t.me/c/7/11', 12: 'https://telegram.me/public_chat/12', 13: 'http://t.me/c/7/13',
+                 14: 'https://evil.example/c/7/14', 15: 'https://t.me:8443/c/7/15', 16: 'https://t.me/c/7/16\u202e',
+                 17: 'https://t.me/' + 'a' * 600, 18: None, 19: {'link': 'https://t.me/c/7/19'}}
+        provider = Provider({i: message(i) for i in cases})
+        provider.links = cases
+        result = self.read(provider, tuple(cases))
+        self.assertEqual(result.status, 'complete')
+        self.assertEqual([r.message.source.telegram_url for r in result.results],
+                         ['https://t.me/c/7/11', 'https://telegram.me/public_chat/12'] + [None] * 7)
+        self.assertTrue(all(r.issues == [] and r.message.source.chat_url is None for r in result.results))
+        self.assertNotIn('evil.example', result.model_dump_json())
+
+    def test_provider_link_failures_leave_no_link_but_lost_authorization_propagates(self):
+        provider = Provider({i: message(i) for i in (11, 12, 13, 14)})
+        provider.links = {11: TDLibError('provider private payload'), 12: TimeoutError('slow'),
+                          13: OSError('transport'), 14: TDLibDeadlineExceeded('deadline')}
+        result = self.read(provider, (11, 12, 13, 14))
+        self.assertEqual([r.status for r in result.results], ['complete'] * 4)
+        self.assertTrue(all(r.message.source.telegram_url is None and r.issues == [] for r in result.results))
+        self.assertNotIn('provider private payload', result.model_dump_json())
+        provider = Provider({11: message(), 12: message(12)})
+        provider.links = {11: AuthorizationBlocked('lost')}
+        result = self.read(provider, (11, 12))
+        self.assertEqual(result.results[0].status, 'blocked')
+        self.assertEqual(result.results[0].issues, ['authorization_unavailable'])
+        self.assertIsNone(result.results[0].message)
+
+    def test_invalid_or_unsupported_rows_spend_no_link_call(self):
+        malformed = message(); malformed.pop('is_outgoing')
+        bad_album = message(12, media_album_id='not-a-number')
+        provider = Provider({11: malformed, 12: bad_album,
+                             13: message(13, content={'@type': 'messagePoll', 'poll': {}}),
+                             14: message(14, sending_state={'@type': 'messageSendingStatePending'})})
+        result = self.read(provider, (11, 12, 13, 14))
+        self.assertTrue(all(r.message is None for r in result.results))
+        self.assertFalse([call for call in provider.calls if call[0] == 'link'])
 
 
 if __name__ == '__main__':

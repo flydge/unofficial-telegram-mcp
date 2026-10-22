@@ -46,6 +46,8 @@ def public_message_facts(row):
     if value is not None:
         for key in ('display_name','display_name_sanitized','display_name_truncated'):
             value['sender'].pop(key,None)
+        # A best-effort provider link may appear or vanish between reads.
+        value['source'].pop('telegram_url',None)
     return row.anchor.model_dump(mode='json'),value
 
 
