@@ -686,8 +686,8 @@ _PROMPTS = {
         "discover_targets with 2–5 hypotheses you write, paging until Main/Archive coverage is complete. Ask "
         "the user when several chats fit.\n"
         "3. Search that chat (search_messages when available, else search_correspondence) and read the context "
-        "or messages. For a document: get_attachment, then read_attachment, read_attachment_page, "
-        "read_spreadsheet or read_presentation.\n"
+        "or messages. For a document: get_attachment, then read_attachment or read_attachment_page "
+        "(Telegram XLSX and PPTX files return unsupported).\n"
         "4. Answer briefly, then numbered sources [n] chat · sender · date · provider link when one is returned; "
         "never construct a URL. State coverage in one line." + _PROMPT_UNTRUSTED),
     "reply_with_file": _Prompt(

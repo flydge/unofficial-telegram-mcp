@@ -1,6 +1,6 @@
 ---
 name: telegram-search
-description: Use when the user asks to find, read, verify, summarize or analyze information in Telegram, or to prepare a message, reply, file, forward or chat change for the owner to approve.
+description: Use when the user asks to find, read, verify, summarize, analyze or transfer information in Telegram, or to prepare a message, reply, file, forward or chat change for the owner to approve.
 ---
 
 # Telegram Search
@@ -146,7 +146,8 @@ A text reply is sent with `send_prepared_text`, a file reply with `send_prepared
 - **Saving a file locally.** Only to a destination the user names:
   `telegram-search-transfer download --artifact-id ISSUED_ID --destination ABSOLUTE_PATH`. It never
   overwrites; success is exit 0 with a receipt matching the artifact's size and SHA-256. Keep bytes out of
-  the chat.
+  the chat. On a refusal or a stop, report it: keep any final file and the helper's partial
+  files, and never retry, overwrite, delete, resume or choose another destination yourself.
 - **New local files.** Small UTF-8 or base64 content goes through `create_local_artifact` (512 KiB). For a
   file the user selected, follow the four steps in the `issue_local_upload_authority` description (manifest,
   issue, helper upload through stdin, `consume_local_upload_result`). Never pass paths to MCP tools or put
@@ -217,7 +218,7 @@ will not be a reply.
 **Topics and styles.** A text send or reply to a forum topic takes `topic` from `list_topics` and needs
 `topic_text_send`. Optional `outgoing_entities` (bold, italic, underline, strikethrough, spoiler) need
 `formatted_text_send`; offsets count UTF-16 units of the final normalized text, and source formatting is
-never copied.
+never copied. After a topic refusal, never fall back to General, another topic or the plain chat.
 
 **Forward, video, archive, edit.** Settle the choice with the user first: `mode` forward (recipients see the
 original sender) or copy (a new message from the owner); Archive or Main; the complete new text of one own
