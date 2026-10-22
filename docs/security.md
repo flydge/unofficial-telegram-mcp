@@ -2091,10 +2091,10 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   (to the value journaled before its first rewrite; a line changed since stays), writes the previous plist
   back byte for byte, from a copy kept in the transaction (`service.previous`, its hash journaled) before
   the first rewrite, and bootstraps the previous broker again only if it was loaded. Every run before the
-  commit checks the version line again, so the repeat pins the new version once more. The restore is journaled: a write-ahead record carrying the
-  refusal's fixed code precedes its effects and a closing record follows them, every effect is decided
-  from the plist and launchd, and a run that finds the write-ahead record without the closing one
-  finishes the restore and refuses with the recorded code. A plist changed since the stop is never
+  commit checks the version line again, so the repeat pins the new version once more. The restore is
+  journaled: a write-ahead record carrying the refusal's fixed code precedes its effects and a closing
+  record follows them, every effect is decided from the files and launchd, and a run that finds the
+  write-ahead record without the closing one finishes the restore and refuses with the recorded code. A plist changed since the stop is never
   overwritten (`service_conflict`). What stays: the copied release, the unfinished transaction and every
   client entry written before the refusal, which already names the new release and so cannot start the
   server until the repeat commits. The same command stops the broker again (gated again) and resumes; at
