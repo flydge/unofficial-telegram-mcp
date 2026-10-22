@@ -679,14 +679,25 @@ this:
 The upgrade is now parked, and two commands end it; `rollback` keeps refusing until one of them has run:
 
 - **The repeat.** Put back or remove the object the code names (a removed `telegram_search` table or
-  skill copy is written again, also one the upgrade had already written), then repeat the same command:
+  skill copy is written again, also one the upgrade had already written; a skill copy the upgrade wrote
+  and you edited in place counts as its own again once that same file holds exactly what the upgrade
+  wrote, with the same mode; an editor that saves by replacing the file makes it another file, so remove
+  that copy instead), then repeat the same command:
   it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
-  upgrade may be refused and repeated. Every run before `current.json` switches makes the broker the new
-  release's whatever an earlier run left: an old broker started again meanwhile (a login loads the plist
-  on disk) is gated and stopped again, and the plist is rewritten until it is the new release's. After the
-  switch only the new release's plist is bootstrapped. So a repeat killed anywhere, its broker stop
-  included, still ends with `current.json`, the `runtime.toml` version line, the plist and the running
-  broker on the same release once it is repeated again.
+  upgrade may be refused and repeated. Every run before `current.json` switches decides the service from
+  what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist
+  on disk: the old release's, or after a kill past the plist rewrite the new release's). A run that goes
+  on stops an old broker started again meanwhile (gated first), also when none ran as the upgrade began,
+  and rewrites the plist until it is the new release's. After the switch only the new release's plist is
+  bootstrapped, and only if a broker ran as the upgrade began (otherwise the next login starts it). A run
+  refused late stops a new broker a login started (it serves nothing: the new release is not admitted
+  before the switch), then puts the version line and the old plist back and starts the old broker if it
+  ran as the upgrade began. So once a repeat after a kill anywhere finishes, `current.json`, the
+  `runtime.toml` version line, the plist and the running broker (if any) name the new release; once one is
+  refused late, they all name the installed release. Two things are never touched, and the run refuses as
+  `service_conflict` until you resolve them and repeat: a plist changed by hand since the stop (below), and
+  a broker loaded under the same label that is neither release's (not started from either plist), which you
+  stop with `launchctl bootout gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker`.
 - **`uninstall`.** It goes over the parked upgrade: it removes what the installed release owns and
   everything the upgrade already wrote (the Codex entry, skill copies, and Claude Code and Claude Desktop
   entries that name the new release), each only while it is exactly what was written, then the broker,
@@ -698,8 +709,13 @@ The same holds for a rollback (`pending_action: rollback`). For an adopting firs
 the repeat is the way out, since there is no installed release for `uninstall` to remove yet (it refuses
 as `transaction_pending`). A restore never overwrites a plist changed since the stop: then the refusal is
 `service_conflict` (or `service_restart_failed` when the bootstrap fails) and the broker stays stopped
-until a repeat succeeds. A repeat after a kill during the restore finishes the restore and refuses with
-the same code; until that repeat has run, `uninstall` also refuses as `transaction_pending`.
+until a repeat succeeds. A broker loaded under the label that is neither release's also refuses the
+restore as `service_conflict` and keeps running; once you stop it, the repeat finishes the restore. A repeat
+after a kill during the restore, or after one of these refusals, finishes the restore and refuses with the
+first refusal's code; until that repeat has run, `uninstall` also refuses as `transaction_pending`. The
+restore also removes the temporary files killed client writes left (a `.telegram-search-*.tmp` copy beside
+`claude_desktop_config.json`, `~/.codex/config.toml`, the plist or `runtime.toml`); `uninstall` and the
+finishing repeat remove any such file the change's journal names.
 
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
@@ -746,10 +762,13 @@ send, move or edit that already happened. Going back to a 0.51 install is a manu
 The installation owns a Claude Code or Claude Desktop entry that its own first install, upgrade or
 rollback wrote (that step's result was `registered`), and only while the entry is still exactly what it
 wrote. When a later upgrade or rollback ends otherwise for that client (`failed`, `not_found`,
-`unavailable`, or `reused` for an entry it did not write), it replaced nothing, so the entry it left in
-place stays owned: the next upgrade replaces it and `uninstall` removes it. An entry that was already
-there (`reused` on a first install), one you wrote, and one you changed are never owned. Ownership is
-read from the installation's own transaction journals, the same way for every receipt schema.
+`unavailable`, or `reused` for an entry it did not write), the earlier entry stays owned while it is still
+exactly that entry: the next upgrade replaces it and `uninstall` removes it. An entry that was already
+there (`reused` on a first install), one you wrote, and one you changed are never owned. That includes an
+entry you changed while an interrupted step was writing it: the resumed step ends `failed`, and the entry
+stays yours (`kept` by `uninstall`) even if you change it back to what the step wrote, until a later
+upgrade or rollback registers that client again. Ownership is read from the installation's own transaction
+journals, the same way for every receipt schema.
 
 ### Uninstall
 

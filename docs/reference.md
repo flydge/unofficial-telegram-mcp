@@ -441,8 +441,10 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
 
 A refusal raised after an upgrade's, a rollback's or an adopting first install's broker stop, and before
-`current.json` switches, first puts the `runtime.toml` version line back if it was rewritten, writes the
-previous broker plist back byte for byte and bootstraps that broker again if it was running; the transaction stays unfinished until the same command is repeated,
+`current.json` switches, first boots out the new release's broker if a login started it from the rewritten
+plist, puts the `runtime.toml` version line back if it was rewritten, writes the previous broker plist back
+byte for byte and bootstraps that broker again if it was running (a broker loaded under the label that is
+neither release's is left running and refuses as `service_conflict`); the transaction stays unfinished until the same command is repeated,
 as often as needed, or, for an upgrade or rollback, until `uninstall` removes the installation together with what the change wrote
 ([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
 
