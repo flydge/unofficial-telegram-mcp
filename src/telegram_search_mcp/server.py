@@ -994,9 +994,9 @@ def build_server(
             "tools": list(_TOOL_NAMES),
             "available_tools": available_tools(descriptor["enabled_capabilities"]),
             "tool_capabilities": {name: list(needed) for name, needed in _TOOL_CAPABILITIES.items()},
+            # The table only: switching a profile is the owner's own Terminal step (docs/install.md), never a tool's.
             "capability_profiles": {"profiles": {name: list(members) for name, members in CAPABILITY_PROFILES.items()},
-                                    "dependencies": {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()},
-                                    "switch": "launcher.py capabilities enable|disable <profile> (owner, in Terminal)"},
+                                    "dependencies": {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()}},
             "authorization_required": "authorizationStateReady",
             "target_scope": (
                 "direct resolution handles Saved Messages and exact @usernames; account-wide "

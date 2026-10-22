@@ -205,15 +205,16 @@ def capabilities(root, args):
     try:
         if args==['show']: result=profiles.show(home)
         else:
+            # Every refusal comes before runtime.toml is written, the broker check (restartable) first. A restart
+            # that fails after the write is part of the `changed` result (broker restart_failed, restart_command).
             result=profiles.apply(home,args[0],args[1],
                 pending=lambda: bundle_install.default_pending_sends(home,Path(sys.executable),root/'app'),
+                restartable=lambda: bundle_install.restart_receipt_broker(root,home,kickstart=False),
                 restart=lambda: bundle_install.restart_receipt_broker(root,home))
     except profiles.ProfileError as error:
         print(json.dumps({'status':'refused','code':error.code}),file=sys.stderr); return 2
-    except bundle_install.InstallError as error:
-        named=error.args[0] if len(error.args)==1 else None
-        code=named if named in ('service_conflict','service_restart_failed') else 'service_restart_failed'
-        print(json.dumps({'status':'refused','code':code}),file=sys.stderr); return 2
+    except bundle_install.InstallError:
+        print(json.dumps({'status':'refused','code':'service_conflict'}),file=sys.stderr); return 2
     print(json.dumps(result,sort_keys=True)); return 0
 
 

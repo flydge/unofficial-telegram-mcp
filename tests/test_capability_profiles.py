@@ -89,13 +89,28 @@ class ApplyTests(unittest.TestCase):
     def restart(self, answer='restarted'):
         def restart():
             self.calls.append('restart')
+            if isinstance(answer, BaseException):
+                raise answer
             return answer
         return restart
 
+    def restartable(self, answer='loaded'):
+        def check():
+            self.calls.append('restartable')
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return check
+
+    def apply(self, action, profile, pending='none', restartable='loaded', restart='restarted'):
+        return profiles.apply(self.home, action, profile, pending=self.pending(pending),
+                              restartable=self.restartable(restartable), restart=self.restart(restart))
+
     def test_enabling_changes_one_line_then_restarts(self):
-        result = profiles.apply(self.home, 'enable', 'forward', pending=self.pending('none'), restart=self.restart())
+        result = self.apply('enable', 'forward')
         self.assertEqual((result['status'], result['broker'], result['clients']), ('changed', 'restarted', 'reconnect'))
-        self.assertEqual(self.calls, ['pending', 'restart'])
+        self.assertEqual(self.calls, ['restartable', 'pending', 'restart'])
+        self.assertNotIn('restart_command', result)
         self.assertEqual(result['profiles']['forward'], 'on')
         self.assertEqual(load_runtime_policy(self.path).enabled_capabilities,
                          ('artifacts', 'formatted_text_send', 'forward_send', 'read', 'send', 'topic_text_send'))
@@ -107,7 +122,7 @@ class ApplyTests(unittest.TestCase):
     def test_a_pending_or_unknown_send_refuses_and_changes_nothing(self):
         for answer in ('pending', 'unknown'):
             with self.subTest(answer=answer), self.assertRaises(profiles.ProfileError) as caught:
-                profiles.apply(self.home, 'enable', 'video', pending=self.pending(answer), restart=self.restart())
+                self.apply('enable', 'video', pending=answer)
             self.assertEqual(caught.exception.code, 'pending_send_unresolved')
             self.assertEqual(self.path.read_bytes(), POLICY)
         self.assertNotIn('restart', self.calls)
@@ -118,30 +133,67 @@ class ApplyTests(unittest.TestCase):
             self.path.write_bytes(POLICY.replace(b'600', b'700'))
             return 'none'
         with self.assertRaises(profiles.ProfileError) as caught:
-            profiles.apply(self.home, 'enable', 'video', pending=edit_meanwhile, restart=self.restart())
+            profiles.apply(self.home, 'enable', 'video', pending=edit_meanwhile, restartable=self.restartable(),
+                           restart=self.restart())
         self.assertEqual(caught.exception.code, 'policy_conflict')
         self.assertEqual(self.path.read_bytes(), POLICY.replace(b'600', b'700'))
         self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ['runtime.toml'])
 
     def test_no_change_needs_neither_the_gate_nor_a_restart(self):
-        result = profiles.apply(self.home, 'disable', 'video', pending=self.pending('pending'), restart=self.restart())
+        result = self.apply('disable', 'video', pending='pending')
         self.assertEqual((result['status'], result['broker']), ('unchanged', 'unchanged'))
         self.assertEqual(self.calls, [])
 
-    def test_a_failed_restart_is_reported_after_the_write(self):
-        with self.assertRaises(profiles.ProfileError) as caught:
-            profiles.apply(self.home, 'enable', 'video', pending=self.pending('none'), restart=self.restart('odd'))
-        self.assertEqual(caught.exception.code, 'service_restart_failed')
+    def test_a_broker_that_cannot_be_restarted_refuses_before_any_write(self):
+        """service_conflict (another loaded or written definition) comes from the check before the write."""
+        for answer in (bundle_install.InstallError('service_conflict'), bundle_install.InstallError('service_restart_failed'),
+                       'odd', None):
+            with self.subTest(answer=answer):
+                self.calls.clear()
+                with self.assertRaises((profiles.ProfileError, bundle_install.InstallError)) as caught:
+                    self.apply('enable', 'video', restartable=answer)
+                if isinstance(caught.exception, profiles.ProfileError):
+                    self.assertEqual(caught.exception.code, 'service_conflict')
+                self.assertEqual(self.path.read_bytes(), POLICY)
+                self.assertEqual(self.calls, ['restartable'])
+                self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), ['runtime.toml'])
+
+    def test_a_stopped_broker_is_not_restarted_but_the_policy_changes(self):
+        result = self.apply('enable', 'video', restartable='not_running', restart='not_running')
+        self.assertEqual((result['status'], result['broker']), ('changed', 'not_running'))
         self.assertIn('video_send', load_runtime_policy(self.path).enabled_capabilities)
+
+    def test_a_failed_restart_after_the_write_reports_the_change_and_the_manual_command(self):
+        """Never a refusal once runtime.toml was replaced: status changed, broker restart_failed, the command."""
+        label = _owner_paths(self.home)[2]
+        for answer in ('odd', bundle_install.InstallError('service_conflict'),
+                       bundle_install.InstallError('service_restart_failed'), OSError('launchctl'), KeyboardInterrupt()):
+            with self.subTest(answer=answer):
+                self.path.write_bytes(POLICY)
+                self.calls.clear()
+                result = self.apply('enable', 'video', restart=answer)
+                self.assertEqual((result['status'], result['broker'], result['clients']),
+                                 ('changed', 'restart_failed', 'reconnect'))
+                self.assertEqual(result['restart_command'],
+                                 ['/bin/launchctl', 'kickstart', '-k', 'gui/%d/%s' % (os.getuid(), label)])
+                self.assertEqual(result['profiles']['video'], 'on')
+                self.assertIn('video_send', load_runtime_policy(self.path).enabled_capabilities)
+                self.assertEqual(self.calls, ['restartable', 'pending', 'restart'])
+                # A rerun finds nothing to change, so the manual command is the way to restart.
+                self.assertEqual(self.apply('enable', 'video')['status'], 'unchanged')
+
+    def test_the_manual_command_names_the_launchctl_the_installer_uses(self):
+        from telegram_search_mcp.launch_agent import LAUNCHCTL
+        self.assertEqual(profiles.LAUNCHCTL, LAUNCHCTL)
 
     def test_an_unsafe_or_foreign_policy_refuses(self):
         self.path.chmod(0o644)
         with self.assertRaises(profiles.ProfileError):
-            profiles.apply(self.home, 'enable', 'video', pending=self.pending('none'), restart=self.restart())
+            self.apply('enable', 'video')
         self.path.chmod(0o600)
         self.path.write_bytes(POLICY + b'unknown_key = 1\n')
         with self.assertRaises(profiles.ProfileError):
-            profiles.apply(self.home, 'enable', 'video', pending=self.pending('none'), restart=self.restart())
+            self.apply('enable', 'video')
         self.assertEqual(self.calls, [])
 
     def test_show_reports_profiles_without_writing(self):
@@ -189,6 +241,17 @@ class RestartTests(unittest.TestCase):
                          'not_running')
         self.assertEqual([c[0] for c in self.commands], ['print'])
 
+    def test_the_check_before_the_write_never_kickstarts(self):
+        self.assertEqual(bundle_install.restart_receipt_broker(self.release, self.home, runner=self.runner(),
+                                                               kickstart=False), 'loaded')
+        self.assertEqual(bundle_install.restart_receipt_broker(self.release, self.home, runner=self.runner(False),
+                                                               kickstart=False), 'not_running')
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            bundle_install.restart_receipt_broker(self.release, self.home, runner=self.runner(program='/usr/bin/python3'),
+                                                  kickstart=False)
+        self.assertEqual(str(caught.exception), 'service_conflict')
+        self.assertEqual({c[0] for c in self.commands}, {'print'})
+
     def test_another_loaded_or_written_definition_refuses(self):
         with self.assertRaises(bundle_install.InstallError) as caught:
             bundle_install.restart_receipt_broker(self.release, self.home, runner=self.runner(program='/usr/bin/python3'))
@@ -199,12 +262,69 @@ class RestartTests(unittest.TestCase):
         self.assertNotIn(['kickstart', '-k'], self.commands)
 
 
+def _launcher():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('launcher_profiles', Path(__file__).parents[1] / 'packaging/launcher.py')
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    return launcher
+
+
+class LauncherCapabilitiesTests(unittest.TestCase):
+    """launcher.capabilities: the check before the write and the restart after it reach apply; only a refusal
+    raised before the write prints `refused`."""
+
+    def run_capabilities(self, outcome):
+        import contextlib, io, json
+        from unittest import mock
+        launcher, seen = _launcher(), {}
+
+        def apply(home, action, profile, *, pending, restartable, restart):
+            seen.update(action=action, profile=profile, restartable=restartable, restart=restart)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(profiles, 'apply', apply), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = launcher.capabilities(Path('/nonexistent/releases/' + 'a' * 64), ['enable', 'video'])
+        return code, json.loads(out.getvalue() or err.getvalue()), seen
+
+    def test_a_change_prints_its_result_even_when_the_restart_failed(self):
+        result = {'status': 'changed', 'broker': 'restart_failed', 'restart_command': ['/bin/launchctl'],
+                  'clients': 'reconnect', 'profiles': {}, 'enabled_capabilities': []}
+        code, printed, seen = self.run_capabilities(result)
+        self.assertEqual((code, printed), (0, result))
+        self.assertEqual((seen['action'], seen['profile']), ('enable', 'video'))
+        self.assertTrue(callable(seen['restartable']) and callable(seen['restart']))
+
+    def test_a_refusal_before_the_write_prints_a_fixed_code(self):
+        for error, code in ((bundle_install.InstallError('service_conflict'), 'service_conflict'),
+                            (bundle_install.InstallError('service_restart_failed'), 'service_conflict'),
+                            (bundle_install.InstallError('anything', 'else'), 'service_conflict'),
+                            (profiles.ProfileError('pending_send_unresolved'), 'pending_send_unresolved')):
+            with self.subTest(error=error):
+                self.assertEqual(self.run_capabilities(error)[:2], (2, {'status': 'refused', 'code': code}))
+
+
+class ManifestProfilesTests(unittest.TestCase):
+    def test_the_manifest_lists_the_profiles_but_not_the_switch_command(self):
+        import asyncio
+        from telegram_search_mcp.config import PROFILE_DEPENDENCIES, RuntimePolicy
+        from telegram_search_mcp.server import build_server
+        server = build_server(policy=RuntimePolicy(), service_factory=lambda: None)
+        result = asyncio.run(server.call_tool('_manifest', {}))
+        manifest = result.structured_content if hasattr(result, 'structured_content') else result[1]
+        table = manifest['capability_profiles']
+        self.assertEqual(set(table), {'profiles', 'dependencies'})
+        self.assertEqual(table['profiles'], {name: list(members) for name, members in CAPABILITY_PROFILES.items()})
+        self.assertEqual(table['dependencies'], {name: list(needs) for name, needs in PROFILE_DEPENDENCIES.items()})
+        self.assertNotIn('launcher', repr(manifest))
+        self.assertNotIn('capabilities enable', repr(manifest))
+
+
 class LauncherGrammarTests(unittest.TestCase):
     def test_the_launcher_spells_the_closed_profile_table(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('launcher_profiles', Path(__file__).parents[1] / 'packaging/launcher.py')
-        launcher = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(launcher)
+        launcher = _launcher()
         self.assertEqual(launcher.PROFILES, tuple(CAPABILITY_PROFILES))
         for argv in (['capabilities'], ['capabilities', 'enable'], ['capabilities', 'enable', 'everything'],
                      ['capabilities', 'show', 'extra'], ['capabilities', 'grant', 'send']):
