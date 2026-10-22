@@ -213,16 +213,28 @@ class BundleInstallTests(InstallHarness, unittest.TestCase):
                 with self.assertRaises(packet[0].InstallError): self.install(packet)
                 self.assertFalse((self.codex / 'config.toml').exists())
 
-    def test_concurrent_config_drift_is_retained_and_resume_refuses(self):
-        packet = self.fixture()
-        def drift(stage):
-            if stage == 'release':
-                (self.codex / 'config.toml').write_bytes(b'# concurrent edit\n')
-                (self.codex / 'config.toml').chmod(0o600)
-        with self.assertRaises(packet[0].InstallError): self.install(packet, checkpoint=drift)
-        self.assertEqual((self.codex / 'config.toml').read_bytes(), b'# concurrent edit\n')
-        with self.assertRaises(packet[0].InstallError): self.install(packet)
-        self.assertFalse((self.runtime / 'current.json').exists())
+    def test_concurrent_config_drift_keeps_the_neighbours_and_a_foreign_entry_refuses(self):
+        # A neighbour written while the release is copied is merged, every byte kept; a `telegram_search`
+        # entry that appears meanwhile is never touched and every resume refuses.
+        for drift, merged in ((b'# concurrent edit\n', True),
+                              (b'# concurrent edit\n[mcp_servers.telegram_search]\ncommand = "/foreign"\n', False)):
+            with self.subTest(merged=merged):
+                self.setUp()
+                packet = self.fixture()
+                def edit(stage):
+                    if stage == 'release':
+                        (self.codex / 'config.toml').write_bytes(drift)
+                        (self.codex / 'config.toml').chmod(0o600)
+                if merged:
+                    self.assertEqual(self.install(packet, checkpoint=edit)['status'], 'activation_required')
+                    data = (self.codex / 'config.toml').read_bytes()
+                    self.assertTrue(data.startswith(drift) and b'[mcp_servers.telegram_search]' in data)
+                    continue
+                with self.assertRaises(packet[0].InstallError): self.install(packet, checkpoint=edit)
+                self.assertEqual((self.codex / 'config.toml').read_bytes(), drift)
+                with self.assertRaises(packet[0].InstallError): self.install(packet)
+                self.assertEqual((self.codex / 'config.toml').read_bytes(), drift)
+                self.assertFalse((self.runtime / 'current.json').exists())
 
     def test_unsafe_root_and_skill_ancestry_are_refused(self):
         packet = self.fixture()

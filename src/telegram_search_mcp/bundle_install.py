@@ -659,12 +659,10 @@ def _desktop_write(j, home, plan):
     j.attempt('claude_desktop_write',write)
 
 
-def _desktop_unchanged(j, add, plan):
-    """Whether the config is still byte-identical to the write-ahead record's preimage (the same write is safe
-    again), within the bounded attempts."""
-    return (plan is not None and type(add) is dict and add.get('existed')==plan.existed
-            and add.get('source_sha256')==plan.source_sha256 and add.get('candidate_sha256')==plan.candidate_sha256
-            and len(j.attempts('claude_desktop_write'))<8)
+def _desktop_again(j, plan):
+    """After an interruption, whether our write may be made again: a plan over the current bytes (our entry still
+    absent, owned or adopted; every neighbour as the file holds it now), within the bounded attempts."""
+    return plan is not None and len(j.attempts('claude_desktop_write'))<8
 
 
 CLAUDE_SKILLS = CLAUDE_SKILLS_STATUSES
@@ -988,6 +986,32 @@ def _codex_change(source, registration, ownership):
     return merge_registration(source,registration,None if owned_subtree(source) is None else ownership)
 
 
+def _codex_write(j, config, before, existed, candidate, post_hash, replan, code):
+    """The journaled Codex write (`registration`) over the file as it is now.
+
+    Over the exact preimage the prepared candidate is written. When the file changed since, only the
+    `telegram_search` entry decides: still the preimage's (ours, or the adopted foreign one) or removed, the
+    same edit is planned again over the current bytes (`replan`, which must yield `post_hash`), keeping every
+    neighbour byte the user wrote meanwhile; any other entry refuses as `code`, untouched, even one equal to
+    ours (only the object this transaction wrote is ever taken as its own).
+    """
+    j.discard('registration',config)
+    bound=j.proof('registration')
+    if bound is not None and 'object' in bound:
+        try:require_object_binding(config,bound['object']);return
+        except RuntimePathError:pass
+    current,exists=_read_file(config,MAX_CONFIG_BYTES)
+    if (current,exists)!=(before,existed):
+        try:
+            mine=owned_subtree(current)
+            if mine is not None and mine!=owned_subtree(before):raise InstallError(code)
+            change=replan(current,mine is not None)
+        except ConfigConflict:raise InstallError(code) from None
+        if change.post_subtree_hash!=post_hash:raise InstallError(code)
+        before,existed,candidate=current,exists,change.candidate
+    j.write('registration',config,candidate,before,existed=existed,maximum=MAX_CONFIG_BYTES)
+
+
 def _changes(root):
     """Sorted numbers of the existing change transactions (bounded)."""
     numbers=[]
@@ -1130,7 +1154,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
 
     `adopt_legacy`: a foreign `telegram_search` entry (Codex, Claude Code, Claude Desktop) or a foreign
     broker plist is replaced only after its exact backup is recorded in the transaction, adopted.json and
-    the receipt; never by default. `launchctl` and `pending_sends` are the injectable service boundary.
+    the receipt; never by default. A Codex config edited while the install runs is merged (`_codex_write`).
+    `launchctl` and `pending_sends` are the injectable service boundary.
     Over an installed root this is an upgrade (`_change`); a lower package version refuses
     (`downgrade_refused`): going back is only `rollback`. Once any change exists, the installed release's own kit
     goes through `_change` too: its repeat result (`upgraded`, or after a rollback back to it `rolled_back`, with
@@ -1256,20 +1281,12 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                 update('service')
             if not reached('registration'):
                 if not reached('registration_pending'):update('registration_pending')
-                # A killed earlier attempt leaves its journaled temporary beside the config.
-                j.discard('registration',config)
-                current,exists=_config(config);bound=proof('registration')
-                owned=False
-                if bound is not None and exists and 'object' in bound:
-                    try:require_object_binding(config,bound['object']);owned=current==candidate
-                    except RuntimePathError:pass
-                if not owned:
-                    if current!=before or exists!=journal['config_existed']:raise InstallError('foreign_registration')
-                    # Each attempt is journaled (and counted) before its temporary exists.
-                    j.attempt('registration',lambda temporary,admit:_atomic_write(config,candidate,MAX_CONFIG_BYTES,expected=before,
-                              require_existing=journal['config_existed'],before_replace=admit,temporary=temporary))
-                    checkpoint('published:registration')
-                    require_object_binding(config,proof('registration')['object'])
+                # Each attempt is journaled (and counted) before its temporary exists; the write goes over the
+                # current bytes (`_codex_write`), a killed attempt's temporary discarded first.
+                def replan(source, present):
+                    return (adopt_registration if 'codex' in adopted and present else merge_registration)(source,registration)
+                _codex_write(j,config,before,journal['config_existed'],candidate,ownership.post_subtree_hash,replan,
+                             'foreign_registration')
                 update('registration')
             if not merge_registration(read_config(config),registration,ownership).is_noop:raise InstallError('registration_conflict')
             checkpoint('registration')
@@ -1335,7 +1352,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             desktop_change=None;desktop_written=False
             def register_desktop():
                 """This transaction's Claude Desktop outcome. Only an absent (or adopted) entry is written; after an
-                interruption the same write is made again only over a file still byte-identical to its recorded preimage."""
+                interruption it is written again, planned over the current bytes, while it is still absent (or adopted)."""
                 nonlocal desktop_change,desktop_written
                 add=recorded('claude_desktop_add')
                 if add is not None:
@@ -1348,7 +1365,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     state='absent' if state=='adopted' else state
                 else:state,change=claude_desktop_registration.observe(home,command,arguments)
                 if add is not None:
-                    if state!='absent' or not _desktop_unchanged(j,add,change):return 'failed'
+                    if state!='absent' or not _desktop_again(j,change):return 'failed'
                 else:
                     if state in ('skipped','unavailable'):return state
                     if state=='exact':return 'reused'
@@ -1503,6 +1520,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     pending send found inside the transaction refuses before any client write, leaving the copied release
     and the open transaction for the repeat. Only a broker that was loaded is bootstrapped again, after the
     commit, because a release is admitted only once current.json names it.
+
+    A client file edited while the transaction runs is merged: only a change of our own entry (or the adopted
+    one) refuses (`_codex_write`; Claude Code and Claude Desktop are planned over the current file).
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
@@ -1685,11 +1705,14 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             service.observe(j)
             j.advance('service_pending');service.stop(j);j.update('service')
         checkpoint('service')
-        # Codex: our owned subtree replaced in place (compare-before-replace over the exact preimage).
+        # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`).
         if not j.reached('registration'):
             j.advance('registration_pending')
             ensure_owned_private_directory(codex,private_leaf=False)
-            j.write('registration',config,candidate,before,existed=j['config_existed'],maximum=MAX_CONFIG_BYTES)
+            def replan(source, present):
+                if 'codex' in adopted and present:return adopt_registration(source,to_registration)
+                return _codex_change(source,to_registration,ownership)
+            _codex_write(j,config,before,j['config_existed'],candidate,new_ownership.post_subtree_hash,replan,'target_conflict')
             j.update('registration')
         if not merge_registration(read_config(config),to_registration,new_ownership).is_noop:raise InstallError('registration_conflict')
         checkpoint('registration')
@@ -1748,8 +1771,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             checkpoint('published:claude_add')
             return 'registered' if state()=='exact' else 'failed'
         def register_desktop():
-            """Owned (or adopted) replace, or an absent entry added, mode kept; after an interruption the same
-            write is made again only over a file still byte-identical to its recorded preimage."""
+            """Owned (or adopted) replace, or an absent entry added, mode kept; after an interruption it is made
+            again, planned over the current bytes, while the entry is still owned, adopted or absent."""
             def state():return claude_desktop_registration.state(home,to_command,to_arguments)
             add=j.recorded('claude_desktop_add')
             if add is not None:
@@ -1759,7 +1782,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 home,desktop_owned[:2] if desktop_owned else None,to_command,to_arguments,
                 adopted=adopted['claude_desktop']['sha256'] if 'claude_desktop' in adopted else None)
             if add is not None:
-                if observed not in ('owned','adopted','absent') or not _desktop_unchanged(j,add,plan):return 'failed'
+                if observed not in ('owned','adopted','absent') or not _desktop_again(j,plan):return 'failed'
             else:
                 if observed in ('skipped','unavailable'):return observed
                 if observed=='exact':return 'reused'
