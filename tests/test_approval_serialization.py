@@ -99,6 +99,18 @@ class SerializedDialogTests(unittest.TestCase):
         self.assertIn("no new send", replay.detail)
         self.assertEqual((self.dialogs, len(self.sender.sent)), (["only"], 1))
 
+    def test_the_open_dialog_is_counted_once_for_the_installers_gate(self):
+        first, second = self.prepare("first"), self.prepare("second")
+        worker = threading.Thread(target=lambda: self.send(first))
+        worker.start()
+        self.assertTrue(self.opened.wait(10))
+        self.assertEqual(self.broker._health()["pending_sends"]["approval_dialogs"], 1)
+        self.assertEqual(self.send(second).status, "dialog_unavailable")  # refused before any dialog: not counted
+        self.assertEqual(self.broker._health()["pending_sends"]["approval_dialogs"], 1)
+        self.release.set()
+        worker.join(10)
+        self.assertEqual(self.broker._health()["pending_sends"]["approval_dialogs"], 0)
+
     def test_a_dialog_that_fails_frees_the_next_one(self):
         self.release.set()
         self.answers = [RuntimeError("osascript"), True]
@@ -111,8 +123,12 @@ class SerializedDialogTests(unittest.TestCase):
     def test_every_send_and_apply_opens_the_dialog_through_the_one_serialized_gate(self):
         source = inspect.getsource(broker_module.Broker)
         self.assertEqual(len(re.findall(r"approval_outcome\(self\._owner_dialog\(", source)), 5)
+        # The one raw dialog call sits in _prompt_approval (counted as an open dialog for the installer's gate),
+        # and only the serialized _owner_dialog calls that.
         self.assertEqual(re.findall(r"self\._approval_prompt\(", source), ["self._approval_prompt("])
-        self.assertIn("self._approval_prompt(", inspect.getsource(broker_module.Broker._owner_dialog))
+        self.assertIn("self._approval_prompt(", inspect.getsource(broker_module.Broker._prompt_approval))
+        self.assertEqual(len(re.findall(r"self\._prompt_approval\(", source)), 1)
+        self.assertIn("self._prompt_approval(", inspect.getsource(broker_module.Broker._owner_dialog))
 
 
 if __name__ == "__main__":
