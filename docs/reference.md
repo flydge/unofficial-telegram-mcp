@@ -139,8 +139,9 @@ them fails validation. It is omitted when no condition applies, so every other r
 
 On a lost broker exactly these tools carry `check_connection`: `read_history`, `read_messages`,
 `read_reply_chain`, `read_topic_history`, `list_chats`, `list_topics`, `search_messages`, `search_chats` and
-`_manifest`. Every other tool reports a lost broker without a hint, because no closed field of its response
-names the condition: a plain `error` with free-text detail (among them `resolve_target`, `verify_target`,
+`_manifest`. Every other tool reports a lost broker without `check_connection`, because no closed field of
+its response names the condition (`get_send_status` still answers `outcome_unknown` with `check_send_status`):
+a plain `error` with free-text detail (among them `resolve_target`, `verify_target`,
 `read_target_messages`, `discover_targets`, `search_correspondence`, `get_message_context`, `get_attachment`,
 the attachment, spreadsheet and presentation readers, `create_local_artifact`, the chunked upload tools and
 `prepare_text_send`) or a content-free `unavailable` (the draft tools such as `list_drafts`, the reply-draft
