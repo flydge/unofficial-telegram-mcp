@@ -1,10 +1,11 @@
 """0.55 phase A: every constructor and call site that defaulted to an import-time path, label or socket
 takes an AccountPaths. None stays the default alias (byte-identical 0.54 values); an explicit account
-reaches every place it names. Named accounts come only from the private test constructor.
+reaches every place it names. Named accounts come only from the explicit test hook.
 """
 from __future__ import annotations
 
 import ast
+import json
 import plistlib
 import subprocess
 import sys
@@ -24,6 +25,53 @@ from telegram_search_mcp.local_upload import LocalUploadRegistry
 
 DEFAULT = DEFAULT_ACCOUNT_PATHS
 POLICY = RuntimePolicy(enabled_capabilities=('artifacts', 'read'))
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_HOME = '/fixture-home/sample-owner'
+BUNDLE_LAUNCHER = '/fixture/bundle/bin/telegram-search-mcp'
+
+
+def payloads_054(python):
+    """The launchd payloads 0.54 (7f67cba) writes for HOME=/fixture-home/sample-owner, recorded from that tree:
+    source mode with `python` as the interpreter, and bundle mode with the fixture launcher."""
+    common = {'LimitLoadToSessionType': 'Aqua', 'RunAtLoad': True, 'StandardErrorPath': '/dev/null',
+              'StandardOutPath': '/dev/null', 'Umask': 63}
+    broker = {**common, 'KeepAlive': True, 'Label': 'com.sample-owner.telegram-search-mcp.broker',
+              'ProcessType': 'Background'}
+    connect = {**common, 'KeepAlive': False, 'Label': 'com.sample-owner.telegram-search-mcp.connect',
+               'ProcessType': 'Interactive', 'EnvironmentVariables': {'PYTHONDONTWRITEBYTECODE': '1'}}
+    return {
+        'broker': {**broker, 'EnvironmentVariables': {'PYTHONDONTWRITEBYTECODE': '1'},
+                   'ProgramArguments': [python, '-m', 'telegram_search_mcp.launch_agent', 'run']},
+        'connect': {**connect, 'ProgramArguments': [python, '-m', 'telegram_search_mcp.setup_cli', 'connect-helper']},
+        'broker_bundled': {**broker, 'EnvironmentVariables': {}, 'ProgramArguments': [BUNDLE_LAUNCHER, 'broker']},
+        'connect_bundled': {**connect, 'ProgramArguments': [BUNDLE_LAUNCHER, 'connect-helper']},
+    }
+
+
+# Renders the payloads in a fresh process, so config derives every name from the fixture HOME at import.
+RENDER = '''
+import json, plistlib, sys
+from pathlib import Path
+from unittest import mock
+from telegram_search_mcp import bundle_runtime, launch_agent
+
+
+class Selection:
+    def arguments(self, kind):
+        return [sys.argv[2], kind]
+
+
+def render(suffix):
+    python = Path(sys.argv[1])
+    return {"broker" + suffix: launch_agent.launch_agent_payload(python_executable=python),
+            "connect" + suffix: launch_agent.connect_job_payload(python_executable=python)}
+
+
+payloads = render("")
+with mock.patch.object(bundle_runtime, "_SELECTION", Selection()):
+    payloads.update(render("_bundled"))
+print(json.dumps({name: plistlib.dumps(payload, sort_keys=True).decode() for name, payload in payloads.items()}))
+'''
 
 
 def launchctl(calls, code=113):
@@ -78,6 +126,20 @@ class DefaultsStayTests(Fixture):
         self.assertEqual(broker._download_source_root, config.TDLIB_SESSION_DIRECTORY / 'files')
         self.assertEqual(broker._staging, {})
         self.assertEqual(broker._client_factory, tdjson.TDLibClient.from_defaults)
+
+    def test_default_launchd_payloads_are_the_literal_054_bytes(self):
+        python = self.home.parent / 'python3'
+        python.write_bytes(b'')
+        rendered = subprocess.run(
+            [sys.executable, '-B', '-c', RENDER, str(python), BUNDLE_LAUNCHER], capture_output=True, text=True,
+            timeout=60, check=True, cwd=self.home.parent,
+            env={'HOME': FIXTURE_HOME, 'PYTHONPATH': str(ROOT / 'src'), 'PYTHONDONTWRITEBYTECODE': '1'})
+        written = json.loads(rendered.stdout)
+        golden = payloads_054(str(python))
+        self.assertEqual(set(written), set(golden))
+        for name, payload in golden.items():
+            with self.subTest(payload=name):  # The bytes plistlib.dump(..., sort_keys=True) writes to the plist.
+                self.assertEqual(written[name], plistlib.dumps(payload, sort_keys=True).decode())
 
     def test_default_launchd_payloads_are_identical_with_or_without_the_default_account(self):
         python = Path(sys.executable)
