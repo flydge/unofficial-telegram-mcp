@@ -441,8 +441,8 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
 
 A refusal raised after an upgrade's, a rollback's or an adopting first install's broker stop, and before
-`current.json` switches, first writes the previous broker plist back byte for byte and bootstraps that
-broker again if it was running; the transaction stays unfinished until the same command is repeated
+`current.json` switches, first puts the `runtime.toml` version line back if it was rewritten, writes the
+previous broker plist back byte for byte and bootstraps that broker again if it was running; the transaction stays unfinished until the same command is repeated
 ([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under

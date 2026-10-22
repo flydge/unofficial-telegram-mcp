@@ -901,17 +901,19 @@ class _Service:
         if restoring!=restored+1 or type(code) is not str or not _CODE.fullmatch(code):raise InstallError('transaction_conflict')
         return code
 
-    def restore(self, j, code):
-        """Before the refusal `code`, raised after the stop and short of the commit: the previous definition back,
-        byte for byte, and the previous broker bootstrapped again when it was loaded, so the old release keeps
-        serving. Idempotent: every effect is decided from the files and launchd; a definition changed since the
-        stop is never overwritten (`service_conflict`). A cycle whose stop changed nothing restores nothing."""
+    def restore(self, j, code, undo):
+        """Before the refusal `code`, raised after the stop and short of the commit: `undo()` (the runtime.toml
+        version line back), then the previous definition back, byte for byte, and the previous broker
+        bootstrapped again when it was loaded, so the old release keeps serving. Idempotent: every effect is
+        decided from the files and launchd; a definition changed since the stop is never overwritten
+        (`service_conflict`). A cycle whose stop changed nothing restores nothing."""
         stopped,restoring,restored=self._counts(j)
         if restoring==restored:
             if stopped==restored and not self.stopping:return
             if stopped==restored:j.update(publication=('service_stopped',{'attempt':stopped+1}))
             j.update(publication=('service_restoring',{'attempt':restored+1,'code':code}))
             j.checkpoint('recorded:service_restore')
+        undo()
         observed=self._observed(j)
         if observed['plist']!='absent':
             j.discard('plist',self.plist);j.discard('plist_restore',self.plist)
@@ -940,6 +942,7 @@ class _Service:
 
 
 _PIN = re.compile(rb'expected_package_version = "([0-9A-Za-z.+-]{1,64})"')
+_VALUE = re.compile(r'[0-9A-Za-z.+-]{1,64}\Z')
 
 
 def _policy_candidate(data, old, new):
@@ -972,7 +975,28 @@ def _policy_step(j, session_root, old, new):
     data,exists=_read_file(policy,MAX_POLICY_BYTES)
     candidate=_policy_candidate(data,old,new) if exists else None
     if candidate is not None and candidate!=data:
+        # Write-ahead, once: the value a late refusal's restore puts back (`_policy_back`).
+        if j.recorded('policy_previous') is None:
+            j.update(single=('policy_previous',{'version':next(_PIN.fullmatch(line).group(1).decode()
+                                                               for line in data.split(b'\n') if _PIN.fullmatch(line))}))
         j.write('policy',policy,candidate,data,existed=True,maximum=MAX_POLICY_BYTES)
+
+
+def _policy_back(j, session_root, new):
+    """Part of a late refusal's restore, before the broker starts again: the version line this transaction
+    rewrote to `new` goes back to the value recorded before its first rewrite, so the restored broker accepts
+    its pin (journaled `policy_restore`). A line that no longer names `new` stays as it is."""
+    record=j.recorded('policy_previous')
+    if record is None or not os.path.lexists(session_root):return
+    value=record.get('version')
+    if type(value) is not str or not _VALUE.fullmatch(value):raise InstallError('transaction_conflict')
+    policy=session_root/'runtime.toml'
+    j.discard('policy',policy);j.discard('policy_restore',policy)
+    data,exists=_read_file(policy,MAX_POLICY_BYTES)
+    try:back=_policy_candidate(data,new,value) if exists else None
+    except InstallError:return
+    if back is not None and back!=data:
+        j.write('policy_restore',policy,back,data,existed=True,maximum=MAX_POLICY_BYTES)
 
 
 def _state(session_root):
@@ -1369,8 +1393,9 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                              runner=launchctl,pending=probe,home=home) if 'service' in adopted else None
             # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
             unfinished=service.unfinished(j) if service is not None else None
+            def undo():_policy_back(j,session_root,manifest['package_version'])
             if unfinished is not None:
-                service.restore(j,unfinished);raise InstallError(unfinished)
+                service.restore(j,unfinished,undo);raise InstallError(unfinished)
             try:
                 # Its observation, its pending-send gate and its stop all come before the first client write: a send
                 # that starts before the stop refuses with every client entry still as it was. After a restore the
@@ -1513,11 +1538,12 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     if not reached('complete'):
                         if not reached('claude_desktop'):update('claude_desktop')
                         checkpoint('claude_desktop')
-                    if not reached('policy'):
+                    if not reached('complete'):
                         j.advance('policy_pending')
-                        # The adopted broker's session pin follows it (any version), only that line.
+                        # The adopted broker's session pin follows it (any version), only that line; checked by
+                        # every run before the commit, since a late refusal's restore puts the old line back.
                         if 'service' in adopted:_policy_step(j,session_root,None,manifest['package_version'])
-                        update('policy')
+                        j.advance('policy')
                     names=['release','telegram-search','telegram-setup']
                     if claude_skills_status=='installed':names+=['claude-telegram-search','claude-telegram-setup']
                     objects={name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names}
@@ -1551,7 +1577,7 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     raise
             except _REFUSALS as error:
                 # Short of the commit the adopted broker keeps serving: its definition and broker come back first.
-                if service is not None and _uncommitted(root/'current.json',None):service.restore(j,_refusal(error))
+                if service is not None and _uncommitted(root/'current.json',None):service.restore(j,_refusal(error),undo)
                 raise
     except InstallError:raise
     except _REFUSALS:
@@ -1806,8 +1832,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                          runner=launchctl,pending=pending_sends,home=home)
         # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
         unfinished=service.unfinished(j)
+        def undo():_policy_back(j,session_root,to_manifest['package_version'])
         if unfinished is not None:
-            service.restore(j,unfinished);raise InstallError(unfinished)
+            service.restore(j,unfinished,undo);raise InstallError(unfinished)
         # The broker observation, its pending-send gate and the stop of a loaded broker (gated again right before it)
         # all come before the first client write: no session can start between the last gate and the stop, and a
         # send that starts before it refuses with every client entry, the plist and the session unchanged. After a
@@ -1920,10 +1947,11 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 j.update(single=('claude_desktop',{'status':desktop_status}))
             if desktop_status not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
             j.advance('claude_desktop');checkpoint('claude_desktop')
-            if not j.reached('policy'):
+            # Checked by every run before the commit: a late refusal's restore puts the old line back.
+            if not j.reached('complete'):
                 j.advance('policy_pending')
                 _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
-                j.update('policy')
+                j.advance('policy')
             checkpoint('policy')
             # Ownership follows the entry: the one this transaction wrote, else the one it left in place (`_client_owners`).
             add=j.recorded('claude_desktop_add')
@@ -1956,7 +1984,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             j.replace('pointer',root/'current.json',lambda p:create(p,pointer),_exact(pointer),_exact(_pointer(current)))
         except _REFUSALS as error:
             # Short of the commit the old release keeps serving: its definition and broker come back first.
-            if _uncommitted(root/'current.json',_pointer(current)):service.restore(j,_refusal(error))
+            if _uncommitted(root/'current.json',_pointer(current)):service.restore(j,_refusal(error),undo)
             raise
         j.advance('complete');checkpoint('complete')
         restarted=service.restart(j)

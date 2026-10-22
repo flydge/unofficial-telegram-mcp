@@ -2,9 +2,10 @@
 rename, unlink, mkdir and rmdir and after every launchctl or claude CLI call of an upgrade, a rollback, an
 uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, an
 upgrade whose Codex write is planned again over a neighbour added while the release is copied, and a late
-refusal (our Codex entry, or the adopted one, changed while the release is copied) whose journaled service
-restore runs after the broker stop of an upgrade or of an adopting first install; the parent then resumes the
-same action. A late refusal's resume refuses with the same code and leaves the same restored state.
+refusal whose journaled restore runs after the broker stop: our Codex entry (or the adopted one) changed while
+the release is copied, for an upgrade and an adopting first install, and `receipt.json` changed after the
+`runtime.toml` version line was rewritten, which the restore puts back first. The parent then resumes the same
+action. A late refusal's resume refuses with the same code and leaves the same restored state.
 
 The resumed final state must equal the uninterrupted run's: a normalised tree of the whole synthetic base, every
 publication binding resolved to the path that now holds that inode. Nothing may be left anywhere (no staging
@@ -310,11 +311,21 @@ def _at_copy(h, edit):
     return checkpoint
 
 
-def _refusal(action):
+def _refusal(h, action):
+    """The action's result, or its refusal with the Claude Code outcome its open change journal recorded (a
+    refusal prints no client statuses; a kill in a write-ahead window still ends `failed` there)."""
     try:
         return action()
     except bundle_install.InstallError as error:
-        return {'refused': str(error), 'pending_action': error.pending_action}
+        result = {'refused': str(error), 'pending_action': error.pending_action}
+        changes = sorted(h.runtime.glob('transactions/change_*/journal.json'), key=lambda p: int(p.parent.name[7:]))
+        if changes:
+            outcome = json.loads(changes[-1].read_bytes())['publications'].get('claude_code')
+            if outcome:
+                result['claude_code'] = outcome[0]['status']
+                if result['claude_code'] == 'failed':
+                    result['claude_registration_command'] = 'recorded'
+        return result
 
 
 OURS, CHANGED = b'tool_timeout_sec = 600', b'tool_timeout_sec = 601'
@@ -339,6 +350,30 @@ def _late_upgrade_check(h, result):
     h.assertEqual(h.launchctl.verbs()[-2:], ['print', 'bootstrap'])
     config = h.codex / 'config.toml'
     config.write_bytes(config.read_bytes().replace(CHANGED, OURS))
+    _upgrade_check(h, h.install(h.new))
+
+
+def _late_policy_prepare(h):
+    _late_upgrade_prepare(h)
+    h.receipt_bytes = (h.runtime / 'receipt.json').read_bytes()
+    h.pin = (h.session_root / 'runtime.toml').read_bytes()
+
+
+def _receipt_changed(h):
+    """At the policy checkpoint, once: receipt.json changed by hand, so the receipt step refuses after the pin."""
+    receipt = h.runtime / 'receipt.json'
+
+    def checkpoint(stage):
+        if stage == 'policy' and receipt.read_bytes() == h.receipt_bytes:
+            receipt.write_bytes(h.receipt_bytes + b' ')
+    return checkpoint
+
+
+def _late_policy_check(h, result):
+    h.assertEqual(result, {'refused': 'metadata_conflict', 'pending_action': None, 'claude_code': 'registered'})
+    h.assertEqual(((h.session_root / 'runtime.toml').read_bytes(), h.plist.read_bytes(), h.launchctl.loaded),
+                  (h.pin,) + h.served)
+    (h.runtime / 'receipt.json').write_bytes(h.receipt_bytes)
     _upgrade_check(h, h.install(h.new))
 
 
@@ -375,10 +410,12 @@ SCENARIOS = {
     'merged_upgrade': Scenario(_upgrade_prepare, lambda h, lc, cl: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_copy(h, lambda d: d if WEATHER in d else d + WEATHER)),
         _merged_check),
-    'late_refusal_upgrade': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
+    'late_refusal_upgrade': Scenario(_late_upgrade_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.new, launchctl=lc, claude_runner=cl, checkpoint=_at_copy(h, lambda d: d.replace(OURS, CHANGED)))),
         _late_upgrade_check, write_ahead=False),
-    'late_refusal_adopt_first_install': Scenario(_late_adopt_prepare, lambda h, lc, cl: _refusal(lambda: h.install(
+    'late_refusal_after_policy': Scenario(_late_policy_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
+        h.new, launchctl=lc, claude_runner=cl, checkpoint=_receipt_changed(h))), _late_policy_check),
+    'late_refusal_adopt_first_install': Scenario(_late_adopt_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
         h.packet, adopt_legacy=True, launchctl=lc, claude_runner=cl,
         checkpoint=_at_copy(h, lambda d: d.replace(LEGACY, LEGACY_CHANGED)))), _late_adopt_check, write_ahead=False),
 }
@@ -611,6 +648,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_late_refusal_restores_the_service_of_an_upgrade(self):
         self.sweep('late_refusal_upgrade')
+
+    def test_late_refusal_after_the_version_line_restores_it_and_the_service(self):
+        self.sweep('late_refusal_after_policy')
 
     def test_late_refusal_restores_the_adopted_broker_of_a_first_install(self):
         self.sweep('late_refusal_adopt_first_install')

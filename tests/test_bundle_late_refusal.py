@@ -275,6 +275,44 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                 self.assertEqual((result['status'], result['service']), ('upgraded', 'restarted'))
                 self.assertUpgradedTo(self.runtime / 'releases' / new[3], old['release_root'])
 
+    def test_a_refusal_after_the_version_line_puts_it_back_before_the_broker_starts(self):
+        """Refused at the receipt, after `runtime.toml` names the new version: the old broker would refuse that
+        pin (`config_stale`), so the restore writes the previous line back first."""
+        for kind in ('upgrade', 'adopting first install'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                if kind == 'upgrade':
+                    self.full()
+                    packet = self.build('b', launcher=b'# second release\n')
+                    action = lambda **kwargs: self.install(packet, **kwargs)
+                    code, receipt, stage, tx = 'metadata_conflict', self.runtime / 'receipt.json', 'policy', 'change_1'
+                    saved = receipt.read_bytes()
+                    tamper = lambda: receipt.write_bytes(saved + b' ')
+                    untamper = lambda: receipt.write_bytes(saved)
+                else:
+                    self.legacy()
+                    packet = self.build('a')
+                    action = lambda **kwargs: self.install(packet, adopt_legacy=True, **kwargs)
+                    code, receipt, stage = 'foreign_receipt', self.runtime / 'receipt.json', 'claude_desktop'
+                    tx = self.tx(packet).name
+                    tamper = lambda: (receipt.write_bytes(b'{}'), receipt.chmod(0o600))
+                    untamper = receipt.unlink
+                policy = self.session_root / 'runtime.toml'
+                service, pin = self.service_state(), policy.read_bytes()
+
+                def edit(value):
+                    if value == stage:
+                        tamper()
+                self.assertEqual(self.refused(lambda: action(checkpoint=edit)), code)
+                self.assertEqual(len(self.journal(tx)['publications']['policy']), 1)  # The new pin was written.
+                self.assertEqual((policy.read_bytes(), self.service_state()), (pin, service))
+                self.assertEqual(self.temporaries(), [])
+                untamper()
+                result = action()
+                self.assertEqual(result['service'], 'restarted')
+                self.assertIn(b'expected_package_version = "0.53.0.dev0"', policy.read_bytes())
+                self.assertEqual(self.launchctl.loaded[4], str(Path(result['release_root']) / 'launcher.py'))
+
     def test_a_kill_inside_the_restore_is_finished_by_the_repeat_with_the_same_refusal(self):
         for stage in ('recorded:service_restore', 'recorded:plist_restore', 'published:plist_restore'):
             with self.subTest(stage=stage):

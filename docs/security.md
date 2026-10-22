@@ -2087,9 +2087,11 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   name it, so an interrupted change leaves the previous release launchable.
 - **A late refusal restores the service first.** Any refusal after the broker stop and before
   `current.json` switches (the same for a rollback, and for an adopting first install before
-  `current.json` exists) first writes the previous plist back byte for byte, from a copy kept in the
-  transaction (`service.previous`, its hash journaled) before the first rewrite, and bootstraps the
-  previous broker again only if it was loaded. The restore is journaled: a write-ahead record carrying the
+  `current.json` exists) first puts the `runtime.toml` version line back if the transaction rewrote it
+  (to the value journaled before its first rewrite; a line changed since stays), writes the previous plist
+  back byte for byte, from a copy kept in the transaction (`service.previous`, its hash journaled) before
+  the first rewrite, and bootstraps the previous broker again only if it was loaded. Every run before the
+  commit checks the version line again, so the repeat pins the new version once more. The restore is journaled: a write-ahead record carrying the
   refusal's fixed code precedes its effects and a closing record follows them, every effect is decided
   from the plist and launchd, and a run that finds the write-ahead record without the closing one
   finishes the restore and refuses with the recorded code. A plist changed since the stop is never

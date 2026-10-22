@@ -655,18 +655,20 @@ restores the broker (below), running MCP clients cannot reach the broker.
 A refusal raised after the broker stop and before `current.json` switches first restores the service,
 then refuses. Examples: `target_conflict` when you changed the `telegram_search` table in
 `~/.codex/config.toml` while the release was copied, `skill_conflict` for an edited skill copy,
-`policy_conflict` for a changed `expected_package_version` line. The restore writes the previous
-LaunchAgent plist back byte for byte (its bytes are kept in the transaction before the rewrite) and
-bootstraps the previous broker again if it was running, so the installed release keeps serving.
-A late refusal leaves exactly this:
+`policy_conflict` for a changed `expected_package_version` line, `metadata_conflict` when `receipt.json`
+changed. The restore puts the `expected_package_version` line of `runtime.toml` back if this upgrade
+already rewrote it (to the value recorded before the rewrite), writes the previous LaunchAgent plist back
+byte for byte (its bytes are kept in the transaction before the rewrite) and bootstraps the previous
+broker again if it was running, so the installed release keeps serving. A late refusal leaves exactly
+this:
 
-- `current.json` and `receipt.json` still name the installed release, and its broker and plist are as
-  they were before the upgrade.
+- `current.json` and `receipt.json` still name the installed release; its broker, its plist and the
+  `runtime.toml` version line are as they were before the upgrade.
 - The new release tree and the unfinished transaction stay.
-- Every client entry written before the refusal stays and already names the new release. In step order
-  that is the Codex subtree, then the skill copies, the Claude Code entry and the Claude Desktop entry,
-  then the `runtime.toml` line; a Codex refusal comes before any of them. Those clients cannot start the
-  server until the upgrade commits, because the launcher starts only the release the receipt names.
+- Every client entry and skill copy written before the refusal stays: in step order the Codex subtree,
+  the skill copies, the Claude Code entry and the Claude Desktop entry (a Codex refusal comes before any
+  of them). The entries already name the new release, so those clients cannot start the server until the
+  upgrade commits: the launcher starts only the release the receipt names.
 - `rollback`, `uninstall` and another kit refuse as `transaction_pending` (`pending_action: upgrade`).
 
 Put back or remove the object the code names (a removed `telegram_search` table or skill copy is written
