@@ -43,6 +43,7 @@ case "$mode" in
     fail) /usr/bin/printf '%s\n' '{"schema_version":1,"error_code":"integrity_failure"}' >&2; exit 6;;
     prepared) /usr/bin/printf '%s\n' '{"verified":true}'; exit 0;;
     other-root) root="$root-other";;
+    newline-root) root="$root"'\n'"$root"; python="$root/python/bin/python3"; launcher="$root/launcher.py";;
     other-python) python=/usr/bin/true;;
     other-verb) verb=setup;;
     other-status) status=installed;;
@@ -220,6 +221,43 @@ class InstallCommandTests(unittest.TestCase):
                         dict(team_id=TEAM, published=1), dict(team_id=TEAM, published='yes')):
             with self.subTest(options=options), self.assertRaises(IC.InstallCommandError) as caught:
                 IC.render(seed_sha256=SEED, seed_bytes=1, index_sha256=INDEX, **options)
+            self.assertEqual(str(caught.exception), 'pins_invalid')
+
+    def test_a_kit_folder_or_release_root_with_a_newline_is_refused(self):
+        # grep reads lines, so each half alone holds no control byte: the case pattern refuses the newline.
+        self.mode('newline-root')  # JSON "\n" inside release_root: every other check of the result passes.
+        result = self.run_command()
+        self.assertEqual((result.returncode, result.stderr.splitlines()[-1]),
+                         (5, '{"schema_version":1,"error_code":"activation_unexpected"}'))
+        self.assertFalse((self.release / 'activation.argv').exists())
+        self.mode('ok')
+        kit = self.root / 'Synthetic\nVolume'
+        kit.mkdir()
+        for path in self.kit.iterdir():
+            (kit / path.name).write_bytes(path.read_bytes())
+            (kit / path.name).chmod(path.stat().st_mode & 0o777)
+        self.command = kit / 'Install.command'
+        (self.root / 'bootstrap.argv').unlink(missing_ok=True)
+        result = self.run_command()
+        self.assertEqual((result.returncode, result.stderr.splitlines()[-1]),
+                         (3, '{"schema_version":1,"error_code":"kit_unavailable"}'))
+        self.assertFalse((self.root / 'bootstrap.argv').exists())
+
+    def test_render_pins_embeds_the_values_of_one_release_pins_file(self):
+        pins = {'schema_version': 1, 'version': '1.2.3', 'publication': 'published', 'team_id': TEAM,
+                'bootstrap_sha256': 'c' * 64, 'bootstrap_bytes': 100, 'seed_sha256': SEED, 'seed_bytes': 71600,
+                'index_sha256': INDEX, 'index_bytes': 200, 'archive_sha256': 'd' * 64, 'archive_bytes': 300}
+        data = (json.dumps(pins, indent=2, sort_keys=True) + '\n').encode()
+        self.assertEqual(IC.render_pins(data), IC.render(seed_sha256=SEED, seed_bytes=71600, index_sha256=INDEX,
+                                                         team_id=TEAM, published=True))
+        unreleased = (json.dumps({**pins, 'publication': 'unreleased', 'team_id': ''}, indent=2, sort_keys=True)
+                      + '\n').encode()
+        self.assertEqual(IC.render_pins(unreleased), IC.render(seed_sha256=SEED, seed_bytes=71600, index_sha256=INDEX))
+        for bad in (data.replace(b'\n', b'', 1), json.dumps({**pins, 'team_id': ''}, indent=2, sort_keys=True).encode()
+                    + b'\n', b'{}\n', (json.dumps({**pins, 'seed_bytes': 0, 'publication': 'unreleased',
+                                                   'team_id': ''}, indent=2, sort_keys=True) + '\n').encode()):
+            with self.subTest(bad=bad), self.assertRaises(IC.InstallCommandError) as caught:
+                IC.render_pins(bad)
             self.assertEqual(str(caught.exception), 'pins_invalid')
 
     def test_a_relative_invocation_is_refused(self):

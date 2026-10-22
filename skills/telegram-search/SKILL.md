@@ -41,10 +41,11 @@ and overlapping or adjacent spans of the same style are rejected. Distinct style
 may nest or cover the same range. Hidden links, mentions, custom emoji, quotes,
 code and formatted attachment captions are outside this outgoing subset.
 
-Review the full text, every style/range/covered substring including spoilers,
-account, recipient, optional exact topic and complete reply evidence, expiry and
-one approval digest. Ordinary/topic formatted previews use v2; formatted replies
-use one outer v3 digest with no inner digest. Empty lists preserve existing plain
+Show the owner a concise preview: the recipient (account, chat, optional exact
+topic and the reply target), the exact text with every style, its range and
+covered substring including spoilers, and the expiry. One approval digest binds
+that preview: ordinary/topic formatted previews use v2; formatted replies use one
+outer v3 digest with no inner digest. Empty lists preserve existing plain
 preview and wire behavior. A text update replaces the complete text and style
 list; omitted or empty lists clear styles. Entity-only updates are rejected.
 Ordinary refresh preserves styles; topic refresh requires fresh preparation.
@@ -418,9 +419,9 @@ To move one chat between Main and Archive, or to replace the plain text of one o
 
 Record each final lane's exact target, query, dates, status, and `coverage.complete`. Deduplicate by `(chat_id, message_id)` while preserving matching lanes, sender, date, sanitized snippet/context, file metadata, and source URLs.
 
-### Inline evidence card
+### Numbered sources and the evidence card
 
-Render every selected evidence item as an expanded Markdown card. The card is the navigation destination when Telegram supplies no safe URL; never omit valid evidence merely because both source URLs are absent. Translate the visible labels to the owner's language while preserving these semantic slots and order:
+After the short answer, list every selected evidence item as a numbered source: `[n] <verified chat title> · <match.sender> · <match.date_utc in UTC> · <Source>`, with the `Source` link chosen by the precedence below; never construct a URL. Never omit valid evidence merely because both source URLs are absent. When the owner asks for the details of a source, or Telegram supplied no safe link for it, expand it into this Markdown card, the navigation destination when there is no safe URL. Translate the visible labels to the owner's language while preserving these semantic slots and order:
 
 ```markdown
 ### Message <N> · <verified chat title>
@@ -441,9 +442,9 @@ Fill the `Source` row using this precedence:
 
 1. If `source.telegram_url` is present, use `[Open exact message](<telegram_url>)`.
 2. Otherwise, if `source.chat_url` is present, use `[Open chat — not the message](<chat_url>)`.
-3. If both are absent, write that Telegram supplied no safe link for this message. The mandatory `Anchor` row still identifies the exact evidence source.
+3. If both are absent, write that Telegram supplied no safe link for this message. The card's `Anchor` row then identifies the exact evidence source.
 
-Printing a raw URL only in the receipt or contract diagnostics does not satisfy the card contract. Never construct a URL from a chat title, sender display text, phone number, message content, or evidence anchor. A `chat_url` is navigation to the resolved conversation, not proof that the app can jump to the matching message.
+Printing a raw URL only in the receipt or contract diagnostics does not satisfy the source contract. Never construct a URL from a chat title, sender display text, phone number, message content, or evidence anchor. A `chat_url` is navigation to the resolved conversation, not proof that the app can jump to the matching message.
 
 - Report `no results` only when every planned lane completed with `coverage.complete=true`.
 - If any lane is incomplete, report `partial` or `undetermined`.
@@ -451,7 +452,7 @@ Printing a raw URL only in the receipt or contract diagnostics does not satisfy 
 - Show at most ten unique evidence anchors and count omitted matches.
 - Separate **observed** evidence from **inference**; never infer causality from proximity alone.
 
-Return a short answer, the inline evidence cards, then a receipt containing discovery route, selected exact targets, account coverage (attempted/pending/unresolved and stop reasons), date interval, actual terms/filters, call count, per-lane coverage, overall status, omitted count, and limitations.
+Return a short answer, the numbered sources, and the coverage in one line (complete, `partial`, `undetermined` or `no results`). Give the full receipt (discovery route, selected exact targets, account coverage with attempted/pending/unresolved and stop reasons, date interval, actual terms/filters, call count, per-lane coverage, overall status, omitted count, and limitations) only when coverage is incomplete or the owner asks.
 
 ## Non-negotiable boundaries
 

@@ -3,9 +3,10 @@
 ## 0.53.0.dev0 — unreleased
 
 Development of 0.53.0, client coverage and distribution ([spec](docs/plans/0.53-client-distribution-spec.md)).
-Every item below has unit-test or ad hoc dry-run evidence only. The Developer ID signed and notarized
-build, the clean-user install, the owner's migration, the product name and publication wait for the
-owner; no signed DMG or public release asset exists yet.
+Every item below has unit-test or ad hoc dry-run evidence only. The owner provisioned the Developer ID
+identity and notary profile on 21.10.2026 (preflight ok). The signed and notarized build and its
+Gatekeeper observation, the clean-user install, the owner's migration, the product name and publication
+wait for the owner session; no signed DMG or public release asset exists yet.
 
 - Product identity (phase A): every user-visible name comes from `product_identity.py`, with a
   rename-impact test and a name-length check that keeps every plugin tool name within 64 characters.
@@ -25,14 +26,24 @@ owner; no signed DMG or public release asset exists yet.
   - The seed is signed too, and `bootstrap.sh --seed-team <TEAMID>` checks its Developer ID requirement
     before running it (`seed_signature_invalid`).
   - `notarize_release.sh` notarizes the payload zip, builds the DMG, then signs, notarizes and staples it
-    (`notarytool` is mocked in tests). `Install.command` runs the pinned bootstrap and then `connect`
-    inline in Terminal, so one double-click covers install and login.
+    (`notarytool` is mocked in tests). `Install.command` runs `bootstrap.sh` with its embedded seed and
+    index pins and then `connect` inline in Terminal, so one double-click covers install and login.
+    `Install.command` is not code-signed (the DMG's signature covers it); how Gatekeeper treats the
+    double-click is an owner-session observation.
   - `release_build.py` runs the whole chain to a corresponding-source archive, `signing_preflight.sh` and an
     [owner checklist](docs/plans/0.53-signing-owner-checklist.md) cover the identity and notary profile,
     and the release gate gains an optional bundle stage. The bundle is assembled without the application
     identity by default, or with one from a named Keychain service.
-  - Owner-pending: the certificate and notary profile, the signed and notarized build, and the
-    application-identity decision.
+  - `release-pins.json` has one schema (`packaging/release_pins.py`): the release build writes it with
+    the sha256 and size of `bootstrap.sh`, the seed, the index and the archive, `Install.command` is
+    rendered from it, and the release commit copies it byte for byte into the plugin, checked by
+    `release_build.py release-commit`. That committed copy at the release tag is the trust root of the
+    curl and plugin paths, checked against the publisher Team ID `256X5MUA6S`; the curl recipe checks
+    all four files before running anything. The native pin table approves that Team ID.
+  - Script path guards refuse a newline, not only other control bytes.
+  - Owner-session: the signed and notarized build and its Gatekeeper observation, and the
+    application-identity decision. The Developer ID identity and notary profile were provisioned by the
+    owner on 21.10.2026.
 - Clients (phase D):
   - Claude Desktop: the installer adds one owned `mcpServers.telegram_search` entry to
     `claude_desktop_config.json` (bounded strict read, journaled compare-before-replace write, neighbours
@@ -42,19 +53,27 @@ owner; no signed DMG or public release asset exists yet.
   - `--claude-code user|plugin|skip` selects Claude Code's user scope, the plugin or nothing. The plugin
     `telegram-local` and a repository marketplace add byte-identical skills, a `/bin/sh -p` shim that reads
     `current.json`, and a `bin/install` that installs from pinned release assets. It refuses
-    (`release_not_published`) while its pins are the unpublished placeholder.
+    (`release_not_published`) while its pins are the unreleased placeholder. Nothing pins a plugin
+    commit: the plugin is whatever commit the user's marketplace clone holds.
   - The server sends client-neutral `instructions` (1,378 characters). `_manifest` gains `available_tools`
     and `tool_capabilities`, and `tools/list` now shows only the tools the loaded policy enables (15 of 55
     under the default `read` and `artifacts` policy). The schema fingerprint still covers the full
     registration and is unchanged.
   - A structural STDIO recorder records a client's protocol revision, tool census and a hash of the tool list and,
-    per call, the tool name, `isError` and result block sizes; never arguments or result content.
+    per call, the tool name, `isError`, the content blocks' types and byte sizes and whether structured
+    content came back; never arguments or result content.
 - Upgrade, rollback, uninstall and `--adopt-legacy` (phase E):
   - Re-running the installer with a newer kit upgrades in place: the new release is published next to the old
     one, owned registrations and skills are re-registered, the broker plist is rewritten, only the
     `expected_package_version` line of `runtime.toml` changes, and `current.json` switches last. A running
     broker with a connected client context refuses first (`pending_send_unresolved`), and a lower
-    version refuses (`downgrade_refused`).
+    version refuses (`downgrade_refused`). A client file edited while a change runs is merged; only a
+    change of our own entry refuses. A refusal after the broker stop first writes the previous plist back
+    byte for byte and starts that broker again if it ran (stopping first a new broker a login started from
+    the rewritten plist, and removing the temporaries killed client writes left), so the installed release
+    keeps serving until the same command finishes the change (repeated as often as needed; every run before
+    the switch makes the broker and its plist the new release's again, whatever a kill or a login left) or
+    `uninstall` removes the installation together with what the change already wrote.
   - `launcher.py rollback` returns to the previous release while no newer state exists, and
     `launcher.py uninstall` removes only owned objects. The Telegram session, enrollment and Keychain are
     never written. The receipt moves to schema 2 and `status` reports Claude Desktop drift.

@@ -35,7 +35,7 @@ class ApprovedPin:
 
     `unsigned` holds the ad-hoc relocated artifacts exactly as the v1 lock pins them; a
     Developer ID re-sign must name them as its inputs. `team_ids` lists the Developer ID teams
-    approved to re-sign this row (empty: no re-signed lock is admitted yet).
+    approved to re-sign this row (empty: no re-signed lock is admitted).
     """
     source_commit: str
     tdlib_version: str
@@ -58,7 +58,9 @@ APPROVED_PINS = (
                 f'https://github.com/tdlib/td/blob/{COMMIT}/LICENSE_1_0.txt', '3.6.4', 'homebrew-receipt-relocated',
                 (('libtdjson.dylib', 17638336, '65ef0643b294659eeb3a151f4b496db1808d2535f646a3494a08fde4340ea12c'),
                  ('libssl.3.dylib', 901744, '7e89651576fc4dfe9461f65de448fc99990dc5c32c06c413d86bdbbfc11e9774'),
-                 ('libcrypto.3.dylib', 4862416, 'f9563883fdbb4f2b367c708a6abd786119c935d3f9cd01fa8e11c34666775d1b'))),
+                 ('libcrypto.3.dylib', 4862416, 'f9563883fdbb4f2b367c708a6abd786119c935d3f9cd01fa8e11c34666775d1b')),
+                # The publisher's Developer ID team (owner-provisioned 21.10.2026; 0.53 spec, decisions).
+                team_ids=frozenset(('256X5MUA6S',))),
 )
 
 

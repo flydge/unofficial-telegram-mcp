@@ -605,9 +605,14 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                 self.assertEqual((result['status'], result['service']), ('rolled_back', 'restarted'))
                 self.assertUpgradedTo(Path(old['release_root']), self.runtime / 'releases' / new[3])
                 receipt = self.receipt()
-                self.assertEqual({k: v for k, v in receipt.items() if k != 'publication_objects'},
-                                 {k: v for k, v in original.items() if k != 'publication_objects'})
+                rewritten = ('publication_objects', 'claude_desktop_ownership')
+                self.assertEqual({k: v for k, v in receipt.items() if k not in rewritten},
+                                 {k: v for k, v in original.items() if k not in rewritten})
                 self.assertEqual(receipt['publication_objects']['release'], original['publication_objects']['release'])
+                if not v1:  # It owns the entry it wrote: the same entry as before, recorded by the rollback.
+                    owned, installed = receipt['claude_desktop_ownership'], original['claude_desktop_ownership']
+                    self.assertEqual((owned['transaction_id'], owned['post_subtree_hash']),
+                                     ('change_2', installed['post_subtree_hash']))
                 self.assertEqual((self.skills / 'telegram-search' / 'SKILL.md').read_bytes(), b'search-skill')
                 self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
                                  policy.replace(b'0.53.0.dev0', OLD_VERSION.encode()))

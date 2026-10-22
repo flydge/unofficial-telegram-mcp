@@ -38,7 +38,7 @@ class LockGrammarTests(unittest.TestCase):
         row = APPROVED_PINS[0]
         self.assertEqual(native_runtime.approved_pin(lock), row)
         self.assertEqual(tuple((a.name, a.bytes, a.sha256) for a in lock.artifacts), row.unsigned)
-        self.assertEqual(row.team_ids, frozenset())  # No Developer ID team is approved before the owner signs.
+        self.assertEqual(row.team_ids, frozenset({'256X5MUA6S'}))  # The publisher's team, from the spec's decisions.
 
     def test_derived_constants_follow_the_reviewed_row(self):
         from telegram_search_mcp import bundle_runtime
@@ -84,10 +84,15 @@ class LockGrammarTests(unittest.TestCase):
             for label, value in cases.items():
                 with self.subTest(label), self.assertRaises(NativeRuntimeError):
                     parse_native_manifest(encode(value))
-        with self.subTest('real table approves no team yet'), self.assertRaises(NativeRuntimeError):
-            parse_native_manifest(encode(v2_lock(json.loads(COMMITTED.read_bytes()), signature='developer-id', team_id=TEAM,
-                                                 signed={'libtdjson.dylib': b's' * 64, 'libssl.3.dylib': b's' * 65,
-                                                         'libcrypto.3.dylib': b's' * 66})))
+        signed = {'libtdjson.dylib': b's' * 64, 'libssl.3.dylib': b's' * 65, 'libcrypto.3.dylib': b's' * 66}
+        committed = json.loads(COMMITTED.read_bytes())
+        with self.subTest('real table approves only the publisher team'), self.assertRaises(NativeRuntimeError):
+            parse_native_manifest(encode(v2_lock(committed, signature='developer-id', team_id=TEAM, signed=signed)))
+        # The owner's signed build repins to the publisher team (repin_native parses exactly this form).
+        publisher = parse_native_manifest(encode(v2_lock(committed, signature='developer-id', team_id='256X5MUA6S',
+                                                         signed=signed)))
+        self.assertEqual(native_runtime.lock_signature(publisher), ('developer-id', '256X5MUA6S'))
+        self.assertEqual(native_runtime.approved_pin(publisher), APPROVED_PINS[0])
 
     def test_a_second_table_row_is_accepted_only_for_its_exact_values(self):
         first = synthetic_pin(self.natives)

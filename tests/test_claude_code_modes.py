@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 from test_bundle_install import InstallHarness
+from test_bundle_upgrade import ChangeHarness, OLD_VERSION
 from telegram_search_mcp import claude_registration
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,6 +173,29 @@ class ModeInstallTests(InstallHarness, unittest.TestCase):
         self.assertEqual(runtime.CLAUDE_DESKTOP_STATUSES, ('registered', 'reused', 'failed', 'unavailable', 'skipped'))
 
 
+class PluginNoteChangeTests(ChangeHarness, unittest.TestCase):
+    """Upgrade, rollback and their repeats carry the plugin-mode note like a first install (reference.md)."""
+
+    def test_every_plugin_mode_result_notes_a_user_scope_entry(self):
+        self.codex_present()
+        self.desktop_present()
+        self.session()
+        fake = self.claude()
+        fake.write_document({'mcpServers': {'telegram_search': {'type': 'stdio', 'command': '/old/python3', 'args': []}}})
+        with mock.patch('telegram_search_mcp.__version__', OLD_VERSION):
+            first = self.install(self.build('a', version=OLD_VERSION), claude_code='plugin')
+        self.service(first['release_root'])
+        new = self.build('b', launcher=b'# second release\n')
+        results = {'install': first, 'upgrade': self.install(new), 'repeated upgrade': self.install(new),
+                   'rollback': self.change('rollback'), 'repeated rollback': self.change('rollback')}
+        for name, result in results.items():
+            with self.subTest(result=name):
+                self.assertEqual((result['claude_code'], result.get('claude_code_user_entry')), ('plugin', 'present'))
+        fake.write_document({'mcpServers': {}})
+        self.assertNotIn('claude_code_user_entry', self.install(new))
+        self.assertEqual(fake.calls, [])
+
+
 def load_launcher(name='claude_code_mode_launcher'):
     spec = importlib.util.spec_from_file_location(name, ROOT / 'packaging' / 'launcher.py')
     module = importlib.util.module_from_spec(spec)
@@ -314,6 +338,15 @@ class BootstrapPassthroughTests(unittest.TestCase):
                                  + (['--claude-code', mode] if mode else []))
                 (self.out / 'launcher-argv').unlink()
 
+    def test_the_default_installation_root_is_the_bundle_root_name(self):
+        """bootstrap.sh's default `--installation-root` is `<home>/Library/Application Support/<BUNDLE_ROOT_NAME>`."""
+        from telegram_search_mcp import product_identity
+        done = self.bootstrap()
+        self.assertEqual((done.returncode, done.stderr), (0, ''))
+        argv = self.launcher_argv()
+        self.assertEqual(argv[argv.index('--installation-root') + 1],
+                         str(self.home / 'Library' / 'Application Support' / product_identity.BUNDLE_ROOT_NAME))
+
     def test_an_invalid_mode_refuses_before_the_seed_runs(self):
         for extra in (('--claude-code', 'both'), ('--claude-code', ''), ('--claude-code',),
                       ('--claude-code', 'plugin', '--claude-code', 'plugin'), ('--claude-code', 'Plugin')):
@@ -323,6 +356,22 @@ class BootstrapPassthroughTests(unittest.TestCase):
                 self.assertEqual(json.loads(done.stderr), {'schema_version': 1, 'error_code': 'selection_invalid',
                                                            'retained_stage': ''})
                 self.assertFalse((self.out / 'seed-ran').exists())
+
+    def test_a_path_with_a_newline_or_another_control_byte_refuses_before_the_seed_runs(self):
+        # grep reads lines, so each half of '/a\n/b' alone holds no control byte: the case pattern refuses it.
+        for option in ('--installation-root', '--codex-home', '--skills-root'):
+            for value in (f'{self.home}/a\n/b', f'{self.home}/a\tb', f'{self.home}/a\n'):
+                with self.subTest(option=option, value=value):
+                    done = self.bootstrap(option, value)
+                    self.assertEqual(done.returncode, 6)
+                    self.assertEqual(json.loads(done.stderr)['error_code'], 'selection_invalid')
+                    self.assertFalse((self.out / 'launcher-argv').exists())
+        folder = self.base / 'kit\nnext'
+        folder.mkdir(mode=0o700)
+        self.seed = Path(shutil.copy2(self.seed, folder / 'bootstrap-verifier'))
+        done = self.bootstrap()
+        self.assertEqual((done.returncode, json.loads(done.stderr)['error_code']), (6, 'selection_invalid'))
+        self.assertFalse((self.out / 'launcher-argv').exists())
 
 
 if __name__ == '__main__': unittest.main()
