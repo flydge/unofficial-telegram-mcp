@@ -161,11 +161,16 @@ open from `connect` must be closed first with `cancel`.
 Installation, a started page or a launch is never Ready; only `ready` followed by a compatible
 `_manifest` is. The preserved default session lives under
 `~/Library/Application Support/TelegramSearchMCP/tdlib` and is never overwritten, purged or
-revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`. The
-owner turns more on in Terminal with the installed launcher's `capabilities enable <profile>` (`readers`,
-`send`, `replies`, `forward`, `video`, `archive_edit`; `show` lists them, `disable` turns one off). It
-checks for pending sends, changes only the policy's capability line and restarts the installed broker; then
-reconnect the MCP client (docs/install.md, "Enabling more capabilities"). Never edit the policy yourself.
+revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`. Only the
+owner turns more on, in their own Terminal, with the installed launcher's `capabilities enable <profile>`
+(`readers`, `send`, `replies`, `forward`, `video`, `archive_edit`; `show` lists them, `disable` turns one
+off; docs/install.md, "Enabling more capabilities"). Never run it yourself, even with a shell, and never
+present it as a step in the middle of a session: it refuses (`pending_send_unresolved`) while any MCP client
+context is active, up to 300 s after the last Telegram call. Tell the owner to quit or disconnect every MCP
+client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
+`policy_unsupported` change nothing: stop and report the code. `status: changed` with `broker:
+restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the policy
+yourself.
 There is no account
 alias or profile registry, cloud auth or model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or

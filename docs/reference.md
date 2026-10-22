@@ -648,7 +648,7 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
 | `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
 | `rollback_unavailable` | There is no previous release to return to. |
-| `rollback_refused` | Newer session state exists, or the previous release no longer matches its record. |
+| `rollback_refused` | Newer session state exists (a `runtime.toml` change beyond the version and `enabled_capabilities` lines, or a changed enrollment), or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
@@ -686,13 +686,16 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 ### Capability profiles
 
 Since the 0.54 candidate the owner switches capabilities in named profiles with the installed launcher's
-`capabilities show | enable <profile> | disable <profile>` (see [installation](install.md#enabling-more-capabilities-candidate)):
+`capabilities show | enable <profile> | disable <profile>`, in Terminal, with every MCP client quit or
+disconnected (see [installation](install.md#enabling-more-capabilities-candidate)):
 `readers`, `send`, `replies`, `forward`, `video` and `archive_edit`. Every optional capability belongs to
 exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`
 or `archive_edit` also enables `send`, and disabling `send` disables them. `_manifest` reports the table under
-`capability_profiles` (`profiles`, `dependencies`), and a `capability_disabled` guard refusal names the
-profile that unlocks the missing capabilities. Profiles grant nothing by themselves: the broker still
-enforces the policy file it loaded.
+`capability_profiles` (`profiles`, `dependencies`; the table only, never the switch command), and a
+`capability_disabled` guard refusal names the profile that unlocks the missing capabilities. A typed
+`capability_disabled` result (the reply tools) carries only `missing_capabilities`; the profile is the one
+`capability_profiles.profiles` lists them under. Profiles grant nothing by themselves: the broker still
+enforces the policy file it loaded, and no tool switches a profile.
 
 ### Tool titles, descriptions and annotations
 

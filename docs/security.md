@@ -2088,7 +2088,9 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   (`downgrade_refused`); an unparsable version refuses the same way. Going back is only `rollback`.
 - **Rollback only to unchanged state.** It refuses (`rollback_refused`) unless `enrollment.json` is
   byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
-  in the version line, and the previous release's manifest and Codex ownership still match.
+  in the version line and the `enabled_capabilities` line (the one line the owner's profile switch
+  writes; known capabilities only, compared through a digest of the file with that line masked, which the
+  upgrade records), and the previous release's manifest and Codex ownership still match.
 - **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
   plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.

@@ -190,7 +190,8 @@ a `0700` directory) with `expected_package_version` set to the running package v
 (`"0.54.0.dev0"` for this candidate),
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: sending, forwarding,
 video, archive and edit, and every extended reader are off. Since the 0.54 candidate the installed launcher
-switches whole **capability profiles** in Terminal:
+switches whole **capability profiles**. Only you, the owner, run the switch, in your own Terminal; an
+assistant never runs it for you, even when it has a shell. `show` changes nothing:
 
 ```bash
 "$HOME/Library/Application Support/TelegramSearch/releases/<pin>/python/bin/python3" -I -S -B \
@@ -198,7 +199,10 @@ switches whole **capability profiles** in Terminal:
 ```
 
 The same command with `capabilities enable <profile>` or `capabilities disable <profile>` changes one
-profile (the `releases/<pin>` directory is the one `current.json` names):
+profile (the `releases/<pin>` directory is the one `current.json` names). A switch is never a step in the
+middle of an assistant session: it refuses while any MCP client context is active, so first quit or
+disconnect every MCP client that used Telegram (or leave the Telegram tools unused for five minutes), run
+the switch, then reconnect the clients:
 
 | Profile | Capabilities | Also enables |
 | --- | --- | --- |
@@ -211,18 +215,30 @@ profile (the `releases/<pin>` directory is the one `current.json` names):
 
 Disabling `send` also disables `replies`, `forward`, `video` and `archive_edit`; the base `read` and
 `artifacts` are not a profile and stay. The action changes only the `enabled_capabilities` line (every other
-byte, pins and comments included, stays) through a validated atomic replace, and only after the running
-broker reports no pending send (`pending_send_unresolved` otherwise, with nothing changed). Then it restarts
-the installed broker with `launchctl kickstart -k` when it is loaded and its definition is exactly the
-installed release's (`service_conflict` otherwise). A file changed meanwhile refuses with
-`policy_conflict`; a multi-line or missing `enabled_capabilities` line, or any other unsafe policy, with
-`policy_unsupported`. If the restart fails after the write (`service_restart_failed`), restart it yourself:
+byte, pins and comments included, stays) through a validated atomic replace. Every refusal comes before
+that write and changes nothing:
 
-```bash
-launchctl kickstart -k gui/$(id -u)/com.<home-directory-name>.telegram-search-mcp.broker
-```
+- `service_conflict`: the broker LaunchAgent is loaded, or its plist is written, with a definition that is
+  not exactly the installed release's (for example after running the launcher of a release `current.json`
+  does not name). Run the launcher of the current release.
+- `pending_send_unresolved`: the running broker reports an active client context. Any MCP client that
+  called a Telegram tool in the last 300 seconds holds one, whether or not a send is pending; a broker that
+  cannot answer refuses the same way. Quit or disconnect the MCP clients (or wait five minutes) and run it
+  again.
+- `policy_conflict`: the file changed meanwhile. `policy_unsupported`: a multi-line or missing
+  `enabled_capabilities` line, or a policy the loader refuses (unknown keys included), or an unsafe file.
 
-`<home-directory-name>` is the last component of your home directory. Editing the file by hand with the
+After the write it restarts the installed broker with `launchctl kickstart -k` when it is loaded. The
+result is `status: changed` with `broker` `restarted` or `not_running`, and `clients: reconnect`. If the
+restart fails after the write, the result is still `status: changed`, with `broker: restart_failed` and
+the manual `restart_command` (an argv list, such as
+`["/bin/launchctl", "kickstart", "-k", "gui/<uid>/com.<home-directory-name>.telegram-search-mcp.broker"]`):
+run it yourself. Running the switch again then reports `unchanged`, because the policy already has the
+new line. A switch, or a switch back, never blocks a later [rollback](#rollback): a rollback accepts a
+`runtime.toml` that differs from its state at the upgrade only in the `enabled_capabilities` line (besides
+the version line it rewrites), and keeps that line.
+
+Editing the file by hand with the
 [capability table below](#published-051-choose-capabilities) still works; keep the pins as written. Running
 components report `config_stale` until restarted. Restarting the broker clears in-memory drafts, uploads,
 cursors and selections, so reconnect the MCP client afterwards (Claude Code: `/mcp`; Codex: restart it).
@@ -776,8 +792,11 @@ upgrades again.
 
 It refuses as `rollback_unavailable` when there is no previous release, and as `rollback_refused` when
 newer state exists: `enrollment.json` differs from its state when the upgrade began (for example after
-a new `connect` enrollment), `runtime.toml` differs from its earlier bytes in more than the version line,
-or the previous release's manifest or Codex ownership no longer matches. A rollback does not undo a
+a new `connect` enrollment), `runtime.toml` differs from its earlier bytes in more than the version line
+and the `enabled_capabilities` line (a [profile switch](#enabling-more-capabilities-candidate) is kept; a
+new key such as `selection_ttl_seconds` refuses, because an older release may reject it), or the previous
+release's manifest or Codex ownership no longer matches. Upgrades recorded before this rule keep the
+whole-file comparison. A rollback does not undo a
 send, move or edit that already happened. Going back to a 0.51 install is a manual procedure; see
 [rollback](security.md#rollback).
 
