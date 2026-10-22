@@ -13,8 +13,9 @@ from telegram_search_mcp.server import build_server
 
 CONNECT_DEFAULT = RuntimePolicy(enabled_capabilities=('read', 'artifacts'))
 SENTINEL = 'GUARD_INPUT_SENTINEL_5c1e'
-OWNER = ' (owner must enable in runtime.toml)'
-STALE = 'config_stale (restart matching components)'
+# Each text ends with the fixed next_action suffix from the closed recovery map (0.54).
+OWNER = ' (owner must enable in runtime.toml); next_action: enable_capability'
+STALE = 'config_stale (restart matching components); next_action: update_installation'
 
 
 class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +110,11 @@ class GuardRefusalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.is_error)
                 self.assertEqual(result.structured_content,
                                  {'result': {'status': 'unavailable', 'detail': 'local upload is unavailable'}})
+
+    def test_suffixes_come_from_the_closed_recovery_map(self):
+        from telegram_search_mcp.next_actions import NEXT_ACTIONS
+        self.assertTrue(OWNER.endswith('; next_action: ' + NEXT_ACTIONS['capability_disabled']))
+        self.assertTrue(STALE.endswith('; next_action: ' + NEXT_ACTIONS['config_stale']))
 
     def test_reason_names_come_from_the_closed_capability_set(self):
         self.assertLessEqual(set(OPERATION_CAPABILITIES.values()) | {'send', 'retained_selections'}, KNOWN_CAPABILITIES)

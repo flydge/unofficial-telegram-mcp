@@ -102,17 +102,40 @@ Every operation performs a fresh handshake on its own owner-authenticated Unix c
 
 In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broker or Telegram contact, is an MCP tool error (`isError`, no structured content) with one fixed text item, one of:
 
-- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml)`
-- `Error executing tool <tool>: config_stale (restart matching components)`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
+- `Error executing tool <tool>: capability_disabled: <capabilities> (owner must enable in runtime.toml); next_action: enable_capability`
+- `Error executing tool <tool>: config_stale (restart matching components); next_action: update_installation`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then recheck _manifest)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml)`. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner must enable in runtime.toml); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
 Since the 0.54 candidate, arguments that do not match a tool's input schema get one fixed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`):
 
 - `Error executing tool <tool>: invalid_arguments (arguments must match the input schema)`
 
 It never contains field paths, caller-chosen keys, values, pydantic text or documentation URLs. A call naming an unregistered tool gets `unknown_tool (refresh tools/list)` without the name. Argument validation runs before the guard, so invalid arguments to a disabled tool report `invalid_arguments`. Any other exception raised inside a tool body still reaches the client as the bare `Error executing tool <tool>`.
+
+### Recovery hints (`next_action`)
+
+Since the 0.54 candidate the responses users hit most carry an optional `next_action` from one closed map
+(`next_actions.NEXT_ACTIONS`). A response never chooses it: it is derived from the response's own closed
+`status`, or, when the status names no condition, its closed `stop_reason`, and a value that contradicts
+them fails validation. It is omitted when no condition applies, so every other response is unchanged.
+
+| `next_action` | condition | where |
+| --- | --- | --- |
+| `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
+| `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
+| `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
+| `enable_capability` | `capability_disabled` | the guard text |
+| `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
+| `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
+| `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
+
+Older tools that report a lost broker as a plain `error` with free-text detail carry no hint, because
+their status alone does not name the condition; `_manifest(check_broker=true)` reports it. The `expired`
+status of attachment pages, spreadsheets, presentations and drafts means the artifact or draft lapsed,
+not a cursor, and carries no hint. Adding the field changed the output schema of every tool that can
+return one of these statuses.
 
 ## Codex skill
 

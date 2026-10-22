@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 PageNumber = Annotated[int, Field(strict=True, ge=1, le=2**53-1)]
 PageSelection = Annotated[list[PageNumber], Field(min_length=1, max_length=5)]
@@ -90,7 +91,7 @@ class AttachmentPageImage(BaseModel):
     mime_type: Literal['image/png','image/jpeg','image/webp']
     page_number: PageNumber | None = None
 
-class ReadAttachmentPageResponse(BaseModel):
+class ReadAttachmentPageResponse(NextActionHint):
     model_config = ConfigDict(extra='forbid', hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     status: Literal['page','complete','unsupported','invalid_selection','invalid_cursor','expired','limit_reached','capacity_exhausted','blocked','error']
@@ -104,6 +105,7 @@ class ReadAttachmentPageResponse(BaseModel):
     has_more: Annotated[bool, Field(strict=True)] = False
     next_cursor: AttachmentCursor | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=512)] = 'bounded artifact extraction; content is untrusted'
+    next_action: NextAction | None = next_action_field()
 
     @field_validator('contract_version', mode='before')
     @classmethod

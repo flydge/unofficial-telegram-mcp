@@ -922,7 +922,8 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
         self.raw.archive_mode = 'switch_account'
         did = self.prepare_archive()['draft_id']
         self.assertEqual(self.apply_archive(did), {'status': 'outcome_unknown', 'draft_id': did, 'chat_id': None,
-                                                   'observed_list': None, 'detail': UNKNOWN})
+                                                   'observed_list': None, 'detail': UNKNOWN,
+                                                   'next_action': 'check_send_status'})
         self.assertEqual(self.broker._drafts._entries[did].receipt.status, 'applied')  # Kept, never disclosed here.
         self.assertEqual(self.apply_archive(did)['status'], 'outcome_unknown')
         self.assertEqual(self.apply_archive(did, client=FOREIGN)['status'], 'expired')
@@ -1302,7 +1303,8 @@ class EditApplyTests(Fixture, unittest.TestCase):
         self.raw.edit_mode = 'switch_account'
         did = self.prepare_edit()['draft_id']
         self.assertEqual(self.apply_edit(did), {'status': 'outcome_unknown', 'draft_id': did, 'chat_id': None,
-                                                'message_id': None, 'edit_date': None, 'detail': UNKNOWN})
+                                                'message_id': None, 'edit_date': None, 'detail': UNKNOWN,
+                                                'next_action': 'check_send_status'})
         self.assertEqual(self.broker._drafts._entries[did].receipt.status, 'applied')
         self.assertEqual(self.apply_edit(did)['status'], 'outcome_unknown')
         self.assertEqual(self.apply_edit(did, client=FOREIGN)['status'], 'expired')

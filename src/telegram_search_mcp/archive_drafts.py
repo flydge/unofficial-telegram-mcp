@@ -12,6 +12,7 @@ from .forward_drafts import _Frozen, _utc
 from .reply_drafts import digest
 from .sanitize import sanitize_telegram_text
 from .schemas import ChatId
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 PREPARED = 'immutable archive draft prepared; inspect full evidence and obtain fresh approval'
 ALREADY = 'chat is already in the target list; no draft was created'
@@ -229,12 +230,13 @@ class ApplyPreparedArchiveRequest(_Closed):
     approved: StrictBool
 
 
-class ApplyPreparedArchiveResponse(_Closed):
+class ApplyPreparedArchiveResponse(NextActionHint, _Closed):
     status: ApplyStatus
     draft_id: DraftId
     chat_id: ChatId | None = None
     observed_list: ChatList | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=200)]
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def exact(self):

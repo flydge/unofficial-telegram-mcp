@@ -617,7 +617,8 @@ class OwnershipTests(unittest.TestCase):
                 self.assertEqual(entry.owner.account_id, 17)
                 # An issued attempt never reads as expired and discloses no provider evidence.
                 unknown = {'status': 'outcome_unknown', 'draft_id': prepared['draft_id'], 'recipient': None,
-                           'message_id': None, 'detail': 'current receipt authority is unavailable; do not retry automatically'}
+                           'message_id': None, 'detail': 'current receipt authority is unavailable; do not retry automatically',
+                           'next_action': 'check_send_status'}
                 self.assertEqual(results[0], unknown)
                 self.provider.account = 17
                 self.assertEqual(self.dispatch('get_send_status', {'draft_id': prepared['draft_id']})['status'], 'outcome_unknown')

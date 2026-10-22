@@ -14,6 +14,7 @@ from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, digest
 from .sanitize import sanitize_telegram_text
 from .schemas import ArtifactId, ChatId
 from .video_probe import MAX_ASPECT, MAX_FILE_BYTES, MAX_SECONDS, MAX_SIDE, MIN_SIDE, VideoFacts
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 PREPARED = 'immutable video draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'artifact is not an eligible native video; no draft was created'
@@ -202,12 +203,13 @@ class SendPreparedVideoRequest(_Closed):
     approved: StrictBool
 
 
-class SendPreparedVideoResponse(_Closed):
+class SendPreparedVideoResponse(NextActionHint, _Closed):
     status: SendStatus
     draft_id: DraftId
     recipient: ChatId | None = None
     message_id: Annotated[int, Field(strict=True, gt=0, lt=2**53)] | None = None
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=200)]
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def exact(self):

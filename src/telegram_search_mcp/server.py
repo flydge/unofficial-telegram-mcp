@@ -34,6 +34,7 @@ from .config import BROKER_SOCKET_PATH, RuntimePolicy, load_runtime_policy, Conf
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        required_capabilities)
+from .next_actions import NEXT_ACTIONS, guard_suffix
 from .attachment_page_models import (ReadAttachmentPageRequest, ReadAttachmentPageResponse,
     PageSelection, AttachmentCursor)
 from .spreadsheet_models import (ReadSpreadsheetRequest, ReadSpreadsheetResponse,
@@ -751,12 +752,15 @@ _TRANSFER = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempoten
 _OVERWRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 # SDK 2.2.0 masks every exception except ToolError as "Error executing tool <name>".
 # Guard refusals are anticipated, so they carry this fixed text: the code and, for
-# capability_disabled, only the missing names from the closed capability set.
+# capability_disabled, only the missing names from the closed capability set, then the
+# fixed next_action suffix of the closed recovery map where one applies.
 _GUARD_REFUSALS = {
-    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)",
+    "capability_disabled": "capability_disabled: {} (owner must enable in runtime.toml)" + guard_suffix("capability_disabled"),
     "client_schema_mismatch": "client_schema_mismatch (refresh tools/list, then recheck _manifest)",
-    "config_stale": "config_stale (restart matching components)",
+    "config_stale": "config_stale (restart matching components)" + guard_suffix("config_stale"),
 }
+# _manifest compatibility codes that name a recovery step.
+_MANIFEST_NEXT_ACTIONS = {code: NEXT_ACTIONS[code] for code in ("broker_unavailable", "config_stale")}
 
 
 def _validate_raw_search_arguments(arguments: dict[str, object]) -> None:
@@ -895,6 +899,8 @@ def build_server(
             descriptor = {"package_version": __version__, "contract_version": CONTRACT_VERSION,
                           "schema_fingerprint": schema_fingerprint(), "enabled_capabilities": []}
             compatibility = {"status": error.code, "broker": None, "detail": "trusted runtime policy is stale"}
+        if compatibility["status"] in _MANIFEST_NEXT_ACTIONS:
+            compatibility = {**compatibility, "next_action": _MANIFEST_NEXT_ACTIONS[compatibility["status"]]}
         return {
             **descriptor,
             "broker_generation": (compatibility.get("broker") or {}).get("broker_generation"),

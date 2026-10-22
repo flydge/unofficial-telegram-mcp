@@ -7,10 +7,12 @@ from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entit
 
 import unicodedata
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator, model_serializer
 
+from .next_actions import NextAction, NextActionHint, next_action_field
 from .sanitize import render_evidence, safe_telegram_link
 from .boolean_query import normalize_search_text, boolean_matches, boolean_seeds
 
@@ -158,7 +160,7 @@ class TargetDiscoveryCoverage(BaseModel):
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=1024)]
 
 
-class TargetResolutionResponse(BaseModel):
+class TargetResolutionResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     status: ResolutionStatus
@@ -166,6 +168,7 @@ class TargetResolutionResponse(BaseModel):
     match_kind: MatchKind | None = None
     candidates: list[TargetCandidate] = Field(default_factory=list, max_length=5)
     coverage: TargetDiscoveryCoverage
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def validate_resolution(self) -> "TargetResolutionResponse":
@@ -288,7 +291,7 @@ class AttachmentRequest(SelectedInput):
     selection_id: SelectionId | None = None
 
 
-class AttachmentResponse(BaseModel):
+class AttachmentResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     status: Literal["complete", "too_large", "unsupported", "not_found", "blocked", "error", "limit_reached"]
@@ -303,6 +306,7 @@ class AttachmentResponse(BaseModel):
     expires_at: datetime | None = None
     coverage: Literal["complete", "none"] = "none"
     detail: str
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def validate_complete(self) -> "AttachmentResponse":
@@ -468,7 +472,7 @@ class PrepareArtifactSendRequest(SelectedInput):
     kind: Literal["document", "photo", "voice_note"] = "document"
 
 
-class PrepareArtifactSendResponse(BaseModel):
+class PrepareArtifactSendResponse(NextActionHint):
     status: Literal["prepared", "blocked", "error"]
     draft_id: str | None = None
     recipient: int | None = None
@@ -487,6 +491,7 @@ class PrepareArtifactSendResponse(BaseModel):
     expires_at: datetime | None = None
     approval_required: bool = True
     detail: str
+    next_action: NextAction | None = next_action_field()
 
 
 class SendPreparedArtifactRequest(BaseModel):
@@ -495,13 +500,14 @@ class SendPreparedArtifactRequest(BaseModel):
     approved: Annotated[bool, Field(strict=True)]
 
 
-class SendPreparedArtifactResponse(BaseModel):
+class SendPreparedArtifactResponse(NextActionHint):
     status: Literal["sent", "failed", "outcome_unknown", "declined", "timeout", "dialog_unavailable", "expired",
                     "recipient_changed", "error"]
     draft_id: str | None = None
     recipient: int | None = None
     message_id: int | None = None
     detail: str
+    next_action: NextAction | None = next_action_field()
 
 
 class PrepareTextSendRequest(BaseModel):
@@ -526,7 +532,7 @@ class PrepareTextSendRequest(BaseModel):
         return value
 
 
-class PrepareTextSendResponse(BaseModel):
+class PrepareTextSendResponse(NextActionHint):
     status: Literal["prepared", "blocked", "error"]
     draft_id: str | None = None
     recipient: int | None = None
@@ -540,6 +546,7 @@ class PrepareTextSendResponse(BaseModel):
     topic: TopicSnapshot | None = None
     preview_sha256: Annotated[str, Field(strict=True, pattern=r'^[0-9a-f]{64}$')] | None = None
     outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+    next_action: NextAction | None = next_action_field()
 
     @model_serializer(mode='wrap')
     def omit_empty_entities(self, handler):
@@ -805,7 +812,7 @@ class DiscoveryCoverage(BaseModel):
         return self
 
 
-class TargetDiscoveryResponse(BaseModel):
+class TargetDiscoveryResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     status: DiscoveryStatus
@@ -814,6 +821,9 @@ class TargetDiscoveryResponse(BaseModel):
     )
     coverage: DiscoveryCoverage
     next_cursor: DiscoveryCursor | None = None
+    next_action: NextAction | None = next_action_field()
+    # Discovery's own `expired` is a lapsed continuation cursor.
+    EXTRA_NEXT_ACTION_STATUSES = MappingProxyType({"expired": "cursor_invalid_or_expired"})
 
     @model_validator(mode="after")
     def validate_response(self) -> "TargetDiscoveryResponse":
@@ -884,7 +894,7 @@ class MessageContextRequest(SelectedInput):
     radius: Annotated[int, Field(strict=True, ge=0, le=4)] = 2
 
 
-class MessageContextResponse(BaseModel):
+class MessageContextResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     status: Literal["complete", "partial", "not_found", "blocked", "error"]
@@ -892,6 +902,7 @@ class MessageContextResponse(BaseModel):
     messages: Annotated[list[ContextEvidence], Field(max_length=9)] = Field(default_factory=list)
     coverage_complete: bool
     detail: str
+    next_action: NextAction | None = next_action_field()
 
 
 class SearchMatch(BaseModel):
@@ -907,12 +918,13 @@ class SearchMatch(BaseModel):
     source: SourceEvidence
 
 
-class SearchResponse(BaseModel):
+class SearchResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["matches", "no_match", "incomplete", "blocked", "error"]
     coverage: Coverage
     matches: list[SearchMatch]
+    next_action: NextAction | None = next_action_field()
 
 
 class SelectedMessageAnchor(EvidenceAnchor):
@@ -1016,12 +1028,20 @@ class MessageReadResult(BaseModel):
         return self
 
 
-class ReadMessagesResponse(BaseModel):
+class ReadMessagesResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     status: Literal["complete", "partial", "blocked", "error"]
     coverage_complete: bool
     results: Annotated[list[MessageReadResult], Field(min_length=1, max_length=20)]
+    next_action: NextAction | None = next_action_field()
+
+    def next_action_condition(self) -> str | None:
+        # The proxy reports a lost broker as an error carrying only that issue on every anchor.
+        results = getattr(self, "results", None)
+        if self.status == "error" and results and all(r.issues == ["broker_unavailable"] for r in results):
+            return "broker_unavailable"
+        return super().next_action_condition()
 
     @model_validator(mode="after")
     def consistent_coverage(self) -> "ReadMessagesResponse":
@@ -1048,7 +1068,7 @@ ReplyStopReason = Literal[
 ]
 
 
-class ReadReplyChainResponse(BaseModel):
+class ReadReplyChainResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     anchor: SelectedMessageAnchor
@@ -1059,6 +1079,7 @@ class ReadReplyChainResponse(BaseModel):
     coverage_complete: Annotated[bool, Field(strict=True)] = False
     stop_reason: ReplyStopReason
     provider_coverage: Literal["tdlib_observed"] = "tdlib_observed"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def consistent_chain(self) -> "ReadReplyChainResponse":
@@ -1171,7 +1192,7 @@ HistoryStopReason = Literal[
 ]
 
 
-class ReadHistoryResponse(BaseModel):
+class ReadHistoryResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     status: Literal["page", "partial", "limit_reached", "invalid_cursor", "capacity_exhausted", "blocked", "error"]
@@ -1184,6 +1205,7 @@ class ReadHistoryResponse(BaseModel):
     stop_reason: HistoryStopReason
     scanned_candidates: Annotated[int, Field(strict=True, ge=0, le=1000)] = 0
     provider_coverage: Literal["tdlib_observed_unverified"] = "tdlib_observed_unverified"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def consistent_history(self) -> "ReadHistoryResponse":
@@ -1292,7 +1314,7 @@ TopicStopReason = Literal[
 ]
 
 
-class ListTopicsResponse(BaseModel):
+class ListTopicsResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     status: Literal["page", "partial", "limit_reached", "invalid_cursor", "capacity_exhausted", "unsupported", "blocked", "error"]
@@ -1306,6 +1328,7 @@ class ListTopicsResponse(BaseModel):
     scanned_candidates: Annotated[int, Field(strict=True, ge=0, le=200)] = 0
     provider_pages: Annotated[int, Field(strict=True, ge=0, le=10)] = 0
     provider_coverage: Literal["tdlib_observed_unverified"] = "tdlib_observed_unverified"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def consistent_topics(self) -> "ListTopicsResponse":
@@ -1377,7 +1400,7 @@ TopicHistoryStopReason = Literal[
 ]
 
 
-class ReadTopicHistoryResponse(BaseModel):
+class ReadTopicHistoryResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Literal[1] = 1
     status: Literal["page", "partial", "limit_reached", "invalid_cursor", "capacity_exhausted", "unsupported", "blocked", "error"]
@@ -1393,6 +1416,7 @@ class ReadTopicHistoryResponse(BaseModel):
     processed_candidates: Annotated[int, Field(strict=True, ge=0, le=200)] = 0
     provider_pages: Annotated[int, Field(strict=True, ge=0, le=10)] = 0
     provider_coverage: Literal["tdlib_observed_unverified"] = "tdlib_observed_unverified"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def consistent_topic_history(self) -> "ReadTopicHistoryResponse":
@@ -1593,7 +1617,7 @@ class SearchBranchCoverage(BaseModel):
         return self
 
 
-class SearchMessagesResponse(BaseModel):
+class SearchMessagesResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Annotated[int, Field(strict=True, ge=1, le=1, json_schema_extra={"const": 1})] = 1
     status: Literal["page", "partial", "limit_reached", "invalid_cursor", "capacity_exhausted", "unsupported", "blocked", "error"]
@@ -1609,6 +1633,7 @@ class SearchMessagesResponse(BaseModel):
     provider_pages: Annotated[int, Field(strict=True, ge=0, le=10)] = 0
     provider_coverage: Literal["tdlib_lexical_unverified"] = "tdlib_lexical_unverified"
     branch_coverage: Annotated[list[SearchBranchCoverage], Field(max_length=4)] = Field(default_factory=list)
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def consistent_search(self) -> "SearchMessagesResponse":
@@ -1770,7 +1795,7 @@ ChatListStopReason = Literal["page_limit", "prefix_exhausted_unverified", "inval
     "capacity_exhausted", "broker_unavailable"]
 
 
-class ListChatsResponse(BaseModel):
+class ListChatsResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Annotated[int, Field(strict=True, ge=1, le=1, json_schema_extra={"const": 1})] = 1
     status: Literal["page", "prefix_exhausted_unverified", "partial", "error", "blocked", "invalid_cursor", "capacity_exhausted"]
@@ -1793,6 +1818,7 @@ class ListChatsResponse(BaseModel):
     stop_reason: ChatListStopReason
     provider_coverage: Literal["bounded_tdlib_prefix_observation"] = "bounded_tdlib_prefix_observation"
     metadata_freshness: Literal["tdlib_local_state_observation"] = "tdlib_local_state_observation"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def bounded_chat_listing(self) -> "ListChatsResponse":
@@ -1943,7 +1969,7 @@ class SelectedChatCoverage(BaseModel):
         return self
 
 
-class SearchChatsResponse(BaseModel):
+class SearchChatsResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Annotated[int, Field(strict=True, ge=1, le=1, json_schema_extra={"const": 1})] = 1
     status: SelectedSearchStatus
@@ -1957,6 +1983,7 @@ class SearchChatsResponse(BaseModel):
     next_cursor: SelectedSearchCursor | None = None
     stop_reason: SelectedSearchStopReason
     provider_coverage: Literal["tdlib_lexical_unverified"] = "tdlib_lexical_unverified"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def bounded_selected_evidence(self) -> "SearchChatsResponse":
@@ -2096,7 +2123,7 @@ class VerifiedTargetMetadata(BaseModel):
     untrusted: Annotated[Literal[True], BeforeValidator(_target_untrusted)] = True
 
 
-class VerifyTargetResponse(BaseModel):
+class VerifyTargetResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Annotated[Literal[1], BeforeValidator(_target_contract_version)] = 1
     status: Literal["verified", "invalid_target", "invalid_handle", "capacity", "blocked", "error"]
@@ -2104,6 +2131,7 @@ class VerifyTargetResponse(BaseModel):
     target: VerifiedTargetMetadata | None = None
     expires_at: SearchDateTime | None = None
     identity_semantics: Literal["fresh_observed_identity_not_atomic_snapshot"] = "fresh_observed_identity_not_atomic_snapshot"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def identity_envelope(self) -> "VerifyTargetResponse":
@@ -2118,7 +2146,7 @@ class VerifyTargetResponse(BaseModel):
         return self
 
 
-class ReadTargetMessagesResponse(BaseModel):
+class ReadTargetMessagesResponse(NextActionHint):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     contract_version: Annotated[Literal[1], BeforeValidator(_target_contract_version)] = 1
     status: Literal["complete", "partial", "invalid_handle", "capacity", "blocked", "error"]
@@ -2127,6 +2155,7 @@ class ReadTargetMessagesResponse(BaseModel):
     expires_at: SearchDateTime | None = None
     messages: Annotated[ReadMessagesResponse | None, BeforeValidator(_strict_target_messages)] = None
     identity_semantics: Literal["fresh_observed_identity_not_atomic_snapshot"] = "fresh_observed_identity_not_atomic_snapshot"
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode="after")
     def bounded_identity_read(self) -> "ReadTargetMessagesResponse":

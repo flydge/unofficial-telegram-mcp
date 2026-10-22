@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .selection_refs import SelectedInput, SelectionId
 from .schemas import ArtifactId, SelectedMessageAnchor
+from .next_actions import NextAction, NextActionHint, next_action_field
 
 SlideIndex = Annotated[int, Field(strict=True, ge=1, le=128)]
 SlideSelection = Annotated[list[SlideIndex], Field(min_length=1, max_length=5)]
@@ -114,7 +115,7 @@ class PresentationScope(_StrictModel):
         return self
 
 
-class ReadPresentationResponse(_StrictModel):
+class ReadPresentationResponse(NextActionHint, _StrictModel):
     contract_version: Literal[1] = 1
     status: Literal['catalog', 'complete', 'unsupported', 'invalid_selection', 'expired', 'limit_reached', 'capacity_exhausted', 'blocked', 'error']
     scope: PresentationScope | None = None
@@ -122,6 +123,7 @@ class ReadPresentationResponse(_StrictModel):
     selection_complete: StrictBoolean = False
     full_content_complete: Literal[False] = False
     detail: Annotated[str, Field(strict=True, min_length=1, max_length=512)] = PRESENTATION_DETAIL
+    next_action: NextAction | None = next_action_field()
 
     @field_validator('contract_version', mode='before')
     @classmethod
