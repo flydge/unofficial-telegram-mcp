@@ -90,7 +90,10 @@ tree, index, receipt, pointer, transaction journal and home binding, and only th
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
 state cannot stop the installed runtime from starting; a repeat install verifies the Codex
-registration and the `~/.agents/skills` copies and refuses drift there.
+registration and refuses drift there. It verifies the `~/.agents/skills` copies only until its
+`receipt.json` is written: from then on the receipt records the copies the install wrote, and a copy you
+edit, replace or remove afterwards is yours (`uninstall` reports an edited one `kept`) and never stops a
+repeat.
 
 Initialization first prepares a complete private sibling packet and one bounded
 adjacent `.TelegramSearch.install-intent.json` record before publishing the
@@ -625,7 +628,12 @@ that an interruption resumes by repeating the command:
    byte for byte, and our entry removed meanwhile is added back. Only our own Codex table or skill copy
    changed since the upgrade started (or right after the upgrade wrote it) stops it there
    (`target_conflict`, `skill_conflict`; see [a refusal after the broker stop](#a-refusal-after-the-broker-stop));
-   a changed Claude Code or Claude Desktop entry is left alone and reported `failed`.
+   a changed Claude Code or Claude Desktop entry is left alone and reported `failed`. Once `receipt.json`
+   names the new release (step 5), the skill copies are done: the receipt records the copies the upgrade
+   wrote, and a repeat neither writes nor checks them again, so a copy you edit, replace or remove after
+   that stays as you left it and never stops the repeat (`uninstall` reports an edited one `kept`; the next
+   upgrade refuses an edited one as `skill_conflict` before anything changes, and writes a removed one
+   again). After `current.json` switches, the same holds for our Codex table.
 4. Only the `expected_package_version` line of `runtime.toml` is rewritten, to the new version; every
    other byte, capabilities included, stays. A file that cannot be changed that way refuses as
    `policy_conflict`.
@@ -682,7 +690,8 @@ The upgrade is now parked, and two commands end it; `rollback` keeps refusing un
   skill copy is written again, also one the upgrade had already written; a skill copy the upgrade wrote
   and you edited in place counts as its own again once that same file holds exactly what the upgrade
   wrote, with the same mode; an editor that saves by replacing the file makes it another file, so remove
-  that copy instead), then repeat the same command:
+  that copy instead; once `receipt.json` names the new release a skill copy no longer stops the repeat, see
+  step 3), then repeat the same command:
   it passes the pending-send gate, stops the broker again and resumes. There is no limit on how often an
   upgrade may be refused and repeated. Every run before `current.json` switches decides the service from
   what launchd and the files hold, whatever an earlier run, a kill or a login left (a login loads the plist

@@ -1560,12 +1560,15 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                     update(single=('claude_skills',{'status':'installed' if present else 'skipped'}))
                 claude_skills_status=recorded('claude_skills').get('status')
                 if claude_skills_status not in CLAUDE_SKILLS:raise InstallError('transaction_conflict')
+                # Once receipt.json is the receipt this install published, the skill copies are done: it records them,
+                # and a copy the user edited, replaced or removed since stays as it is and never blocks the repeat.
+                published=_published_receipt(j,root)
                 for prefix,base in (('',skills),('claude-',claude_skills)):
                     for skill in manifest['skills']:
                         sid,expected=skill['id'],skill['sha256'];name=prefix+sid;target=base/sid
                         if not reached(name+'_pending'):update(name+'_pending')
                         # An external client directory the user may wipe: published once, never re-verified later.
-                        if prefix and (claude_skills_status=='skipped' or reached(name)):
+                        if published is not None or prefix and (claude_skills_status=='skipped' or reached(name)):
                             if not reached(name):update(name)
                             checkpoint(name);continue
                         if prefix:ensure_owned_private_directory(claude_skills,private_leaf=False)
@@ -1685,7 +1688,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                         _client_temporaries(j.value['publications'],home,config,plist,session_root)
                     names=['release','telegram-search','telegram-setup']
                     if claude_skills_status=='installed':names+=['claude-telegram-search','claude-telegram-setup']
-                    objects={name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names}
+                    objects=({name:published['publication_objects'][name] for name in names} if published is not None
+                             else {name:{k:v for k,v in proof(name).items() if k!='staged'} for name in names})
                     add=recorded('claude_desktop_add')
                     receipt={**identity,'schema_version':2,'registration_sha256':digest(ownership.to_bytes()),'skills':manifest['skills'],
                              'publication_objects':objects,'claude_code':claude_status,'claude_skills':claude_skills_status,
@@ -1988,7 +1992,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 j.advance('service_pending');service.stop(j);j.advance('service')
             checkpoint('service')
             # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`); until the commit
-            # every run writes it again if it was removed since.
+            # every run writes it again if it was removed since and checks it. After the commit it is done: a table
+            # the user changed or removed since stays as it is (`kept` by uninstall while changed), and the repeat
+            # finishes.
             if not j.reached('complete'):
                 j.advance('registration_pending')
                 ensure_owned_private_directory(codex,private_leaf=False)
@@ -1997,12 +2003,23 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                     return _codex_change(source,to_registration,ownership)
                 _codex_write(j,config,before,j['config_existed'],candidate,new_ownership.post_subtree_hash,replan,'target_conflict')
                 j.advance('registration')
-            _codex_check(config,to_registration,new_ownership,'target_conflict')
+                _codex_check(config,to_registration,new_ownership,'target_conflict')
             checkpoint('registration')
+            # Once receipt.json is the receipt this change published, the skill copies are done: it records them, and
+            # they are not written or checked again. One the user edited, replaced or removed since stays as it is
+            # (`kept` by uninstall while edited); the repeat finishes, and the next upgrade decides it as usual.
+            published=_published_receipt(j,root)
             objects={}
             to_skills={s['id']:s['sha256'] for s in to_manifest['skills']}
             for skill_name in SKILL_NAMES:
                 if skill_name not in names:
+                    j.advance(skill_name+'_pending');j.advance(skill_name);checkpoint(skill_name);continue
+                if published is not None:
+                    # The binding the published receipt records: the copy this change wrote, owned while it is that copy.
+                    bound=published['publication_objects'].get(skill_name)
+                    if type(bound) is not dict or type(bound.get('object')) is not dict or type(bound.get('child')) is not dict:
+                        raise InstallError('transaction_conflict')
+                    objects[skill_name]={'object':bound['object'],'child':bound['child']}
                     j.advance(skill_name+'_pending');j.advance(skill_name);checkpoint(skill_name);continue
                 base,sid=(claude_skills,skill_name[7:]) if skill_name.startswith('claude-') else (skills,skill_name)
                 path=base/sid;old=current['publication_objects'].get(skill_name);expected=to_skills[sid]
@@ -2141,6 +2158,18 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         if adopted:result['adopted']=sorted(adopted)
         _plugin_note(result,mode,home)
         return _result_extras(result,claude_status,desktop_status,to_command,to_arguments)
+
+
+def _published_receipt(j, root):
+    """The receipt value an attempt of this change's `receipt` step published, while receipt.json is still that
+    exact object; else None (not published yet, or changed by hand since, which the receipt step refuses)."""
+    path=root/'receipt.json'
+    for attempt in j.attempts('receipt'):
+        if type(attempt.get('object')) is dict and _bound(path,attempt['object']):
+            value=unique_json(read(path,mode=0o600))
+            if type(value.get('publication_objects')) is not dict:raise InstallError('transaction_conflict')
+            return value
+    return None
 
 
 def _exact(expected):

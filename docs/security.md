@@ -2132,7 +2132,11 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   one this transaction already wrote, is written again before the commit. A skill copy this transaction
   published, edited and then put back in place is its own again only while it is the very object an attempt
   published (the binding its journal records) and holds exactly the target's bytes; an edit that keeps the
-  binding but not the bytes still refuses (`skill_conflict`). Claude Code entries are
+  binding but not the bytes still refuses (`skill_conflict`). Once receipt.json is the receipt the
+  transaction published, its skill copies are done: the receipt records the ones it wrote, a repeat
+  neither writes nor checks them again, and a copy edited, replaced or removed after that is left as it
+  is (`kept` by uninstall while edited) instead of refusing for good; after an upgrade's or rollback's
+  commit the same holds for its Codex entry. Claude Code entries are
   written only by its CLI, which keeps its neighbours.
 - **Owned objects only.** Replacement and removal require the exact bytes or filesystem object the
   receipt or journal binds. The installation root itself is such an object: `uninstall` removes it whole,
