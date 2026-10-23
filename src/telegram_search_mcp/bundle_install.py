@@ -51,15 +51,17 @@ class InstallError(ValueError):
 
     `pending_action` (only with `transaction_pending`) names the unfinished change from PENDING_ACTIONS that must
     be retried first, and `pending_account` (only with an account action) the alias it is for, a closed token from
-    the transaction's own journal; anything else is dropped.
+    the transaction's own journal; `account` (only with `alias_broker_unreadable`, review fix 055d3) the alias whose
+    broker the owner boots out by hand; anything else is dropped.
     """
 
-    def __init__(self, *args, pending_action=None, pending_account=None):
+    def __init__(self, *args, pending_action=None, pending_account=None, account=None):
         super().__init__(*args)
         self.pending_action = (pending_action if args == ('transaction_pending',) and type(pending_action) is str
                                and pending_action in PENDING_ACTIONS else None)
         self.pending_account = (pending_account if self.pending_action in ACCOUNT_ACTIONS
                                 and named_alias(pending_account) else None)
+        self.account = account if args == ('alias_broker_unreadable',) and named_alias(account) else None
 
 
 def encoded(value):
@@ -979,7 +981,9 @@ class _Service:
 
     def gate(self, payload):
         python,app=_probe_python(payload)
-        if self.pending(self.home,python,app)!='none':raise InstallError('pending_send_unresolved')
+        answer=self.pending(self.home,python,app)
+        if self.alias is not None:_gate_answer(answer,self.alias)  # `unreadable` only for an alias (review fix 055d3).
+        elif answer!='none':raise InstallError('pending_send_unresolved')
 
     def _observed(self, j):
         observed=j.recorded(self.k('service'))
@@ -3650,7 +3654,7 @@ def _alias_broker(alias, home, target_root, from_root, runner, pending, root):
     known = {'from': _service_payload(from_root, jobs.broker_label, alias)} if from_root.exists() else {}
 
     def gate(home, python, app):
-        return pending(home, python, app, jobs.socket, jobs.policy)
+        return _alias_pending(pending, home, jobs, python, app, from_root)
     return _Service(jobs.broker_plist, jobs.broker_label, target, known=known, runner=runner, pending=gate, home=home,
                     alias=alias, root=root)
 
@@ -3805,6 +3809,27 @@ _ACCOUNT_PENDING_PROBE = ("import sys\nfrom pathlib import Path\nsys.path[:0]=[p
                           "finally:\n c.close()\n")
 
 
+# Run under the current release's interpreter when a loaded alias broker's own definition names an interpreter that no
+# longer exists (a release since removed; review fix 055d3, R4). The socket is reached from its own directory, so the
+# path budget never matters. No listener (refused, or the file gone) prints `stale`: nothing runs to hold a send. A
+# broker that answers is counted as `_ACCOUNT_PENDING_PROBE` counts it; one that cannot be read exits non-zero.
+_LEFTOVER_PROBE = ("import os,socket,sys\nfrom pathlib import Path\nsys.path[:0]=[p for p in sys.argv[1:2] if p]\n"
+                   "s=Path(sys.argv[2]);os.chdir(s.parent);n=Path(s.name)\n"
+                   "k=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\nk.settimeout(5)\ntry:\n k.connect(str(n))\n"
+                   "except (ConnectionRefusedError,FileNotFoundError):\n print('stale');raise SystemExit(0)\n"
+                   "finally:\n k.close()\n"
+                   "from telegram_search_mcp.config import load_runtime_policy\n"
+                   "from telegram_search_mcp.broker_client import BrokerClient\n"
+                   "c=BrokerClient(socket_path=n,policy=load_runtime_policy(Path(sys.argv[3])),\n"
+                   " request_timeout=5,restart_callback=lambda:None,retry_backoff_seconds=0)\ntry:\n h=c.health()\n"
+                   " a=h.get('active_clients');p=h.get('pending_sends')\n"
+                   " k=('in_flight','approval_dialogs','unreconciled_receipts')\n"
+                   " if (type(a) is not int or a<0 or type(p) is not dict or sorted(p)!=sorted(k)\n"
+                   "     or any(type(p[n]) is not int or p[n]<0 for n in k)):print('unknown')\n"
+                   " else:print('pending' if a or any(p[n] for n in k) else 'none')\n"
+                   "finally:\n c.close()\n")
+
+
 def _probe(home, python, app, script, *arguments, timeout):
     """The fixed token a probe printed, or None; bounded, no shell, explicit minimal environment."""
     try:
@@ -3827,11 +3852,19 @@ def default_account_check(home, python, app):
                                                                'unknown')
 
 
-def account_pending_sends(home, python, app, socket, policy):
+def account_pending_sends(home, python, app, socket, policy, *, current=None):
     """'none', 'pending' or 'unknown' for a named alias's running broker: sends in flight, open approval dialogs,
-    outcomes get_send_status could still settle and client contexts all count. No socket holds nothing."""
+    outcomes get_send_status could still settle and client contexts all count. No socket holds nothing.
+
+    `current` (the current release's (interpreter, app)) is asked when the broker's own interpreter `python` no longer
+    exists (review fix 055d3, R4: a loaded leftover definition naming a release since removed, which answered
+    `unknown` forever before): its live socket is probed under the current release (`_LEFTOVER_PROBE`). No listener
+    is a stale socket, `none`; a broker that answers is counted as above; one that cannot be read is 'unreadable'."""
     if not os.path.lexists(socket):
         return 'none'
+    if current is not None and python is not None and not os.path.lexists(python):
+        return {b'none\n': 'none', b'pending\n': 'pending', b'unknown\n': 'unknown', b'stale\n': 'none'}.get(
+            _probe(home, current[0], current[1], _LEFTOVER_PROBE, socket, policy, timeout=20), 'unreadable')
     return {b'none\n': 'none', b'pending\n': 'pending'}.get(
         _probe(home, python, app, _ACCOUNT_PENDING_PROBE, socket, policy, timeout=20), 'unknown')
 
@@ -4037,12 +4070,29 @@ class _LoginLocks:
             os.close(self.descriptors.pop())
 
 
-def _alias_gate(pending, home, jobs, payload):
-    """The pending-send gate of the alias's loaded broker, asked under the interpreter of the definition it runs
-    (`_probe_python`): anything but `none` refuses."""
-    python, app = _probe_python(payload)
-    if pending(home, python, app, jobs.socket, jobs.policy) != 'none':
+def _gate_answer(answer, alias):
+    """An alias broker's gate: `none` passes; `unreadable` (a leftover broker of a release since removed whose live
+    socket the current release cannot read, review fix 055d3) refuses `alias_broker_unreadable`, naming the alias so
+    the refusal can print the manual bootout of its exact label; anything else `pending_send_unresolved`."""
+    if answer == 'unreadable':
+        raise InstallError('alias_broker_unreadable', account=alias)
+    if answer != 'none':
         raise InstallError('pending_send_unresolved')
+
+
+def _alias_pending(pending, home, jobs, python, app, current):
+    """The alias's pending-send probe under the interpreter of the definition it runs, or, when that interpreter no
+    longer exists, its live socket under the current release (`current`: its root; review fix 055d3)."""
+    if python is not None and not os.path.lexists(python):
+        return pending(home, python, app, jobs.socket, jobs.policy,
+                       current=(current/'python/bin/python3', current/'app'))
+    return pending(home, python, app, jobs.socket, jobs.policy)
+
+
+def _alias_gate(pending, home, jobs, payload, current):
+    """The pending-send gate of the alias's loaded broker, asked under the interpreter of the definition it runs
+    (`_probe_python`; under the current release's when that one is gone): anything but `none` refuses."""
+    _gate_answer(_alias_pending(pending, home, jobs, *_probe_python(payload), current), jobs.alias)
 
 
 def _publish_accounts(j, root, data, records):
@@ -4164,7 +4214,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 # broker of another release of this installation is gated here, then rewritten by the step below.
                 _, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if loaded and running != target:
-                    _alias_gate(pending, home, jobs, running)
+                    _alias_gate(pending, home, jobs, running, installed)
                 source, existed = _config(config)
                 try:
                     change = merge_registration(source, registration, name=name)
@@ -4213,7 +4263,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 stale_plist = False  # This release's own definition, written with other bytes: it stays.
             if stale_loaded or stale_plist:
                 if stale_loaded:
-                    _alias_gate(pending, home, jobs, running)
+                    _alias_gate(pending, home, jobs, running, installed)
                 if j.recorded('service_rewrite') is None:
                     j.update(single=('service_rewrite', {'attempt': 1}))
                     checkpoint('recorded:service_rewrite')
@@ -4449,7 +4499,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     raise InstallError('claude_desktop_config_unsupported')
                 _, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if loaded:
-                    _alias_gate(pending, home, jobs, running)
+                    _alias_gate(pending, home, jobs, running, installed)
                 # A broker holding the alias's lock outside its launchd job is not ours to stop; nor a connect.lock this
                 # run could not hold (an alias the registry no longer admits) that a process holds.
                 if (not loaded and _alias_held(jobs, 'broker.lock')
@@ -4499,7 +4549,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 if data is None and not loaded:
                     return
                 if loaded:
-                    _alias_gate(pending, home, jobs, running)
+                    _alias_gate(pending, home, jobs, running, installed)
                 # Write-ahead, so a resume after the bootout or the unlink reports it removed, not absent.
                 if j.recorded('service_owned') is None:
                     j.update(single=('service_owned', {'attempt': 1}))

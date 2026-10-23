@@ -738,7 +738,7 @@ def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
     """`account-add` or `account-remove` of `alias` (0.55 spec 3D) with the fakes: the default broker's check answers
     `ready` and an alias broker holds no pending send. The socket budget is widened only for the long disposable
     base (the registry's own tests apply it)."""
-    probe = {'alias_pending': lambda *_: 'none'}
+    probe = {'alias_pending': lambda *_, **__: 'none'}
     if action == 'account_add':
         probe['default_check'] = lambda *_: 'ready'
     with mock.patch.object(account_registry, 'SOCKET_PATH_LIMIT', 4096), \
@@ -975,7 +975,7 @@ def _late_aliases_check(h, result):
     h.assertEqual((result['refused'], result['pending_action']), ('metadata_conflict', None))
     (h.runtime / 'receipt.json').write_bytes(h.receipt_bytes)
     h.target = h.runtime / 'releases' / h.new[3]
-    result = _newer(h, alias_pending=lambda *_: 'none')
+    result = _newer(h, alias_pending=lambda *_, **__: 'none')
     _aliases_check(h, result, 'upgraded', 'restarted')
     h.assertEqual(_aliases_on_one_release(h), [])
 
@@ -1075,19 +1075,19 @@ SCENARIOS = {
     # stop and plist, version line, entry and accounts.json record of each), a late refusal that restores every
     # broker, and the rollback below 0.55 that retires the registry and the default's readiness record.
     'upgrade_with_aliases': Scenario(_aliases_upgrade_prepare, lambda h, lc, cl: _newer(
-        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
+        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'),
         lambda h, result: _aliases_check(h, result, 'upgraded', 'restarted'), final=_aliases_on_one_release),
     'rollback_with_aliases': Scenario(_aliases_rollback_prepare, lambda h, lc, cl: h.change(
-        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
+        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'),
         lambda h, result: _aliases_check(h, result, 'rolled_back', 'restarted'), final=_aliases_on_one_release),
     'uninstall_with_aliases': Scenario(_aliases_uninstall_prepare, lambda h, lc, cl: h.change(
-        'uninstall', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _aliases_uninstall_check,
+        'uninstall', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'), _aliases_uninstall_check,
         write_ahead=False, final=_aliases_left),
     'late_refusal_with_aliases': Scenario(_late_aliases_prepare, lambda h, lc, cl: _refusal(h, lambda: _newer(
-        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none', checkpoint=_receipt_changed(h))),
+        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none', checkpoint=_receipt_changed(h))),
         _late_aliases_check, final=_late_aliases_final),
     'rollback_below_055_retires_the_registry': Scenario(_retire_prepare, lambda h, lc, cl: h.change(
-        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _retire_check, final=_retired),
+        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'), _retire_check, final=_retired),
 }
 
 

@@ -40,7 +40,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
     'service_restart_failed','downgrade_refused','uninstall_incomplete',
     'accounts_inconsistent','default_check_failed','account_remove_incomplete','accounts_present',
-    'release_not_current','login_in_progress',
+    'release_not_current','login_in_progress','alias_broker_unreadable',
     'alias_invalid','alias_exists','alias_unknown','alias_path_too_long','alias_name_too_long','registry_full',
     'registry_invalid','registry_unsafe','registry_busy'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
@@ -48,6 +48,16 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
 # A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only, and for an
 # account transaction its alias (`pending_account`, a closed token).
 PENDING_ACTIONS=('install','upgrade','rollback','uninstall','account-add','account-remove')
+# An `alias_broker_unreadable` refusal also names the alias (`account`, a closed token) and the owner's manual next
+# step: the bootout of that alias's exact broker label, a loaded leftover of a release since removed whose live socket
+# the current release cannot read (0.55 review fix 055d3).
+UNREADABLE_ACTION='boot_out_alias_broker_then_retry'
+
+
+def bootout_command(alias):
+    """`launchctl bootout gui/<uid>/<label>` of a named alias's broker label, as an argv list."""
+    from telegram_search_mcp.config import alias_jobs
+    return ['launchctl','bootout','gui/%d/%s'%(os.getuid(),alias_jobs(alias,Path.home()).broker_label)]
 # The owner's capability profiles (telegram_search_mcp.config.CAPABILITY_PROFILES), spelled here for the grammar.
 PROFILES=('readers','send','replies','forward','video','archive_edit')
 
@@ -284,7 +294,7 @@ def main(argv=None):
     # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
     code=('bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES,*ACCOUNT_CHANGES)
           else 'bundle_admission_failed')
-    pending=pending_account=None
+    pending=pending_account=account=None
     try:
         root=Path(__file__).absolute().parent
         account_change=len(args)==2 and args[0] in ACCOUNT_CHANGES and alias_token(args[1])
@@ -305,6 +315,7 @@ def main(argv=None):
                 if type(named) is str and named in INSTALL_CODES: code=named
                 pending=getattr(error,'pending_action',None)
                 pending_account=getattr(error,'pending_account',None)
+                account=getattr(error,'account',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
         if args and args[0]=='bootstrap-install':
@@ -333,6 +344,7 @@ def main(argv=None):
                 if type(named) is str and named in INSTALL_CODES: code=named
                 pending=getattr(error,'pending_action',None)
                 pending_account=getattr(error,'pending_account',None)
+                account=getattr(error,'account',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
         # capabilities show | enable <profile> | disable <profile> [--account <alias>]: the owner's profile switch
@@ -373,6 +385,11 @@ def main(argv=None):
         if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS:
             refusal['pending_action']=pending
             if pending in ACCOUNT_CHANGES and alias_token(pending_account): refusal['pending_account']=pending_account
+        if code=='alias_broker_unreadable' and alias_token(account):
+            try:
+                refusal.update(account=account,next_action=UNREADABLE_ACTION,bootout_command=bootout_command(account))
+            except Exception:
+                refusal={'status':'refused','code':code}
         print(json.dumps(refusal),file=sys.stderr)
         return 2
 

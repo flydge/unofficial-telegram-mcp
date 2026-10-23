@@ -34,14 +34,15 @@ LOCK_ONLY = {'run': 'dir', 'run/connect.lock': hashlib.sha256(b'').hexdigest()}
 
 
 def tree(path):
-    """{relative path: sha256 or 'dir'} of everything under `path`."""
+    """{relative path: sha256, 'dir' or 'socket'} of everything under `path`."""
     out = {}
     for parent, dirs, files in os.walk(path):
         for name in dirs:
             out[str((Path(parent) / name).relative_to(path))] = 'dir'
         for name in files:
             child = Path(parent) / name
-            out[str(child.relative_to(path))] = hashlib.sha256(child.read_bytes()).hexdigest()
+            out[str(child.relative_to(path))] = ('socket' if child.is_socket() else
+                                                  hashlib.sha256(child.read_bytes()).hexdigest())
     return out
 
 
@@ -66,7 +67,7 @@ class AccountHarness(ChangeHarness):
                                        others={self.jobs.broker_label: self.jobs.broker_plist,
                                                self.jobs.connect_label: self.connect_plist})
         self.checks, self.check_answers = [], []
-        self.alias_probes, self.alias_answers = [], []
+        self.alias_probes, self.alias_answers, self.alias_currents = [], [], []
 
     def old(self):
         """The installed release, built and installed as `BASE_VERSION`."""
@@ -82,8 +83,9 @@ class AccountHarness(ChangeHarness):
         self.checks.append((python, app))
         return self.check_answers.pop(0) if self.check_answers else 'ready'
 
-    def alias_pending(self, home, python, app, socket, policy):
+    def alias_pending(self, home, python, app, socket, policy, current=None):
         self.alias_probes.append((python, app, socket, policy))
+        self.alias_currents.append(current)  # Only for a definition whose interpreter is gone (review fix 055d3).
         return self.alias_answers.pop(0) if self.alias_answers else 'none'
 
     def account(self, action, alias=None, **kwargs):

@@ -125,11 +125,32 @@ class AccountChangeGrammarTests(unittest.TestCase):
         self.assertIsNone(error('transaction_pending', pending_action='upgrade', pending_account='play').pending_account)
         self.assertIsNone(error('transaction_pending', pending_action='account-add', pending_account='Play').pending_account)
 
+    def test_an_unreadable_leftover_broker_names_the_manual_bootout_of_its_exact_label(self):
+        """Review fix (055d3, R4): `alias_broker_unreadable` carries the alias and the bootout of that alias's exact
+        broker label as the owner's next step; a forged account is dropped with the step."""
+        from telegram_search_mcp import config
+        error = bundle_install.InstallError
+        label = config.alias_jobs('work', Path.home()).broker_label
+        for action in ('account-add', 'account-remove'):
+            with self.subTest(action=action):
+                refusal = json.loads(self.dispatch([action, 'play'], error('alias_broker_unreadable', account='work'))[2])
+                self.assertEqual(refusal, {'status': 'refused', 'code': 'alias_broker_unreadable', 'account': 'work',
+                                           'next_action': 'boot_out_alias_broker_then_retry',
+                                           'bootout_command': ['launchctl', 'bootout',
+                                                               'gui/%d/%s' % (os.getuid(), label)]})
+        forged = error('alias_broker_unreadable', account='work')
+        forged.account = '/Users/' + SENTINEL
+        self.assertEqual(json.loads(self.dispatch(['account-remove', 'work'], forged)[2]),
+                         {'status': 'refused', 'code': 'alias_broker_unreadable'})
+        self.assertIsNone(error('pending_send_unresolved', account='work').account)
+        self.assertIsNone(error('alias_broker_unreadable', account='Work').account)
+
     def test_every_code_an_account_transaction_can_pass_through_is_in_the_closed_set(self):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
         self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
-                              'accounts_present', 'release_not_current', 'login_in_progress'},
+                              'accounts_present', 'release_not_current', 'login_in_progress',
+                              'alias_broker_unreadable'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
 

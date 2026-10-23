@@ -1458,6 +1458,103 @@ class LeftoverDefinitionTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir()
                                   if p.name != self.plist.name], [self.jobs.broker_plist.name])  # No temporary left.
 
+    # Review fix (055d3, R4): such a leftover loaded, with the real `account_pending_sends` --------------------------
+
+    def real_probe(self):
+        """The real `account_pending_sends` as the gate's probe. For a definition whose interpreter is gone it must be
+        handed the current release (receipt.json's) as `current`; a synthetic release's interpreter cannot run, so that
+        probe then runs under this interpreter and this package as a bundled app, as the release's own would."""
+        import sys
+        from test_pending_probe import _bundled_app
+        app = self.base / 'probe-app'
+        if not app.exists():
+            _bundled_app(app)
+        seen = []
+
+        def probe(home, python, app_, socket, policy, current=None):
+            seen.append(current)
+            if current is None:
+                return bundle_install.account_pending_sends(home, python, app_, socket, policy)
+            self.assertEqual(current, (self.release / 'python/bin/python3', self.release / 'app'))
+            return bundle_install.account_pending_sends(home, python, app_, socket, policy,
+                                                        current=(Path(sys.executable), app))
+        return probe, seen
+
+    def socket_file(self, *, listening):
+        """A socket file at the alias's socket path (bound from its directory: the disposable home's path is longer
+        than the AF_UNIX limit a real alias's never exceeds): stale, or a listener that answers nothing a broker
+        would."""
+        import socket
+        import threading
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        cwd = os.getcwd()
+        os.chdir(self.jobs.socket.parent)
+        try:
+            sock.bind(self.jobs.socket.name)
+        finally:
+            os.chdir(cwd)
+        if not listening:
+            sock.close()
+            return
+        sock.listen(4)
+        sock.settimeout(0.2)
+        stop = threading.Event()
+
+        def drop():
+            while not stop.is_set():
+                try:
+                    sock.accept()[0].close()
+                except OSError:
+                    continue
+        thread = threading.Thread(target=drop)
+        thread.start()
+        self.addCleanup(sock.close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+
+    def test_a_stale_socket_of_a_gone_release_reads_as_nothing_held(self):
+        for action in ('account_remove', 'uninstall'):
+            with self.subTest(action=action):
+                self.setUp()
+                self.added()
+                self.alias_session()
+                self.leftover(loaded=True)
+                self.socket_file(listening=False)
+                probe, seen = self.real_probe()
+                result = (self.account(action, alias_pending=probe) if action == 'account_remove'
+                          else self.change('uninstall', alias_pending=probe))
+                service = result['service'] if action == 'account_remove' else result['accounts']['work']['service']
+                self.assertEqual(service, 'removed')
+                self.assertFalse(self.jobs.broker_plist.exists())
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertTrue(seen and all(current is not None for current in seen))
+
+    def test_a_live_broker_of_a_gone_release_that_cannot_be_read_names_its_manual_bootout(self):
+        for action in ('account_remove', 'uninstall', 'upgrade'):
+            with self.subTest(action=action):
+                self.setUp()
+                self.added()
+                self.alias_session()
+                data = plistlib.dumps(self.leftover(loaded=True), sort_keys=True)
+                self.socket_file(listening=True)
+                probe, _ = self.real_probe()
+                before = self.change_snapshot()
+                with self.assertRaises(bundle_install.InstallError) as caught:
+                    if action == 'account_remove':
+                        self.account(action, alias_pending=probe)
+                    elif action == 'uninstall':
+                        self.change('uninstall', alias_pending=probe)
+                    else:
+                        self.install(self.newer(), alias_pending=probe)
+                self.assertEqual((str(caught.exception), caught.exception.account), ('alias_broker_unreadable', 'work'))
+                self.assertEqual(self.change_snapshot(), before)
+                self.assertEqual(self.jobs.broker_plist.read_bytes(), data)
+                self.assertIsNotNone(self.launchctl.job(self.jobs.broker_label))
+                # Once the owner booted it out by hand (the refusal's bootout_command), nothing holds a send.
+                self.launchctl.set_job(self.jobs.broker_label, None)
+                if action == 'account_remove':
+                    self.assertEqual(self.account(action, alias_pending=probe)['service'], 'removed')
+
     def test_a_foreign_definition_is_refused_and_never_removed(self):
         for action in ('account_remove', 'upgrade', 'account_add', 'uninstall'):
             with self.subTest(action=action):
