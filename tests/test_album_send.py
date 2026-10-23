@@ -821,7 +821,7 @@ class StagingTests(Drafts, unittest.TestCase):
         from telegram_search_mcp.tdjson import _valid_staged_input_file
         draft, claim, paths = self.staged()
         self.assertEqual(len(paths), 2)
-        self.assertEqual(album_staged_paths(draft, root=self.stage), paths)
+        self.assertEqual(album_staged_paths(draft.draft_id, draft.album, root=self.stage), paths)
         for index, (path, item, source) in enumerate(zip(paths, self.album.items, claim.paths)):
             with self.subTest(index=index):
                 self.assertEqual(path.parent.parent, self.stage)
@@ -1033,6 +1033,364 @@ class TransportSendTests(unittest.TestCase):
         [request] = self.albums()
         self.assertEqual(set(request) - {'@type', '@extra'}, fields('sendMessageAlbum'))
         self.assertEqual(set(request['options']) - {'@type'}, fields('messageSendOptions'))
+
+
+class DialogSeamTests(unittest.TestCase):
+    """Until the album renderer lands (part 2), the shipped dialog never shows a partial album: it refuses."""
+
+    def test_an_album_preview_never_renders_and_decides_dialog_unavailable(self):
+        from telegram_search_mcp.approval_prompt import decide_approved_send, render_approval
+        arguments = dict(recipient_title='Recipient', recipient=RECIPIENT, display_name='Album', size_bytes=10,
+                         sha256='a' * 64, caption='')
+        for kind, preview in (('album', {'draft_id': 'draft_' + '1' * 32}), ('album', None),
+                              ('document', {'draft_id': 'draft_' + '1' * 32})):
+            with self.subTest(kind=kind, preview=preview is not None):
+                self.assertIsNone(render_approval(**arguments, kind=kind, album_preview=preview))
+                with patch('telegram_search_mcp.approval_prompt.subprocess.run',
+                           side_effect=AssertionError('no dialog may be shown')):
+                    self.assertEqual(decide_approved_send(**arguments, kind=kind, album_preview=preview).outcome,
+                                     'dialog_unavailable')
+
+
+FULL = ('artifacts', 'send', 'album_send', 'video_send')
+
+
+class BrokerFixture:
+    """The production broker over the synthetic transport; staging under a private temporary root."""
+    policy = FULL
+
+    def setUp(self):
+        import time
+        from telegram_search_mcp.artifact_store import ArtifactStore
+        from telegram_search_mcp.broker import Broker
+        from telegram_search_mcp.config import RuntimePolicy
+        self.time = time
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.stage = self.root / 'stage'
+        self.raw = Raw(); self.client = TDLibClient(raw=self.raw, staging_root=self.stage)
+        self.approvals = []
+        self.broker = Broker(socket_path=self.root / 'broker.sock',
+            artifact_store=ArtifactStore(cache_dir=self.root / 'cache'), client_factory=lambda: self.client,
+            policy=RuntimePolicy(enabled_capabilities=self.policy),
+            approval_prompt=lambda **kw: self.approvals.append(kw) or True)
+        self.broker._staging = {'root': self.stage}
+        self.addCleanup(self.broker.shutdown)
+
+    def set_policy(self, *capabilities):
+        from telegram_search_mcp.config import RuntimePolicy
+        self.broker._policy = RuntimePolicy(enabled_capabilities=capabilities)
+
+    def dispatch(self, op, payload, client=CLIENT):
+        return self.broker._dispatch({'operation': op, 'payload': payload, 'client_id': client,
+            'deadline': self.time.monotonic() + 10, 'broker_generation': self.broker._generation})
+
+    def upload(self, data, name, client=CLIENT):
+        import base64
+        result = self.dispatch('create_local_artifact', {'file_name': name,
+            'content_base64': base64.b64encode(data).decode()}, client)
+        self.assertEqual(result['status'], 'complete', result)
+        return result['artifact_id']
+
+    def request(self, *artifact_ids, group='media', captions=None):
+        return {'recipient': RECIPIENT, 'group': group, 'items': [
+            {'artifact_id': artifact_id, 'caption': (captions or [''] * len(artifact_ids))[index]}
+            for index, artifact_id in enumerate(artifact_ids)]}
+
+    def media(self):
+        return (self.upload(PNG, 'one.png'), self.upload(MOVIE, 'two.mp4'), self.upload(JPEG, 'three.jpg'))
+
+    def prepare(self, *artifact_ids, client=CLIENT, **extra):
+        result = self.dispatch('prepare_album_send', self.request(*(artifact_ids or self.media()), **extra), client)
+        self.assertEqual(result['status'], 'prepared', result)
+        return result['album']
+
+    def send(self, did, approved=True, client=CLIENT):
+        return self.dispatch('send_prepared_album', {'draft_id': did, 'approved': approved}, client)
+
+    def status(self, did, client=CLIENT):
+        return self.dispatch('get_album_send_status', {'draft_id': did}, client)
+
+    def albums(self):
+        return [request for request in self.raw.sent if request['@type'] == 'sendMessageAlbum']
+
+    def staged(self):
+        return sorted(path for path in self.stage.rglob('*') if path.is_file()) if self.stage.exists() else []
+
+
+UNAVAILABLE_PREPARE = {'status': 'unavailable', 'album': None, 'refusal': None, 'detail': 'album draft is unavailable'}
+
+
+class CapabilityConjunctionTests(BrokerFixture, unittest.TestCase):
+    """Criterion 6 at the broker: album_send with send, and video_send as well for video items."""
+
+    def test_album_send_and_send_are_both_required_before_any_artifact_or_provider_work(self):
+        from telegram_search_mcp.contract import CompatibilityError
+        ids = self.media()
+        for capabilities in (('artifacts', 'send', 'video_send'), ('artifacts', 'album_send', 'video_send'),
+                             ('artifacts',)):
+            self.set_policy(*capabilities)
+            before = len(self.raw.sent)
+            for op, payload in (('prepare_album_send', self.request(*ids)),
+                                ('send_prepared_album', {'draft_id': 'draft_' + '1' * 32, 'approved': True}),
+                                ('get_album_send_status', {'draft_id': 'draft_' + '1' * 32})):
+                with self.subTest(capabilities=capabilities, op=op), self.assertRaises(CompatibilityError):
+                    self.dispatch(op, payload)
+            self.assertEqual(len(self.raw.sent), before)
+        self.assertEqual(self.broker._drafts.known_ids(), set())
+
+    def test_video_items_also_need_video_send(self):
+        from telegram_search_mcp.contract import CapabilityDisabled
+        photo, video, jpeg = self.media()
+        self.set_policy('artifacts', 'send', 'album_send')
+        self.assertEqual(self.prepare(photo, jpeg)['items'][0]['kind'], 'photo')  # Photos alone need no video_send.
+        before = len(self.raw.sent)
+        with self.assertRaises(CapabilityDisabled) as refused:
+            self.dispatch('prepare_album_send', self.request(photo, video))
+        self.assertEqual(refused.exception.missing, ('video_send',))
+        # Refused before the recipient is read (only the account was).
+        self.assertNotIn('getChat', [request['@type'] for request in self.raw.sent[before:]])
+        self.assertEqual(len(self.broker._drafts.known_ids()), 1)
+
+    def test_a_prepared_video_album_never_sends_or_discloses_once_video_send_is_off(self):
+        from telegram_search_mcp.contract import CapabilityDisabled
+        album = self.prepare()
+        self.set_policy('artifacts', 'send', 'album_send')
+        with self.assertRaises(CapabilityDisabled) as refused:
+            self.send(album['draft_id'])
+        self.assertEqual(refused.exception.missing, ('video_send',))
+        self.assertEqual(self.status(album['draft_id'])['evidence'], 'none')
+        self.assertEqual((self.approvals, self.albums()), ([], []))
+        self.set_policy(*FULL)
+        def disable(**kw):
+            self.set_policy('artifacts', 'send', 'album_send')
+            return True
+        self.broker._approval_prompt = disable  # Turned off while the dialog is open.
+        result = self.send(album['draft_id'])
+        self.assertIn(result['status'], ('expired', 'local_failed'))
+        self.assertEqual(self.albums(), [])
+
+    def test_the_policy_is_rechecked_inside_the_raw_dispatch_fence(self):
+        album = self.prepare()
+        fence = self.broker._album_send_fence
+        calls = []
+        def late_disable(*args):
+            calls.append(args)
+            if len(calls) == 2:  # The provider's raw-dispatch fence, after every guard has passed.
+                self.set_policy('artifacts', 'send', 'album_send')
+            return fence(*args)
+        with patch.object(self.broker, '_album_send_fence', side_effect=late_disable):
+            result = self.send(album['draft_id'])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((result['status'], self.albums()), ('local_failed', []))
+
+
+class AdmissionTests(BrokerFixture, unittest.TestCase):
+    """Work item 2: every item id is authorized before any other work; one refusal refuses the draft."""
+
+    def test_a_foreign_or_unknown_item_refuses_the_whole_draft_with_one_fixed_shape(self):
+        own = self.media()
+        foreign = self.upload(PNG + b'foreign', 'foreign.png', client=FOREIGN)
+        unknown = 'artifact_' + 'c' * 32 + '_' + 'd' * 64 + '_10'
+        for position in range(3):
+            for intruder in (foreign, unknown):
+                ids = list(own); ids[position] = intruder
+                before = len(self.raw.sent)
+                with self.subTest(position=position, intruder=intruder[:20]):
+                    with patch('telegram_search_mcp.album_drafts.album_item',
+                               side_effect=AssertionError('classified before admission')), \
+                            patch.object(self.broker, '_attachment_metadata',
+                                         side_effect=AssertionError('metadata before admission')):
+                        self.assertEqual(self.dispatch('prepare_album_send', self.request(*ids)), UNAVAILABLE_PREPARE)
+                    self.assertEqual(len(self.raw.sent), before)
+        self.assertEqual(self.broker._drafts.known_ids(), set())
+
+    def test_malformed_requests_are_refused_by_the_closed_model(self):
+        from pydantic import ValidationError
+        photo, video, _ = self.media()
+        for payload in (self.request(photo), self.request(photo, photo), self.request(photo, video, group='audio'),
+                        {**self.request(photo, video), 'reply_to': 5}):
+            with self.subTest(payload=repr(payload)[:80]), self.assertRaises(ValidationError):
+                self.dispatch('prepare_album_send', payload)
+        self.assertEqual(self.broker._drafts.known_ids(), set())
+
+
+class PrepareTests(BrokerFixture, unittest.TestCase):
+    def test_prepare_binds_every_item_in_order(self):
+        from telegram_search_mcp.album_drafts import AlbumDraftPreview
+        ids = self.media()
+        album = self.prepare(*ids, captions=['First', '', 'Third'])
+        AlbumDraftPreview.model_validate(album)
+        self.assertEqual([(i['position'], i['kind'], i['artifact_id']) for i in album['items']],
+                         [(1, 'photo', ids[0]), (2, 'video', ids[1]), (3, 'photo', ids[2])])
+        self.assertEqual((album['recipient'], album['group'], album['account_id']),
+                         ({'chat_id': RECIPIENT, 'title': 'Recipient'}, 'media', ACCOUNT))
+        from telegram_search_mcp.outgoing_drafts import DraftOwner
+        draft = self.broker._drafts.peek(album['draft_id'], owner=DraftOwner(CLIENT, ACCOUNT))
+        self.assertEqual((draft.kind, draft.sha256, draft.size_bytes), ('album', album['album_sha256'],
+                                                                         album['total_size_bytes']))
+
+    def test_documents_group_and_refusals(self):
+        pdf, png = self.upload(PDF, 'report.pdf'), self.upload(PNG, 'scan.png')
+        album = self.prepare(pdf, png, group='documents')
+        self.assertEqual([i['kind'] for i in album['items']], ['document', 'document'])
+        before = self.broker._drafts.known_ids()
+        refused = self.dispatch('prepare_album_send', self.request(pdf, png))
+        self.assertEqual(refused, {'status': 'refused', 'album': None, 'refusal': 'unsupported_item',
+                                   'detail': 'an item is not eligible for this album; no draft was created'})
+        with patch('telegram_search_mcp.album_drafts.MAX_ALBUM_BYTES', 10):
+            self.assertEqual(self.dispatch('prepare_album_send', self.request(pdf, png, group='documents'))['refusal'],
+                             'album_too_large')
+        self.assertEqual(self.broker._drafts.known_ids(), before)
+
+    def test_unreadable_recipient_is_unavailable(self):
+        self.raw.chats.pop(RECIPIENT)
+        self.assertEqual(self.dispatch('prepare_album_send', self.request(*self.media())), UNAVAILABLE_PREPARE)
+        self.assertEqual(self.broker._drafts.known_ids(), set())
+
+    def test_generic_and_other_send_tools_never_touch_album_drafts(self):
+        did = self.prepare()['draft_id']
+        self.assertEqual(self.dispatch('get_draft', {'draft_id': did})['status'], 'unavailable')
+        self.assertEqual(self.dispatch('cancel_draft', {'draft_id': did})['status'], 'unavailable')
+        self.assertEqual(self.dispatch('list_drafts', {})['drafts'], [])
+        self.assertEqual(self.dispatch('send_prepared_artifact', {'draft_id': did, 'approved': True})['status'], 'error')
+        self.assertEqual(self.dispatch('send_prepared_video', {'draft_id': did, 'approved': True})['status'], 'error')
+        self.assertEqual(self.dispatch('get_send_status', {'draft_id': did})['evidence'], 'none')
+        self.assertEqual((self.approvals, self.albums()), ([], []))
+        self.assertEqual(self.status(did)['status'], 'pending')
+
+
+class SendTests(BrokerFixture, unittest.TestCase):
+    """Criteria 2, 3 and 5 through the broker: one dialog, one attempt, receipt replay, whole-album retirement."""
+
+    def test_one_dialog_one_attempt_then_receipt_replay(self):
+        from telegram_search_mcp.album_drafts import AlbumDraftPreview
+        album = self.prepare()
+        result = self.send(album['draft_id'])
+        self.assertEqual((result['status'], result['album_sha256'], result['recipient']),
+                         ('sent', album['album_sha256'], RECIPIENT))
+        self.assertEqual(result['slots'], [{'position': 1, 'status': 'sent', 'message_id': 701},
+                                           {'position': 2, 'status': 'sent', 'message_id': 702},
+                                           {'position': 3, 'status': 'sent', 'message_id': 703}])
+        [dialog] = self.approvals
+        self.assertEqual((dialog['kind'], dialog['sha256'], dialog['size_bytes'], dialog['recipient'],
+                          dialog['recipient_title']),
+                         ('album', album['album_sha256'], album['total_size_bytes'], RECIPIENT, 'Recipient'))
+        self.assertEqual(AlbumDraftPreview.model_validate(dialog['album_preview']).model_dump(mode='json'), album)
+        [request] = self.albums()
+        paths = [Path(content[kind][kind]['path']) for content, kind in zip(
+            request['input_message_contents'], ('photo', 'video', 'photo'))]
+        self.assertTrue(all(path.parent.parent == self.stage for path in paths))
+        self.assertEqual(self.staged(), [])  # Every slot is terminal: every item is retired.
+        replay = self.send(album['draft_id'])
+        self.assertEqual((replay['status'], replay['slots']), ('sent', result['slots']))
+        self.assertIn('no new send', replay['detail'])
+        self.assertEqual((len(self.albums()), len(self.approvals)), (1, 1))
+
+    def test_partial_outcome_keeps_the_staged_items_until_every_slot_ends(self):
+        self.raw.outcomes = ['sent', 'failed', 'silent']
+        self.client.ALBUM_CONFIRMATION_SECONDS = 0.05
+        album = self.prepare()
+        result = self.send(album['draft_id'])
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual([slot['status'] for slot in result['slots']], ['sent', 'failed', 'outcome_unknown'])
+        self.assertEqual(len(self.staged()), 3)  # Slot 3 may still upload from its staged copy.
+        status = self.status(album['draft_id'])
+        self.assertEqual((status['status'], status['evidence'], [s['status'] for s in status['slots']]),
+                         ('partial', 'provider', ['sent', 'failed', 'outcome_unknown']))
+        self.assertEqual(len(self.staged()), 3)
+        self.raw.events.append(succeeded(-13, 903, 'messagePhoto'))  # The late, exact end of slot 3.
+        status = self.status(album['draft_id'])
+        self.assertEqual([(s['status'], s.get('message_id')) for s in status['slots']],
+                         [('sent', 701), ('failed', None), ('sent', 903)])
+        self.assertEqual(status['status'], 'partial')
+        self.assertEqual(self.staged(), [])
+        replay = self.send(album['draft_id'])
+        self.assertEqual([s['status'] for s in replay['slots']], ['sent', 'failed', 'sent'])
+        self.assertEqual(len(self.albums()), 1)  # No path resends.
+
+    def test_unknown_and_failed_outcomes_never_resend(self):
+        for outcomes, expected in ((['silent', 'silent', 'silent'], 'outcome_unknown'),
+                                   (['failed', 'silent', 'failed'], 'outcome_unknown'),
+                                   (['failed', 'failed', 'failed'], 'failed')):
+            with self.subTest(outcomes=outcomes):
+                self.setUp()
+                self.raw.outcomes = outcomes
+                self.client.ALBUM_CONFIRMATION_SECONDS = 0.05
+                did = self.prepare()['draft_id']
+                self.assertEqual(self.send(did)['status'], expected)
+                for _ in range(2):
+                    self.assertEqual(self.send(did)['status'], expected)
+                    self.assertEqual(self.status(did)['status'], expected)
+                self.assertEqual((len(self.albums()), len(self.approvals)), (1, 1))
+                self.assertNotIn('PRIVATE', repr(self.send(did)))
+        self.setUp()
+        self.raw.rejected = True
+        did = self.prepare()['draft_id']
+        self.assertEqual(self.send(did)['status'], 'failed')
+        self.assertEqual(self.staged(), [])
+
+    def test_not_approved_and_dialog_outcomes_make_no_attempt(self):
+        from telegram_search_mcp.approval_prompt import ApprovalDecision, DETAILS, NOT_GIVEN
+        did = self.prepare()['draft_id']
+        self.assertEqual(self.send(did, approved=False)['detail'], NOT_GIVEN)
+        for answer, status in ((False, 'declined'), (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                result = self.send(did)
+                self.assertEqual((result['status'], result['detail']), (status, DETAILS[status]))
+        self.assertEqual((self.albums(), self.staged()), ([], []))
+        self.broker._approval_prompt = lambda **kw: True
+        self.assertEqual(self.send(did)['status'], 'sent')
+
+    def test_the_shipped_dialog_refuses_an_album_until_its_renderer_lands(self):
+        from telegram_search_mcp.approval_prompt import decide_approved_send
+        self.broker._approval_prompt = decide_approved_send
+        did = self.prepare()['draft_id']
+        with patch('telegram_search_mcp.approval_prompt.subprocess.run',
+                   side_effect=AssertionError('no dialog may be shown')):
+            self.assertEqual(self.send(did)['status'], 'dialog_unavailable')
+        self.assertEqual(self.albums(), [])
+
+    def test_revalidation_before_the_dialog(self):
+        for expected, change in (
+                ('recipient_changed', lambda ids: self.raw.chats[RECIPIENT].update(title='Renamed')),
+                ('expired', lambda ids: (self.broker._artifact_store.cache_dir / ids[1]).write_bytes(MOVIE[:-1] + b'X')),
+                ('expired', lambda ids: (self.broker._artifact_store.cache_dir / ids[2]).unlink())):
+            with self.subTest(expected=expected):
+                self.setUp()
+                ids = self.media()
+                did = self.prepare(*ids)['draft_id']
+                change(ids)
+                self.assertEqual(self.send(did)['status'], expected)
+                self.assertEqual((self.approvals, self.albums()), ([], []))
+
+    def test_a_local_staging_failure_is_local_failed_and_replays(self):
+        did = self.prepare()['draft_id']
+        with patch('telegram_search_mcp.outgoing_stage.MAX_STAGING_BYTES', 10):
+            result = self.send(did)
+        self.assertEqual((result['status'], result['slots']), ('local_failed', []))
+        self.assertEqual((self.albums(), self.staged()), ([], []))
+        self.assertEqual(self.send(did)['status'], 'local_failed')
+        status = self.status(did)
+        self.assertEqual((status['status'], status['evidence']), ('failed', 'local_failed'))
+
+    def test_a_foreign_client_or_account_sees_nothing(self):
+        did = self.prepare()['draft_id']
+        self.assertEqual(self.send(did, client=FOREIGN)['status'], 'expired')
+        self.assertEqual(self.status(did, client=FOREIGN)['evidence'], 'none')
+        self.raw.account = ACCOUNT + 1
+        self.assertEqual(self.send(did)['status'], 'expired')
+        self.assertEqual(self.status(did)['evidence'], 'none')
+        self.assertEqual((self.approvals, self.albums()), ([], []))
+
+    def test_counted_as_a_send_in_flight(self):
+        from telegram_search_mcp.broker import SEND_OPERATIONS
+        self.assertIn('send_prepared_album', SEND_OPERATIONS)
+        self.raw.outcomes = ['sent', 'silent', 'silent']
+        self.client.ALBUM_CONFIRMATION_SECONDS = 0.05
+        self.send(self.prepare()['draft_id'])
+        self.assertEqual(self.broker._health()['pending_sends']['unreconciled_receipts'], 1)
 
 
 if __name__ == '__main__':

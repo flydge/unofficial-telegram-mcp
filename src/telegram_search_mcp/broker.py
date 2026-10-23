@@ -51,7 +51,8 @@ from .local_upload_models import UPLOAD_MODELS, LocalUploadUnavailable
 from .outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
 from .outgoing_media import validate_photo
 from .outgoing_voice import prepare_voice_note, VoiceError
-from .outgoing_stage import retire_staged_document, stage_approved_document
+from .outgoing_stage import (album_staged_paths, retire_staged_album, retire_staged_document, stage_approved_album,
+                             stage_approved_document)
 from .sanitize import sanitize_telegram_text
 from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, AttachmentImage, AttachmentRequest,
@@ -86,6 +87,12 @@ from .video_probe import VideoProbeError, probe_video
 from .video_drafts import (MAX_VIDEO_BYTES, VideoDraftPreview, VideoRecipient, VideoRefusal, VideoSpec,
     PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest, SendPreparedVideoResponse,
     PREPARED as VIDEO_PREPARED, REFUSED as VIDEO_REFUSED, UNAVAILABLE as VIDEO_UNAVAILABLE)
+from . import album_drafts
+from .album_drafts import (AlbumDraftPreview, AlbumRecipient, AlbumRefusal, AlbumSpec, GetAlbumSendStatusRequest,
+    GetAlbumSendStatusResponse, PrepareAlbumSendRequest, PrepareAlbumSendResponse, SendPreparedAlbumRequest,
+    SendPreparedAlbumResponse, album_status, slot_list, PREPARED as ALBUM_PREPARED, REFUSED as ALBUM_REFUSED,
+    UNAVAILABLE as ALBUM_UNAVAILABLE)
+from .send_observations import album_outcomes
 from .archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveRefusal, ArchiveSpec, PrepareChatArchiveRequest,
     PrepareChatArchiveResponse, ApplyPreparedArchiveRequest, ApplyPreparedArchiveResponse,
     PREPARED as ARCHIVE_PREPARED, ALREADY as ARCHIVE_ALREADY, REFUSED as ARCHIVE_REFUSED,
@@ -98,7 +105,12 @@ from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditS
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 # The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
-                             'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit'})
+                             'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit',
+                             'send_prepared_album'})
+# The 0.56 album operations (part 1, the core): reachable through broker dispatch. Their MCP tools, IPC
+# operation names and contract capability rows are added with the tool surface; until then the broker checks
+# the album policy itself (`_require_album_policy`), before admission.
+ALBUM_OPERATIONS = frozenset({'prepare_album_send', 'send_prepared_album', 'get_album_send_status'})
 
 
 # Operations exempt from the account pin check (spec 2): lifecycle (`check` runs the pin itself), and local
@@ -548,11 +560,17 @@ class Broker(SelectionBrokerMixin):
         provider evidence is replayed only to a later call that still holds the original client
         lifecycle and account epoch. The call lost the owner that held the claim: its client decides."""
         video = operation == 'send_prepared_video'
+        album = operation == 'send_prepared_album'
         outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None,
-                   kinds=frozenset({'video'} if video else {'document', 'photo', 'voice_note'}))
+                   kinds=frozenset({'video'} if video else {'album'} if album else {'document', 'photo', 'voice_note'}))
                    if client_id is not None else None)
         if outcome is None:
             return None
+        if album:
+            if outcome == 'local_failed':
+                return SendPreparedAlbumResponse(status='local_failed', draft_id=draft_id,
+                                                 detail='local revalidation failed; no provider send was attempted')
+            return SendPreparedAlbumResponse(status='outcome_unknown', draft_id=draft_id, detail=RECEIPT_AUTHORITY_UNAVAILABLE)
         if video:
             if outcome == 'local_failed':
                 return SendPreparedVideoResponse(status='local_failed', draft_id=draft_id,
@@ -602,10 +620,17 @@ class Broker(SelectionBrokerMixin):
             return terminal[operation](status='unavailable', detail=REPLY_UNAVAILABLE if 'reply_artifact' in operation else 'draft is unavailable').model_dump(mode='json')
         if operation == 'get_send_status':
             return send_status(payload['draft_id']).model_dump(mode='json')
-        if operation in ('send_prepared_artifact', 'send_prepared_video'):
+        if operation in ('send_prepared_artifact', 'send_prepared_video', 'send_prepared_album'):
             attempted = self._attempted_send(operation, payload['draft_id'], client_id)
             if attempted is not None:
                 return attempted.model_dump(mode='json')
+        if operation == 'prepare_album_send':
+            return PrepareAlbumSendResponse(status='unavailable', detail=ALBUM_UNAVAILABLE).model_dump(mode='json')
+        if operation == 'send_prepared_album':
+            return SendPreparedAlbumResponse(status='expired', draft_id=payload['draft_id'],
+                                             detail='draft is unavailable').model_dump(mode='json')
+        if operation == 'get_album_send_status':
+            return album_status(payload['draft_id']).model_dump(mode='json')
         if operation == 'send_prepared_artifact':
             return SendPreparedArtifactResponse(status='expired', draft_id=payload['draft_id'], detail='draft is unavailable').model_dump(mode='json')
         if operation == 'prepare_video_send':
@@ -654,7 +679,9 @@ class Broker(SelectionBrokerMixin):
             'append_local_upload', 'finish_local_upload', 'prepare_artifact_send', 'prepare_reply_artifact_send',
             'get_reply_artifact_draft', 'update_reply_artifact_draft', 'refresh_reply_artifact_draft',
             'list_drafts', 'get_draft', 'update_draft', 'refresh_draft', 'cancel_draft',
-            'send_prepared_artifact', 'get_send_status', 'prepare_video_send', 'send_prepared_video'}
+            'send_prepared_artifact', 'get_send_status', 'prepare_video_send', 'send_prepared_video'} | ALBUM_OPERATIONS
+        if operation in ALBUM_OPERATIONS:
+            self._require_album_policy()  # Before admission, artifact or provider work.
         if operation not in owned_operations:
             return finish(self._dispatch_owned(request))
         with self._artifact_authority.scope(request['client_id'], self._artifact_store) as scope:
@@ -680,6 +707,11 @@ class Broker(SelectionBrokerMixin):
                 artifact_id = request['payload'].get('artifact_id') if model is not None else None
                 if artifact_id is not None and not self._artifact_authority.authorize(scope, artifact_id):
                     return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
+                if operation == 'prepare_album_send':
+                    # Every item before any other work: one refusal refuses the whole draft with one fixed shape.
+                    album = PrepareAlbumSendRequest.model_validate(request['payload'])
+                    if not all(self._artifact_authority.authorize(scope, item.artifact_id) for item in album.items):
+                        return finish(self._artifact_unavailable(operation, request['payload'], request['client_id']))
                 if operation == 'get_attachment':
                     account = self._artifact_account()
                     if account is not None:
@@ -912,6 +944,17 @@ class Broker(SelectionBrokerMixin):
         if operation == "send_prepared_video":
             model = SendPreparedVideoRequest.model_validate(payload)
             return self._send_prepared_video(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_album_send":
+            model = PrepareAlbumSendRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_album_send(model, client_id=client_id).model_dump(mode="json")
+        if operation == "send_prepared_album":
+            model = SendPreparedAlbumRequest.model_validate(payload)
+            return self._send_prepared_album(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "get_album_send_status":
+            model = GetAlbumSendStatusRequest.model_validate(payload)
+            return self._get_album_send_status(model, client_id=client_id,
+                                               deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_chat_archive":
             model = PrepareChatArchiveRequest.model_validate(payload)
             with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
@@ -1245,6 +1288,8 @@ class Broker(SelectionBrokerMixin):
             self._require_change_policy('archive_chats')  # Status and receipts stay bound to archive_chats.
         elif kind == 'text_edit':
             self._require_change_policy('edit_own_text')  # Status and receipts stay bound to edit_own_text.
+        elif kind == 'album':
+            raise DraftError('draft is unavailable')  # An album has its own status model; generic tools see none.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         self._require_capabilities('send')
@@ -1324,7 +1369,7 @@ class Broker(SelectionBrokerMixin):
             return ListDraftsResponse(status="unavailable", detail="drafts are unavailable")
 
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
-        if draft.reply_source is not None or draft.kind in ("forward", "video", "archive", "text_edit"):
+        if draft.reply_source is not None or draft.kind in ("forward", "video", "archive", "text_edit", "album"):
             raise DraftError("draft is unavailable")
         self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
@@ -1906,7 +1951,7 @@ class Broker(SelectionBrokerMixin):
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
-            if kind in ("forward", "video", "archive", "text_edit") or (kind == "text") != text_only:
+            if kind in ("forward", "video", "archive", "text_edit", "album") or (kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             self._require_topic_policy(request.draft_id, owner)
@@ -1932,7 +1977,7 @@ class Broker(SelectionBrokerMixin):
                                                     detail="draft is unavailable after expiry or restart")
             # The recipient is resolved again immediately before the single provider attempt.
             entry = self._drafts.peek(request.draft_id, owner=owner)
-            if entry.kind in ("forward", "video", "archive", "text_edit") or (entry.kind == "text") != text_only:
+            if entry.kind in ("forward", "video", "archive", "text_edit", "album") or (entry.kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             chat = self._shared_client().resolve_target(entry.recipient)
@@ -2506,6 +2551,278 @@ class Broker(SelectionBrokerMixin):
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._send_claim_lost(draft_id, client_id, 'video', result, owner=owner if held else None)
+
+    # --- 0.56 ordered albums (F15b) -------------------------------------------------------------------------
+
+    def _require_album_policy(self, kinds=()) -> None:
+        """album_send with send; an album with a video item also needs video_send, so an album never bypasses it.
+        Refuses with only the missing names, in that order."""
+        self._require_capabilities('album_send', 'send', *(('video_send',) if 'video' in kinds else ()))
+
+    def _album_owner(self, client_id: str, kinds=()) -> DraftOwner:
+        owner = self._draft_owner(client_id)
+        self._require_album_policy(kinds)
+        return owner
+
+    def _album_preview(self, draft, owner: DraftOwner) -> AlbumDraftPreview:
+        spec = draft.album
+        if draft.kind != 'album' or type(spec) is not AlbumSpec:
+            raise DraftError(ALBUM_UNAVAILABLE)
+        self._require_album_policy(spec.kinds)
+        return AlbumDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            recipient=AlbumRecipient(chat_id=draft.recipient, title=draft.recipient_title), album=spec)
+
+    def _prepare_album_send(self, request: PrepareAlbumSendRequest, *, client_id: str) -> PrepareAlbumSendResponse:
+        """Every item was authorized at admission; classify each locally, then read the recipient once."""
+        try:
+            owner = self._album_owner(client_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            items = []
+            for item in request.items:
+                artifact = self._artifact_store.lookup(item.artifact_id)
+                if artifact is None:
+                    raise DraftError(ALBUM_UNAVAILABLE)
+                metadata = self._attachment_metadata(item.artifact_id)
+                # The recorded name and MIME type are display evidence only; the bytes are bound by sha256.
+                items.append(album_drafts.album_item(group=request.group, artifact=artifact,
+                    recorded_name=metadata[1] if metadata is not None else None,
+                    recorded_mime=metadata[2] if metadata is not None else None, caption=item.caption))
+            if sum(item.size_bytes for item in items) > album_drafts.MAX_ALBUM_BYTES:
+                raise AlbumRefusal('album_too_large')
+            kinds = frozenset(item.kind for item in items)
+            self._require_album_policy(kinds)  # A video item needs video_send too, before the recipient is read.
+            recipient_identity, recipient_title = chat_identity(provider.resolve_target(request.recipient),
+                                                                request.recipient)
+            spec = AlbumSpec(group=request.group, items=tuple(items), recipient_identity=recipient_identity)
+            self._reply_budget_check(provider)
+            if (self._album_owner(client_id, kinds) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(ALBUM_UNAVAILABLE)
+            previews = []
+            # The preview is built and validated before insertion: a refused preview leaves no orphan draft and
+            # supersedes nothing.
+            draft = self._drafts.prepare_album(owner=owner, recipient=request.recipient,
+                recipient_title=recipient_title, album=spec,
+                evidence=lambda candidate: previews.append(self._album_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PrepareAlbumSendResponse(status='prepared', album=preview, detail=ALBUM_PREPARED)
+        except AlbumRefusal as refusal:
+            return PrepareAlbumSendResponse(status='refused', refusal=refusal.code, detail=ALBUM_REFUSED)
+        except CapabilityDisabled:
+            raise
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError,
+                ArtifactStoreError, ArtifactUnavailable):
+            return PrepareAlbumSendResponse(status='unavailable', detail=ALBUM_UNAVAILABLE)
+
+    def _send_prepared_album(self, request: SendPreparedAlbumRequest, *, client_id: str,
+                             deadline: float | None = None) -> SendPreparedAlbumResponse:
+        if request.approved is not True:
+            return SendPreparedAlbumResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
+        # Capture once: account reads, owner confirmation, staging and transport share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._send_prepared_album_impl(request, client_id=client_id)
+
+    @staticmethod
+    def _album_result(result, receipt, spec: AlbumSpec, *, recipient: int, replay: bool = False):
+        detail = ('previous provider attempt receipt; no new send was attempted' if replay else {
+            'sent': 'TDLib confirmed every item',
+            'failed': 'TDLib reported a failure for every item; no resend is authorized',
+            'partial': 'some items were confirmed and some were not; never resend the album',
+            'outcome_unknown': 'delivery is unconfirmed; do not retry automatically'}[receipt.status])
+        return result(receipt.status, detail, recipient=recipient, album_sha256=spec.sha256,
+                      slots=slot_list(receipt.slots))
+
+    def _retire_album(self, draft_id: str, spec: AlbumSpec) -> None:
+        """Retire every staged item; only once every slot is terminal (or nothing was attempted)."""
+        try:
+            retire_staged_album(album_staged_paths(draft_id, spec, **self._staging), **self._staging)
+        except (OSError, ValueError, ConfigurationError):
+            pass  # The receipt still owns the provider outcome; staging is TTL-bounded.
+
+    def _send_prepared_album_impl(self, request: SendPreparedAlbumRequest, *, client_id: str) -> SendPreparedAlbumResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return SendPreparedAlbumResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        held = False
+        try:
+            owner = self._album_owner(client_id)
+            if self._drafts.kind(draft_id, owner=owner) != 'album':
+                return result('error', 'draft kind does not match send tool')
+            spec = self._drafts.album_of(draft_id, owner=owner)
+            self._require_album_policy(spec.kinds)  # Receipts stay bound to video_send for video items.
+            held = True  # The current owner and every item's artifact lifecycle hold this draft.
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                if previous.evidence == 'local_failed':
+                    return result('local_failed', 'previous local failure receipt; no provider attempt was made '
+                                  'and no new send was attempted')
+                return self._album_result(result, previous, spec, recipient=None, replay=True)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            # peek re-hashes every item against its own sha256 and size.
+            entry = self._drafts.peek(draft_id, owner=owner)
+            if entry.kind != 'album' or entry.album != spec:
+                return result('error', 'draft kind does not match send tool')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            identity, title = chat_identity(provider.resolve_target(entry.recipient), entry.recipient)
+            if title != expected_title or identity != spec.recipient_identity:
+                return result('recipient_changed', 'recipient changed; prepare a new album draft',
+                              recipient=entry.recipient)
+            self._reply_budget_check(provider)
+            if (self._album_owner(client_id, spec.kinds) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(ALBUM_UNAVAILABLE)
+            preview = self._album_preview(entry, owner).model_dump(mode='json')
+            # One dialog for every item: the album digest stands for the content and the total for the size.
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='album', album_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
+            # The local dialog may remain open while account, policy or provider change.
+            if self._album_owner(client_id, spec.kinds) != owner:
+                raise DraftError(ALBUM_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(ALBUM_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            scope = active_scope(self._artifact_store)
+            send_fence = ((lambda: self._album_send_fence(scope, owner, provider, claim.provider_epoch, claim))
+                          if scope is not None else None)
+            def album_guard():
+                require_current(self._policy)
+                enabled = set(self._policy.enabled_capabilities)
+                return ({'send', 'album_send'} <= enabled and ('video' not in spec.kinds or 'video_send' in enabled)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.album_claim_current(draft_id, owner=owner, provider=provider,
+                                                         provider_epoch=epoch))
+            try:
+                staged = stage_approved_album(claim, **self._staging)
+            except (OSError, ValueError, ConfigurationError):
+                self._drafts.finish_album(draft_id, owner=owner, claim=claim, slots=None, evidence='local_failed')
+                return result('local_failed', 'local staged files could not be prepared; no provider send was attempted')
+            try:
+                # Recheck after potentially long staging, before provider entry.
+                if send_fence is not None:
+                    with send_fence():
+                        pass
+                sender = getattr(provider, 'send_album_message', None)
+                if not callable(sender):
+                    raise MessageSendNotAttempted('album provider is unavailable')
+                items = tuple((item.kind, path, item.caption,
+                               (item.facts.duration_seconds, item.facts.width, item.facts.height,
+                                item.facts.supports_streaming) if item.kind == 'video' else None)
+                              for item, path in zip(spec.items, staged))
+                outcomes = sender(claim.draft.recipient, items, expected_account_id=owner.account_id,
+                    expected_recipient_title=expected_title, expected_recipient_identity=spec.recipient_identity,
+                    attempt_id=draft_id, pre_send_guard=album_guard, pre_send_fence=send_fence)
+                receipt = self._drafts.finish_album(draft_id, owner=owner, claim=claim, slots=outcomes)
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish_album(draft_id, owner=owner, claim=claim, slots=None,
+                                                    evidence='local_failed')
+            except Exception:
+                receipt = self._drafts.finish_album(draft_id, owner=owner, claim=claim,
+                                                    slots=(('outcome_unknown', None),) * len(spec.items))
+            # An item that may still upload keeps its staged copy until every slot is terminal or expired.
+            if receipt.slots is None or all(slot[0] != 'outcome_unknown' for slot in receipt.slots):
+                self._retire_album(draft_id, spec)
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider send was attempted')
+            try:
+                # Disclose observed evidence only to the same current account, client and policy.
+                if self._album_owner(client_id, spec.kinds) != owner:
+                    raise DraftError(ALBUM_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, ArtifactUnavailable):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            return self._album_result(result, receipt, spec, recipient=claim.draft.recipient)
+        except CapabilityDisabled:
+            if not held:
+                raise  # Named before any receipt, dialog or provider work: a video album needs video_send.
+            return self._send_claim_lost(draft_id, client_id, 'album', result, owner=owner)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._send_claim_lost(draft_id, client_id, 'album', result, owner=owner if held else None)
+
+    @contextmanager
+    def _album_send_fence(self, scope, owner, provider, provider_epoch, claim):
+        """As `_artifact_send_fence`, for every item of one album: observe outside mutexes, serialize only the
+        irreversible raw dispatch."""
+        try:
+            if self._draft_owner(owner.client_id) != owner or self._shared_client() is not provider:
+                raise DraftError("draft is unavailable")
+            self._require_album_policy(claim.draft.album.kinds)
+            self._reply_budget_check(provider)
+        except (ArtifactUnavailable, DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+            raise MessageSendNotAttempted("album scope changed before transport") from None
+        with self._artifact_authority.lock:
+            try:
+                self._artifact_authority.live(scope)
+                if (self._client is not provider or provider.send_observation_epoch is not provider_epoch or
+                        not all(self._artifact_authority.authorize_local(scope, artifact_id)
+                                for artifact_id in claim.draft.album.artifact_ids)):
+                    raise ArtifactUnavailable("artifact is unavailable")
+            except ArtifactUnavailable:
+                raise MessageSendNotAttempted("album scope changed before transport") from None
+            yield
+
+    def _get_album_send_status(self, request: GetAlbumSendStatusRequest, *, client_id: str,
+                               deadline: float | None = None) -> GetAlbumSendStatusResponse:
+        """Content-free unless the same owner, policy, provider and attempt hold the album; exact provider evidence
+        refines an unknown slot; nothing here ever sends."""
+        budget = min(deadline if deadline is not None else float('inf'), time.monotonic() + 30)
+        draft_id = request.draft_id
+        unknown = album_status(draft_id)
+        try:
+            client = self._shared_client()
+            with client.request_budget(budget):
+                owner = self._album_owner(client_id)
+                if self._drafts.kind(draft_id, owner=owner) != 'album':
+                    return unknown
+                spec = self._drafts.album_of(draft_id, owner=owner)
+                self._require_album_policy(spec.kinds)  # Status stays bound to video_send for video items.
+                state, receipt, provider, attempted_at, provider_epoch = self._drafts.status_snapshot(draft_id,
+                                                                                                      owner=owner)
+                count = len(spec.items)
+                if state == 'pending':
+                    result = album_status(draft_id, 'local_pending', album_sha256=spec.sha256)
+                elif receipt is not None and receipt.evidence == 'local_failed':
+                    result = album_status(draft_id, 'local_failed', album_sha256=spec.sha256)
+                elif provider is client and provider_epoch is client.send_observation_epoch:
+                    observation = client.get_send_observation(draft_id)
+                    if receipt is not None:
+                        if observation is not None:
+                            receipt = self._drafts.reconcile_album(draft_id, owner=owner, provider=client,
+                                provider_epoch=provider_epoch, attempted_at=attempted_at,
+                                outcomes=album_outcomes(observation, count))
+                        result = album_status(draft_id, 'provider', album_sha256=spec.sha256, outcomes=receipt.slots)
+                        if all(slot[0] != 'outcome_unknown' for slot in receipt.slots):
+                            self._retire_album(draft_id, spec)
+                    elif state == 'claimed':
+                        result = album_status(draft_id, 'local_claimed', album_sha256=spec.sha256,
+                                              outcomes=album_outcomes(observation, count, live=True))
+                    else:
+                        return unknown
+                else:
+                    return unknown
+                # Recheck the owner, the budget, the attempt and the provider after the account and provider reads.
+                if self._album_owner(client_id, spec.kinds) != owner or time.monotonic() >= budget:
+                    return unknown
+                _, _, current_provider, current_attempt, current_epoch = self._drafts.status_snapshot(draft_id,
+                                                                                                    owner=owner)
+                if (current_provider is not provider or current_attempt != attempted_at or
+                        current_epoch is not provider_epoch or self._shared_client() is not client):
+                    return unknown
+                return result
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError,
+                ArtifactUnavailable):
+            return unknown
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)

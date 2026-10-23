@@ -529,9 +529,12 @@ def _text_only(display_name, caption, duration_seconds, source_sha256, source_di
 def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
-            draft_preview, account_alias) -> tuple[str, bool]:
+            draft_preview, account_alias, album_preview) -> tuple[str, bool]:
     """(document, is a change) for exactly one preview bound to the broker's own arguments."""
     _require(_valid_alias(account_alias))
+    # 0.56 albums: no album dialog renders yet, so an album is never shown a partial dialog; it refuses as
+    # dialog_unavailable (no attempt) until the album renderer lands with the tool surface.
+    _require(kind != 'album' and album_preview is None)
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
                 archive_preview, text_edit_preview, draft_preview)
@@ -622,7 +625,7 @@ def render_approval(**arguments) -> tuple[str, bool] | None:
 _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
                  video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
-                 account_alias=None)
+                 account_alias=None, album_preview=None)
 
 
 def decide_approved_send(
@@ -640,6 +643,7 @@ def decide_approved_send(
     draft_preview: dict | None = None,
     timeout_seconds: int = DIALOG_SECONDS,
     account_alias: str | None = None,
+    album_preview: dict | None = None,
 ) -> ApprovalDecision:
     """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
     timer, or any failure to render or show the dialog means no send or change. `account_alias` (only once an
@@ -650,7 +654,7 @@ def decide_approved_send(
         source_sha256=source_sha256, source_display_name=source_display_name, reply_preview=reply_preview,
         reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
-        draft_preview=draft_preview, account_alias=account_alias)
+        draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview)
     if rendered is None:
         return UNAVAILABLE
     document, change = rendered

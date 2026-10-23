@@ -135,14 +135,14 @@ def album_item_directory(album_draft_id: str, index: int) -> str:
     return "draft_" + hashlib.sha256(seed).hexdigest()[:32]
 
 
-def album_staged_paths(draft, *, root: Path | None = None) -> tuple[Path, ...]:
+def album_staged_paths(album_draft_id: str, album, *, root: Path | None = None) -> tuple[Path, ...]:
     """Where every item of one album draft is (or would be) staged, in send order."""
     root = STAGING_ROOT if root is None else root
-    album = getattr(draft, "album", None)
-    if getattr(draft, "kind", None) != "album" or album is None:
+    items = getattr(album, "items", None)
+    if type(items) is not tuple or not items:
         raise ValueError("unsafe outgoing album")
-    return tuple(root / album_item_directory(draft.draft_id, index) / item.display_name
-                 for index, item in enumerate(album.items))
+    return tuple(root / album_item_directory(album_draft_id, index) / item.display_name
+                 for index, item in enumerate(items))
 
 
 def stage_approved_album(claim: ClaimedDraft, *, root: Path | None = None) -> tuple[Path, ...]:
@@ -157,7 +157,7 @@ def stage_approved_album(claim: ClaimedDraft, *, root: Path | None = None) -> tu
     if (draft.kind != "album" or album is None or type(claim.paths) is not tuple or
             len(claim.paths) != len(album.items) or not all(_safe_name(item.display_name) for item in album.items)):
         raise ValueError("unsafe outgoing album")
-    targets = album_staged_paths(draft, root=root)
+    targets = album_staged_paths(draft.draft_id, album, root=root)
     with _LOCK:
         occupied = _sweep_locked(root)
         if occupied + album.total_bytes > MAX_STAGING_BYTES:
