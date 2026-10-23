@@ -1172,7 +1172,6 @@ class _Service:
             j.update(single=(self.k('service_restarted'),{'attempt':1}));j.checkpoint(self.k('restarted'))
         return 'restarted'
 
-
     def _appeared(self, j, appeared):
         """After the commit, for a named alias whose plist was absent at the observation: a first login that finished
         during the change wrote and loaded its broker from the release that served it, which current.json no longer
@@ -1993,13 +1992,14 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists goes the default's way in the same
     transaction, each under its own journal keys (`_key`): a login of it still running refuses before the transaction
     (`login_in_progress`), its broker observed, gated (`alias_pending`, through its own socket; any answer but `none`
-    refuses the whole change) and stopped after the default's, its plist rewritten
-    to the target release before the commit, its runtime.toml version line, and, with its accounts.json record, its
-    Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its record republished beside
-    receipt.json. A plist absent at its observation is verified again after the commit: one a login wrote meanwhile
-    is moved to the target's (`_Service._appeared`). A late refusal restores every stopped broker, the default's first. A rollback checks each alias's
-    session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any alias
-    exists; with none left it retires the registry and the default's readiness record after its commit and restart.
+    refuses the whole change) and stopped after the default's, its plist rewritten to the target release before the
+    commit, its runtime.toml version line, and, with its accounts.json record, its Codex, Claude Code and Claude
+    Desktop entries re-pointed after the default's and its record republished beside receipt.json. A plist absent at
+    its observation is verified again after the commit: one a login wrote meanwhile is moved to the target's
+    (`_Service._appeared`). A late refusal restores every stopped broker, the default's first. A rollback checks each
+    alias's session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any
+    alias exists; with none left it retires the registry and the default's readiness record after its commit and
+    restart.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
@@ -2782,11 +2782,11 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists (and a parked change's) goes the
     default's way, under its own journal keys: its exact broker definition booted out by its own label (pending-send
     gate first, through `alias_pending`, before the transaction and again right before its bootout; any answer but
-    `none` refuses) and removed, its connect job booted out, and
-    the Codex, Claude Code and Claude Desktop entries its record owns removed. Its root, session and policy, and the
-    registry, are never touched, as the default's session is not: a later install re-registers an alias with its
-    `account-add`, keeping its session. With no alias left the registry (only the default's pin, which no release
-    would keep) is moved aside beside itself, never deleted.
+    `none` refuses) and removed, its connect job booted out, and the Codex, Claude Code and Claude Desktop entries
+    its record owns removed. Its root, session and policy, and the registry, are never touched, as the default's
+    session is not: a later install re-registers an alias with its `account-add`, keeping its session. With no alias
+    left the registry (only the default's pin, which no release would keep) is moved aside beside itself, never
+    deleted.
     """
     try:
         require_platform()
@@ -3798,10 +3798,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
 
     Every refusal comes before the transaction exists: the alias grammar and budgets (account_registry, before any
     directory exists), a run from anything but the receipt's current release or a current release older than 0.55
-    (`release_not_current`), an alias the registry and sidecar already list, another alias's record the registry does not
-    list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the alias's
-    server name (Codex
-    `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
+    (`release_not_current`), an alias the registry and sidecar already list, another alias's record the registry
+    does not list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the
+    alias's server name (Codex `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
     `claude_desktop_registration_conflict` or `claude_desktop_config_unsupported`), a loaded default broker that
     is not the receipt's exact definition (`service_conflict`), or any unfinished transaction
     (`transaction_pending`). Then, journaled: the registry entry (unpinned); one `check` on the default broker when
@@ -4048,8 +4047,8 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
     unsettled outcomes, client contexts). Then, journaled: its connect job booted out (its handoff loads the
     broker); its broker gated again and booted out by its own label, its exact plist removed, both again by every
     attempt until the root moves and once more right before the move; its own Codex, Claude Code and Claude Desktop
-    entries removed (neighbours kept); its registry entry and pin dropped; its root moved aside under the accounts tree
-    with a unique name (never deleted, never inside the default tree, never a name a later add reuses); its
+    entries removed (neighbours kept); its registry entry and pin dropped; its root moved aside under the accounts
+    tree with a unique name (never deleted, never inside the default tree, never a name a later add reuses); its
     accounts.json record dropped. A kill at any point resumes on the retry; a retry after it finished returns its
     result.
     """
