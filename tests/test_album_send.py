@@ -1384,6 +1384,57 @@ class SendTests(BrokerFixture, unittest.TestCase):
         self.assertEqual(self.status(did)['evidence'], 'none')
         self.assertEqual((self.approvals, self.albums()), ([], []))
 
+    def test_release_or_account_switch_during_the_wait_is_outcome_unknown_never_expired(self):
+        unknown = {'status': 'outcome_unknown', 'recipient': None, 'album_sha256': None, 'slots': [],
+                   'detail': 'current receipt authority is unavailable; do not retry automatically',
+                   'next_action': 'check_send_status'}
+        for action in (lambda: self.broker._artifact_authority.release(CLIENT),
+                       lambda: setattr(self.raw, 'account', ACCOUNT + 1)):
+            with self.subTest(action=action):
+                self.setUp()
+                did = self.prepare()['draft_id']
+                real = self.raw.send
+                def send(request, real=real, action=action):
+                    real(request)
+                    if request['@type'] == 'sendMessageAlbum':
+                        action()
+                self.raw.send = send
+                self.assertEqual(self.send(did), {**unknown, 'draft_id': did})
+                receipt = self.broker._drafts._entries[did].receipt
+                self.assertEqual(receipt.status, 'sent')  # Kept, never disclosed to a lost authority.
+                self.assertEqual(self.send(did)['status'], 'expired')  # A later call: content-free, no attempt.
+                self.assertEqual((len(self.albums()), len(self.approvals)), (1, 1))
+
+    def test_late_updates_after_the_observation_expired_change_nothing(self):
+        self.raw.outcomes = ['sent', 'silent', 'silent']
+        self.client.ALBUM_CONFIRMATION_SECONDS = 0.05
+        did = self.prepare()['draft_id']
+        self.assertEqual(self.send(did)['status'], 'partial')
+        with patch('telegram_search_mcp.send_observations.RETENTION_SECONDS', 0):
+            self.raw.events.extend([succeeded(-12, 902, 'messageVideo'), succeeded(-13, 903, 'messagePhoto')])
+            status = self.status(did)
+        self.assertEqual([s['status'] for s in status['slots']], ['sent', 'outcome_unknown', 'outcome_unknown'])
+        self.assertEqual(len(self.staged()), 3)  # Never retired on an unknown slot; the 12-hour sweep expires them.
+        self.assertEqual(len(self.albums()), 1)
+
+    def test_an_attempt_in_flight_reads_pending_with_live_slots(self):
+        from telegram_search_mcp.outgoing_drafts import DraftOwner
+        did = self.prepare()['draft_id']
+        owner = DraftOwner(CLIENT, ACCOUNT)
+        self.broker._drafts.claim(did, owner=owner, approved=True, provider=self.client,
+                                  provider_epoch=self.client.send_observation_epoch)
+        status = self.status(did)
+        self.assertEqual((status['status'], status['evidence'], [s['status'] for s in status['slots']]),
+                         ('pending', 'local_claimed', ['pending'] * 3))
+        types = ('messagePhoto', 'messageVideo', 'messagePhoto')
+        self.client._send_observations.register_album(did, 'e', 5, RECIPIENT, types)
+        self.client._send_observations.reduce(result(types))
+        self.client._send_observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+        status = self.status(did)
+        self.assertEqual((status['status'], [(s['status'], s.get('message_id')) for s in status['slots']]),
+                         ('pending', [('sent', 801), ('pending', None), ('pending', None)]))  # Never partial in flight.
+        self.assertEqual(self.albums(), [])
+
     def test_counted_as_a_send_in_flight(self):
         from telegram_search_mcp.broker import SEND_OPERATIONS
         self.assertIn('send_prepared_album', SEND_OPERATIONS)

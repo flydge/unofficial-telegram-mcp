@@ -148,8 +148,10 @@ def album_outcomes(observation, count, *, live=False):
 
     A slot is `sent` or `failed` only from its bound terminal update; a rejected request fails every slot; a
     conflict, a missing or foreign observation and every unbound or unfinished slot are `outcome_unknown`.
-    `live` (an attempt still in flight) reports an unfinished slot as `pending` instead."""
+    `live` (an attempt still in flight, perhaps not yet registered) reports an unfinished slot as `pending`."""
     unknown = 'pending' if live else 'outcome_unknown'
+    if observation is None and live:
+        return ((unknown, None),) * count
     if (not isinstance(observation, AlbumObservation) or len(observation.slots) != count or
             observation.status == 'conflict'):
         return (('outcome_unknown', None),) * count
