@@ -14,10 +14,10 @@ import math
 import os
 import secrets
 import time
-from . import __version__
+from . import __version__, account_registry
 from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
-from .config import ConfigurationError, load_runtime_policy
+from .config import DEFAULT_ALIAS, ConfigurationError, load_runtime_policy
 from .credential_identity import CredentialIdentityError, ResolvedIdentity, resolve_enrolled, resolve_new
 from .credentials import CredentialStoreError, SecretValue
 from .enrollment import SetupPaths, EnrollmentStore, EnrollmentError, managed_key
@@ -33,7 +33,9 @@ _CODES = frozenset({'owner_busy', 'owner_unsafe', 'legacy_unmanaged', 'enrollmen
     'app_identity_invalid', 'identity_changed', 'policy_unsafe', 'unsupported_auth_state', 'invalid_password',
     'invalid_input', 'flood_wait', 'dependency_unavailable', 'auth_request_failed', 'timeout',
     'password_submission_uncertain', 'expired', 'cancelled', 'auth_close_failed', 'auth_destroy_failed',
-    'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout'})
+    'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
+    # The account pin at login (0.55 spec 3C): never a user id, only these fixed codes.
+    'account_mismatch', 'account_duplicate', 'alias_unavailable'})
 STATUS_CODES = _CODES  # Public: the fixed codes a UI may display.
 MAX_RETRY_AFTER = 86400  # Seconds; a flood_wait retry time outside 1..this is never written.
 # The one next_action table: ConnectResult.to_dict, connect's inline result and every `wait` and
@@ -43,6 +45,9 @@ NEXT_ACTIONS = {
     'legacy_unmanaged': 'preserve_existing_session_and_use_legacy_install_path',
     'enrollment_inconsistent': 'review_enrollment_binding_without_resetting',
     'identity_changed': 'review_enrollment_binding_without_resetting',
+    'account_mismatch': 'review_enrollment_binding_without_resetting',
+    'account_duplicate': 'review_enrollment_binding_without_resetting',
+    'alias_unavailable': 'stop_and_report',
     'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
     'enrollment_missing': 'stop_and_report', 'app_identity_invalid': 'stop_and_report',
     'policy_unsafe': 'stop_and_report', 'owner_unsafe': 'stop_and_report',
@@ -81,6 +86,10 @@ _DEFINITIVE_PASSWORD = frozenset({'invalid_password', 'invalid_input'})
 # A submission needs a provider round trip; with less left its outcome would be
 # uncertain by construction, so the run expires instead of sending.
 _MIN_SUBMIT = 5.0
+# A registry refusal at login as the connect code it reports: a busy registry is a retry, anything else
+# (an alias removed meanwhile, an unreadable registry) stops.
+_PIN_CODES = {'account_mismatch': 'account_mismatch', 'account_duplicate': 'account_duplicate',
+              'registry_busy': 'dependency_unavailable'}
 
 
 class ConnectUI(ABC):
@@ -249,6 +258,29 @@ def _drive(transport, ui, progress, credentials, key, paths, remaining):
     raise _Stop('timeout')
 
 
+def _pin_account(transport, paths, remaining):
+    """The account pin at login, before the broker is handed the session (0.55 spec 3C).
+
+    Without a registry the default alias reads nothing (0.54). Otherwise the authorized user must be this alias's
+    own, and no other alias's (the default included): the same rule and pin the broker applies at its first
+    check, applied before the handoff so a duplicate account is refused at login. A user not yet pinned is
+    pinned here. The user id is compared and dropped; it never reaches a result, the status or the page.
+    """
+    account = paths.account
+    if account.alias == DEFAULT_ALIAS and not account_registry.present(account.accounts_root):
+        return
+    user_id = transport.get_account_id(timeout=remaining(_STEP))
+    code = None
+    try:
+        account_registry.pin_account(account.accounts_root, account.alias, user_id)
+    except account_registry.RegistryError as error:
+        code = _PIN_CODES.get(error.code, 'alias_unavailable')
+    finally:
+        user_id = None
+    if code is not None:
+        raise _Stop(code)
+
+
 def _password(transport, ui, progress, observation, attempts, remaining):
     """One request in flight; only a definitive refusal allows re-entry."""
     code = None
@@ -370,6 +402,7 @@ def run_connect(paths, store, provider_factory, ui, *, handoff, lifetime=600, cl
                 remaining(_STEP)
                 transport = AuthTransport(provider_factory())
                 _drive(transport, ui, progress, credentials, key, paths, remaining)
+                _pin_account(transport, paths, remaining)
                 result = ConnectResult('authorizing', None)
             except _Stop as stop:
                 result = _failed(expired_or(stop.code), retry_after=stop.retry_after)

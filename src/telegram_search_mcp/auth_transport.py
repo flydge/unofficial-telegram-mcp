@@ -248,6 +248,17 @@ class AuthTransport:
     def check_password(self, password: SecretValue, *, timeout=10) -> None:
         self._ok('checkAuthenticationPassword', {'password': _text(password)}, timeout)
 
+    def get_account_id(self, *, timeout=10) -> int:
+        """The authorized session's Telegram user id, for the account pin only (0.55 spec 3C).
+
+        The caller compares it and drops it: it is never returned to a client, written or logged.
+        """
+        value = self._request('getMe', {}, timeout)
+        user_id = value.get('id')
+        if value.get('@type') != 'user' or type(user_id) is not int or not 0 < user_id < 2**53:
+            _fail('auth_request_failed')
+        return user_id
+
     def wait_for_state_change(self, previous: AuthorizationState, *, timeout=10) -> AuthorizationState:
         deadline = self._deadline(timeout)
         for _ in range(100000):

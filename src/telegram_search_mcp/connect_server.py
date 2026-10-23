@@ -22,7 +22,7 @@ import time
 import unicodedata
 import segno
 from .connect_flow import PHASES, STATUS_CODES, ConnectUI, valid_retry_after
-from .connect_page import ASSETS
+from .connect_page import assets as page_assets
 from .credentials import SecretValue
 
 MAX_BODY = 4096  # Bytes of a POST body.
@@ -241,8 +241,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(404)
         if self.command != allowed:
             return self._send(405, extra=[('Allow', allowed)])
-        if allowed == 'GET' and path in ASSETS:
-            content_type, body = ASSETS[path]
+        if allowed == 'GET' and path in screen.assets:
+            content_type, body = screen.assets[path]
             return self._send(200, body, content_type)
         if allowed == 'POST' and self.headers.get_all('Origin') != [screen.origin]:
             return self._send(403)
@@ -355,10 +355,12 @@ class _Server(ThreadingHTTPServer):
 class ConnectServer:
     """Owns the listening socket and the token; `start()` returns the one URL that carries it."""
 
-    def __init__(self, ui: LoopbackConnectUI, expires_at: float, *, clock=time.time):
+    def __init__(self, ui: LoopbackConnectUI, expires_at: float, *, clock=time.time, alias=None):
+        """`alias` names the registered account alias whose page this serves; None serves the default's."""
         if (not isinstance(ui, LoopbackConnectUI) or type(expires_at) not in (int, float)
                 or not math.isfinite(expires_at) or not callable(clock)):
             raise ValueError('invalid_input')
+        self.assets = page_assets(alias)  # Refuses anything but None or a named alias's closed token.
         self.ui, self._expires_at, self._clock = ui, expires_at, clock
         self._token = secrets.token_urlsafe(32).encode('ascii')
         self._lock = threading.Lock()

@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from .broker_client import BrokerCompatibilityError, BrokerUnavailable
+from .config import DEFAULT_ALIAS
 from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, next_action,
                            run_connect, valid_retry_after, write_connect_status)
 from .credentials import CredentialStoreError
@@ -72,6 +73,12 @@ def connect_lock_path(paths):
 def _jobs(paths):
     """Keyword arguments naming this account's launchd jobs; none for the default alias (its 0.54 calls)."""
     return account_options(paths.account)
+
+
+def _page(paths):
+    """Keyword arguments naming the account alias on the connect page; none for the default alias."""
+    alias = paths.account.alias
+    return {} if alias == DEFAULT_ALIAS else {'alias': alias}
 
 
 def _denied(error):
@@ -656,7 +663,8 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
         ui = ui_factory()
         if handle_sigterm:
             previous, installed = _on_sigterm(ui, stopping), True
-        server = server_factory(ui, expires_at)
+        # A named alias's page names the alias (never the account); the default's call is unchanged.
+        server = server_factory(ui, expires_at, **_page(paths))
         url = server.start()
         try:
             opener(url)
