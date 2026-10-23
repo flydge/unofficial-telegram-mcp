@@ -541,6 +541,100 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
                 self.assertEqual(state, reference)
 
 
+class LoadedAgainTests(AccountHarness, unittest.TestCase):
+    """Review fix (055d, medium): a broker loaded again after account-remove's broker step (a still-loaded connect
+    job's handoff, or a concurrent `setup --account`) is gated and stopped again, by every attempt until the root
+    moves and once more right before the move, and its exact plist unlinked; a definition that is not the release's
+    exact one is never removed. The connect job goes first, since its handoff loads the broker."""
+
+    def setUp(self):
+        super().setUp()
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        jobs, held = self.jobs, {}
+
+        class Locking(FakeLaunchctl):
+            """launchd whose loaded alias broker holds its broker.lock, as the running broker does, until booted out."""
+
+            def set_job(self, label, value):
+                super().set_job(label, value)
+                if label == jobs.broker_label and value is None and 'fd' in held:
+                    os.close(held.pop('fd'))
+                elif label == jobs.broker_label and value is not None and 'fd' not in held:
+                    held['fd'] = acquire_owner_lock(jobs.root / 'run' / 'broker.lock')
+        self.launchctl = Locking(self.plist, self.base / 'launchd-state.json',
+                                 others={self.jobs.broker_label: self.jobs.broker_plist,
+                                         self.jobs.connect_label: self.connect_plist})
+        self.addCleanup(lambda: os.close(held.pop('fd')) if 'fd' in held else None)
+
+    def loaded_again(self, payload=None, *, load=True):
+        """What a connect job's handoff does: the alias's broker definition written and loaded again."""
+        payload = payload or self.module()._service_payload(self.release, self.jobs.broker_label, self.ALIAS)
+        self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        self.jobs.broker_plist.chmod(0o600)
+        if load:
+            self.launchctl.load(self.jobs.broker_label)
+
+    def assertRetired(self, result, session):
+        self.assertEqual((result['status'], result['service'], result['connect_job'], result['session']),
+                         ('account_removed', 'removed', 'stopped', 'moved'))
+        self.assertEqual(tree(Path(result['session_moved_to'])), session)
+        self.assertFalse(self.jobs.root.exists() or self.jobs.broker_plist.exists())
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+        self.assertEqual((self.registry(), self.sidecar()), ((), None))
+
+    def test_the_connect_job_goes_before_the_broker(self):
+        self.added()
+        self.alias_session()
+        self.account('account_remove')
+        bootouts = [call[1].rpartition('/')[2] for call in self.launchctl.calls if call[0] == 'bootout']
+        self.assertEqual(bootouts, [self.jobs.connect_label, self.jobs.broker_label])
+
+    def test_a_broker_loaded_again_after_its_step_is_stopped_before_the_move(self):
+        self.added()
+        session = self.alias_session()
+
+        def handoff(stage):
+            if stage == 'service':
+                self.loaded_again()
+        self.assertRetired(self.account('account_remove', checkpoint=handoff), session)
+        # Gated right before each bootout: the precheck, the broker step and the move's.
+        self.assertEqual(len(self.alias_probes), 3)
+
+    def test_a_retry_stops_a_broker_loaded_again_and_leaves_no_plist(self):
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        for case in ('loaded', 'booted out by hand'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.added()
+                session = self.alias_session()
+                stray = {}
+
+                def started(stage):  # A broker started by hand holds its lock: the move refuses, the retry follows.
+                    if stage == 'registry':
+                        stray['fd'] = acquire_owner_lock(self.jobs.root / 'run' / 'broker.lock')
+                self.refused('account_remove', 'service_conflict', checkpoint=started)
+                os.close(stray.pop('fd'))
+                self.assertEqual(self.registry(), ())
+                self.loaded_again()  # A connect job still running hands off again.
+                if case == 'booted out by hand':
+                    self.launchctl.set_job(self.jobs.broker_label, None)
+                self.assertRetired(self.account('account_remove'), session)
+
+    def test_a_definition_that_is_not_the_releases_own_is_never_removed(self):
+        self.added()
+        self.alias_session()
+        payload = self.module()._service_payload(self.release, self.jobs.broker_label, self.ALIAS)
+        foreign = {**payload, 'KeepAlive': False}
+
+        def written(stage):
+            if stage == 'service':
+                self.loaded_again(foreign, load=False)
+        self.refused('account_remove', 'service_conflict', checkpoint=written)
+        self.refused('account_remove', 'service_conflict')
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()), foreign)
+        self.assertTrue(self.jobs.root.exists())
+
+
 class AliasJobsTests(unittest.TestCase):
     """config.alias_jobs: what account-remove retires, by the alias's AccountPaths layout, without the registry."""
 

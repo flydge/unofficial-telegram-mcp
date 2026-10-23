@@ -3164,7 +3164,7 @@ _ACCOUNT_STAGED_FILES = frozenset({'journal.json', 'config.preimage', 'config.ca
 _ACCOUNT_ADD_STEPS = ['prepared', 'registry', 'default_check', 'registration_pending', 'registration',
                       'claude_code_pending', 'claude_code', 'claude_desktop_pending', 'claude_desktop',
                       'sidecar_pending', 'sidecar', 'finished']
-_ACCOUNT_REMOVE_STEPS = ['prepared', 'service', 'connect', 'registration', 'claude_code', 'claude_desktop',
+_ACCOUNT_REMOVE_STEPS = ['prepared', 'connect', 'service', 'registration', 'claude_code', 'claude_desktop',
                          'registry', 'session', 'sidecar', 'finished']
 ACCOUNT_RECORD_KEYS = frozenset({'transaction', 'release_root', 'codex', 'claude_code', 'claude_desktop',
                                  'claude_desktop_ownership'})
@@ -3967,6 +3967,11 @@ def _account_removed(journal, alias):
     """account-remove's result, from its journal alone (so a retry after it finished returns the same)."""
     status = {n: (_record(journal, n) or {}).get('status')
               for n in ('service', 'connect', 'registration', 'claude_code', 'claude_desktop', 'session')}
+    # A broker or connect job loaded again after its step and stopped by a later attempt counts as stopped.
+    if _record(journal, 'service_owned') is not None:
+        status['service'] = 'removed'
+    if _record(journal, 'connect_loaded') is not None:
+        status['connect'] = 'stopped'
     result = {'status': 'account_removed', 'account': alias, 'service': status['service'],
               'connect_job': status['connect'], 'codex': status['registration'], 'claude_code': status['claude_code'],
               'claude_desktop': status['claude_desktop'], 'session': status['session'],
@@ -3989,9 +3994,10 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
     (`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`: refused,
     never overwritten), an alias broker definition that is not the receipt release's own (`service_conflict`),
     and the pending-send gate of its loaded broker (`pending_send_unresolved`: sends in flight, open dialogs,
-    unsettled outcomes, client contexts). Then, journaled: its broker gated again and booted out by its own label,
-    its exact plist removed; its connect job booted out; its own Codex, Claude Code and Claude Desktop entries
-    removed (neighbours kept); its registry entry and pin dropped; its root moved aside under the accounts tree
+    unsettled outcomes, client contexts). Then, journaled: its connect job booted out (its handoff loads the
+    broker); its broker gated again and booted out by its own label, its exact plist removed, both again by every
+    attempt until the root moves and once more right before the move; its own Codex, Claude Code and Claude Desktop
+    entries removed (neighbours kept); its registry entry and pin dropped; its root moved aside under the accounts tree
     with a unique name (never deleted, never inside the default tree, never a name a later add reuses); its
     accounts.json record dropped. A kill at any point resumes on the retry; a retry after it finished returns its
     result.
@@ -4070,34 +4076,42 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     j.update(single=(step, {'status': status}))
                 j.advance(step)
                 checkpoint(step)
-            # The broker: gated again right before its bootout, by its own label only; then its exact plist.
-            if j.recorded('service') is None:
-                data, loaded = _alias_service(launchctl, jobs, installed)
-                if loaded:
-                    _alias_gate(pending, home, jobs, installed)
-                if data is not None or loaded:
-                    # Write-ahead, so a resume after the bootout or the unlink reports it removed, not absent.
-                    if j.recorded('service_owned') is None:
-                        j.update(single=('service_owned', {'attempt': 1}))
-                    if loaded:
-                        _bootout(launchctl, jobs.broker_label)
-                    checkpoint('stopped:service')
-                    if data is not None and not _unlink_exact(jobs.broker_plist, data):
-                        raise InstallError('service_conflict')
-                status = 'removed' if j.recorded('service_owned') is not None else 'absent'
-            else:
-                status = None
-            done('service', status)
-            # The connect job (its plist lives in the alias's run directory and moves aside with the root).
-            if j.recorded('connect') is None:
+            def stop_connect():
+                """The connect job, by its own label (its plist lives in the alias's run directory and moves aside with
+                the root); write-ahead, so a resume after the bootout reports it stopped."""
                 if _live(launchctl, jobs.connect_label) is not None:
                     if j.recorded('connect_loaded') is None:
                         j.update(single=('connect_loaded', {'attempt': 1}))
                     _bootout(launchctl, jobs.connect_label)
-                status = 'stopped' if j.recorded('connect_loaded') is not None else 'not_loaded'
-            else:
-                status = None
-            done('connect', status)
+
+            def stop_broker():
+                """The broker: only the release's exact definition (any other refuses `service_conflict` and is never
+                removed), gated again right before its bootout by its own label; then its exact plist unlinked."""
+                data, loaded = _alias_service(launchctl, jobs, installed)
+                if data is None and not loaded:
+                    return
+                if loaded:
+                    _alias_gate(pending, home, jobs, installed)
+                # Write-ahead, so a resume after the bootout or the unlink reports it removed, not absent.
+                if j.recorded('service_owned') is None:
+                    j.update(single=('service_owned', {'attempt': 1}))
+                if loaded:
+                    _bootout(launchctl, jobs.broker_label)
+                checkpoint('stopped:service')
+                if data is not None and not _unlink_exact(jobs.broker_plist, data):
+                    raise InstallError('service_conflict')
+            # The connect job first, since its handoff loads the broker; then the broker. Until the root moves, every
+            # attempt runs both again (and the move once more right before it), so a broker a still-loaded connect
+            # job's handoff or a concurrent `setup --account` loaded again since is gated and stopped too, and its
+            # exact plist unlinked (review fix 055d). Each outcome is recorded once; the result reports what any
+            # attempt stopped (`_account_removed`).
+            moving = j.recorded('session') is None
+            if moving:
+                stop_connect()
+            done('connect', 'stopped' if j.recorded('connect_loaded') is not None else 'not_loaded')
+            if moving:
+                stop_broker()
+            done('service', 'removed' if j.recorded('service_owned') is not None else 'absent')
             # Codex: only the entry the record's receipt owns.
             if j.recorded('registration') is None:
                 j.discard('codex', config)
@@ -4196,20 +4210,25 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                         raise InstallError(error.code) from None
                 j.advance('registry')
             checkpoint('registry')
-            # The session: the whole alias root moved aside (no-replace) under the journaled unique name, only while no
-            # process holds its broker or connect lock (both jobs are booted out by now; nothing admits the alias).
+            # The session: the whole alias root moved aside (no-replace) under the journaled unique name. Right before
+            # it both jobs are stopped once more (a broker loaded again holds its lock: it is gated and booted out, not
+            # a permanent refusal); then only while no process holds its broker or connect lock (nothing admits the
+            # alias any longer, so a holder is one started by hand: refused, and the retry stops both jobs again).
             if j.recorded('session') is None:
                 moved = jobs.root.parent/aside
                 if os.path.lexists(moved):
                     status = 'moved'
-                elif os.path.lexists(jobs.root):
-                    if _alias_held(jobs, 'broker.lock') or _alias_held(jobs, 'connect.lock'):
-                        raise InstallError('service_conflict')
-                    _rename(jobs.root, moved)
-                    checkpoint('published:session')
-                    status = 'moved'
                 else:
-                    status = 'absent'
+                    stop_connect()
+                    stop_broker()
+                    if os.path.lexists(jobs.root):
+                        if _alias_held(jobs, 'broker.lock') or _alias_held(jobs, 'connect.lock'):
+                            raise InstallError('service_conflict')
+                        _rename(jobs.root, moved)
+                        checkpoint('published:session')
+                        status = 'moved'
+                    else:
+                        status = 'absent'
             else:
                 status = None
             done('session', status)
