@@ -188,9 +188,9 @@ Every send or change needs two approvals: the user's in the chat, then the owner
 5. The owner then clicks Send or Apply in a dialog on this Mac (120 seconds; Cancel is the default).
    `declined`, `timeout` and `dialog_unavailable` mean nothing was sent or changed; the draft stays pending
    until it expires, is superseded or is cancelled. Ask the user again before another call.
-6. `outcome_unknown` means it may have reached Telegram: call `get_send_status` and report its `status` and
-   `evidence`. Never send again, and never prepare a new draft to retry. A repeated send call only replays
-   the receipt.
+6. `outcome_unknown` means it may have reached Telegram: call `get_send_status` (`get_album_send_status`
+   for an album) and report its `status` and `evidence`. Never send again, and never prepare a new draft to
+   retry. A repeated send call only replays the receipt.
 
 **Outcomes.** `sent` carries the final `message_id`; `applied` confirms an archive move (`observed_list`) or
 an edit. `expired`, `recipient_changed`, `source_changed`, `chat_changed`, `message_changed`,

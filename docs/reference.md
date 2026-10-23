@@ -568,7 +568,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`. On the Homebrew/source path a `TDLIB_OPENSSL_KEG: openssl@3 <version>` line (or `unavailable`/`unrecognized`) follows `INITIALIZING_TDLIB`, naming the OpenSSL keg the Homebrew TDLib loads; the bundled runtime omits it.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-five tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-eight tools of the current candidate.
 
 ## Client distribution reference (0.53 candidate)
 
@@ -2442,7 +2442,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 55 tools. The three owner tools below use existing
+The candidate exposes 58 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: the `issue_local_upload_authority` description and the CLI help contain this
 complete sequence.

@@ -454,6 +454,13 @@ class ObservationTests(unittest.TestCase):
             observations.reduce(succeeded(-11, 801, 'messagePhoto'))
             with self.subTest(event=repr(event)[:90]):
                 self.assertEqual(self.slots(observations)[1][0], ('conflict', -11, None))
+            # The same end ahead of the result: an unreadable message or another type is a conflict too.
+            early = self.observed()
+            early.reduce(event)
+            early.reduce(succeeded(-11, 801, 'messagePhoto'))
+            early.reduce(result())
+            with self.subTest(early=repr(event)[:90]):
+                self.assertEqual(self.slots(early)[1][0], ('conflict', -11, None))
         video = self.observed()
         video.reduce(result())
         final = succeeded(-12, 802, 'messageVideo')
@@ -623,7 +630,7 @@ class ContractTests(Store, unittest.TestCase):
         album with an unconfirmed item carries check_send_status too, a settled one carries no hint."""
         from telegram_search_mcp.album_drafts import SEND_DETAILS, SendPreparedAlbumResponse, album_status
         did, sha = 'draft_' + '1' * 32, 'a' * 64
-        for key in ('outcome_unknown', 'partial_unknown', 'replay_unknown', 'lost'):
+        for key in ('outcome_unknown', 'partial_unknown', 'replay_unknown', 'lost', 'authority'):
             with self.subTest(detail=key):
                 self.assertIn('get_album_send_status', SEND_DETAILS[key])
                 self.assertIn('never resend', SEND_DETAILS[key])
@@ -1578,9 +1585,23 @@ class SendTests(BrokerFixture, unittest.TestCase):
         self.assertEqual(self.status(did)['evidence'], 'none')
         self.assertEqual((self.approvals, self.albums()), ([], []))
 
+    def test_every_album_path_that_lost_its_authority_names_the_album_status(self):
+        """After an attempt, a call that lost the receipt authority answers outcome_unknown with a detail that
+        names get_album_send_status (never the generic get_send_status route) on the artifact-loss and the
+        lost-claim paths alike."""
+        from telegram_search_mcp.album_drafts import SEND_DETAILS
+        from telegram_search_mcp.broker import DraftOwner
+        did = 'draft_' + '1' * 32
+        with patch.object(self.broker._drafts, 'attempt_outcome', return_value='attempted'):
+            lost = self.broker._attempted_send('send_prepared_album', did, CLIENT)
+            claim = self.broker._send_claim_lost(did, CLIENT, 'album', lambda status, detail: (status, detail),
+                                                 owner=DraftOwner(client_id=CLIENT, account_id=ACCOUNT))
+        self.assertEqual((lost.status, lost.detail), ('outcome_unknown', SEND_DETAILS['authority']))
+        self.assertEqual(claim, ('outcome_unknown', SEND_DETAILS['authority']))
+
     def test_release_or_account_switch_during_the_wait_is_outcome_unknown_never_expired(self):
         unknown = {'status': 'outcome_unknown', 'recipient': None, 'album_sha256': None, 'slots': [],
-                   'detail': 'current receipt authority is unavailable; do not retry automatically',
+                   'detail': 'current receipt authority is unavailable; call get_album_send_status, never resend',
                    'next_action': 'check_send_status'}
         for action in (lambda: self.broker._artifact_authority.release(CLIENT),
                        lambda: setattr(self.raw, 'account', ACCOUNT + 1)):

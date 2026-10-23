@@ -570,7 +570,8 @@ class Broker(SelectionBrokerMixin):
             if outcome == 'local_failed':
                 return SendPreparedAlbumResponse(status='local_failed', draft_id=draft_id,
                                                  detail='local revalidation failed; no provider send was attempted')
-            return SendPreparedAlbumResponse(status='outcome_unknown', draft_id=draft_id, detail=RECEIPT_AUTHORITY_UNAVAILABLE)
+            return SendPreparedAlbumResponse(status='outcome_unknown', draft_id=draft_id,
+                                             detail=ALBUM_SEND_DETAILS['authority'])
         if video:
             if outcome == 'local_failed':
                 return SendPreparedVideoResponse(status='local_failed', draft_id=draft_id,
@@ -2372,7 +2373,8 @@ class Broker(SelectionBrokerMixin):
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider send was attempted')
         if outcome == 'attempted':
-            return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            return result('outcome_unknown', ALBUM_SEND_DETAILS['authority'] if kind == 'album'
+                          else RECEIPT_AUTHORITY_UNAVAILABLE)
         return result('expired', 'draft is unavailable or no longer valid')
 
     def _require_video_policy(self) -> None:
@@ -2743,7 +2745,7 @@ class Broker(SelectionBrokerMixin):
                 if self._album_owner(client_id, spec.kinds) != owner:
                     raise DraftError(ALBUM_UNAVAILABLE)
             except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, ArtifactUnavailable):
-                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+                return result('outcome_unknown', ALBUM_SEND_DETAILS['authority'])
             return self._album_result(result, receipt, spec, recipient=claim.draft.recipient)
         except CapabilityDisabled:
             if not held:

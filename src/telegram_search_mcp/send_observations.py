@@ -205,8 +205,12 @@ def _reduce_album(old, event):
         if any(row[0] == old_id for row in old.early):  # Two ends for one message contradict each other.
             return replace(old, early=tuple(row if row[0] != old_id else (old_id, 'conflict', None, row[3])
                                             for row in old.early))
-        if content_type not in old.content_types or len(old.early) >= MAX_EARLY_ALBUM_UPDATES:
+        if len(old.early) >= MAX_EARLY_ALBUM_UPDATES:
             return old
+        if content_type not in old.content_types:
+            # An end in the album's own chat whose message cannot be read or is of a type the album never sent:
+            # that temporary ID is a conflict once it binds, exactly as for a bound slot.
+            return replace(old, early=(*old.early, (old_id, 'conflict', None, '')))
         status, message_id = _album_terminal(event, old.chat_id, content_type)
         return replace(old, early=(*old.early, (old_id, status, message_id, content_type)))
     for index, slot in enumerate(old.slots):

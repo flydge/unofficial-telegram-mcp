@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import tempfile
 import threading
 import unittest
@@ -86,6 +87,25 @@ class ContractTests(unittest.TestCase):
         proxy = BrokerClient(socket_path=Path('/nonexistent/no.sock'), policy=ALBUM_POLICY,
                              restart_callback=lambda: None)
         self.assertGreaterEqual(proxy._request_timeout, 330 + 30)
+
+
+class DocCensusTests(unittest.TestCase):
+    """056 re-review fix: every statement of the current candidate's tool count in the public docs is the census."""
+
+    def test_the_docs_state_the_current_tool_count(self):
+        root = Path(__file__).resolve().parents[1]
+        ones = ('', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine')
+        tens = {5: 'fifty', 6: 'sixty'}
+        count = len(_TOOL_NAMES)
+        word = tens[count // 10] + ('-' + ones[count % 10] if count % 10 else '')
+        found = []
+        for name in ('reference.md', 'security.md', 'install.md'):
+            text = (root / 'docs' / name).read_text(encoding='utf-8')
+            found += re.findall(r'([a-z]+(?:-[a-z]+)?) tools of the current candidate', text)
+            found += re.findall(r'\(([a-z]+(?:-[a-z]+)?) in the current candidate', text)
+            found += [w for w in re.findall(r'The candidate exposes (\d+) tools', text)]
+        self.assertGreaterEqual(len(found), 4)
+        self.assertEqual(set(found) - {word, str(count)}, set())
 
 
 class _Service:

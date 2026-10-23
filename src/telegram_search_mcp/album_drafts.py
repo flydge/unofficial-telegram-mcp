@@ -46,6 +46,7 @@ SEND_DETAILS = {
     'replay_unknown': ('previous provider attempt receipt; no new send was attempted; call get_album_send_status for '
                        'the unconfirmed items, never resend'),
     'lost': 'broker response is unavailable; call get_album_send_status, never resend',
+    'authority': 'current receipt authority is unavailable; call get_album_send_status, never resend',
 }
 PREVIEW_VERSION = 1
 MIN_ITEMS, MAX_ITEMS = 2, 10
