@@ -95,12 +95,12 @@ class ChangeHarness(InstallHarness):
         self.probes.append((python, app))
         return self.answers.pop(0) if self.answers else 'none'
 
-    def build(self, name, *, launcher=b'# inert unit fixture\n', search=b'search-skill', version='0.54.0rc1'):
+    def build(self, name, *, launcher=b'# inert unit fixture\n', search=b'search-skill', version='0.55.0.dev0'):
         module = self.module()
         release = self.base / name
         release.mkdir(mode=0o700)
         files = {'launcher.py': launcher, 'python/bin/python3': b'inert-runtime',
-                 'app/telegram_search_mcp/__init__.py': b'__version__ = "0.54.0rc1"\n',
+                 'app/telegram_search_mcp/__init__.py': b'__version__ = "0.55.0.dev0"\n',
                  'native/libtdjson.dylib': b'inert-native', 'skills/telegram-search/SKILL.md': search,
                  'skills/telegram-setup/SKILL.md': b'setup-skill',
                  'tdlib-lock.json': json.dumps(v1_lock(inert_natives())).encode()}
@@ -277,7 +277,7 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         self.assertEqual([p[0] for p in self.probes], [Path(old['release_root']) / 'python/bin/python3'] * 3)
         self.assertEqual(self.session_hashes(), before)
         self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
-                         policy.replace(OLD_VERSION.encode(), b'0.54.0rc1'))
+                         policy.replace(OLD_VERSION.encode(), b'0.55.0.dev0'))
         for name in ('telegram-search',):
             for base in (self.skills, self.claude_skills):
                 self.assertEqual((base / name / 'SKILL.md').read_bytes(), b'search-skill-2')
@@ -449,7 +449,7 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         after = (self.session_root / 'runtime.toml').read_bytes()
         changed = [(a, b) for a, b in zip(before.split(b'\n'), after.split(b'\n')) if a != b]
         self.assertEqual(changed, [(b'expected_package_version = "%s"' % OLD_VERSION.encode(),
-                                    b'expected_package_version = "0.54.0rc1"')])
+                                    b'expected_package_version = "0.55.0.dev0"')])
         self.assertIn(capabilities.encode(), after)
         self.assertEqual(oct((self.session_root / 'runtime.toml').stat().st_mode & 0o777), '0o600')
 
@@ -615,7 +615,7 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                                      ('change_2', installed['post_subtree_hash']))
                 self.assertEqual((self.skills / 'telegram-search' / 'SKILL.md').read_bytes(), b'search-skill')
                 self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
-                                 policy.replace(b'0.54.0rc1', OLD_VERSION.encode()))
+                                 policy.replace(b'0.55.0.dev0', OLD_VERSION.encode()))
                 self.assertEqual(self.session_hashes(), before)
                 self.selection_check(OLD_VERSION)
                 self.assertTrue((self.runtime / 'releases' / new[3]).is_dir())
@@ -644,7 +644,7 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                 switched = path.read_bytes()
                 result = self.change('rollback')
                 self.assertEqual((result['status'], result['release_root']), ('rolled_back', old['release_root']))
-                self.assertEqual(path.read_bytes(), switched.replace(b'0.54.0rc1', OLD_VERSION.encode()))
+                self.assertEqual(path.read_bytes(), switched.replace(b'0.55.0.dev0', OLD_VERSION.encode()))
                 # Forward again over the switched policy: the kept release is verified and reused.
                 self.assertEqual(self.install(new)['status'], 'upgraded')
                 self.assertEqual(path.read_bytes(), switched)

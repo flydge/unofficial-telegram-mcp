@@ -5,7 +5,7 @@ description: Use when the user asks to find, read, verify, summarize, analyze or
 
 # Telegram Search
 
-Paired candidate: `0.54.0rc1`, contract 1. Installing the MCP and connecting the account belong to the
+Paired candidate: `0.55.0.dev0`, contract 1. Installing the MCP and connecting the account belong to the
 paired telegram-setup skill.
 
 You, the MCP client's model, supply the meaning: hypotheses, the choice of chat, the summary. The MCP returns
