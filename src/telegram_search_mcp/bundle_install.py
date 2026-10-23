@@ -1972,7 +1972,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its record republished beside
     receipt.json. A late refusal restores every stopped broker, the default's first. A rollback checks each alias's
     session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any alias
-    exists; with none left it retires the registry and the default's readiness record after its commit.
+    exists; with none left it retires the registry and the default's readiness record after its commit and restart.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
@@ -2488,11 +2488,11 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             if _uncommitted(root/'current.json',_pointer(current)):restore_all(_refusal(error))
             raise
         j.advance('complete');checkpoint('complete')
-        # A rollback below 0.55 with no alias left: the registry and the default's readiness record retire before the
-        # older release's broker starts.
-        retired=_retire_accounts(j,home,session_root) if retire is not None else None
         restarted=service.restart(j)
         alias_restarted={alias:broker.restart(j) for alias,broker in brokers}
+        # A rollback below 0.55 with no alias left: the registry and the default's readiness record retire once the
+        # older broker serves again (it reads neither, so a refusal here never keeps it stopped; the retry resumes).
+        retired=_retire_accounts(j,home,session_root) if retire is not None else None
         j.advance('finished')
         result={'status':'upgraded' if kind=='upgrade' else 'rolled_back','installation':'upgraded' if kind=='upgrade' else 'rolled_back',
                 'release_root':str(to_root),'package_version':to_manifest['package_version'],'previous_release_root':str(from_root),
@@ -3536,10 +3536,11 @@ def _retire_registry(j, home):
 
 
 def _retire_accounts(j, home, session_root):
-    """After the commit of a rollback to a release that knows no aliases (refused before it while one exists): the
-    alias registry, which then holds only the default's pin, moves aside beside itself under the journaled name, and
-    the default broker's readiness record (spec 3C) into the transaction; neither is deleted. The older release keeps
-    no pin while it serves, so a later 0.55 starts again from no registry, and the default tree is 0.54's."""
+    """After the commit and restart of a rollback to a release that knows no aliases (refused before it while one
+    exists): the alias registry, which then holds only the default's pin, moves aside beside itself under the
+    journaled name, and the default broker's readiness record (spec 3C) into the transaction; neither is deleted. The
+    older release keeps no pin while it serves and reads neither file, so a later 0.55 starts again from no registry,
+    and the default tree is 0.54's."""
     registry = _retire_registry(j, home)
     if j.recorded('retired_readiness') is None:
         from .broker_readiness import NAME

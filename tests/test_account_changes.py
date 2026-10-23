@@ -328,6 +328,24 @@ class RollbackOverAliasesTests(AliasChangeHarness, unittest.TestCase):
         again = self.change('rollback')
         self.assertEqual((again['status'], again['installation']), ('rolled_back', 'reused'))
 
+    def test_a_busy_registry_at_the_retirement_keeps_the_older_broker_serving_and_the_retry_finishes(self):
+        old = self.upgraded_then('work')
+        self.account('account_remove')
+        real = account_registry.retire
+
+        def busy(*args, **kwargs):
+            raise account_registry.RegistryError('registry_busy')
+        with mock.patch.object(account_registry, 'retire', busy), self.assertRaises(bundle_install.InstallError) as caught:
+            self.change('rollback')
+        self.assertEqual(str(caught.exception), 'registry_busy')
+        self.assertEqual((self.pointer()['release_root'], self.launchctl.loaded[4]), (str(old), str(old / 'launcher.py')))
+        self.assertTrue((config.accounts_root(self.home) / 'registry.json').exists())
+        with mock.patch.object(account_registry, 'retire', real):
+            result = self.change('rollback')
+        self.assertEqual((result['status'], result['installation'], result['account_registry']),
+                         ('rolled_back', 'rolled_back', 'retired'))
+        self.assertFalse((config.accounts_root(self.home) / 'registry.json').exists())
+
     def test_a_rollback_below_055_without_a_registry_retires_nothing(self):
         self.full()
         self.install(self.newer())

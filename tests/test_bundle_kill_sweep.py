@@ -37,6 +37,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+import tomlkit
+
 from test_adopt_legacy import AdoptionHarness
 from test_bundle_upgrade import FakeLaunchctl, NEIGHBOUR_CODEX
 from telegram_search_mcp import account_registry, bundle_install, config
@@ -51,8 +53,12 @@ RANDOM = [(re.compile(pattern), replacement) for pattern, replacement in (
     (r'-adopted-[0-9a-f]{24}', '-adopted-*'), (r'-initial-[a-z0-9_]{8}', '-initial-*'),
     (r'-removed-[0-9a-f]{32}', '-removed-*'), (r'-staging-[a-z0-9_]{8}', '-staging-*'),
     (r'\.telegram-search-[0-9a-f]{32}\.tmp', '.telegram-search-*.tmp'),
-    (r'\bremoved-([a-z][a-z0-9]{0,11})-[0-9a-f]{32}', r'removed-\1-*'))]
+    (r'\bremoved-([a-z][a-z0-9]{0,11})-[0-9a-f]{32}', r'removed-\1-*'),
+    (r'\bretired-[0-9a-f]{32}-registry', 'retired-*-registry'))]
 WRITE_AHEAD = {'claude_remove': 'remove', 'claude_add': 'add-json'}
+# A write-ahead window's outcome is in the result's top level (the default's, or an account action's own alias), or,
+# for a change's per-alias record (`claude_add:<alias>`, 0.55 phase D), under its `accounts`.
+TOP = '<top>'
 CLAUDE_DOCUMENT = 'user/.claude.json'
 
 
@@ -119,7 +125,7 @@ class Effects:
                 value = real(argv, **kwargs)
             finally:
                 self.inside = False
-            self.tick(kind, argv[1] if kind == 'launchctl' else argv[2])
+            self.tick(kind, argv[1] if kind == 'launchctl' else argv[2] + ' ' + argv[5])  # claude: verb and server.
             return value
         return call
 
@@ -337,11 +343,19 @@ def _refusal(h, action):
         result = {'refused': str(error), 'pending_action': error.pending_action}
         changes = sorted(h.runtime.glob('transactions/change_*/journal.json'), key=lambda p: int(p.parent.name[7:]))
         if changes:
-            outcome = json.loads(changes[-1].read_bytes())['publications'].get('claude_code')
+            publications = json.loads(changes[-1].read_bytes())['publications']
+            outcome = publications.get('claude_code')
             if outcome:
                 result['claude_code'] = outcome[0]['status']
                 if result['claude_code'] == 'failed':
                     result['claude_registration_command'] = 'recorded'
+            # Each alias's outcome the change recorded (0.55 phase D), in the place a result names it.
+            for key, records in sorted(publications.items()):
+                if key.startswith('claude_code:'):
+                    value = result.setdefault('accounts', {}).setdefault(key.partition(':')[2], {})
+                    value['claude_code'] = records[0]['status']
+                    if value['claude_code'] == 'failed':
+                        value['claude_registration_command'] = 'recorded'
         return result
 
 
@@ -788,6 +802,171 @@ def _account_left(h):
     return ['%s left' % k for k, bad in left.items() if bad]
 
 
+def _alias_pinned(h, version):
+    """`work`'s enrollment and runtime.toml pinning `version`, as its login writes them."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    for name, data in (('enrollment.json', b'{"synthetic": "alias enrollment"}\n'),
+                       ('runtime.toml', ('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
+                                         'enabled_capabilities = ["read", "artifacts"]\n' % version).encode())):
+        (jobs.root / name).write_bytes(data)
+        (jobs.root / name).chmod(0o600)
+
+
+def _alias_launchd(h):
+    """The fake launchd knowing `work`'s broker and connect jobs beside the default's."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    h.launchctl = FakeLaunchctl(h.plist, h.base / 'launchd-state.json', others={
+        jobs.broker_label: jobs.broker_plist, jobs.connect_label: jobs.root / 'run' / (jobs.connect_label + '.plist')})
+
+
+def _aliases_upgrade_prepare(h):
+    """0.52.9 installed with `work` (logged in, its broker loaded, its version line pinned) and `play` (never logged
+    in) added, and the 0.55 kit to upgrade to."""
+    _accounts_prepare(h, ALIAS, 'play')
+    _alias_logged_in(h)
+    _alias_pinned(h, '0.52.9')
+    h.new = h.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+    h.target = h.runtime / 'releases' / h.new[3]
+
+
+def _aliases_check(h, result, status, service):
+    h.assertEqual((result['status'], result['service']), (status, service))
+    h.assertEqual({a: (v['service'], v['codex'], v['claude_code'], v['claude_desktop']) for a, v in result['accounts'].items()},
+                  {'play': ('not_loaded', 'registered', 'registered', 'registered'),
+                   'work': ('restarted', 'registered', 'registered', 'registered')})
+
+
+def _aliases_served(h):
+    """`work`'s plist, loaded broker and version line name `h.target`."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    payload = bundle_install._service_payload(h.target, jobs.broker_label, ALIAS)
+    version = json.loads((h.target / 'manifest/release.json').read_text())['package_version']
+    named = {'alias plist': jobs.broker_plist.exists() and plistlib.loads(jobs.broker_plist.read_bytes()) == payload,
+             'alias broker': h.launchctl.job(jobs.broker_label) == payload['ProgramArguments'],
+             'alias pin': ('expected_package_version = "%s"' % version).encode() in (jobs.root / 'runtime.toml').read_bytes()}
+    return ['%s does not name %s' % (k, h.target.name) for k, ok in named.items() if not ok]
+
+
+def _aliases_on_one_release(h):
+    """No alias left on a mixed release: what `_one_release` checks, `work`'s broker and pin, and every alias's
+    Codex, Claude Code and Claude Desktop entry and accounts.json record name `h.target`."""
+    out = _one_release(h) + _aliases_served(h)
+    servers = tomlkit.parse((h.codex / 'config.toml').read_text())['mcp_servers']
+    desktop = json.loads(h.desktop_config.read_text())['mcpServers']
+    records = json.loads((h.runtime / 'accounts.json').read_text())['accounts']
+    for alias in ('play', ALIAS):
+        command = str(h.target / 'python/bin/python3')
+        arguments = ['-I', '-S', '-B', str(h.target / 'launcher.py'), 'mcp', '--account', alias]
+        name = 'telegram_search_' + alias
+        # A Claude Code entry in its documented write-ahead window is never retried: its record says `failed`.
+        claude = records[alias]['claude_code'] not in ('registered', 'reused') or h.claude().entry_of(name) == {
+            'type': 'stdio', 'command': command, 'args': arguments}
+        named = {'codex': name in servers and [servers[name]['command'], list(servers[name]['args'])] == [command, arguments],
+                 'claude code': claude,
+                 'claude desktop': desktop.get(name) == {'command': command, 'args': arguments},
+                 'record': records[alias]['release_root'] == str(h.target)}
+        out += ['%s %s does not name %s' % (alias, k, h.target.name) for k, ok in named.items() if not ok]
+    return out
+
+
+def _aliases_rollback_prepare(h):
+    """Release a (0.55) with `work` and `play` added (`work` logged in), upgraded to b (0.55): a rollback back to a
+    goes over both aliases."""
+    h.claude()
+    _alias_launchd(h)
+    h.codex_present()
+    h.desktop_present()
+    (h.home / '.claude').mkdir(mode=0o755, exist_ok=True)
+    h.session(pin='0.55.0.dev0')
+    h.install(h.build('a'))
+    h.target = Path(h.pointer()['release_root'])
+    h.service(h.target)
+    for alias in (ALIAS, 'play'):
+        _account(h, 'account_add', alias=alias)
+    _alias_logged_in(h)
+    _alias_pinned(h, '0.55.0.dev0')
+    h.install(h.build('b', launcher=b'# second release\n', search=b'search-skill-2'))
+
+
+def _aliases_uninstall_prepare(h):
+    _accounts_prepare(h, ALIAS, 'play')
+    _alias_logged_in(h)
+    _alias_pinned(h, '0.52.9')
+
+
+def _aliases_uninstall_check(h, result):
+    _uninstall_check(h, result)
+    h.assertEqual({a: v['claude_code'] for a, v in result['accounts'].items()}, {'play': 'removed', 'work': 'removed'})
+
+
+def _aliases_left(h):
+    """After an uninstall: nothing of either alias but `work`'s session and the registry, which stay."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    config_bytes = (h.codex / 'config.toml').read_bytes()
+    desktop = json.loads(h.desktop_config.read_text())['mcpServers']
+    left = {'alias plist': jobs.broker_plist.exists(), 'alias broker': h.launchctl.job(jobs.broker_label) is not None,
+            'alias connect job': h.launchctl.job(jobs.connect_label) is not None,
+            'alias codex entries': b'telegram_search_' in config_bytes,
+            'alias claude code entries': any(h.claude().entry_of('telegram_search_' + a) for a in (ALIAS, 'play')),
+            'alias desktop entries': any(n.startswith('telegram_search_') for n in desktop),
+            'no alias session': not (jobs.root / 'tdlib' / 'td.binlog').exists(),
+            'no registry': account_registry.load(config.accounts_root(h.home)) is None}
+    return _nothing_left(h) + ['%s' % k for k, bad in left.items() if bad]
+
+
+def _retire_prepare(h):
+    """0.52.9 upgraded to 0.55, `work` added, logged in and removed again, and the default broker's readiness record
+    (a registry exists): the rollback below 0.55 retires both."""
+    _alias_launchd(h)
+    _, h.previous = h.full()
+    h.target = Path(h.previous['release_root'])
+    h.install(h.build('b', launcher=b'# second release\n', search=b'search-skill-2'))
+    h.claude()
+    _account(h, 'account_add')
+    _alias_logged_in(h)
+    _account(h, 'account_remove')
+    run = h.session_root / 'run'
+    run.mkdir(mode=0o700, exist_ok=True)
+    (run / 'readiness.json').write_bytes(b'{"authorized":true,"generation":"g","version":1}')
+    (run / 'readiness.json').chmod(0o600)
+
+
+def _retire_check(h, result):
+    _rollback_check(h, result)
+    h.assertEqual(result['account_registry'], 'retired')
+
+
+def _retired(h):
+    """The registry and the default's readiness record moved aside, never deleted; the default tree is 0.54's."""
+    accounts = config.accounts_root(h.home)
+    retired = [p.name for p in accounts.iterdir() if p.name.startswith('retired-')]
+    moved = list(h.runtime.glob('transactions/change_*/readiness.retired'))
+    wrong = {'registry left': (accounts / 'registry.json').exists(), 'registry not retired once': len(retired) != 1,
+             'readiness left': (h.session_root / 'run' / 'readiness.json').exists(),
+             'readiness not moved once': len(moved) != 1, 'accounts.json left': (h.runtime / 'accounts.json').exists()}
+    return _one_release(h) + [k for k, bad in wrong.items() if bad]
+
+
+def _late_aliases_prepare(h):
+    _aliases_upgrade_prepare(h)
+    h.target = Path(h.pointer()['release_root'])  # A late refusal leaves the installed release serving.
+    h.receipt_bytes = (h.runtime / 'receipt.json').read_bytes()
+
+
+def _late_aliases_check(h, result):
+    h.assertEqual((result['refused'], result['pending_action']), ('metadata_conflict', None))
+    (h.runtime / 'receipt.json').write_bytes(h.receipt_bytes)
+    h.target = h.runtime / 'releases' / h.new[3]
+    result = h.install(h.new, alias_pending=lambda *_: 'none')
+    _aliases_check(h, result, 'upgraded', 'restarted')
+    h.assertEqual(_aliases_on_one_release(h), [])
+
+
+def _late_aliases_final(h):
+    """Every broker back on the installed release after the late refusal, `work`'s version line included."""
+    return _one_release(h) + _aliases_served(h)
+
+
 def _stopped_on_target(h):
     """current.json, the pin and the plist name `h.target`, and no broker runs (none did when the change began)."""
     out = [p for p in _one_release(h) if not p.startswith('loaded broker')]
@@ -874,6 +1053,23 @@ SCENARIOS = {
     'account_remove_beside_another': Scenario(lambda h: (_accounts_prepare(h, ALIAS, 'play'), _alias_logged_in(h)),
                                               lambda h, lc, cl: _account(h, 'account_remove', lc, cl),
                                               _account_remove_check, write_ahead=False, final=_account_left),
+    # 0.55 phase D part 2: an upgrade, a rollback and an uninstall over the default and two aliases (every broker
+    # stop and plist, version line, entry and accounts.json record of each), a late refusal that restores every
+    # broker, and the rollback below 0.55 that retires the registry and the default's readiness record.
+    'upgrade_with_aliases': Scenario(_aliases_upgrade_prepare, lambda h, lc, cl: h.install(
+        h.new, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
+        lambda h, result: _aliases_check(h, result, 'upgraded', 'restarted'), final=_aliases_on_one_release),
+    'rollback_with_aliases': Scenario(_aliases_rollback_prepare, lambda h, lc, cl: h.change(
+        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
+        lambda h, result: _aliases_check(h, result, 'rolled_back', 'restarted'), final=_aliases_on_one_release),
+    'uninstall_with_aliases': Scenario(_aliases_uninstall_prepare, lambda h, lc, cl: h.change(
+        'uninstall', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _aliases_uninstall_check,
+        write_ahead=False, final=_aliases_left),
+    'late_refusal_with_aliases': Scenario(_late_aliases_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
+        h.new, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none', checkpoint=_receipt_changed(h))),
+        _late_aliases_check, final=_late_aliases_final),
+    'rollback_below_055_retires_the_registry': Scenario(_retire_prepare, lambda h, lc, cl: h.change(
+        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _retire_check, final=_retired),
 }
 
 
@@ -918,11 +1114,19 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
             shutil.rmtree(parent, ignore_errors=True)
 
     def write_ahead_records(self):
-        counts = dict.fromkeys(WRITE_AHEAD, 0)
+        """{(record, server, owner): count} of every journal's write-ahead Claude Code records: an unkeyed record is
+        the default's server's, or in an account transaction its own alias's, its outcome at the result's top level
+        (`TOP`); a change's keyed record (`<record>:<alias>`) is that alias's, under its `accounts`."""
+        counts = {}
         for journal in (self.runtime / 'transactions').glob('*/journal.json') if self.runtime.is_dir() else ():
-            publications = json.loads(journal.read_bytes())['publications']
-            for name in counts:
-                counts[name] += len(publications.get(name, []))
+            value = json.loads(journal.read_bytes())
+            for key, records in value['publications'].items():
+                name, _, alias = key.partition(':')
+                if name not in WRITE_AHEAD:
+                    continue
+                own = alias or value.get('alias')
+                server = config.alias_server_name(own) if own else 'telegram_search'
+                counts[(name, server, alias or TOP)] = counts.get((name, server, alias or TOP), 0) + len(records)
         return counts
 
     def claude_document(self):
@@ -938,15 +1142,17 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
         """Trace the uninterrupted run; each effect notes whether it falls in a Claude Code write-ahead window."""
         self.setUp()
         scenario.prepare(self)
-        trace, calls, baseline = [], dict.fromkeys(WRITE_AHEAD.values(), 0), self.write_ahead_records()
+        trace, calls, baseline = [], {}, self.write_ahead_records()
 
         def hook(count, kind, where):
             if kind == 'claude':
                 calls[where] = calls.get(where, 0) + 1
             window = False
             if scenario.write_ahead:
-                records = self.write_ahead_records()
-                window = any(records[name] - baseline[name] > calls[verb] for name, verb in WRITE_AHEAD.items())
+                # A record journaled beyond the CLI calls its server got: the kill is in that record's window.
+                window = next(((owner, server) for (name, server, owner), n in self.write_ahead_records().items()
+                               if n - baseline.get((name, server, owner), 0) > calls.get(WRITE_AHEAD[name] + ' ' + server, 0)),
+                              False)
             trace.append((kind, where, window, self.claude_document() if window else None))
 
         result = self.run_action(scenario, hook)
@@ -974,20 +1180,26 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
         return os.waitstatus_to_exitcode(status)
 
     def problems(self, reference, result, window=None):
-        """How the resumed state and result differ from the uninterrupted run's."""
+        """How the resumed state and result differ from the uninterrupted run's. `window`: ((owner, server), Claude
+        document at the kill) of a kill in a write-ahead window, its owner `TOP` or an alias (`write_ahead_records`)."""
         prefix, out = str(self.base), []
         left = orphans(self.base)
         if left:
             out.append('left %s' % left[:4])
         expected, actual = copy.deepcopy(reference.state), snapshot(self.base)
-        expected_result, actual_result = dict(reference.result), normal(result, prefix, {})
+        expected_result, actual_result = copy.deepcopy(reference.result), normal(result, prefix, {})
         if window is not None:
+            (owner, server), window = window
+
+            def holder(value):
+                """The part of a result that carries the windowed outcome."""
+                return value if owner == TOP else value.get('accounts', {}).get(owner, {})
             # Never retried after its write-ahead record: `failed` with the manual command, the entry as the kill left it.
-            if actual_result.get('claude_code') != 'failed' or 'claude_registration_command' not in actual_result:
-                out.append('write-ahead window not reported failed: %s' % actual_result.get('claude_code'))
+            if holder(actual_result).get('claude_code') != 'failed' or 'claude_registration_command' not in holder(actual_result):
+                out.append('write-ahead window not reported failed: %s' % holder(actual_result).get('claude_code'))
             for value in (expected_result, actual_result):
-                value.pop('claude_code', None)
-                value.pop('claude_registration_command', None)
+                holder(value).pop('claude_code', None)
+                holder(value).pop('claude_registration_command', None)
             for state in (expected, actual):
                 for name, entry in state.items():
                     if name.endswith('/receipt.json') and entry[0] == 'file' and type(entry[2]) is dict:
@@ -996,11 +1208,21 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                         for record in entry[2].get('accounts', {}).values():
                             record.pop('claude_code', None)
                     if name.endswith('/journal.json'):  # A `claude_add` after a killed remove is never attempted.
-                        entry[2]['publications'] = [n for n in entry[2]['publications'] if n not in WRITE_AHEAD]
+                        entry[2]['publications'] = [n for n in entry[2]['publications']
+                                                    if n.partition(':')[0] not in WRITE_AHEAD]
             if window == '<absent>':
                 expected.pop(CLAUDE_DOCUMENT, None)
             else:
-                expected[CLAUDE_DOCUMENT] = expected[CLAUDE_DOCUMENT][:2] + [window]
+                # The windowed server's entry as the kill left it; every other server's as the uninterrupted run left it
+                # (with aliases a change goes on to the next server's entry after the window).
+                document = copy.deepcopy(expected[CLAUDE_DOCUMENT][2])
+                servers = document.setdefault('mcpServers', {})
+                kept = window.get('mcpServers', {}).get(server)
+                if kept is None:
+                    servers.pop(server, None)
+                else:
+                    servers[server] = kept
+                expected[CLAUDE_DOCUMENT] = expected[CLAUDE_DOCUMENT][:2] + [document]
         out.extend('state %s' % d for d in differences(expected, actual))
         finished = ('reused', 'absent')
         if actual_result.get('installation') in finished and expected_result.get('installation') not in finished:
@@ -1035,7 +1257,7 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                 except Exception as error:
                     found.append('%s: the resume refused %r' % (at, error))
                     continue
-                window = ('<absent>' if document is None else document) if window else None
+                window = (window, '<absent>' if document is None else document) if window else None
                 found.extend('%s: %s' % (at, p) for p in self.problems(reference, result, window))
                 if scenario.final is not None:
                     found.extend('%s: %s' % (at, p) for p in scenario.final(self))
@@ -1173,6 +1395,21 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
     def test_account_remove_beside_another_alias(self):
         self.sweep('account_remove_beside_another')
 
+    def test_upgrade_over_the_default_and_two_aliases(self):
+        self.sweep('upgrade_with_aliases')
+
+    def test_rollback_over_the_default_and_two_aliases(self):
+        self.sweep('rollback_with_aliases')
+
+    def test_uninstall_over_the_default_and_two_aliases(self):
+        self.sweep('uninstall_with_aliases')
+
+    def test_late_refusal_restores_every_broker_and_alias_version_line(self):
+        self.sweep('late_refusal_with_aliases')
+
+    def test_rollback_below_055_retires_the_registry_and_the_readiness_record(self):
+        self.sweep('rollback_below_055_retires_the_registry')
+
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""
         cases = [('upgrade', 'create', '/.change_1-staging-'),                 # an opening change transaction
@@ -1183,7 +1420,8 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                  ('adopt_first_install', 'create', '/metadata-packet-adopted_sidecar-'),  # the adopted.json packet
                  ('account_add', 'create', '/.account_1-staging-'),                   # an opening account transaction
                  ('account_remove', 'create', '/.account_2-staging-'),
-                 ('account_add_beside_another', 'create', '/metadata-packet-accounts_sidecar-')]  # the accounts.json packet
+                 ('account_add_beside_another', 'create', '/metadata-packet-accounts_sidecar-'),  # the accounts.json packet
+                 ('upgrade_with_aliases', 'create', '/metadata-packet-accounts_sidecar-')]  # a change's republished one
         references = {}
         with self.fixed_base():
             for name, effect, fragment in cases:
