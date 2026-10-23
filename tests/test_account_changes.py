@@ -446,6 +446,25 @@ class UninstallOverAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.assertEqual(self.jobs.broker_plist.read_bytes(), foreign)
         self.assertIsNotNone(self.claude().entry_of('telegram_search_work'))
 
+    def test_an_uninstall_that_leaves_no_alias_retires_the_registry_and_never_touches_the_default_tree(self):
+        self.added()
+        self.account('account_remove')  # No alias left: the registry holds only the default's pin.
+        run = self.session_root / 'run'
+        run.mkdir(mode=0o700, exist_ok=True)
+        (run / 'readiness.json').write_bytes(b'{"authorized":true,"generation":"g","version":1}')
+        (run / 'readiness.json').chmod(0o600)
+        default = tree(self.session_root)
+        accounts = config.accounts_root(self.home)
+        pinned = (accounts / 'registry.json').read_bytes()
+        result = self.change('uninstall')
+        self.assertEqual((result['status'], result['account_registry']), ('uninstalled', 'retired'))
+        self.assertNotIn('accounts', result)
+        self.assertFalse((accounts / 'registry.json').exists())
+        retired = [p for p in accounts.iterdir() if p.name.startswith('retired-')]
+        self.assertEqual([p.read_bytes() for p in retired], [pinned])
+        self.assertEqual(tree(self.session_root), default)  # The default's session tree, readiness record included.
+        self.assertIsNone(account_registry.load(accounts))
+
     def parked_upgrade(self, stage, edit, undo):
         """An upgrade parked by a late refusal at `stage` (after the alias entries were re-pointed)."""
         self.added()

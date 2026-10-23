@@ -2750,7 +2750,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     gate first, through `alias_pending`; any answer but `none` refuses) and removed, its connect job booted out, and
     the Codex, Claude Code and Claude Desktop entries its record owns removed. Its root, session and policy, and the
     registry, are never touched, as the default's session is not: a later install re-registers an alias with its
-    `account-add`, keeping its session.
+    `account-add`, keeping its session. With no alias left the registry (only the default's pin, which no release
+    would keep) is moved aside beside itself, never deleted.
     """
     try:
         require_platform()
@@ -2830,6 +2831,10 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                               installation_root=str(root),user_home=str(home))
                 opened={**identity,'stage':'prepared','publications':{}}
                 if aliases:opened['accounts']=accounts  # Only with a named alias: else 0.54's journal.
+                elif account_registry.present(accounts_root(home)):
+                    # No alias left: the registry, then holding only the default's pin that no release would keep, is
+                    # retired before the root is (as by a rollback below 0.55), under a name journaled now.
+                    opened['retire']='retired-%s-registry.json'%uuid.uuid4().hex
                 name=_open_change(root,lambda _:{'journal.json':encoded(opened)})
             else:_sweep_staging(root)
             tx=root/'transactions'/name
@@ -2840,6 +2845,9 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             if parked:_client_temporaries(parked[1]['publications'],home,config,plist,session_root,
                                           sorted(_change_accounts(parked[1],root)))
             if j.value.get('accounts',{})!=accounts:raise InstallError('transaction_conflict')
+            retire=j.value.get('retire')
+            if retire is not None and (aliases or type(retire) is not str or not _RETIRED_REGISTRY.fullmatch(retire)):
+                raise InstallError('transaction_conflict')
             def done(step,status):
                 if j.recorded(step) is None:j.update(single=(step,{'status':status}))
                 j.advance(step);checkpoint(step)
@@ -3068,6 +3076,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if not kept.exists():
                         if digest(read(origin,MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:raise InstallError('transaction_conflict')
                         _rename(origin,kept)
+            retired_registry=_retire_registry(j,home) if retire is not None else None
             _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
             j.advance('retired');checkpoint('retired')
             retired=root.parent/('.'+root.name+'-removed-'+uuid.uuid4().hex)
@@ -3075,6 +3084,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
         _sweep(root)
         result={'status':'uninstalled','installation':'removed','next_action':'restart_mcp_clients',**out}
         if aliases:result['accounts']=alias_out
+        if retired_registry is not None:result['account_registry']=retired_registry
         if kept_root is not None:result['legacy_backups']=str(kept_root)
         return result
     except InstallError:raise
@@ -3510,11 +3520,9 @@ def _alias_codex_check(config, alias, post_hash, code):
         raise InstallError(code)
 
 
-def _retire_accounts(j, home, session_root):
-    """After the commit of a rollback to a release that knows no aliases (refused before it while one exists): the
-    alias registry, which then holds only the default's pin, moves aside beside itself under the journaled name, and
-    the default broker's readiness record (spec 3C) into the transaction; neither is deleted. The older release keeps
-    no pin while it serves, so a later 0.55 starts again from no registry, and the default tree is 0.54's."""
+def _retire_registry(j, home):
+    """A registry that lists no alias moved aside beside itself under the journaled name (`retire`), never deleted
+    (account_registry.retire); one that lists an alias since refuses `accounts_present`. Its outcome, once."""
     if j.recorded('retired_registry') is None:
         try:
             status = account_registry.retire(accounts_root(home), j['retire'])
@@ -3523,6 +3531,16 @@ def _retire_accounts(j, home, session_root):
         if status == 'aliases':
             raise InstallError('accounts_present')
         j.update(single=('retired_registry', {'status': status}))
+        j.checkpoint('retired_registry')
+    return j.recorded('retired_registry')['status']
+
+
+def _retire_accounts(j, home, session_root):
+    """After the commit of a rollback to a release that knows no aliases (refused before it while one exists): the
+    alias registry, which then holds only the default's pin, moves aside beside itself under the journaled name, and
+    the default broker's readiness record (spec 3C) into the transaction; neither is deleted. The older release keeps
+    no pin while it serves, so a later 0.55 starts again from no registry, and the default tree is 0.54's."""
+    registry = _retire_registry(j, home)
     if j.recorded('retired_readiness') is None:
         from .broker_readiness import NAME
         record, retired = session_root/'run'/NAME, j.tx/'readiness.retired'
@@ -3532,7 +3550,7 @@ def _retire_accounts(j, home, session_root):
             j.checkpoint('published:readiness_retired')
             status = 'retired'
         j.update(single=('retired_readiness', {'status': status}))
-    return j.recorded('retired_registry')['status']
+    return registry
 
 
 # Run under the default broker's own interpreter (the receipt-bound release's): one `check`, which pins an authorized
