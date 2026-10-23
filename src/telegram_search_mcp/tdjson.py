@@ -914,7 +914,7 @@ class LegacyTDJson:
         self.close()
 
 
-from .send_observations import SendObservations, ObservationUnavailable
+from .send_observations import SendObservations, ObservationUnavailable, album_outcomes
 
 
 class TDLibClient:
@@ -2288,6 +2288,129 @@ class TDLibClient:
                 raise MessageSendOutcomeUnknown("video send observation was lost") from error
             self._send_observations.discard_unattempted(attempt_id)
             raise MessageSendNotAttempted("video send was refused before transport") from error
+
+    # A whole album may upload many files: wait up to 120 s, then the album status reconciles each slot.
+    ALBUM_CONFIRMATION_SECONDS = 120.0
+
+    @staticmethod
+    def _album_contents(items) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """The closed content of every item, built exactly as the single photo, video and document sends build it."""
+        if type(items) is not tuple or not 2 <= len(items) <= 10:
+            raise ValueError("album items are unavailable")
+        contents, types = [], []
+        for item in items:
+            if type(item) is not tuple or len(item) != 4:
+                raise ValueError("album item is unavailable")
+            kind, path, caption, video = item
+            local = {"@type": "inputFileLocal", "path": str(path)}
+            formatted = {"@type": "formattedText", "text": caption, "entities": []}
+            if kind == "document" and video is None:
+                contents.append({"@type": "inputMessageDocument", "document": {"@type": "inputDocument",
+                    "document": local, "thumbnail": None, "disable_content_type_detection": True},
+                    "caption": formatted})
+            elif kind == "photo" and video is None:
+                contents.append({"@type": "inputMessagePhoto", "photo": {"@type": "inputPhoto", "photo": local,
+                    "thumbnail": None, "video": None, "added_sticker_file_ids": [], "width": 0, "height": 0},
+                    "caption": formatted, "show_caption_above_media": False, "self_destruct_type": None,
+                    "has_spoiler": False})
+            elif kind == "video" and type(video) is tuple and len(video) == 4:
+                duration, width, height, streaming = video
+                contents.append(TDLibClient._video_content(path, caption, duration_seconds=duration, width=width,
+                                                           height=height, supports_streaming=streaming))
+            else:
+                raise ValueError("album item kind is unavailable")  # Voice notes and audio are never album items.
+            types.append({"document": "messageDocument", "photo": "messagePhoto", "video": "messageVideo"}[kind])
+        return contents, tuple(types)
+
+    def send_album_message(self, chat_id: int, items, *, expected_account_id: int, expected_recipient_title: str,
+                           expected_recipient_identity: tuple, attempt_id: str, pre_send_guard: Callable[[], bool],
+                           pre_send_fence=None) -> tuple[tuple[str, int | None], ...]:
+        """Revalidate account and recipient under the provider lock, then make exactly one sendMessageAlbum attempt.
+
+        `items` holds (kind, staged path, plain caption, video facts or None) per item in send order. Every refusal
+        before the raw send is no-attempt evidence (MessageSendNotAttempted); after it the result is one
+        (sent|failed|outcome_unknown, final message ID) per item from exact evidence only, and nothing is ever
+        retried: an item without exact evidence stays outcome_unknown."""
+        from .forward_sources import chat_identity
+        self._request_context.artifact_transport_attempted = False
+        count = len(items) if type(items) is tuple else 0
+        try:
+            with self._serialized_reply_call():
+                def current_authority():
+                    if (type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                            type(expected_recipient_title) is not str or type(expected_recipient_identity) is not tuple or
+                            type(attempt_id) is not str or not attempt_id or not callable(pre_send_guard) or
+                            pre_send_guard() is not True or self.get_account_id() != expected_account_id):
+                        return False
+                    identity, title = chat_identity(self.resolve_target(chat_id), chat_id)
+                    return (identity == expected_recipient_identity and title == expected_recipient_title and
+                            self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                if not current_authority():
+                    raise ValueError("album authority changed")
+                contents, types = self._album_contents(items)
+                return self._album_transport(chat_id, contents, types, attempt_id=attempt_id,
+                                             pre_transport_guard=pre_send_guard, pre_transport_fence=pre_send_fence)
+        except Exception as error:
+            if getattr(self._request_context, "artifact_transport_attempted", False):
+                return album_outcomes(self._send_observations.snapshot(attempt_id), count)
+            self._send_observations.discard_unattempted(attempt_id)
+            if isinstance(error, MessageSendNotAttempted):
+                raise
+            raise MessageSendNotAttempted("album send was refused before transport") from error
+
+    def _album_transport(self, chat_id: int, contents: list[dict[str, Any]], content_types: tuple[str, ...], *,
+                         attempt_id: str, pre_transport_guard: Callable[[], bool],
+                         pre_transport_fence=None) -> tuple[tuple[str, int | None], ...]:
+        sending_id = secrets.randbelow((1 << 31) - 1) + 1
+        for _ in range(8):
+            if self._send_observations.sending_id_available(sending_id):
+                break
+            sending_id = secrets.randbelow((1 << 31) - 1) + 1
+        else:
+            raise MessageSendNotAttempted("send correlation is unavailable")
+        payload = {"@type": "sendMessageAlbum", "chat_id": chat_id, "topic_id": None, "reply_to": None,
+                   "options": {**SEND_OPTIONS, "sending_id": sending_id}, "input_message_contents": contents}
+        try:
+            _validate_bounded_request(payload, self._staging_root)
+        except ForbiddenTDLibRequest as error:
+            raise MessageSendNotAttempted("album request shape is not allowed") from error
+        extra = f"telegram-search-mcp-{next(self._ids)}"
+        aggregate_deadline = getattr(self._request_context, "deadline", None)
+        if not self._ready or (aggregate_deadline is not None and time.monotonic() >= aggregate_deadline):
+            raise MessageSendNotAttempted("album provider is unavailable before send")
+        try:
+            self._send_observations.register_album(attempt_id, extra, sending_id, chat_id, content_types)
+        except ObservationUnavailable as error:
+            raise MessageSendNotAttempted("send correlation is unavailable") from error
+        try:
+            if pre_transport_guard() is not True:
+                raise ValueError("album scope changed")
+            if aggregate_deadline is not None and time.monotonic() >= aggregate_deadline:
+                raise ValueError("album request deadline expired")
+        except Exception as error:
+            raise MessageSendNotAttempted("album scope changed before transport") from error
+        # The one attempt. Once the raw send is invoked the outcome comes only from exact evidence.
+        with pre_transport_fence() if pre_transport_fence is not None else nullcontext():
+            self._request_context.artifact_transport_attempted = True
+            self._raw.send({**payload, "@extra": extra})
+        deadline = time.monotonic() + self.ALBUM_CONFIRMATION_SECONDS
+        if aggregate_deadline is not None:
+            deadline = min(deadline, aggregate_deadline)
+        while time.monotonic() < deadline:
+            try:
+                response = self._raw.receive(min(1.0, max(0.0, deadline - time.monotonic())))
+            except Exception:
+                break  # Confirmation transport lost: whatever is exact so far stands, the rest stays unknown.
+            if response is None:
+                continue
+            self._reduce_receive_event(response)
+            if not self._ready:
+                break
+            observation = self._send_observations.snapshot(attempt_id)
+            if (observation is None or observation.status in ("failed", "conflict") or
+                    (observation.status == "bound" and all(slot.status != "pending" for slot in observation.slots))):
+                break
+        return album_outcomes(self._send_observations.snapshot(attempt_id), len(content_types))
 
     def _send_message_content(
         self, chat_id: int, content: dict[str, Any], expected_type: str,

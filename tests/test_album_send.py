@@ -233,7 +233,7 @@ class TransportShapeTests(unittest.TestCase):
         self.check(album_request([video_content(root, 1), photo_content(root, 2), video_content(root, 3)]))
         self.check(album_request([document_content(root, i) for i in range(1, 11)]))
         self.check(album_request([photo_content(root, i) if i % 2 else video_content(root, i) for i in range(1, 11)]))
-        self.check(album_request([document_content(root, 1), document_content(root, 2)], chat_id=-1001234567890))
+        self.check(album_request([document_content(root, 1), document_content(root, 2)], chat_id=-RECIPIENT))
 
     def test_counts_groups_and_kinds_outside_the_closed_shape_refuse(self):
         root = self.root
@@ -898,6 +898,141 @@ class StagingTests(Drafts, unittest.TestCase):
             os.utime(path.parent, (old, old))
         single = self.single()
         self.assertEqual(sorted(entry.name for entry in self.stage.iterdir()), [single.parent.name])
+
+
+VIDEO_FACTS = (5, 1280, 720, True)
+
+
+class TransportSendTests(unittest.TestCase):
+    """Criteria 2 and 4 through the real transport and reducer: exactly one attempt, never retried."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.raw = Raw()
+        self.client = TDLibClient(raw=self.raw, staging_root=self.root)
+        self.client._ready = True
+
+    def items(self, *kinds, captions=None):
+        names = {'photo': 'p.jpg', 'video': 'v.mp4', 'document': 'd.pdf'}
+        result = []
+        for index, kind in enumerate(kinds):
+            path = self.root / f'draft_{index + 1:032x}' / names[kind]
+            result.append((kind, path, (captions or [''] * len(kinds))[index], VIDEO_FACTS if kind == 'video' else None))
+        return tuple(result)
+
+    def send(self, items=None, **changes):
+        arguments = dict(expected_account_id=ACCOUNT, expected_recipient_title='Recipient',
+                         expected_recipient_identity=('chatTypePrivate', RECIPIENT), attempt_id='attempt',
+                         pre_send_guard=lambda: True)
+        arguments.update(changes)
+        return self.client.send_album_message(RECIPIENT, items or self.items('photo', 'video', 'photo'), **arguments)
+
+    def albums(self):
+        return [request for request in self.raw.sent if request['@type'] == 'sendMessageAlbum']
+
+    def test_one_exact_closed_request_and_every_slot_confirmed(self):
+        items = self.items('photo', 'video', 'photo', captions=['One', '', 'Three'])
+        self.assertEqual(self.send(items), (('sent', 701), ('sent', 702), ('sent', 703)))
+        [request] = self.albums()
+        sending_id = request['options']['sending_id']
+        self.assertTrue(0 < sending_id < 2**31)
+        self.assertEqual(request, {
+            '@type': 'sendMessageAlbum', 'chat_id': RECIPIENT, 'topic_id': None, 'reply_to': None,
+            'options': {**SEND_OPTIONS, 'sending_id': sending_id}, '@extra': request['@extra'],
+            'input_message_contents': [photo_content(self.root, 1, 'One'), video_content(self.root, 2),
+                                       photo_content(self.root, 3, 'Three')]})
+        documents = self.items('document', 'document')
+        self.raw.sent.clear()
+        self.client._send_observations.invalidate()
+        self.assertEqual(self.send(documents, attempt_id='second'), (('sent', 701), ('sent', 702)))
+        self.assertEqual(self.albums()[0]['input_message_contents'],
+                         [document_content(self.root, 1), document_content(self.root, 2)])
+
+    def test_mixed_outcomes_are_per_slot_and_never_retried(self):
+        self.raw.outcomes = ['sent', 'failed', 'silent']
+        clock = [1000.0]
+        def receive(timeout, raw=self.raw):
+            if raw.events:
+                return raw.events.popleft()
+            clock[0] += timeout
+            return None
+        self.raw.receive = receive
+        with patch('time.monotonic', lambda: clock[0]):
+            start = clock[0]
+            self.assertEqual(self.send(), (('sent', 701), ('failed', None), ('outcome_unknown', None)))
+        self.assertAlmostEqual(clock[0] - start, 120, delta=1)  # Bounded wait, then status reconciles.
+        self.assertEqual(len(self.albums()), 1)
+
+    def test_rejection_conflict_and_lost_transport(self):
+        self.raw.rejected = True
+        self.assertEqual(self.send(attempt_id='rejected'), (('failed', None),) * 3)
+        self.raw.rejected = False
+        self.raw.tamper = lambda value: {**value, 'messages': [value['messages'][1], value['messages'][0],
+                                                                 value['messages'][2]]}  # video first: wrong order
+        self.assertEqual(self.send(attempt_id='conflict'), (('outcome_unknown', None),) * 3)  # despite successes
+        self.raw.tamper = None
+        self.raw.outcomes = ['sent', 'silent', 'silent']
+        original = self.raw.album_events
+        def lost(request):
+            events = original(request)
+            self.raw.fail_receive = True
+            return events
+        self.raw.album_events = lost
+        self.assertEqual(self.send(attempt_id='lost'), (('sent', 701), ('outcome_unknown', None),
+                                                        ('outcome_unknown', None)))
+        self.raw.album_events = original
+        send = self.raw.send
+        def broken(request):
+            if request['@type'] != 'sendMessageAlbum':
+                return send(request)
+            self.raw.sent.append(copy.deepcopy(request))
+            raise OSError('synthetic transport failure')
+        self.raw.send = broken
+        self.assertEqual(self.send(attempt_id='broken'), (('outcome_unknown', None),) * 3)
+        self.assertEqual(len(self.albums()), 4)  # One attempt each, never a second.
+
+    def test_new_messages_before_the_result_never_bind_through_the_transport(self):
+        original = self.raw.album_events
+        def early(request):
+            events = original(request)
+            # Every terminal update overtakes the result: they wait for the exact binding.
+            return events[:3] + events[4:] + [events[3]]
+        self.raw.album_events = early
+        self.assertEqual(self.send(), (('sent', 701), ('sent', 702), ('sent', 703)))
+
+    def test_refusals_before_registration_are_no_attempt(self):
+        from telegram_search_mcp.tdjson import MessageSendNotAttempted
+        outside = (('photo', Path('/tmp/unapproved.jpg'), '', None), *self.items('photo', 'photo')[1:])
+        voice = (*self.items('photo'), ('voice_note', self.root / f'draft_{9:032x}' / 'n.ogg', '', None))
+        mixed = self.items('photo', 'document')
+        for items, changes in ((None, {'expected_account_id': 8}), (None, {'expected_recipient_title': 'Other'}),
+                               (None, {'expected_recipient_identity': ('chatTypePrivate', 1)}),
+                               (None, {'pre_send_guard': lambda: False}), (outside, {}), (voice, {}), (mixed, {}),
+                               (self.items('photo'), {}), (self.items(*['photo'] * 11), {}),
+                               ((('video', self.root / f'draft_{1:032x}' / 'v.mp4', '', (5, 15, 720, True)),
+                                 *self.items('photo', 'photo')[1:]), {}),
+                               ((('photo', self.root / f'draft_{1:032x}' / 'p.jpg', ' lead', None),
+                                 *self.items('photo', 'photo')[1:]), {}),
+                               (None, {'pre_send_fence': lambda: (_ for _ in ()).throw(MessageSendNotAttempted('x'))})):
+            with self.subTest(items=repr(items)[:60], changes=changes), self.assertRaises(MessageSendNotAttempted):
+                self.send(items, **changes)
+            self.assertEqual(self.albums(), [])
+            self.assertIsNone(self.client._send_observations.snapshot('attempt'))
+
+    def test_matches_the_pinned_tdlib_constructor_fields(self):
+        import re
+        from telegram_search_mcp.config import TDLIB_LIBRARY
+        header_path = TDLIB_LIBRARY.resolve().parent.parent / 'include/td/telegram/td_api.h'
+        if not header_path.is_file():
+            self.skipTest('pinned TDLib development header is not installed')
+        header = header_path.read_text()
+        def fields(class_name):
+            declaration = header.split(f'class {class_name} final', 1)[1].split('\n};', 1)[0]
+            return {name for _, name in re.findall(r'^\s+([^\n]+?)\s+(\w+)_;$', declaration, re.MULTILINE)}
+        self.send(self.items('photo', 'video', 'document')[:2])
+        [request] = self.albums()
+        self.assertEqual(set(request) - {'@type', '@extra'}, fields('sendMessageAlbum'))
+        self.assertEqual(set(request['options']) - {'@type'}, fields('messageSendOptions'))
 
 
 if __name__ == '__main__':

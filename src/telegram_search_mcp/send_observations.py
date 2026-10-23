@@ -143,6 +143,25 @@ def _album_binding(event, observation):
     return tuple(temporary), album_ids.pop()
 
 
+def album_outcomes(observation, count, *, live=False):
+    """Per-slot (status, final message ID) from exact evidence only, in send order.
+
+    A slot is `sent` or `failed` only from its bound terminal update; a rejected request fails every slot; a
+    conflict, a missing or foreign observation and every unbound or unfinished slot are `outcome_unknown`.
+    `live` (an attempt still in flight) reports an unfinished slot as `pending` instead."""
+    unknown = 'pending' if live else 'outcome_unknown'
+    if (not isinstance(observation, AlbumObservation) or len(observation.slots) != count or
+            observation.status == 'conflict'):
+        return (('outcome_unknown', None),) * count
+    if observation.status == 'failed':
+        return (('failed', None),) * count
+    if observation.status != 'bound':
+        return ((unknown, None),) * count
+    return tuple(('sent', slot.message_id) if slot.status == 'sent' else ('failed', None) if slot.status == 'failed'
+                 else (unknown, None) if slot.status == 'pending' else ('outcome_unknown', None)
+                 for slot in observation.slots)
+
+
 def _reduce_album(old, event):
     if old.status in ('failed', 'conflict'):
         return old
