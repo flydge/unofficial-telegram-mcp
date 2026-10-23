@@ -7,8 +7,10 @@ Without a registry the default asks no getMe (0.54). The user id never reaches a
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +18,7 @@ from unittest import mock
 
 from test_onboarding import AuthRaw, MemoryStore, Terminal
 
-from telegram_search_mcp import account_registry
+from telegram_search_mcp import account_registry, bundle_install, connect_cli
 from telegram_search_mcp.config import AccountPaths
 from telegram_search_mcp.enrollment import EnrollmentStore, SetupPaths
 from telegram_search_mcp.session_owner import SessionOwnerLease
@@ -172,6 +174,77 @@ class DefaultSetupPinTests(SetupHarness):
         result = self.resume(USER_A)
         self.assertEqual((result.status, result.code), ('ready', None))
         self.assertEqual(self.pins(), ({'work': USER_B}, USER_A))
+
+
+def tree(path):
+    out = {}
+    for parent, dirs, files in os.walk(path):
+        for name in dirs:
+            out[str((Path(parent) / name).relative_to(path))] = 'dir'
+        for name in files:
+            child = Path(parent) / name
+            out[str(child.relative_to(path))] = hashlib.sha256(child.read_bytes()).hexdigest()
+    return out
+
+
+class ConnectLockTests(SetupHarness):
+    """Review fix (055d2, lead decision A): `setup --account` and `resume --account` hold the alias's connect.lock for
+    their whole run, handoff included, as the connect helper does, so an installer transaction over the aliases (which
+    holds every alias's connect.lock, `bundle_install._LoginLocks`) and a login never run at once. Held, they refuse
+    with their existing code, `owner_busy`, before anything else. The default's setup keeps 0.54's behaviour."""
+
+    def installer_holds_the_locks(self):
+        def launchctl(argv, **kwargs):  # No connect job loaded.
+            return subprocess.CompletedProcess(argv, 113, '', '')
+        locks = bundle_install._LoginLocks(launchctl, self.home, ['work']).__enter__()
+        self.addCleanup(locks.__exit__)
+        locks.complete()
+        self.assertEqual(locks.held, {'work'})
+        self.assertTrue(self.paths.account.connect_lock.exists())  # The very lock setup takes.
+
+    def test_setup_and_resume_refuse_owner_busy_while_an_installer_transaction_runs_and_touch_nothing(self):
+        self.home_with('work')
+        self.use('work')
+        self.installer_holds_the_locks()
+        before = tree(self.paths.account.root)
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                result = self.setup(USER_B, resume=resume)
+                self.assertEqual((result.status, result.code), ('pending', 'owner_busy'))
+                self.assertEqual(result.to_dict()['next_action'], 'check_existing_broker_without_stopping_it')
+                # No provider, no secret prompt, no enrollment, no handoff: nothing at all.
+                self.assertEqual((self.events, self.raws, self.terminal.prompts, self.handoffs), ([], [], [], 0))
+                self.assertIsNone(EnrollmentStore(self.paths).read())
+                self.assertEqual(tree(self.paths.account.root), before)
+                self.assertEqual(self.pins(), ({'work': None}, None))
+
+    def test_a_named_aliases_setup_holds_its_connect_lock_through_the_handoff(self):
+        self.home_with('work')
+        self.use('work')
+        seen = []
+        handoff = self.handoff
+
+        def probing():
+            seen.append(connect_cli._connect_lock_held(self.paths))
+            return handoff()
+        self.handoff = probing
+        result = self.setup(USER_B)
+        self.assertEqual((result.status, result.code, seen), ('ready', None, [True]))
+        self.assertFalse(connect_cli._connect_lock_held(self.paths))  # Released when the run ends.
+
+    def test_the_default_setup_takes_no_connect_lock(self):
+        self.home_with()
+        self.use('default')
+        seen = []
+        handoff = self.handoff
+
+        def probing():
+            seen.append(connect_cli._connect_lock_held(self.paths))
+            return handoff()
+        self.handoff = probing
+        result = self.setup(USER_A)
+        self.assertEqual((result.status, result.code, seen), ('ready', None, [False]))
+        self.assertFalse(self.paths.account.connect_lock.exists())
 
 
 class CodeTableTests(unittest.TestCase):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ from unittest import mock
 from test_connect_flow import PARAMETERS, PHONE, READY, BUNDLED, ConnectHarness, FakeUI, QrRaw, other_device
 from test_onboarding import MemoryStore
 
-from telegram_search_mcp import account_registry, connect_cli, connect_flow, connect_page, connect_server
+from telegram_search_mcp import account_registry, bundle_install, connect_cli, connect_flow, connect_page, connect_server
 from telegram_search_mcp.config import AccountPaths
 from telegram_search_mcp.connect_flow import ConnectResult, connect_status_path, run_connect
 from telegram_search_mcp.enrollment import EnrollmentStore, SetupPaths
@@ -265,6 +266,62 @@ class AliasPageTests(unittest.TestCase):
                                        ui_factory=lambda: FakeUI(paths), server_factory=Server, opener=lambda _: None,
                                        sleeper=lambda _: None, restore_broker=lambda: None)
         self.assertEqual(seen, [{'alias': 'work'}, {}])
+
+
+class InstallerTransactionLockTests(unittest.TestCase):
+    """Review fix (055d2, lead decision A): while an installer transaction over the aliases runs it holds each alias's
+    connect.lock (`bundle_install._LoginLocks`), the one every helper holds for its whole run. The launchd connect
+    helper and `connect --account` (the agent's, or inline in the owner's Terminal) then end with their existing code,
+    `connect_in_progress`, and change nothing: no status file, screen, run, handoff, broker stop or restore, no job."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(dir='/tmp', prefix='l')
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name).resolve()
+        os.chmod(self.home, 0o700)
+        account_registry.add_alias('work', self.home, longest_tool='t')
+        self.paths = SetupPaths.from_account(AccountPaths.for_alias('work', self.home))
+        self.calls = []
+
+        def launchctl(argv, **kwargs):  # No job loaded.
+            self.calls.append(argv[1])
+            return subprocess.CompletedProcess(argv, 113, '', '')
+        self.launchctl = launchctl
+        locks = bundle_install._LoginLocks(launchctl, self.home, ['work']).__enter__()
+        self.addCleanup(locks.__exit__)
+        locks.complete()
+        self.assertEqual(locks.held, {'work'})
+        self.assertEqual(connect_cli.connect_lock_path(self.paths), self.paths.account.connect_lock)
+        self.assertTrue(connect_cli._connect_lock_held(self.paths))
+        self.calls.clear()
+
+    def tree(self):
+        return sorted(str(p.relative_to(self.paths.account.root)) for p in self.paths.account.root.rglob('*'))
+
+    def test_the_connect_helper_ends_connect_in_progress_and_touches_nothing(self):
+        log, before = [], self.tree()
+        result = connect_cli.connect_helper(
+            self.paths, store=None, provider_factory=None, handoff=lambda **_: log.append('handoff'),
+            run=lambda *args, **kwargs: log.append('run'), ui_factory=lambda: log.append('ui'),
+            server_factory=lambda *args, **kwargs: log.append('server'), opener=lambda _: log.append('open'),
+            sleeper=lambda _: None, restore_broker=lambda: log.append('restore'))
+        self.assertEqual((result.phase, result.code), ('failed', 'connect_in_progress'))
+        self.assertEqual(log, [])
+        self.assertFalse(connect_status_path(self.paths).exists())
+        self.assertEqual(self.tree(), before)
+
+    def test_connect_answers_connect_in_progress_and_starts_nothing(self):
+        before = self.tree()
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('nothing may run')
+        value, code = connect_cli.connect(self.paths, client_factory=never, terminal=None, inline=never,
+                                          runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None,
+                                          broker_plist=self.paths.account.broker_plist)
+        self.assertEqual((code, value), (0, {'status': 'connect_in_progress', 'next_action': 'wait'}))
+        self.assertEqual(set(self.calls), {'print'})  # Only looked: no bootout, no bootstrap.
+        self.assertFalse(self.paths.account.broker_plist.exists())
+        self.assertEqual(self.tree(), before)
 
 
 if __name__ == '__main__':
