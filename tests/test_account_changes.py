@@ -529,5 +529,41 @@ class UninstallOverAliasesTests(AliasChangeHarness, unittest.TestCase):
                 self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
 
 
+class AccountsDirectoryWithoutRegistryTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d, low): without a registry the accounts directory is never judged, so a non-private one leaves
+    an upgrade, a rollback and an uninstall as 0.54's; with a registry in it they still refuse `registry_unsafe`."""
+
+    def loose_accounts_directory(self):
+        accounts = config.accounts_root(self.home)
+        accounts.mkdir(mode=0o755, exist_ok=True)
+        accounts.chmod(0o755)
+        return accounts
+
+    def test_upgrade_rollback_and_uninstall_proceed_without_a_registry(self):
+        self.full()
+        accounts = self.loose_accounts_directory()
+        result = self.install(self.newer())
+        self.assertEqual(result['status'], 'upgraded')
+        self.assertNotIn('accounts', result)
+        self.assertEqual(self.change('rollback')['status'], 'rolled_back')
+        result = self.change('uninstall')
+        self.assertEqual(result['status'], 'uninstalled')
+        self.assertNotIn('account_registry', result)
+        self.assertEqual(os.listdir(accounts), [])  # Nothing created, nothing retired.
+
+    def test_with_a_registry_a_loose_accounts_directory_still_refuses(self):
+        self.full()
+        account_registry.add_alias('work', self.home, longest_tool='t')
+        self.loose_accounts_directory()
+        before = self.change_snapshot()
+        new = self.newer()
+        for action, run in (('upgrade', lambda: self.install(new)), ('uninstall', lambda: self.change('uninstall'))):
+            with self.subTest(action=action):
+                with self.assertRaises(bundle_install.InstallError) as caught:
+                    run()
+                self.assertEqual(str(caught.exception), 'registry_unsafe')
+                self.assertEqual(self.change_snapshot(), before)
+
+
 if __name__ == '__main__':
     unittest.main()

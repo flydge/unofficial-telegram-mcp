@@ -150,6 +150,18 @@ class FileSafetyTests(Fixture):
         self.assertFalse(registry.present(self.root))
         self.assertEqual(self.snapshot(), before)
 
+    def test_without_a_registry_the_directory_is_never_judged(self):
+        """Review fix (055d, low): no registry is 0.54, whatever the accounts directory's mode; with one, unsafe stays
+        refused."""
+        self.root.mkdir(parents=True, mode=0o755)
+        self.root.chmod(0o755)
+        before = self.snapshot()
+        self.assertIsNone(registry.load(self.root))
+        self.assertFalse(registry.admits('work', self.home))
+        self.assertEqual(self.snapshot(), before)
+        self.write(encoded(document({'work': {'user_id': None}})), root_mode=0o755)
+        self.refused('registry_unsafe', lambda: registry.load(self.root))
+
     def test_an_owner_only_regular_file_loads(self):
         self.write(encoded(document({'work': {'user_id': None}})))
         self.assertTrue(registry.present(self.root))

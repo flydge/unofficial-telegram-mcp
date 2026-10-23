@@ -188,13 +188,18 @@ def _open_root(root: Path, *, create: bool = False) -> int:
 
 
 def load(root: Path) -> Registry | None:
-    """The registry in `root`, or None when there is none (0.54). Never creates anything."""
+    """The registry in `root`, or None when there is none (0.54). Never creates anything.
+
+    Without a registry the directory is not judged: 0.54 never read it, so a non-private one leaves every path as
+    0.54's (an upgrade, rollback or uninstall included). With a registry, an unsafe directory or file refuses."""
     try:
         os.lstat(root)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError:
         raise RegistryError("registry_unsafe") from None
+    if not present(root):
+        return None
     directory = _open_root(root)
     try:
         return _load_at(directory)
