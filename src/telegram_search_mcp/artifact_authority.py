@@ -89,6 +89,12 @@ class ArtifactAuthority:
             self._account_id = None
             self._grants = {key: value for key, value in self._grants.items() if value.account_id is None}
 
+    def observed_account(self):
+        """The account last observed at an account boundary, or None after an invalidation. No provider read:
+        for content-free routing only, never a grant."""
+        with self.lock:
+            return self._account_id
+
     def observe_account(self, account):
         if type(account) is not int or not 0 < account < 2**53:
             self.invalidate_account()

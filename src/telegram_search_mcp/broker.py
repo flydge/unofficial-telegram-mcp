@@ -499,13 +499,24 @@ class Broker(SelectionBrokerMixin):
             raise AccountBlocked(error.code) from None
         self._account_session = (client, epoch, user_id) if epoch is not None else None
 
+    def _observed_owner(self, client_id) -> DraftOwner | None:
+        """This client's DraftOwner under the account the broker last observed, or None; no provider read.
+
+        Content-free routing only (a send budget, an attempt outcome): every grant re-reads the account.
+        """
+        account = self._artifact_authority.observed_account()
+        try:
+            return None if account is None else DraftOwner(client_id=client_id, account_id=account)
+        except ValueError:
+            return None
+
     def _attempted_send(self, operation, draft_id, client_id):
         """A consumed claim never reads as expired. After lost authority (release, account
         switch, publication) it reports its local failure or a content-free outcome_unknown;
         provider evidence is replayed only to a later call that still holds the original client
-        lifecycle and account epoch."""
+        lifecycle and account epoch. The call lost the owner that held the claim: its client decides."""
         video = operation == 'send_prepared_video'
-        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id,
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None,
                    kinds=frozenset({'video'} if video else {'document', 'photo', 'voice_note'}))
                    if client_id is not None else None)
         if outcome is None:
@@ -1807,9 +1818,11 @@ class Broker(SelectionBrokerMixin):
         return SendPreparedTextResponse.model_validate(result.model_dump())
 
     def _send_prepared_artifact(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
-        if ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id,client_id=client_id)) or
-                (text_only and (self._drafts.is_owned_topic(request.draft_id, client_id=client_id) or
-                    self._drafts.is_owned_formatted(request.draft_id, client_id=client_id)))):
+        # Budget routing takes the DraftOwner: only this client's draft of the account last observed is routed.
+        owner = self._observed_owner(client_id)
+        if owner is not None and ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id, owner=owner))
+                or (text_only and (self._drafts.is_owned_topic(request.draft_id, owner=owner) or
+                    self._drafts.is_owned_formatted(request.draft_id, owner=owner)))):
             provider=self._shared_client()
             # Capture once: nested provider budgets must not renew time consumed
             # by account reads, owner confirmation or local staging.
@@ -2265,15 +2278,16 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return self._send_claim_lost(draft_id, client_id, 'forward', result, held=held)
+            return self._send_claim_lost(draft_id, client_id, 'forward', result, owner=owner if held else None)
 
-    def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, held: bool):
+    def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, owner: DraftOwner | None):
         """A call that lost the claim to a concurrent or repeated call made no attempt, but the
         draft may have been sent: outcome_unknown, never expired (as `_change_attempted`). Only a
-        call whose owner (and, for a video, artifact lifecycle) held the draft is routed; a later
-        call without it keeps the content-free `expired`, as does a draft never claimed."""
-        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
-                   if held else None)
+        call whose owner (and, for a video, artifact lifecycle) held the draft is routed, with that
+        DraftOwner; a later call without it keeps the content-free `expired`, as does a draft never
+        claimed."""
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=owner, kinds=frozenset({kind}))
+                   if owner is not None else None)
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider send was attempted')
         if outcome == 'attempted':
@@ -2455,7 +2469,7 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return self._send_claim_lost(draft_id, client_id, 'video', result, held=held)
+            return self._send_claim_lost(draft_id, client_id, 'video', result, owner=owner if held else None)
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)
@@ -2469,8 +2483,9 @@ class Broker(SelectionBrokerMixin):
         return owner
 
     def _change_attempted(self, draft_id: str, client_id: str, kind: str, result):
-        """A consumed claim never reads as expired after a lost authority (attempt_outcome)."""
-        outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
+        """A consumed claim never reads as expired after a lost authority (attempt_outcome): the call cannot name
+        the owner that held the claim, so its client decides."""
+        outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None, kinds=frozenset({kind}))
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider change was attempted')
         if outcome == 'attempted':

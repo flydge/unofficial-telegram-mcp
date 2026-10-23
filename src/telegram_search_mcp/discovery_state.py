@@ -134,6 +134,9 @@ class DiscoveryScan:
     global_pointer: int
     touched_at: float
     active_lease_token: str | None
+    # Who started the scan (0.55 spec 3C): the client lifecycle, the broker generation and the account, or ()
+    # for an unbound caller. A scan presented under another owner is dropped, so a re-login never inherits it.
+    owner: tuple = ()
 
 
 class DiscoveryRegistry:
@@ -196,10 +199,13 @@ class DiscoveryRegistry:
         hypothesis_digest: str,
         hypothesis_count: int,
         scope: DiscoveryScope,
+        owner: tuple = (),
     ) -> str:
         digest, count, checked_scope = self._validate_binding(
             hypothesis_digest, hypothesis_count, scope
         )
+        if type(owner) is not tuple:
+            raise ValueError("owner must be a tuple")
         with self._lock:
             now = self._clock()
             self._purge_expired(now)
@@ -227,6 +233,7 @@ class DiscoveryRegistry:
                 global_pointer=0,
                 touched_at=now,
                 active_lease_token=None,
+                owner=owner,
             )
             return cursor
 
@@ -249,6 +256,7 @@ class DiscoveryRegistry:
         hypothesis_digest: str,
         hypothesis_count: int,
         scope: DiscoveryScope,
+        owner: tuple = (),
     ) -> DiscoveryScan:
         try:
             digest, count, checked_scope = self._validate_binding(
@@ -258,6 +266,10 @@ class DiscoveryRegistry:
             raise DiscoveryCursorExpired() from error
         with self._lock:
             scan = self._scan(cursor, touch=False)
+            if type(owner) is not tuple or scan.owner != owner:
+                # Another account, generation or client: the scan is gone, exactly like an unknown cursor.
+                del self._scans[scan.cursor]
+                raise DiscoveryCursorExpired()
             if (
                 not hmac.compare_digest(scan.hypothesis_digest, digest)
                 or scan.hypothesis_count != count

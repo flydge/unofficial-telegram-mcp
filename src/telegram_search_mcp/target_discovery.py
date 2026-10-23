@@ -347,8 +347,11 @@ class TargetDiscoveryService:
         *,
         client: TargetDiscoveryClient,
         registry: DiscoveryRegistry | None = None,
+        owner: tuple = (),
     ) -> None:
+        """`owner` is the caller's (client id, broker generation); each scan also binds the account it read."""
         self._client = client
+        self._owner = owner
         self._registry = (
             registry
             if registry is not None
@@ -364,17 +367,20 @@ class TargetDiscoveryService:
         lease_token: str | None = None
         work: DiscoveryWork | None = None
         try:
+            owner = self._scan_owner()
             if cursor is None:
                 cursor = self._registry.start(
                     hypothesis_digest=digest,
                     hypothesis_count=len(request.hypotheses),
                     scope=request.scope,
+                    owner=owner,
                 )
             state = self._registry.bind(
                 cursor,
                 hypothesis_digest=digest,
                 hypothesis_count=len(request.hypotheses),
                 scope=request.scope,
+                owner=owner,
             )
             work = self._registry.next_work(cursor)
             if work is None:
@@ -468,6 +474,7 @@ class TargetDiscoveryService:
                 hypothesis_digest=digest,
                 hypothesis_count=len(request.hypotheses),
                 scope=request.scope,
+                owner=owner,
             )
             return self._response(
                 cursor,
@@ -507,6 +514,13 @@ class TargetDiscoveryService:
                     self._registry.release_work(cursor, lease_token)
                 except (DiscoveryCursorExpired, RuntimeError):
                     pass
+
+    def _scan_owner(self) -> tuple:
+        """The scan's owner: the caller's lifecycle plus the account the session is authorized as now (0.55 spec
+        3C), so a cursor from before a re-login is refused like an unknown one. A client that cannot name its
+        account (a test double) binds None; a read failure is the provider failure it is."""
+        getter = getattr(self._client, "get_account_id", None)
+        return (*self._owner, getter() if callable(getter) else None)
 
     def _advance_catalog(
         self,

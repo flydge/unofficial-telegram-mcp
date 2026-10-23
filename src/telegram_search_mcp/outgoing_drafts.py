@@ -196,24 +196,28 @@ class OutgoingDraftRegistry:
         self._entries: dict[str, _Entry] = {}
         self._lock = threading.Lock()
 
-    def is_owned_artifact_reply(self, draft_id: str, *, client_id: str) -> bool:
+    def _owned(self, draft_id: object, owner: DraftOwner) -> _Entry | None:
+        """The entry only for its own DraftOwner: the client and the account (re-login hardening, 0.55 spec 3C)."""
+        entry = self._entries.get(draft_id) if isinstance(draft_id, str) else None
+        return entry if entry is not None and type(owner) is DraftOwner and entry.owner == owner else None
+
+    def is_owned_artifact_reply(self, draft_id: str, *, owner: DraftOwner) -> bool:
         """Private budget routing only; never exposes draft/account facts."""
         with self._lock:
-            entry=self._entries.get(draft_id)
-            return (entry is not None and entry.owner.client_id==client_id
-                    and entry.draft.reply_source is not None and entry.draft.kind!='text')
+            entry = self._owned(draft_id, owner)
+            return entry is not None and entry.draft.reply_source is not None and entry.draft.kind != 'text'
 
-    def is_owned_topic(self, draft_id: str, *, client_id: str) -> bool:
+    def is_owned_topic(self, draft_id: str, *, owner: DraftOwner) -> bool:
         """Private budget routing only; never exposes draft/account facts."""
         with self._lock:
-            entry = self._entries.get(draft_id)
-            return entry is not None and entry.owner.client_id == client_id and entry.draft.topic is not None
+            entry = self._owned(draft_id, owner)
+            return entry is not None and entry.draft.topic is not None
 
-    def is_owned_formatted(self, draft_id: str, *, client_id: str) -> bool:
+    def is_owned_formatted(self, draft_id: str, *, owner: DraftOwner) -> bool:
         """Private budget routing only; no account or draft disclosure."""
         with self._lock:
-            entry = self._entries.get(draft_id)
-            return bool(entry is not None and entry.owner.client_id == client_id and entry.draft.outgoing_entities)
+            entry = self._owned(draft_id, owner)
+            return bool(entry is not None and entry.draft.outgoing_entities)
 
     def prepare(
         self,
@@ -610,17 +614,22 @@ class OutgoingDraftRegistry:
                        if entry.attempted_at is not None and now < entry.attempted_at + 900
                        and (entry.receipt is None or entry.receipt.status == "outcome_unknown"))
 
-    def attempt_outcome(self, draft_id: object, *, client_id: str, kinds: frozenset[str]) -> str | None:
+    def attempt_outcome(self, draft_id: object, *, client_id: str, owner: DraftOwner | None,
+                        kinds: frozenset[str]) -> str | None:
         """Content-free routing after a lost authority: did this client consume the draft?
 
         None: never claimed (or unknown, foreign, another kind, or past receipt retention).
         'local_failed': the claim ended before any provider attempt. 'attempted': anything else.
-        Never an authority for disclosure, status or another send; the caller maps it to a
-        fixed outcome.
+        A call that names the DraftOwner that held its claim routes only that owner's draft, its client and
+        its account (re-login hardening, 0.55 spec 3C). `owner` None is a call that lost the authority to
+        name it (a release, an account switch): its client alone decides, so a consumed claim never reads as
+        expired. Never an authority for disclosure, status or another send; the caller maps it to a fixed
+        outcome.
         """
         with self._lock:
             entry = self._entries.get(draft_id) if isinstance(draft_id, str) else None
             if (entry is None or entry.owner.client_id != client_id or entry.draft.kind not in kinds or
+                    (owner is not None and (type(owner) is not DraftOwner or owner != entry.owner)) or
                     entry.attempted_at is None or self._attempt_clock() >= entry.attempted_at + 900):
                 return None
             receipt = entry.receipt
