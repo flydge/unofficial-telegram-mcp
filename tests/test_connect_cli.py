@@ -1850,6 +1850,16 @@ class SetupSkillTests(unittest.TestCase):
         self.assertIn('restarts Claude Code', text)  # /mcp cannot see a server added mid-session.
         self.assertIn('run `cancel`, then use the Terminal fallback', text)
 
+    def test_the_profiles_the_owner_can_enable_are_the_configured_profiles(self):
+        from telegram_search_mcp.config import CAPABILITY_PROFILES
+        root = Path(__file__).parents[1]
+        copies = [(root / path).read_bytes() for path in
+                  ('skills/telegram-setup/SKILL.md', 'plugins/telegram-local/skills/telegram-setup/SKILL.md')]
+        self.assertEqual(copies[0], copies[1])
+        listed = re.search(r'`capabilities enable <profile>`\s*\(([^;)]*);', copies[0].decode('utf-8'))
+        self.assertIsNotNone(listed)
+        self.assertEqual(re.findall(r'`([a-z_]+)`', listed[1]), list(CAPABILITY_PROFILES))
+
 
 class LauncherRefusalTests(unittest.TestCase):
     """H1: a refused bootstrap-install names the installer's fixed code; nothing else is ever echoed."""
