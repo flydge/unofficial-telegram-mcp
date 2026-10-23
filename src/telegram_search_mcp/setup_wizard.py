@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 import os
 import time
-from . import __version__
+from . import __version__, account_registry
 from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
 from .config import ConfigurationError, load_runtime_policy
@@ -21,7 +21,9 @@ _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'l
     'unsupported_auth_state', 'invalid_code', 'code_expired', 'invalid_password', 'flood_wait',
     'dependency_unavailable', 'auth_request_failed', 'timeout', 'cancelled', 'invalid_input',
     'auth_close_failed', 'auth_destroy_failed', 'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
-    'policy_unsafe', 'app_identity_missing', 'app_identity_invalid', 'identity_changed'})
+    'policy_unsafe', 'app_identity_missing', 'app_identity_invalid', 'identity_changed',
+    # The account pin at login, as connect reports it (0.55 spec 3C): never a user id, only these fixed codes.
+    'account_mismatch', 'account_duplicate', 'alias_unavailable'})
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,9 @@ class SetupResult:
             'owner_busy': 'check_existing_broker_without_stopping_it',
             'legacy_unmanaged': 'preserve_existing_session_and_use_legacy_install_path',
             'enrollment_inconsistent': 'review_enrollment_binding_without_resetting',
+            'account_mismatch': 'review_enrollment_binding_without_resetting',
+            'account_duplicate': 'review_enrollment_binding_without_resetting',
+            'alias_unavailable': 'stop_and_report',
             'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
             'auth_destroy_failed': 'exit_setup_process_then_resume_in_foreground_native_terminal',
             'unsupported_auth_state': 'complete_supported_auth_with_official_telegram_guidance',
@@ -181,7 +186,10 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
                 for _ in range(16):
                     state = transport.get_authorization_state(timeout=remaining())
                     if state is AuthorizationState.READY:
-                        result = SetupResult('authorized', None)
+                        # The connect helper's login pin, before the teardown and handoff (0.55 spec 3C).
+                        refused = account_registry.login_refusal(
+                            paths.account, lambda: transport.get_account_id(timeout=remaining()))
+                        result = SetupResult('authorized', None) if refused is None else _result(refused)
                         break
                     if state is AuthorizationState.PARAMETERS:
                         transport.set_parameters(credentials, key, database_directory=str(paths.account.database),

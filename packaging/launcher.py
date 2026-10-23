@@ -20,10 +20,11 @@ class AdmissionError(ValueError): pass
 
 # Closed grammar. connect-helper is internal: only the transient launchd job runs it.
 ACTIONS=('mcp','broker','setup','resume','status','connect','wait','cancel','api-credentials','connect-helper')
-# The actions that take a trailing `--account <alias>` for a registered alias (0.55 spec 3B). The alias is a closed
-# token, never `default` (the default account is spelled by omitting the flag), and is checked against the registry
-# before any directory is created. Without the flag an action's argv and behaviour are unchanged.
-ACCOUNT_ACTIONS=('mcp','broker','setup','resume','connect','wait','cancel','api-credentials','status')
+# The actions that take a trailing `--account <alias>` for a registered alias (0.55 spec 3B; connect-helper is the
+# argv of the alias's own connect job, 3C). The alias is a closed token, never `default` (the default account is
+# spelled by omitting the flag), and is checked against the registry before any directory is created. Without the
+# flag an action's argv and behaviour are unchanged.
+ACCOUNT_ACTIONS=('mcp','broker','setup','resume','connect','wait','cancel','api-credentials','status','connect-helper')
 ALIAS_CHARACTERS=frozenset('abcdefghijklmnopqrstuvwxyz0123456789')
 # Installation changes run by an installed release: admitted by its own pinned tree, not by the
 # receipt, so an interrupted change stays resumable while receipt and pointer disagree.
@@ -196,7 +197,8 @@ def dispatch_mcp(alias=None):
 
 
 def status(root, alias=None):
-    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`."""
+    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`. A named alias's status is
+    its own (loaded, authorized); the default's client entries are not its, so it has no `clients`."""
     import contextlib, io
     from telegram_search_mcp.setup_cli import main as dispatch
     from telegram_search_mcp.bundle_install import client_status
@@ -205,7 +207,7 @@ def status(root, alias=None):
     text=captured.getvalue()
     try: value=_json(text)
     except (ValueError,AdmissionError): value=None
-    if type(value) is dict:
+    if type(value) is dict and alias is None:
         value['clients']=client_status(root.parent.parent,Path.home())
         text=json.dumps(value,sort_keys=True)+'\n'
     sys.stdout.write(text)

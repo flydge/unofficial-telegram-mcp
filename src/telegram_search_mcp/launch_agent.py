@@ -1,4 +1,8 @@
-"""Safe launchd lifecycle for the single broker."""
+"""Safe launchd lifecycle for each account's broker and its transient connect helper.
+
+The default alias keeps today's labels, plists and bytes; a named alias's jobs are written, bootstrapped and
+booted out only under its own labels (0.55 spec 3C).
+"""
 
 from __future__ import annotations
 
@@ -57,16 +61,6 @@ def _connect_label(account: AccountPaths | None) -> str:
 def _account_arguments(account: AccountPaths | None) -> list[str]:
     """The trailing argv naming a named alias (spec 3B); none for the default alias, so its 0.54 argv stays."""
     return [] if account is None or account.alias == DEFAULT_ALIAS else ["--account", account.alias]
-
-
-def _require_default_job(account: AccountPaths | None) -> None:
-    """Writing or starting a named alias's broker job, and its connect helper's argv, are phase C's (spec 3C).
-
-    Until then a named alias's broker payload exists (its argv ends with `--account <alias>`) and is recognised,
-    but no job is written or bootstrapped for it.
-    """
-    if account is not None and account.alias != DEFAULT_ALIAS:
-        raise LaunchAgentError("account jobs are unavailable")
 
 
 def _default_preflight(account: AccountPaths | None = None) -> None:
@@ -206,7 +200,6 @@ def _read_launch_agent(directory_descriptor: int, name: str) -> object | None:
 
 def write_launch_agent(*, plist_path: Path, python_executable: Path, account: AccountPaths | None = None) -> None:
     """Atomically write the fixed, credential-free LaunchAgent definition."""
-    _require_default_job(account)
     directory_descriptor = _open_launch_agent_directory(plist_path)
     temporary_name = f".{plist_path.name}.{secrets.token_hex(16)}.tmp"
     temporary_exists = False
@@ -288,7 +281,6 @@ def install_launch_agent(
     uid: int | None = None,
     account: AccountPaths | None = None,
 ) -> None:
-    _require_default_job(account)
     label, default_plist = _broker_job(account)
     plist_path = default_plist if plist_path is None else plist_path
     if preflight is None:
@@ -410,7 +402,6 @@ def start_enrolled_broker(
     Ready is checked separately through the compatible IPC boundary. With
     create=False nothing is ever written: a missing definition refuses.
     """
-    _require_default_job(account)
     label, default_plist = _broker_job(account)
     plist_path = default_plist if plist_path is None else plist_path
     if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
@@ -513,13 +504,15 @@ def stop_enrolled_broker(
         raise LaunchAgentError('unable to stop installed broker') from None
 
 
-def connect_job_arguments(*, python_executable: Path = Path(sys.executable)) -> list[str]:
-    """Bundle mode: the receipt-bound launcher; source mode: this interpreter's module."""
+def connect_job_arguments(*, python_executable: Path = Path(sys.executable),
+                          account: AccountPaths | None = None) -> list[str]:
+    """Bundle mode: the receipt-bound launcher; source mode: this interpreter's module. A named alias's helper
+    argv ends with `--account <alias>`, like its broker's."""
     from . import bundle_runtime
     selection = bundle_runtime._SELECTION
     if selection is not None:
         try:
-            return selection.arguments('connect-helper')
+            return selection.arguments('connect-helper') + _account_arguments(account)
         except bundle_runtime.BundleError:
             raise LaunchAgentError('installed bundle binding is unsafe') from None
     executable = python_executable.absolute()
@@ -528,15 +521,14 @@ def connect_job_arguments(*, python_executable: Path = Path(sys.executable)) -> 
             raise LaunchAgentError('Python executable is invalid')
     except OSError:
         raise LaunchAgentError('Python executable is invalid') from None
-    return [str(executable), '-m', 'telegram_search_mcp.setup_cli', 'connect-helper']
+    return [str(executable), '-m', 'telegram_search_mcp.setup_cli', 'connect-helper', *_account_arguments(account)]
 
 
 def connect_job_payload(*, python_executable: Path = Path(sys.executable),
                         account: AccountPaths | None = None) -> dict[str, Any]:
-    _require_default_job(account)
     return {
         'Label': _connect_label(account),
-        'ProgramArguments': connect_job_arguments(python_executable=python_executable),
+        'ProgramArguments': connect_job_arguments(python_executable=python_executable, account=account),
         'RunAtLoad': True,
         'KeepAlive': False,
         'LimitLoadToSessionType': 'Aqua',
@@ -763,26 +755,25 @@ def _alias_argument(value: str) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="telegram-search-broker")
     parser.add_argument("command", choices=("run", "install", "status", "uninstall"))
-    # `run --account <alias>` is a named alias's broker argv (spec 3B); its install and lifecycle are phase C's.
+    # `--account <alias>` names a registered alias's broker (spec 3B, 3C); without it, the default's.
     parser.add_argument("--account", type=_alias_argument, metavar="ALIAS", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     try:
+        jobs = {}
         if arguments.account is not None:
-            if arguments.command != "run":
-                raise LaunchAgentError("account lifecycle is unavailable")
-            # The registry admits the alias before the broker creates any directory.
-            return run_broker(AccountPaths.for_alias(arguments.account, Path.home()))
+            # The registry admits the alias before anything is created or any job is named.
+            jobs = {"account": AccountPaths.for_alias(arguments.account, Path.home())}
         if arguments.command == "run":
-            return run_broker()
+            return run_broker(**jobs)
         if arguments.command == "install":
-            install_launch_agent()
+            install_launch_agent(**jobs)
             print("INSTALLED")
             return 0
         if arguments.command == "status":
-            active = launch_agent_status()
+            active = launch_agent_status(**jobs)
             print("RUNNING" if active else "NOT_RUNNING")
             return 0 if active else 1
-        uninstall_launch_agent()
+        uninstall_launch_agent(**jobs)
         print("UNINSTALLED")
         return 0
     except Exception:

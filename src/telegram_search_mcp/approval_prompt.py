@@ -9,6 +9,14 @@ One renderer turns every bound preview into one document, in a fixed order:
 One native dialog shows it: an NSAlert through `osascript -l JavaScript` with a fixed-size scrolling view,
 Cancel as the default and a timer that ends it as `timeout`. Only an explicit click on Send/Apply
 approves; anything else is `declined`, `timeout` or `dialog_unavailable`, and never a send or change.
+
+Once an alias registry exists (0.55 spec 3C) the broker names its account alias: the heading says which alias
+asks, and the summary's account line carries the alias and a masked account (the last two digits of the user
+id) instead of the user id, so the user id never reaches the dialog: the owner's own chat (Saved Messages, whose
+chat id is the user id) is named "Saved Messages", the owner as a message sender or a topic's creator is "you".
+Without one, every argument and byte is 0.54's but for two substitutions that hold in both modes: wherever a chat
+is named (recipient, forward source, reply anchor, archived or edited chat) the own chat is "Saved Messages", and
+the owner as a forwarded message's sender is "you"; 0.54 printed the user id in both places.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from types import MappingProxyType
 from typing import Literal, get_args
 
 from . import product_identity as identity
+from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS
 
 
 Outcome = Literal['approved', 'declined', 'timeout', 'dialog_unavailable']
@@ -84,7 +93,7 @@ function run(argv) {
         var app = $.NSApplication.sharedApplication;
         app.setActivationPolicy(1);
         var alert = $.NSAlert.alloc.init;
-        alert.messageText = $("@@NAME@@ — approve @@ACTION@@");
+        alert.messageText = $("@@NAME@@ — approve @@ACTION@@@@ACCOUNT@@");
         alert.informativeText = $('Cancel is the default. Without a choice this dialog closes after ' + seconds +
             ' seconds and nothing is @@EFFECT@@.');
         alert.addButtonWithTitle($('Cancel')).keyEquivalent = $('\\r');
@@ -126,17 +135,22 @@ _CHANGE_SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'change').replace('@@VERB@@', 
 _TOKENS = {b'APPROVED': APPROVED, b'DECLINED': DECLINED, b'TIMEOUT': TIMEOUT}
 
 
-def _dialog_script(template):
-    # Resolved per call so the heading follows `product_identity.DISPLAY_NAME`, escaped as a JS string.
-    return template.replace('@@NAME@@', json.dumps(identity.DISPLAY_NAME, ensure_ascii=True)[1:-1])
+def _dialog_script(template, alias=None):
+    # Resolved per call so the heading follows `product_identity.DISPLAY_NAME`, escaped as a JS string. A named
+    # account (0.55) adds the alias to the heading; without one the script is the 0.54 bytes.
+    account = '' if alias is None else json.dumps(f' for account «{alias}»', ensure_ascii=True)[1:-1]
+    return (template.replace('@@NAME@@', json.dumps(identity.DISPLAY_NAME, ensure_ascii=True)[1:-1])
+            .replace('@@ACCOUNT@@', account))
 
 
-def _dialog(document: str, *, change: bool, seconds: int) -> ApprovalDecision:
-    if type(seconds) is not int or not 1 <= seconds <= DIALOG_SECONDS or type(document) is not str:
+def _dialog(document: str, *, change: bool, seconds: int, alias: str | None = None) -> ApprovalDecision:
+    if (type(seconds) is not int or not 1 <= seconds <= DIALOG_SECONDS or type(document) is not str
+            or not _valid_alias(alias)):
         return UNAVAILABLE
     try:
         result = subprocess.run(
-            ['/usr/bin/osascript', '-l', 'JavaScript', '-e', _dialog_script(_CHANGE_SCRIPT if change else _SCRIPT),
+            ['/usr/bin/osascript', '-l', 'JavaScript', '-e',
+             _dialog_script(_CHANGE_SCRIPT if change else _SCRIPT, alias),
              '--', str(seconds), document],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=seconds + 5, check=False,
@@ -230,8 +244,33 @@ def _document(summary, body, technical, closing) -> str:
                      for row in (line.rows() if isinstance(line, _Payload) else _rows(line)))
 
 
-def _head(action: str, account_id: int, expires_at) -> list[str]:
-    return [action, f'Account: {account_id}', f'Expires: {expires_at.isoformat()}']
+def _valid_alias(alias) -> bool:
+    """None (no registry: 0.54) or an account alias: `default` or a named alias's closed token."""
+    return alias is None or (type(alias) is str and (alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is not None))
+
+
+def _account_line(account_id: int, alias: str | None) -> str:
+    """The summary's account. Without a registry (alias None) the 0.54 line with the user id; with one, the alias
+    and a masked account, the last two digits of the user id, so the user id itself never reaches the dialog."""
+    if alias is None:
+        return f'Account: {account_id}'
+    _require(type(account_id) is int and account_id > 0)
+    return f'Account: {alias} (Telegram account ••{str(account_id)[-2:]})'
+
+
+def _chat(chat_id: int, account_id: int) -> str:
+    """A chat as the dialog names it: the owner's own chat (Saved Messages) has the user id as its chat id, so it is
+    named, never numbered; every other chat keeps its id (a private chat's id is the other user's)."""
+    return 'Saved Messages' if chat_id == account_id else f'chat {chat_id}'
+
+
+def _sender(kind: str, sender_id: int, account_id: int) -> str:
+    """A message's sender or a topic's creator: the owner is `you`, never the user id."""
+    return 'you' if kind == 'user' and sender_id == account_id else f'{kind} {sender_id}'
+
+
+def _head(action: str, account_id: int, expires_at, alias: str | None) -> list[str]:
+    return [action, _account_line(account_id, alias), f'Expires: {expires_at.isoformat()}']
 
 
 def _evidence(value: str) -> str:
@@ -251,13 +290,16 @@ def _styles(draft) -> list[str]:
         for offset, length, kind, covered in outgoing_entity_facts(draft.text, frozen)]
 
 
-def _topic_lines(topic) -> tuple[list[str], list[str]]:
-    """(summary line, technical lines) for a bound forum topic."""
+def _topic_lines(topic, account_id, alias) -> tuple[list[str], list[str]]:
+    """(summary line, technical lines) for a bound forum topic. With a registry a topic the owner created names its
+    creator `you`; without one the line is 0.54's (its account line prints the user id anyway)."""
     if topic is None:
         return [], []
+    creator = (f'{topic.creator_kind} {topic.creator_id}' if alias is None
+               else _sender(topic.creator_kind, topic.creator_id, account_id))
     return ([f'Topic {_MARK}: {_span(_evidence(topic.name))} (topic {topic.forum_topic_id})'],
             [f'Topic type: {topic.chat_type}; peer: {topic.peer_id}',
-             f'Topic created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}',
+             f'Topic created: {topic.creation_date}; creator: {creator}',
              f'Topic general: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; '
              f'hidden: {topic.is_hidden}',
              f'Topic SHA-256: {topic.source_sha256}'])
@@ -269,12 +311,12 @@ def _entity_rows(heading: str, rows) -> list[str]:
              for kind, offset, length, covered in rows]) if rows else []
 
 
-def _plain_document(draft) -> str:
+def _plain_document(draft, alias) -> str:
     """Ordinary text or file send without a topic, styles or reply."""
-    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
+    where = f'{_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})'
     if draft.kind == 'text':
         return _document(
-            _head(f'Send text to {where}', draft.account_id, draft.expires_at),
+            _head(f'Send text to {where}', draft.account_id, draft.expires_at, alias),
             ['Text (exact):', _Payload(draft.text)],
             [f'Draft: {draft.draft_id}', f'Bytes: {draft.size_bytes}', f'Text SHA-256: {draft.sha256}'],
             f'{identity.DISPLAY_NAME} will make one send attempt.')
@@ -282,17 +324,17 @@ def _plain_document(draft) -> str:
               f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
     voice_technical = ([f'Source SHA-256: {draft.source_sha256}'] if draft.kind == 'voice_note' else [])
     return _document(
-        _head(f'Send a {_KIND_WORDS[draft.kind]} to {where}', draft.account_id, draft.expires_at),
+        _head(f'Send a {_KIND_WORDS[draft.kind]} to {where}', draft.account_id, draft.expires_at, alias),
         [f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}', f'Bytes: {draft.size_bytes}', *voice,
          *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
         [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical],
         f'{identity.DISPLAY_NAME} will make one upload/send attempt.')
 
 
-def _topic_document(draft) -> str:
+def _topic_document(draft, alias) -> str:
     """Text into a forum topic, formatted text, or both (one outer preview digest)."""
-    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
-    topic, topic_technical = _topic_lines(draft.topic)
+    where = f'{_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})'
+    topic, topic_technical = _topic_lines(draft.topic, draft.account_id, alias)
     if draft.outgoing_entities:
         action = f'Send formatted text to {where}'
         rule = 'Normal notifications; no reply, link preview, schedule or draft clearing.'
@@ -303,49 +345,49 @@ def _topic_document(draft) -> str:
         rule = 'Plain text; normal notifications; no reply, formatting, link preview, schedule or draft clearing.'
         closing = f'{identity.DISPLAY_NAME} will revalidate this account and topic, then make one send attempt.'
     return _document(
-        [*_head(action, draft.account_id, draft.expires_at), *topic],
+        [*_head(action, draft.account_id, draft.expires_at, alias), *topic],
         ['Text (exact):', _Payload(draft.text), *_styles(draft), '', rule],
         [f'Draft: {draft.draft_id}', *topic_technical, f'Bytes: {draft.size_bytes}',
          f'Text SHA-256: {draft.sha256}', f'Preview SHA-256: {draft.preview_sha256}'],
         closing)
 
 
-def _reply_target(target) -> tuple[list, list[str]]:
+def _reply_target(target, account_id) -> tuple[list, list[str]]:
     """(payload lines, technical lines) for the message replied to; its text is untrusted evidence. The
     evidence is always the bound rendering (render_content / sanitize_telegram_text; styled and media
     targets are JSON renderings even when nothing was cleaned), so the block is labelled a rendering, a
     sanitized one also "cleaned, not exact", and its sanitized flag stays directly under it."""
     anchor = target.anchor
     label = ' (rendering, cleaned, not exact)' if target.sanitized else ' (rendering)'
-    return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}{label}:',
+    return ([f'In reply to message {anchor.message_id} in {_chat(anchor.chat_id, account_id)} {_MARK}{label}:',
              _Payload(_evidence(target.text)),
              f'Target sanitized: {target.sanitized}; truncated: {target.truncated}'],
             [f'Target source SHA-256: {target.source_sha256}'])
 
 
-def _reply_document(validated) -> str:
+def _reply_document(validated, alias) -> str:
     draft = validated.draft
-    topic, topic_technical = _topic_lines(draft.topic)
-    target, target_technical = _reply_target(validated.reply_target)
+    topic, topic_technical = _topic_lines(draft.topic, draft.account_id, alias)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
     return _document(
-        [*_head(f'Send a reply to {_span(draft.recipient_title)} (chat {draft.recipient})', draft.account_id,
-                draft.expires_at), *topic],
+        [*_head(f'Send a reply to {_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})',
+                draft.account_id, draft.expires_at, alias), *topic],
         [*target, '', 'Reply text (exact):', _Payload(draft.text), *_styles(draft)],
         [f'Draft: {draft.draft_id}', *topic_technical, f'Bytes: {draft.size_bytes}', f'Text SHA-256: {draft.sha256}',
          *target_technical, f'Preview SHA-256: {validated.preview_sha256}'],
         f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
 
 
-def _reply_artifact_document(validated) -> str:
+def _reply_artifact_document(validated, alias) -> str:
     draft = validated.draft
-    target, target_technical = _reply_target(validated.reply_target)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
     voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
               f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
     voice_technical = ([f'Source SHA-256: {draft.source_sha256}', f'Waveform (base64): {draft.waveform_base64}']
                        if draft.kind == 'voice_note' else [])
     return _document(
-        _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} (chat {draft.recipient})',
-              draft.account_id, draft.expires_at),
+        _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} '
+              f'({_chat(draft.recipient, draft.account_id)})', draft.account_id, draft.expires_at, alias),
         [*target, '', f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}',
          f'Bytes: {draft.size_bytes}', *voice,
          *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
@@ -354,7 +396,7 @@ def _reply_artifact_document(validated) -> str:
         f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
 
 
-def _forward_document(validated) -> str:
+def _forward_document(validated, alias) -> str:
     """The text or caption is an exact gutter payload; entity covered spans, link-preview URLs, file
     facts and the author signature are « » spans, all under the readable rule."""
     from .forward_drafts import unescaped
@@ -400,10 +442,11 @@ def _forward_document(validated) -> str:
                    ([f'Via bot {_MARK}: user {source.via_bot_user_id}'] if source.via_bot_user_id is not None else []) +
                    (['Source is itself a forward: the copy carries no original attribution'] if source.is_forward else []))
     return _document(
-        [f'Forward a message to {_span(recipient.title)} (chat {recipient.chat_id})', mode,
-         f'Account: {validated.account_id}', f'Expires: {validated.expires_at.isoformat()}'],
-        [f'Source chat: {_span(source.chat.title)} (chat {source.chat.chat_id})', f'Message ID: {source.message_id}',
-         f'Sender {_MARK}: {source.sender.kind} {source.sender.id}', *attribution,
+        [f'Forward a message to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})', mode,
+         _account_line(validated.account_id, alias), f'Expires: {validated.expires_at.isoformat()}'],
+        [f'Source chat: {_span(source.chat.title)} ({_chat(source.chat.chat_id, validated.account_id)})',
+         f'Message ID: {source.message_id}',
+         f'Sender {_MARK}: {_sender(source.sender.kind, source.sender.id, validated.account_id)}', *attribution,
          f'Date: {source.date.isoformat()}', f'Content: {source.content_kind}', *content, *link, *media],
         [f'Draft: {validated.draft_id}', f'Source SHA-256: {source.source_sha256}',
          f'Preview SHA-256: {validated.preview_sha256}'],
@@ -411,14 +454,14 @@ def _forward_document(validated) -> str:
         'then make one forward attempt.')
 
 
-def _video_document(validated) -> str:
+def _video_document(validated, alias) -> str:
     """The probed facts are what the container boxes declare; nothing is decoded."""
     recipient = validated.recipient
     caption = (['Caption [untrusted] (exact):', _Payload(validated.raw_caption)] if validated.caption is not None
                else ['Caption: (none)'])
     return _document(
-        _head(f'Send a native video to {_span(recipient.title)} (chat {recipient.chat_id})',
-              validated.account_id, validated.expires_at),
+        _head(f'Send a native video to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})',
+              validated.account_id, validated.expires_at, alias),
         [f'File name [untrusted] (exact): {_span(validated.raw_display_name)}', f'Bytes: {validated.size_bytes}',
          'Declared by the file (not decoded):', f'Duration: {validated.duration_seconds} seconds',
          f'Dimensions: {validated.width}x{validated.height}', f'Codec: {validated.codec}',
@@ -430,7 +473,7 @@ def _video_document(validated) -> str:
         'then make one upload/send attempt as a native video.')
 
 
-def _archive_document(validated) -> str:
+def _archive_document(validated, alias) -> str:
     chat = validated.chat
     current, target = _LIST_NAMES[validated.current_list], _LIST_NAMES[validated.target_list]
     # Telegram behaviour of the move itself: the chat leaves its list (and a pin there); folders
@@ -442,15 +485,16 @@ def _archive_document(validated) -> str:
     if validated.note is not None:
         notes.append(f'Note: {validated.note} (Telegram behaviour).')
     return _document(
-        _head(f'Move chat {_span(chat.title)} (chat {chat.chat_id}, {chat.kind}) from {current} to {target}',
-              validated.account_id, validated.expires_at),
+        _head(f'Move chat {_span(chat.title)} ({_chat(chat.chat_id, validated.account_id)}, {chat.kind}) '
+              f'from {current} to {target}',
+              validated.account_id, validated.expires_at, alias),
         [f'Current list: {current}', f'Target list: {target}', *notes],
         [f'Draft: {validated.draft_id}', f'Preview SHA-256: {validated.preview_sha256}'],
         f'{identity.DISPLAY_NAME} will revalidate the account, the chat and its current list, then make one '
         'move attempt and report the list it observes right after.')
 
 
-def _text_edit_document(validated) -> str:
+def _text_edit_document(validated, alias) -> str:
     """Only formatting Telegram does not detect again is listed as removed."""
     from datetime import datetime, timezone
     from .edit_drafts import AUTO_DETECTED
@@ -464,7 +508,8 @@ def _text_edit_document(validated) -> str:
               if validated.current_edit_date else 'never')
     return _document(
         [*_head(f'Edit your message {validated.message_id} in {_span(chat.title)} '
-                f'(chat {chat.chat_id}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id, validated.expires_at),
+                f'({_chat(chat.chat_id, validated.account_id)}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id,
+                validated.expires_at, alias),
          f'Last edited: {edited}'],
         [f'Current text {_MARK} (exact):', _Payload(validated.raw_current_text), *formatting,
          'New text (exact):', _Payload(validated.raw_new_text), '',
@@ -484,8 +529,10 @@ def _text_only(display_name, caption, duration_seconds, source_sha256, source_di
 def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
-            draft_preview) -> tuple[str, bool]:
+            draft_preview, account_alias) -> tuple[str, bool]:
     """(document, is a change) for exactly one preview bound to the broker's own arguments."""
+    _require(_valid_alias(account_alias))
+    alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
                 archive_preview, text_edit_preview, draft_preview)
     _require(sum(value is not None for value in previews) == 1)
@@ -506,7 +553,8 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(chat.chat_id == recipient and chat.title == recipient_title and sha256 == expected_sha256 and
                  text in ('', None) and caption in ('', None) and duration_seconds is None and
                  source_sha256 is None and source_display_name is None)
-        return (_archive_document(validated) if archive_preview is not None else _text_edit_document(validated)), True
+        return (_archive_document(validated, alias) if archive_preview is not None
+                else _text_edit_document(validated, alias)), True
     if video_preview is not None:
         from .video_drafts import VideoDraftPreview
         validated = VideoDraftPreview.model_validate(video_preview)
@@ -515,14 +563,14 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  validated.raw_display_name == display_name and validated.raw_caption == (caption or '') and
                  text in ('', None) and duration_seconds is None and source_sha256 is None and
                  source_display_name is None)
-        return _video_document(validated), False
+        return _video_document(validated, alias), False
     if forward_preview is not None:
         from .forward_drafts import ForwardDraftPreview
         validated = ForwardDraftPreview.model_validate(forward_preview)
         _require(validated.recipient.chat_id == recipient and validated.recipient.title == recipient_title and
                  validated.source.source_sha256 == sha256 and text in ('', None) and caption in ('', None) and
                  duration_seconds is None and source_sha256 is None and source_display_name is None)
-        return _forward_document(validated), False
+        return _forward_document(validated, alias), False
     if topic_preview is not None:
         from .draft_models import DraftPreview
         validated = DraftPreview.model_validate(topic_preview)
@@ -531,7 +579,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  validated.text == text and validated.sha256 == sha256 and validated.size_bytes == size_bytes)
         if validated.outgoing_entities:
             _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
-        return _topic_document(validated), False
+        return _topic_document(validated, alias), False
     if reply_artifact_preview is not None:
         from .reply_artifact_drafts import ReplyArtifactDraftPreview
         validated = ReplyArtifactDraftPreview.model_validate(reply_artifact_preview)
@@ -539,7 +587,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == draft.kind and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.sha256 == sha256 and draft.size_bytes == size_bytes and draft.display_name == display_name and
                  draft.caption == (caption or '') and text in ('', None))
-        return _reply_artifact_document(validated), False
+        return _reply_artifact_document(validated, alias), False
     if reply_preview is not None:
         from .reply_drafts import ReplyDraftPreview
         validated = ReplyDraftPreview.model_validate(reply_preview)
@@ -547,7 +595,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == 'text' and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.text == text and draft.sha256 == sha256 and draft.size_bytes == size_bytes)
         _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
-        return _reply_document(validated), False
+        return _reply_document(validated, alias), False
     from .draft_models import DraftPreview
     validated = DraftPreview.model_validate(draft_preview)
     _require(validated.topic is None and not validated.outgoing_entities and validated.kind == kind and
@@ -560,7 +608,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(validated.display_name == display_name and validated.caption == (caption or '') and
                  text in ('', None) and validated.duration_seconds == duration_seconds and
                  validated.source_sha256 == source_sha256 and validated.source_display_name == source_display_name)
-    return _plain_document(validated), False
+    return _plain_document(validated, alias), False
 
 
 def render_approval(**arguments) -> tuple[str, bool] | None:
@@ -573,7 +621,8 @@ def render_approval(**arguments) -> tuple[str, bool] | None:
 
 _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
-                 video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None)
+                 video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
+                 account_alias=None)
 
 
 def decide_approved_send(
@@ -590,20 +639,22 @@ def decide_approved_send(
     text_edit_preview: dict | None = None,
     draft_preview: dict | None = None,
     timeout_seconds: int = DIALOG_SECONDS,
+    account_alias: str | None = None,
 ) -> ApprovalDecision:
     """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
-    timer, or any failure to render or show the dialog means no send or change."""
+    timer, or any failure to render or show the dialog means no send or change. `account_alias` (only once an
+    alias registry exists) names the asking account in the heading and the masked account line."""
     rendered = render_approval(
         recipient_title=recipient_title, recipient=recipient, display_name=display_name, size_bytes=size_bytes,
         sha256=sha256, caption=caption, kind=kind, text=text, duration_seconds=duration_seconds,
         source_sha256=source_sha256, source_display_name=source_display_name, reply_preview=reply_preview,
         reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
-        draft_preview=draft_preview)
+        draft_preview=draft_preview, account_alias=account_alias)
     if rendered is None:
         return UNAVAILABLE
     document, change = rendered
-    return _dialog(document, change=change, seconds=timeout_seconds)
+    return _dialog(document, change=change, seconds=timeout_seconds, alias=account_alias)
 
 
 def confirm_approved_send(**arguments) -> bool:

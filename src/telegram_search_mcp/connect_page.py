@@ -3,13 +3,17 @@
 Nothing here is secret or per-run: the token travels in the URL fragment and the QR comes from
 /api/state, so every asset is identical for every run. The strict CSP forbids inline script and
 style, which is why the markup has no style attributes and all behaviour lives in APP_JS.
+A named account alias gets its own page (`assets`): the same assets with the alias in the title and one
+header line, never the Telegram account (0.55 spec 3C). The default alias's page is ASSETS, unchanged.
 """
 from __future__ import annotations
+import functools
 import html
 import json
 import re
 
 from . import product_identity as identity
+from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS
 
 PRODUCT = identity.DISPLAY_NAME
 
@@ -147,9 +151,9 @@ _HTML_TEMPLATE = """<!doctype html>
 """
 
 
-def _render_html():
-    english = STRINGS['en']
-    return re.sub(r'\{\{(\w+)\}\}', lambda match: html.escape(english[match.group(1)]), _HTML_TEMPLATE)
+def _render_html(strings=STRINGS, template=_HTML_TEMPLATE):
+    english = strings['en']
+    return re.sub(r'\{\{(\w+)\}\}', lambda match: html.escape(english[match.group(1)]), template)
 
 
 INDEX_HTML = _render_html()
@@ -387,7 +391,11 @@ _JS_TEMPLATE = r"""'use strict';
 })();
 """
 
-APP_JS = _JS_TEMPLATE.replace('__STRINGS__', json.dumps(STRINGS, ensure_ascii=False, indent=2))
+def _render_js(strings=STRINGS):
+    return _JS_TEMPLATE.replace('__STRINGS__', json.dumps(strings, ensure_ascii=False, indent=2))
+
+
+APP_JS = _render_js()
 
 APP_CSS = """:root {
   --bg: #f3f5f8; --card: #ffffff; --fg: #151a22; --muted: #5d6877; --line: #dde2ea;
@@ -479,8 +487,36 @@ input[type="password"]:disabled { opacity: .6; }
 @media (max-width: 360px) { .card { padding: 20px 14px; } }
 """
 
-ASSETS = {
-    '/': ('text/html; charset=utf-8', INDEX_HTML.encode('utf-8')),
-    '/app.js': ('text/javascript; charset=utf-8', APP_JS.encode('utf-8')),
-    '/app.css': ('text/css; charset=utf-8', APP_CSS.encode('utf-8')),
-}
+def _assets(index_html, app_js):
+    return {
+        '/': ('text/html; charset=utf-8', index_html.encode('utf-8')),
+        '/app.js': ('text/javascript; charset=utf-8', app_js.encode('utf-8')),
+        '/app.css': ('text/css; charset=utf-8', APP_CSS.encode('utf-8')),
+    }
+
+
+ASSETS = _assets(INDEX_HTML, APP_JS)
+# The header line a named alias's page adds; its text is the `account` string of either language.
+_ACCOUNT_LINE = '<p class="muted" data-i18n="account">{{account}}</p>\n'
+_ACCOUNT_STRINGS = {'en': 'Account alias: {alias}', 'ru': 'Псевдоним аккаунта: {alias}'}
+
+
+def assets(alias=None):
+    """The page of one account: ASSETS for the default (alias None), else that named alias's own assets.
+
+    A named alias is a closed token; anything else (`default` included) is refused with ValueError.
+    """
+    if alias is None:
+        return ASSETS
+    if type(alias) is not str or alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is None:
+        raise ValueError('invalid_alias')
+    return _alias_assets(alias)
+
+
+@functools.lru_cache(maxsize=8)
+def _alias_assets(alias):
+    strings = {language: {**values, 'title': f'{values["title"]} · {alias}',
+                          'account': _ACCOUNT_STRINGS[language].format(alias=alias)}
+               for language, values in STRINGS.items()}
+    template = _HTML_TEMPLATE.replace('</header>', _ACCOUNT_LINE + '</header>', 1)
+    return _assets(_render_html(strings, template), _render_js(strings))

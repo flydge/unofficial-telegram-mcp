@@ -6,10 +6,12 @@ import sys
 import time
 from pathlib import Path
 from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavailable
+from . import broker_readiness
 from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPaths, ConfigurationError, load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
-from .launch_agent import account_options, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
+from .launch_agent import (account_options, launch_agent_status, start_enrolled_broker, validate_enrolled_broker,
+                           LaunchAgentError)
 from .secure_terminal import NativeTerminal
 from .session_owner import SessionOwnerLease, OwnerLeaseError
 from .setup_wizard import run_setup, setup_status
@@ -29,15 +31,19 @@ api-credentials stores your own Telegram API ID and hash (add-only) before the
 first connect; without it an installed bundle supplies its own application identity.
 status reads enrollment metadata and an existing broker handshake only;
 it does not initialize TDLib, read Keychain, start services or prove Ready.
+status --account <alias> also reports whether that alias's broker LaunchAgent
+is loaded and the readiness its running broker recorded at its last account
+check; it never asks for a check, so it never starts TDLib or pins an account,
+and never reports the Telegram account.
 connect-helper is internal: connect starts it as a transient launchd job.
-Every other command takes a trailing --account <alias> for a registered account
+Every command takes a trailing --account <alias> for a registered account
 alias; without it the command serves the default account.
 Pinned TDLib and an installed matching Python package remain prerequisites.
 '''
 COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
-# The commands that take a trailing `--account <alias>` (0.55 spec 3B); connect-helper's job becomes per alias in
-# phase C. Without the flag a command's argv and behaviour are the default alias's, byte for byte.
-ACCOUNT_COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials')
+# The commands that take a trailing `--account <alias>` (0.55 spec 3B); connect-helper's is the argv of the alias's
+# own connect job (3C). Without the flag a command's argv and behaviour are the default alias's, byte for byte.
+ACCOUNT_COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
 # The closed refusal codes of an --account the registry does not admit; anything else is alias_unavailable.
 ACCOUNT_CODES = frozenset({'alias_unavailable', 'alias_path_too_long', 'registry_invalid', 'registry_unsafe'})
 
@@ -80,6 +86,32 @@ def existing_broker_status(paths):
         return 'unavailable'
     finally:
         if client is not None: client.close()
+
+
+def account_status(paths, broker):
+    """A named alias's service facts: its alias, whether its own broker LaunchAgent is loaded and whether its
+    running broker's session is authorized, as that broker recorded at its last account check (broker_readiness:
+    true, false for a session not authorized or refused by the pin, None when unknown or recorded by an earlier
+    broker).
+
+    Read-only: one handshake names the running broker's generation; no check is sent, so nothing starts TDLib or
+    writes a pin. Only that alias's label, socket and run directory are read; the account is never read or reported.
+    """
+    try:
+        loaded = launch_agent_status(account=paths.account)
+    except Exception:
+        loaded = None
+    authorized, client = None, None
+    if broker == 'compatible_running':
+        try:
+            client = _client(paths, 1)
+            authorized = broker_readiness.read(paths.account.run, client.handshake().get('broker_generation'))
+        except Exception:
+            authorized = None
+        finally:
+            if client is not None:
+                client.close()
+    return {'alias': paths.account.alias, 'loaded': loaded, 'authorized': authorized}
 
 
 def handoff_broker(*, paths=None, timeout=30, sleeper=time.sleep):
@@ -184,6 +216,8 @@ def main(argv=None) -> int:
     if args == ['status']:
         status = setup_status(paths)
         status['broker'] = existing_broker_status(paths)
+        if alias is not None:  # The default's status keeps its 0.54 keys.
+            status.update(account_status(paths, status['broker']))
         print(json.dumps(status, sort_keys=True))
         return 0 if status['state'] != 'inconsistent' else 2
     if args[0] in ('connect', 'wait', 'cancel', 'api-credentials', 'connect-helper'):

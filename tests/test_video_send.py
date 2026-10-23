@@ -797,7 +797,8 @@ class AttemptedSendTests(VideoFixture, unittest.TestCase):
         result = self.send(did)
         self.assertEqual((result['status'], result['detail']), ('expired', 'draft is unavailable'))
         self.assertEqual(self.sends(), [])
-        self.assertIsNone(self.broker._drafts.attempt_outcome(did, client_id=CLIENT, kinds=frozenset({'video'})))
+        self.assertIsNone(self.broker._drafts.attempt_outcome(did, client_id=CLIENT, owner=None,
+                                                              kinds=frozenset({'video'})))
 
     def test_document_artifact_released_after_the_raw_send_is_outcome_unknown(self):
         artifact_id = self.upload()

@@ -339,6 +339,8 @@ class SearchService:
         self._owns_client = owns_client
         client_id = client_id or secrets.token_hex(16)
         broker_generation = broker_generation or secrets.token_hex(16)
+        # Discovery scans bind this lifecycle and generation, plus the account (re-login hardening, 0.55 spec 3C).
+        self._discovery_owner = (client_id, broker_generation)
         self._verified_target_reader = VerifiedTargetReader(client=client,
             client_id=client_id, broker_generation=broker_generation)
         self._chat_list_reader = ChatListReader(client=client,
@@ -421,6 +423,7 @@ class SearchService:
         return TargetDiscoveryService(
             client=self._client,
             registry=self._discovery_registry,
+            owner=self._discovery_owner,
         ).discover(request)
 
     def search(self, request: SearchRequest, *, deadline: float | None = None) -> SearchResponse:

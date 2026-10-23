@@ -343,20 +343,16 @@ class LaunchdThreadingTests(Fixture):
             launch_agent.validate_enrolled_broker(runner=launchctl(calls), uid=501, account=self.work)
         self.assertEqual(calls, [])
 
-    def test_no_job_is_written_for_a_named_account_before_phase_c(self):
+    def test_a_named_account_writes_its_own_jobs(self):
         python = Path(sys.executable)
         self.work.broker_plist.parent.mkdir(parents=True, mode=0o700)
-        # Phase B: the broker argv names the alias; writing and starting its jobs stay phase C's.
+        # Phase C: the alias's broker and connect job are written under its own labels (tests/test_account_jobs.py).
         self.assertEqual(launch_agent.launch_agent_payload(python_executable=python, account=self.work)
                          ['ProgramArguments'][-2:], ['--account', 'work'])
-        for build in (lambda: launch_agent.connect_job_payload(python_executable=python, account=self.work),
-                      lambda: launch_agent.start_enrolled_broker(python_executable=python, account=self.work,
-                                                                 runner=launchctl([])),
-                      lambda: launch_agent.write_connect_job(plist_path=self.work.connect_plist, account=self.work)):
-            with self.assertRaises(launch_agent.LaunchAgentError):
-                build()
-        self.assertEqual(list(self.work.broker_plist.parent.iterdir()), [])
-        self.assertFalse(self.work.connect_plist.exists())
+        self.assertEqual(launch_agent.connect_job_payload(python_executable=python, account=self.work)
+                         ['ProgramArguments'][-2:], ['--account', 'work'])
+        launch_agent.write_connect_job(plist_path=self.work.connect_plist, account=self.work)
+        self.assertEqual(plistlib.loads(self.work.connect_plist.read_bytes())['Label'], self.work.connect_label)
 
     def test_cancel_and_handoff_address_the_account_jobs(self):
         paths = SetupPaths.from_account(self.work)

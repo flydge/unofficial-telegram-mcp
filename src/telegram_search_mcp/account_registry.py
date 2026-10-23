@@ -411,3 +411,30 @@ def pin_account(root: Path, alias: str, user_id: int, *, sleeper: Callable[[floa
         return current.with_pin(alias, user_id)
 
     _change(root, change, create=False, sleeper=sleeper)
+
+
+# A refusal of the pin at login as the code `connect`, `setup` and `resume` report (spec 3C): a busy registry is
+# a retry, and anything else but the two pin codes (an alias removed meanwhile, an unreadable registry) stops.
+LOGIN_CODES = {"account_mismatch": "account_mismatch", "account_duplicate": "account_duplicate",
+               "registry_busy": "dependency_unavailable"}
+
+
+def login_refusal(account, read_user_id: Callable[[], int]) -> str | None:
+    """The account pin at login, before an authorized session is handed to the broker (spec 3C).
+
+    One rule for every login path (the connect helper, `setup` and `resume`), the one the broker applies at its
+    first check. Without a registry the default alias reads nothing (0.54): `read_user_id` is never called.
+    Otherwise the authorized user must be this alias's own and no other alias's, the default included; a user
+    not yet pinned is pinned here. Returns None, or the fixed code from LOGIN_CODES (`alias_unavailable` for any
+    other refusal). A failure to read the user is the caller's. The user id is compared and dropped.
+    """
+    if account.alias == DEFAULT_ALIAS and not present(account.accounts_root):
+        return None
+    user_id = read_user_id()
+    try:
+        pin_account(account.accounts_root, account.alias, user_id)
+    except RegistryError as error:
+        return LOGIN_CODES.get(error.code, "alias_unavailable")
+    finally:
+        user_id = None
+    return None

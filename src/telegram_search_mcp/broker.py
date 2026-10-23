@@ -40,7 +40,7 @@ from .broker_protocol import (
     send_frame,
 )
 from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths, ensure_private_directory, RuntimePolicy, load_runtime_policy
-from . import account_registry
+from . import account_registry, broker_readiness
 from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
                        require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
@@ -106,6 +106,9 @@ SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'se
 # check for the same reason: owner-local bytes. Every other operation, any added later included, is checked.
 ACCOUNT_CHECK_EXEMPT = frozenset({'health', 'release_client', 'check', 'create_local_artifact',
                                   'begin_local_upload', 'append_local_upload', 'finish_local_upload'})
+
+
+_UNRECORDED = object()
 
 
 class BrokerStartupError(RuntimeError):
@@ -265,6 +268,9 @@ class Broker(SelectionBrokerMixin):
         self._accounts_root = account_paths.accounts_root
         # (client, authorization epoch, user id) of the last session the pin admitted; never leaves the broker.
         self._account_session: tuple[object, object, int] | None = None
+        # The readiness last recorded for status (broker_readiness); _UNRECORDED until the first write succeeds.
+        self._readiness_lock = threading.Lock()
+        self._readiness: object = _UNRECORDED
         self._verify_peer_uid = verify_peer_uid
         self._peer_uid_loader = peer_uid_loader
         self._max_clients = max_clients
@@ -293,7 +299,10 @@ class Broker(SelectionBrokerMixin):
         self._approval_dialogs = 0
 
     def _prompt_approval(self, **kwargs) -> ApprovalDecision | bool:
-        """The owner's approval dialog, counted as open while it runs."""
+        """The owner's approval dialog, counted as open while it runs. Once an alias registry exists the dialog
+        names this broker's alias and a masked account (spec 3C); without one its arguments are 0.54's."""
+        if account_registry.present(self._accounts_root):
+            kwargs = {**kwargs, 'account_alias': self._alias}
         with self._state_lock:
             self._approval_dialogs += 1
         try:
@@ -450,7 +459,32 @@ class Broker(SelectionBrokerMixin):
         return account
 
     def _account_check(self, *, client=None, user_id=None) -> None:
+        """The account pin (`_pin_session`), and its outcome recorded as this broker's readiness for status (spec
+        3C): admitted true, not authorized or refused false, an unverified account unknown."""
+        try:
+            admitted = self._pin_session(client=client, user_id=user_id)
+        except AccountBlocked as blocked:
+            self._record_readiness(None if blocked.code == 'account_unverified' else False)
+            raise
+        if admitted is not None:
+            self._record_readiness(admitted)
+
+    def _record_readiness(self, authorized: bool | None) -> None:
+        """Record a changed readiness in this broker's run directory, only once a registry exists or for a named
+        alias: without one nothing is written (0.54). Best effort; a failed write leaves no record (unknown)."""
+        with self._readiness_lock:
+            if self._readiness is authorized:
+                return
+            if self._alias == account_registry.DEFAULT_ALIAS and not account_registry.present(self._accounts_root):
+                return
+            written = broker_readiness.record(self._socket_path.parent, self._generation, authorized)
+            self._readiness = authorized if written else _UNRECORDED
+
+    def _pin_session(self, *, client=None, user_id=None) -> bool | None:
         """The account pin, at authorization and before every Telegram-sourced grant (spec 2).
+
+        Returns None without a registry (the default alias), False for a session that is not authorized, and True
+        for an admitted one; a refusal raises AccountBlocked.
 
         Without a registry it reads nothing but the registry's absence: 0.54. With one, the authorized
         session's user id is pinned for this alias at the first check (the default alias's in
@@ -463,7 +497,7 @@ class Broker(SelectionBrokerMixin):
             if self._alias != account_registry.DEFAULT_ALIAS:  # a named alias exists only in the registry
                 self._artifact_authority.invalidate_account()
                 raise AccountBlocked('alias_unavailable')
-            return
+            return None
         if client is None:
             client = self._shared_client()
         epoch = getattr(client, 'send_observation_epoch', None)
@@ -479,7 +513,7 @@ class Broker(SelectionBrokerMixin):
                 try:
                     client.ensure_ready()
                 except AuthorizationBlocked:
-                    return  # not authorized: the operation itself reports it blocked and grants nothing
+                    return False  # not authorized: the operation itself reports it blocked and grants nothing
                 except TDLibError:
                     # Any other failure fails closed: the session's account could not be read, so nothing runs.
                     self._artifact_authority.invalidate_account()
@@ -495,14 +529,26 @@ class Broker(SelectionBrokerMixin):
             self._artifact_authority.invalidate_account()
             raise AccountBlocked(error.code) from None
         self._account_session = (client, epoch, user_id) if epoch is not None else None
+        return True
+
+    def _observed_owner(self, client_id) -> DraftOwner | None:
+        """This client's DraftOwner under the account the broker last observed, or None; no provider read.
+
+        Content-free routing only (the send budget): every grant re-reads the account.
+        """
+        account = self._artifact_authority.observed_account()
+        try:
+            return None if account is None else DraftOwner(client_id=client_id, account_id=account)
+        except ValueError:
+            return None
 
     def _attempted_send(self, operation, draft_id, client_id):
         """A consumed claim never reads as expired. After lost authority (release, account
         switch, publication) it reports its local failure or a content-free outcome_unknown;
         provider evidence is replayed only to a later call that still holds the original client
-        lifecycle and account epoch."""
+        lifecycle and account epoch. The call lost the owner that held the claim: its client decides."""
         video = operation == 'send_prepared_video'
-        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id,
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None,
                    kinds=frozenset({'video'} if video else {'document', 'photo', 'voice_note'}))
                    if client_id is not None else None)
         if outcome is None:
@@ -948,9 +994,13 @@ class Broker(SelectionBrokerMixin):
             try:
                 self._shared_client().ensure_ready()
                 self._account_check()  # At authorization: the first authorized check pins the account.
+            except AccountBlocked:
+                return {"status": "blocked"}  # Recorded by the account check.
             except AuthorizationBlocked:
+                self._record_readiness(False)
                 return {"status": "blocked"}
             except TDLibError:
+                self._record_readiness(None)
                 return {"status": "error"}
             return {"status": "ready"}
         if operation == "health":
@@ -1804,9 +1854,11 @@ class Broker(SelectionBrokerMixin):
         return SendPreparedTextResponse.model_validate(result.model_dump())
 
     def _send_prepared_artifact(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
-        if ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id,client_id=client_id)) or
-                (text_only and (self._drafts.is_owned_topic(request.draft_id, client_id=client_id) or
-                    self._drafts.is_owned_formatted(request.draft_id, client_id=client_id)))):
+        # Budget routing takes the DraftOwner: only this client's draft of the account last observed is routed.
+        owner = self._observed_owner(client_id)
+        if owner is not None and ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id, owner=owner))
+                or (text_only and (self._drafts.is_owned_topic(request.draft_id, owner=owner) or
+                    self._drafts.is_owned_formatted(request.draft_id, owner=owner)))):
             provider=self._shared_client()
             # Capture once: nested provider budgets must not renew time consumed
             # by account reads, owner confirmation or local staging.
@@ -2262,15 +2314,16 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return self._send_claim_lost(draft_id, client_id, 'forward', result, held=held)
+            return self._send_claim_lost(draft_id, client_id, 'forward', result, owner=owner if held else None)
 
-    def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, held: bool):
+    def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, owner: DraftOwner | None):
         """A call that lost the claim to a concurrent or repeated call made no attempt, but the
         draft may have been sent: outcome_unknown, never expired (as `_change_attempted`). Only a
-        call whose owner (and, for a video, artifact lifecycle) held the draft is routed; a later
-        call without it keeps the content-free `expired`, as does a draft never claimed."""
-        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
-                   if held else None)
+        call whose owner (and, for a video, artifact lifecycle) held the draft is routed, with that
+        DraftOwner; a later call without it keeps the content-free `expired`, as does a draft never
+        claimed."""
+        outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=owner, kinds=frozenset({kind}))
+                   if owner is not None else None)
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider send was attempted')
         if outcome == 'attempted':
@@ -2452,7 +2505,7 @@ class Broker(SelectionBrokerMixin):
                           'delivery is unconfirmed; do not retry automatically',
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
-            return self._send_claim_lost(draft_id, client_id, 'video', result, held=held)
+            return self._send_claim_lost(draft_id, client_id, 'video', result, owner=owner if held else None)
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)
@@ -2466,8 +2519,9 @@ class Broker(SelectionBrokerMixin):
         return owner
 
     def _change_attempted(self, draft_id: str, client_id: str, kind: str, result):
-        """A consumed claim never reads as expired after a lost authority (attempt_outcome)."""
-        outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, kinds=frozenset({kind}))
+        """A consumed claim never reads as expired after a lost authority (attempt_outcome): the call cannot name
+        the owner that held the claim, so its client decides."""
+        outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None, kinds=frozenset({kind}))
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider change was attempted')
         if outcome == 'attempted':
