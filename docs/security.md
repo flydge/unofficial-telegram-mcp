@@ -170,9 +170,11 @@ Offline create, upload and local readers use the trusted fixed session namespace
 and do not initialize TDLib solely to obtain a numeric account ID. Provider-bound
 work binds separately observed numeric identity and rechecks it before publication.
 Observed account drift or authorization loss revokes provider-bound authority;
-switching back cannot revive it. This is one supported default-session namespace,
-not multi-account routing or detection of an unsupported external session
-replacement before any provider observation. Same-UID client impersonation remains
+switching back cannot revive it. Each broker is one session namespace (the default
+account's, or since the 0.55 candidate one account alias's, see the
+[accounts boundary](#accounts-boundary-055-candidate)), never multi-account routing inside one
+broker or detection of an unsupported external session replacement before any provider
+observation. Same-UID client impersonation remains
 outside this IPC isolation boundary. The underlying byte store's unscoped Python
 API is internal; MCP cannot import or adopt an unbound persisted artifact.
 
@@ -309,7 +311,7 @@ The registry does not retain raw hypotheses, titles, usernames, messages, snippe
 
 Separately, the broker's sole `TDLibClient` keeps a broker-lifetime, memory-only numeric catalog cache. It contains only Main/Archive mappings of integer `chat_id -> order`, reduced from validated asynchronous catalog updates regardless of which request received them. It does not retain raw update dictionaries, chat objects, titles, usernames, messages, hypotheses, snippets, paths, credentials, provider errors, or historical raw offsets. Broker restart clears this cache; there is no cleanup file.
 
-The custom `MetadataIndex`, SQLite/FTS database, `INDEX_ROOT`, and all custom index writes have been removed from runtime code. Exact file-metadata and numeric-content searches are call-local. Unofficial Telegram MCP creates no persistent alias, catalog, hypothesis, query, offset, snippet, evidence, or private-index store.
+The custom `MetadataIndex`, SQLite/FTS database, `INDEX_ROOT`, and all custom index writes have been removed from runtime code. Exact file-metadata and numeric-content searches are call-local. Unofficial Telegram MCP creates no persistent alias, catalog, hypothesis, query, offset, snippet, evidence, or private-index store. The one exception since the 0.55 candidate is the owner's account alias registry, which holds only alias names and the Telegram user id pinned to each account (see the [accounts boundary](#accounts-boundary-055-candidate)).
 
 Application logging is restricted to constant readiness/error markers. Broker health exposes only uptime, queue depth, active-client count, completed/error counts, peak handler overlap, and aggregate TDLib serialization-wait count; it never includes targets, hypotheses, queries, IDs, titles, messages, snippets, offsets, paths, credentials, or exception text. Private request bodies and provider errors are not logged. The legacy `td_json_client_execute` symbol is used only once before client creation for `setLogVerbosityLevel(0)`, preventing TDLib diagnostics from contaminating the STDIO protocol. It is not reachable from an MCP tool.
 
@@ -1800,7 +1802,10 @@ native Terminal the helper runs inline instead. A dedicated `run/connect.lock`, 
 session owner lease, keeps exactly one helper alive. The run takes the owner lease for the whole
 authorization and releases it before the broker handoff. It writes only `run/connect-status.json`
 (mode `0600`, at most 1 KiB: `phase`, `code`, `updated_at`, `expires_at`, `retry_after`, all from
-closed vocabularies); `wait` reads it strictly and reports only what it validates.
+closed vocabularies); `wait` reads it strictly and reports only what it validates. An account alias
+(0.55 candidate) has its own job, `com.<home-directory-name>.telegram-search-mcp.a.<alias>.connect`
+running `connect-helper --account <alias>`, with its plist, status file and lock in that alias's own `run`
+directory; its page names the alias in its title and one header line, never the account.
 
 The helper serves a stdlib HTTP screen on `127.0.0.1` at an ephemeral port. A fresh random 32-byte
 token lives only in the URL fragment, so it is never sent in a request or referrer; the page
@@ -1856,7 +1861,9 @@ claim protection against hostile software running as the same OS user. Evidence 
 ## Claude Desktop registration boundary (0.53 candidate)
 
 The installer can add, replace or remove exactly one key, `mcpServers.telegram_search`, in
-`~/Library/Application Support/Claude/claude_desktop_config.json`. When the `Claude` directory does
+`~/Library/Application Support/Claude/claude_desktop_config.json`, and for each account alias (0.55
+candidate) one `mcpServers.telegram_search_<alias>` key beside it, by the same rules. When the `Claude`
+directory does
 not exist it reads and writes nothing. It starts no process and reads no other Claude Desktop file.
 
 **Read.** The file is read through held no-follow parents and a descriptor, at most 1 MiB, with ACL
@@ -2073,7 +2080,13 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   plist and, on an upgrade, rollback or adoption of a service, one line of `runtime.toml`:
   `expected_package_version`. Every other byte of that file, capabilities included, stays, and a file
   that cannot be changed that way refuses (`policy_conflict`). `enrollment.json`, the managed key, the
-  TDLib session and the Keychain are never written; their hashes are only read.
+  TDLib session and the Keychain are never written; their hashes are only read. With account aliases
+  (0.55 candidate) the same holds for each alias: its broker plist and its `runtime.toml` version line
+  move with the default's, and `accounts.json` beside `receipt.json` records its owned entries. The
+  account actions also write the alias registry and move a removed alias's root aside; a rollback below
+  0.55 with no alias left moves the registry and the default broker's `run/readiness.json` aside, and an
+  uninstall with no alias left moves the registry aside; nothing of a session is deleted
+  ([accounts boundary](#accounts-boundary-055-candidate)).
 - **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
   right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
   through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
@@ -2082,7 +2095,8 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   `outcome_unknown`, within the 900-second receipt retention), all of which a restart would cut off or lose,
   and any connected client context counts as well. A 0.51 or 0.52 broker has no such count, so there any
   context is an unknown answer. Anything but "none" (including an unknown answer) refuses
-  (`pending_send_unresolved`). The bootout
+  (`pending_send_unresolved`). With account aliases each running alias broker is asked the same way
+  through its own socket, and any one of them refuses the whole change. The bootout
   follows the last check directly and precedes every client write, so a refusal leaves every client
   entry, the plist and the session unchanged; after the first check, the copied release tree and the
   unfinished transaction stay until the same command is repeated. Only the exact label is
@@ -2094,7 +2108,9 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   byte-identical to its state when the upgrade began, `runtime.toml` differs from its earlier bytes only
   in the version line and the `enabled_capabilities` line (the one line the owner's profile switch
   writes; known capabilities only, compared through a digest of the file with that line masked, which the
-  upgrade records), and the previous release's manifest and Codex ownership still match.
+  upgrade records), and the previous release's manifest and Codex ownership still match. Each account
+  alias's own state is checked the same way (an alias added since refuses), and a rollback to a release
+  older than 0.55 refuses `accounts_present` while any alias exists.
 - **Commit order.** The new release tree is copied next to the old one, the broker is stopped and its
   plist rewritten, the clients follow, then `receipt.json`, and `current.json` last. A release is admitted only when the receipt and pointer
   name it, so an interrupted change leaves the previous release launchable.
@@ -2207,6 +2223,85 @@ the installed release's own definition and only after the broker reports no send
 dialog, no unsettled send outcome and no active client context. A restart failure after the write is
 reported as `changed` with `broker: restart_failed`, never as a refusal. Profiles grant nothing by
 themselves: the broker enforces the policy file it loads, and every send still needs the owner's dialog.
+With `--account <alias>` the switch edits that alias's own `runtime.toml` behind its own broker's gate.
+
+## Accounts boundary (0.55 candidate)
+
+The owner can add Telegram accounts under local aliases ([installation](install.md#accounts-055-candidate),
+[reference](reference.md#account-aliases-055-candidate)). Without an alias registry every path, name,
+file and behaviour is 0.54's.
+
+**Same-UID trust.** Aliases separate Telegram sessions, not users. Every alias runs as the same macOS
+user, and owner-only modes do not separate one alias's files from another's: any process of that user can
+read each session root, socket and cache, and can impersonate any MCP client, as with one account. An alias
+keeps accounts from mixing by accident and keeps each MCP client's handles to its own account; it is not a
+boundary against hostile software running as the same user.
+
+**One broker per account.** Each alias has its own session root
+(`TelegramSearchMCP-accounts/<alias>`, a sibling of the legacy tree, never inside it), its own broker
+LaunchAgent and connect job under labels of its own, its own socket, locks, `runtime.toml`, artifact cache,
+uploads and staging, and its own broker with one TDLib client. N aliases mean N brokers and N TDLib
+clients, and up to N × 1 GiB of artifact cache besides TDLib's own session files; there are at most eight
+aliases. An alias's proxy reaches only its own socket, which binds the account; no handshake key, tool
+parameter or response field names an account, so the schema fingerprint is unchanged. The alias reaches
+the model only in the MCP `serverInfo.name` and one instructions line, and is fixed in each client entry's
+and plist's argument list (`--account <alias>`), never an environment variable, a tool argument or a path a
+client supplies. A broker refuses to run for a name the registry does not list.
+
+**Handle isolation.** Every handle one account's broker issues (every draft kind, send status,
+artifact IDs, upload IDs and authority and result tokens, retained selections, verified targets, nine
+cursor kinds and the discovery `scan_` continuation) is refused by another account's broker exactly like an
+unknown handle of the same kind, with no dialog and no provider change; the isolation matrix checks each
+kind both ways on two real brokers over fake TDLib sessions. The transfer helper's `download` is isolated
+by the cache path: `--account <alias>` reads only that alias's artifact cache, an artifact ID of another
+account answers `artifact_unverified` as an unknown one, and a TDLib file path inside another account's
+session files is outside the broker's private cache and refused.
+
+**The account pin.** The registry `TelegramSearchMCP-accounts/registry.json` (owner-only `0600` in a
+`0700` folder, closed schema, at most 4 KiB, atomic writes under its own lease) stores the aliases and the
+Telegram user id pinned to each, and to the default account. Each broker pins the user it first finds
+authorized; a later different user blocks with `account_mismatch`, a user pinned under another alias, the
+default included, with `account_duplicate`. The check runs at authorization and before every operation
+except a closed exempt set (`health`, `release_client`, `check` and the local-byte artifact and upload
+operations); a new operation is checked by default. Every login (`connect`, `setup`, `resume`) applies the
+same rule after Ready and before the handoff, so nothing is handed to the broker on a refusal; the
+authorized session stays on disk. The pin's user id is compared and dropped: the registry code never
+prints, logs or returns it. Once a registry exists it no longer reaches the dialog's argument list
+either: the approval dialog names the alias in its heading and shows the account only masked, as the
+alias and the user id's last two digits (`Account: work (Telegram account ••42)`), so a wrong session
+shows without revealing the id. Without a registry the default account reads no user for the pin and its
+dialog keeps 0.54's account line with the user id; in both modes a chat whose ID is the account's own
+reads "Saved Messages".
+
+**Keychain.** One Keychain service holds the application identity (`api_id`, `api_hash`), shared by every
+alias, as is the bundled `app-identity.json`: it identifies the application, not the account. Each
+enrollment still has its own random database key under its own Keychain account
+(`database_key_<enrollment-id>`).
+
+**Removal moves aside.** `account-remove` boots out the alias's connect job and broker, removes its owned
+client entries and registry entry with its pin, and moves the whole alias root to
+`TelegramSearchMCP-accounts/removed-<alias>-<32 hex>`, a name outside the alias grammar that no later
+action admits or reuses. Session data is never deleted and the session is never logged out: Telegram keeps
+that device authorized until the owner ends it on the phone. Rename is a remove plus an add and a new login,
+because the enrollment binds absolute paths. Uninstall keeps alias roots, sessions and the registry while
+an alias exists; a rollback below 0.55 or an uninstall with no alias left moves the registry aside to
+`retired-<32 hex>-registry.json`, never deleting it.
+
+**Installer.** `account-add` and `account-remove` are journaled transactions under the installer lease, run
+only from the current release that knows aliases; they never log in or read the account. They own an alias
+entry only while it is exactly the entry their record describes (Codex: the recorded hash; Claude Code and
+Claude Desktop: the exact alias entry of one of this installation's releases), and an alias broker plist
+only in the installer's own shape for this installation; anything else is foreign and refused, never
+overwritten or removed. Every transaction over aliases holds each alias's connect lock for its run, so no
+login of an alias writes or loads a broker of another release meanwhile (`login_in_progress`). Upgrade and
+rollback gate every running broker before any change.
+
+**Client allowlists.** A client allowlist, permission rule or hook keyed on `mcp__telegram_search__*` does
+not cover an alias's tools, which clients name `mcp__telegram_search_<alias>__<tool>`; the plugin stays
+default-only.
+
+The evidence is unit tests and synthetic sockets, brokers and launchd; two really authorized accounts with
+one approved action each are an owner-session row.
 
 ## Retained-selection boundary (B2B candidate)
 
