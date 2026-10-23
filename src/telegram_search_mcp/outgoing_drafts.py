@@ -963,7 +963,9 @@ class OutgoingDraftRegistry:
             slots = tuple(observed if current[0] == "outcome_unknown" and observed[0] in ("sent", "failed")
                           else current for current, observed in zip(receipt.slots, outcomes))
             if slots != receipt.slots:
-                entry.receipt = replace(receipt, slots=slots, status=album_overall(slot[0] for slot in slots))
+                entry.receipt = SendReceipt(draft_id=receipt.draft_id,
+                                            status=album_overall(slot[0] for slot in slots), message_id=None,
+                                            finished_at=receipt.finished_at, evidence=receipt.evidence, slots=slots)
             return entry.receipt
 
     def status_snapshot(self, draft_id: str, *, owner: DraftOwner):

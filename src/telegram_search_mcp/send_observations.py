@@ -181,8 +181,9 @@ def _reduce_album(old, event):
         for old_id, status, message_id, content_type in old.early:
             for index, slot in enumerate(slots):
                 if slot.temporary_id == old_id and slot.status == 'pending':
-                    slots[index] = (replace(slot, status=status, message_id=message_id)
-                                    if content_type == slot.content_type else replace(slot, status='conflict'))
+                    slots[index] = (AlbumSlot(slot.content_type, old_id, status, message_id)
+                                    if content_type == slot.content_type
+                                    else AlbumSlot(slot.content_type, old_id, 'conflict'))
         return replace(old, status='bound', slots=tuple(slots), media_album_id=album_id, early=())
     if kind not in ('updateMessageSendSucceeded', 'updateMessageSendFailed') or not integer(event.get('old_message_id')):
         return old  # updateNewMessage never binds; deletion or absence never ends a slot.
@@ -204,7 +205,7 @@ def _reduce_album(old, event):
                 return old  # Terminal is final.
             status, message_id = _album_terminal(event, old.chat_id, slot.content_type)
             slots = list(old.slots)
-            slots[index] = replace(slot, status=status, message_id=message_id)
+            slots[index] = AlbumSlot(slot.content_type, old_id, status, message_id)
             return replace(old, slots=tuple(slots))
     return old
 
