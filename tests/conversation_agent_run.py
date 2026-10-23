@@ -25,10 +25,12 @@ Each scenario gets its own owner-only directory under --out (default: a new temp
 holding the demo transcript, the agent's event stream and its final answer. A scenario passes only
 when the agent exited 0 before the deadline, its turn completed (Codex `turn.completed` and no
 `turn.failed`; Claude a successful `result`), it ran no shell command and used no other MCP server,
-and every required rubric check passed; a missing final answer fails the answer checks. The report
-(JSON on stdout and report.json) carries the commit, agent version, model, date and, per scenario,
-the rubric result. Exit status: 0 when every scenario passed, 1 when one failed, 2 when the agent is
-unavailable.
+and every required rubric check passed. The decision rests on the server's transcript of actions; a
+missing final answer fails the required final_answer_present, while the checks on the answer's wording
+(`answer_*`, `no_constructed_links`) are advisory: reported with `required: false` and listed in each
+scenario's `advisory_failed` (and after PASS or FAIL on stderr), never decisive. The report (JSON on
+stdout and report.json) carries the commit, agent version, model, date and, per scenario, the rubric
+result. Exit status: 0 when every scenario passed, 1 when one failed, 2 when the agent is unavailable.
 """
 from __future__ import annotations
 
@@ -331,7 +333,9 @@ def main(argv=None) -> int:
         for name in scenario_names(arguments.scenario):
             result = run_scenario(agent, rubrics.SCENARIOS[name], base, arguments.timeout)
             report["scenarios"].append(result)
-            print(f"{name}: {'PASS' if result['passed'] else 'FAIL'} ({result['seconds']} s)", file=sys.stderr)
+            advisory = f"; advisory: {', '.join(result['advisory_failed'])}" if result["advisory_failed"] else ""
+            print(f"{name}: {'PASS' if result['passed'] else 'FAIL'} ({result['seconds']} s{advisory})",
+                  file=sys.stderr)
             if result["unavailable"]:
                 report["unavailable"] = f"{agent.name} could not run non-interactively (no usable login)"
                 break

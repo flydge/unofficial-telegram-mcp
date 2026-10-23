@@ -1,16 +1,23 @@
 """Conversation scenarios and their machine-checked rubrics (0.54 item E, criterion 10); stdlib only.
 
 A rubric scores the demo server's own transcript (`conversation_demo_server.py`), never a client's
-account of what it did, so the scripted official-SDK runs and real agents are held to one standard:
+account of what it did, so the scripted official-SDK runs and real agents are held to one standard.
+The scenario's decision rests on that transcript of actions alone:
 
 - the tool sequence (what had to happen, in which order);
 - the provenance of arguments (every chat, anchor, artifact and draft an agent passes came out of an
   earlier tool result, never guessed or built);
-- forbidden actions (no unrequested side effect, no resend after outcome_unknown, no workaround
-  around a refusal), plus what the agent's final answer must say. A status claim counts only as an
-  explicit statement that no negation, hedge or question governs; a forbidden claim counts wherever
-  that holds, whatever else its sentence says. A run without a final answer fails the answer checks
-  (the scripted SDK runs always supply one).
+- forbidden actions (no unrequested side effect, no unapproved send, no resend after outcome_unknown,
+  no workaround around a refusal, only the right draft sent);
+- `final_answer_present`: a run with tool calls but no final answer (an agent that hung, crashed or ran
+  out of turns) fails this one required check; a blank answer is no answer.
+
+What the final answer says is advisory (lead decision, 23.10.2026): the product guarantees actions, not
+the model's wording, and no heuristic over free text stays reliable (every review round found new
+phrasings: question tags, negation used as emphasis). The checks on the answer (those named `answer_...`
+and `no_constructed_links`) are therefore reported with `required: false`: a failed one is listed in the
+result's `advisory_failed` and never decides the scenario. The wording heuristics below are kept as they
+are, and the scripted SDK runs and the review answers still have to satisfy all of them.
 
 A required check decides the scenario; an advisory check is reported only.
 """
@@ -18,7 +25,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -239,11 +246,17 @@ NO_ANSWER = "no final answer"
 
 
 def answer_check(name: str, answer: str | None, passed: bool, detail: str = "") -> Check:
-    """A required check on the final answer; a run without one (the agent hung, crashed or ran out of
-    turns) fails it, since the SDK runs always supply their own answer."""
+    """An advisory check on the wording of the final answer: reported, never decisive. A run without an
+    answer fails it too (the SDK runs always supply one); whether there is an answer at all is decided by
+    the required `final_answer_present`."""
     if answer is None:
-        return Check(name, False, detail=NO_ANSWER)
-    return Check(name, passed, detail=detail)
+        return Check(name, False, required=False, detail=NO_ANSWER)
+    return Check(name, passed, required=False, detail=detail)
+
+
+def final_answer_present(answer: str | None) -> Check:
+    """The one required check on the answer: an agent that hung, crashed or ran out of turns has none."""
+    return Check("final_answer_present", answer is not None, detail="" if answer is not None else NO_ANSWER)
 
 
 def no_constructed_links(run: Run, answer: str | None) -> Check:
@@ -251,9 +264,10 @@ def no_constructed_links(run: Run, answer: str | None) -> Check:
     return answer_check("no_constructed_links", answer, not made, ", ".join(sorted(made)))
 
 
-# Answer statements ----------------------------------------------------------------------------------
-# An answer is read clause by clause: a clause ends at sentence punctuation, a semicolon, a colon, a line
-# break, a spaced dash, or a conjunction that opens a new clause; inside a clause, a comma ends a part.
+# Answer statements (all advisory) ------------------------------------------------------------------
+# These heuristics only feed the advisory answer checks; they never decide a scenario. An answer is read
+# clause by clause: a clause ends at sentence punctuation, a semicolon, a colon, a line break, a spaced
+# dash, or a conjunction that opens a new clause; inside a clause, a comma ends a part.
 #
 # A negation counts for a phrase at most four words after it in the same part. A hedge governs only what it
 # modifies, from before it in the same part: a modal (could, would, should, may, might, can, will, must,
@@ -600,8 +614,7 @@ def unread_overview(run: Run, answer: str | None) -> list[Check]:
         Check("archive_unread_read", account.NEWSLETTER in read, required=False),
         Check("only_unread_chats_read", all(unread.get(t, 0) > 0 for t in targets), required=False),
         facts_in_answer("answer_names_unread_chats", answer, {"alice": ("Alice",), "atlas": ("Project Atlas",)}, 2),
-        replace(facts_in_answer("answer_names_archive", answer, {"newsletter": ("Atlas Newsletter", "Newsletter")},
-                                1), required=False),
+        facts_in_answer("answer_names_archive", answer, {"newsletter": ("Atlas Newsletter", "Newsletter")}, 1),
         manifest_first(run),
     ]
 
@@ -619,8 +632,10 @@ def capability_disabled(run: Run, answer: str | None) -> list[Check]:
                   {"prepare_text_send", "prepare_artifact_send", "create_local_artifact"}]
     manifests = [run.result(c) for _, c in run.named("_manifest")]
     # An agent may also stop before asking: _manifest shows the capability off, and the tool
-    # description names it for a document source. That is the same recovery, reached earlier.
-    foreseen = (not replies and answer is not None and "reply_media_targets" in answer and bool(manifests)
+    # description names it for a document source. That is the same recovery, reached earlier. It is read from
+    # the transcript alone (no reply call, a manifest with the capability off); whether the answer names the
+    # capability is the advisory answer_names_capability.
+    foreseen = (not replies and bool(manifests)
                 and all("reply_media_targets" not in (m.get("enabled_capabilities") or []) for m in manifests))
     return [
         anchors_from_evidence(run),
@@ -733,11 +748,16 @@ def server_arguments(scenario: Scenario, transcript: Path) -> list[str]:
 
 
 def score(scenario: Scenario, run: Run, answer: str | None = None) -> dict:
-    """The rubric's verdict; an empty or blank answer is no answer, and fails every answer check."""
+    """The rubric's verdict. A blank answer is no answer. The decision follows the required checks, which
+    read the transcript of actions and, for a run with tool calls, whether a final answer exists; the
+    answer-wording checks are advisory and listed in `advisory_failed`."""
     answer = answer if answer is not None and answer.strip() else None
     checks = scenario.rubric(run, answer) + [argument_errors(run)]
+    if run.calls:
+        checks.append(final_answer_present(answer))
     return {"scenario": scenario.name,
             "passed": bool(run.calls) and all(check.passed for check in checks if check.required),
             "sequence": run.sequence(),
             "checks": [{"name": c.name, "passed": c.passed, "required": c.required, "detail": c.detail}
-                       for c in checks]}
+                       for c in checks],
+            "advisory_failed": [c.name for c in checks if not c.required and not c.passed]}

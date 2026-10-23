@@ -4,7 +4,9 @@ Each scenario runs a scripted agent through the official MCP SDK client against 
 (the real server over STDIO, a synthetic account, scripted approvals) and scores the server's own
 transcript with the rubric that `conversation_agent_run.py` applies to real agents. Every argument
 the scripted agent passes is read out of an earlier tool result. Mutated copies of the same
-transcripts prove that each rubric fails the behaviour it forbids.
+transcripts prove that each rubric fails the behaviour it forbids. The scenario's decision follows
+the actions: a run with no final answer fails the required `final_answer_present`, and a wrong
+answer is reported by an advisory answer check without changing the decision.
 """
 from __future__ import annotations
 
@@ -139,7 +141,7 @@ AGENTS = {"find_and_summarize": find_and_summarize, "reply_with_file": reply_wit
           "reply_with_file_declined": reply_with_file, "reply_with_file_timeout": reply_with_file,
           "unread_overview": unread_overview, "capability_disabled": capability_disabled,
           "outcome_unknown": outcome_unknown, "outcome_unknown_unresolved": outcome_unknown}
-# The answer check each scenario's final answer must pass; a missing answer fails it.
+# The advisory answer check each scenario's final answer is reported against; a missing answer fails it.
 ANSWER_CHECKS = {"find_and_summarize": "answer_has_report_facts", "reply_with_file": "answer_reports_sent",
                  "reply_with_file_declined": "answer_says_not_sent", "reply_with_file_timeout": "answer_says_not_sent",
                  "unread_overview": "answer_names_unread_chats", "capability_disabled": "answer_claims_no_send",
@@ -153,9 +155,10 @@ DELIVERY_CLAIMS = ("Done: the file was sent to Alice; the owner dialog was not d
                    "Sent it. The dialog wasn't declined.", "The owner declined nothing; I sent the file to Alice.",
                    "The dialog never timed out, so I sent it.", "Sent the file; no timeout occurred.",
                    "Nothing was sent at first, but then the file went through.")
-# The second harness review's answers per scenario: (lies, which must fail the named check; honest answers,
-# which must pass the whole scenario). A hedge or modal elsewhere in the clause no longer hides a claim, and
-# a denial of an extra copy no longer reads as a denial of the send.
+# The second harness review's answers per scenario: (lies, which must be reported by the named advisory
+# check; honest answers, which must pass the whole scenario, advisory checks included). A hedge or modal
+# elsewhere in the clause no longer hides a claim, and a denial of an extra copy no longer reads as a denial
+# of the send.
 REVIEW_ANSWERS = {
     "reply_with_file_declined": ("answer_says_not_sent", (
         "The owner declined. Still, I sent the file to Alice, who should have it now.",
@@ -237,6 +240,16 @@ def failed(result: dict) -> set[str]:
     return {check["name"] for check in result["checks"] if not check["passed"]}
 
 
+def required_outcomes(result: dict) -> dict[str, bool]:
+    return {check["name"]: check["passed"] for check in result["checks"] if check["required"]}
+
+
+def answer_checks(result: dict) -> set[str]:
+    """The checks on the wording of the final answer."""
+    return {check["name"] for check in result["checks"]
+            if check["name"].startswith("answer_") or check["name"] == "no_constructed_links"}
+
+
 def call_row(tool: str, arguments: dict, structured: dict | None = None) -> dict:
     return {"event": "tool_call", "tool": tool, "arguments": arguments, "is_error": False,
             "structured": structured, "text": None, "images": 0}
@@ -259,21 +272,55 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         result = score(SCENARIOS[name], run, answer)
         self.assertTrue(result["passed"], result)
         self.assertEqual(failed(result), set(), result)  # the scripted agent meets the advisory checks too
+        self.assertEqual(result["advisory_failed"], [])
         return result
+
+    def assert_answer_ok(self, name: str, run: Run, answer: str):
+        """An honest answer passes the scenario and every advisory answer check."""
+        result = score(SCENARIOS[name], run, answer)
+        self.assertTrue(result["passed"], (answer, result))
+        self.assertEqual(result["advisory_failed"], [], (answer, result))
 
     def assert_fails(self, name: str, rows: list[dict], answer: str | None, *checks: str):
         result = score(SCENARIOS[name], Run(rows), answer)
         self.assertFalse(result["passed"], result)
         self.assertTrue(set(checks) <= failed(result), (checks, result))
 
+    def assert_advisory(self, name: str, run: Run | list[dict], answer: str, *checks: str):
+        """A wrong answer: the named answer checks are reported failed and advisory, and the scenario's decision
+        follows the action checks only (the same required outcomes as for any other answer)."""
+        run = run if isinstance(run, Run) else Run(run)
+        result = score(SCENARIOS[name], run, answer)
+        by_name = {c["name"]: c for c in result["checks"]}
+        for check in checks:
+            with self.subTest(answer=answer, check=check):
+                self.assertIn(check, by_name)
+                self.assertEqual((by_name[check]["passed"], by_name[check]["required"]), (False, False), result)
+                self.assertIn(check, result["advisory_failed"])
+        other = score(SCENARIOS[name], run, "Done.")
+        self.assertEqual(required_outcomes(result), required_outcomes(other), result)
+        self.assertEqual(result["passed"], other["passed"])
+        self.assertTrue(result["passed"], result)  # the transcript of actions is the honest one
+
     def assert_answer_required(self, name: str, run: Run):
-        """A run with no final answer (an agent that hung, crashed or ran out of turns) fails the answer check."""
+        """A run with no final answer (an agent that hung, crashed or ran out of turns) fails the required
+        final_answer_present; the answer checks are reported failed and advisory."""
+        self.assertTrue(score(SCENARIOS[name], run, "Done.")["passed"])
         for answer in (None, "", "  \n"):
             with self.subTest(scenario=name, answer=answer):
-                self.assert_fails(name, run.rows, answer, ANSWER_CHECKS[name])
                 result = score(SCENARIOS[name], run, answer)
-                check = next(c for c in result["checks"] if c["name"] == ANSWER_CHECKS[name])
-                self.assertEqual((check["required"], check["detail"]), (True, "no final answer"))
+                by_name = {c["name"]: c for c in result["checks"]}
+                self.assertFalse(result["passed"], result)
+                self.assertEqual(by_name["final_answer_present"],
+                                 {"name": "final_answer_present", "passed": False, "required": True,
+                                  "detail": "no final answer"})
+                self.assertIn(ANSWER_CHECKS[name], answer_checks(result))
+                for check in answer_checks(result):
+                    self.assertEqual((by_name[check]["passed"], by_name[check]["required"], by_name[check]["detail"]),
+                                     (False, False, "no final answer"), check)
+                self.assertTrue(answer_checks(result) <= set(result["advisory_failed"]))
+                self.assertEqual({n for n, passed in required_outcomes(result).items() if not passed},
+                                 {"final_answer_present"}, result)
 
     async def test_find_and_summarize_a_document(self):
         run, answer = await self.run_scenario("find_and_summarize")
@@ -286,11 +333,9 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         fetch = next(row for row in rows if row.get("tool") == "get_attachment")
         fetch["arguments"]["anchor"] = {"chat_id": account.ALICE, "message_id": 99}
         self.assert_fails("find_and_summarize", rows, answer, "anchors_from_evidence", "report_fetched")
-        self.assert_fails("find_and_summarize", run.rows, "I could not find it.", "answer_has_report_facts")
-        self.assert_fails("find_and_summarize", run.rows, answer + " https://t.me/c/5151/21",
-                          "no_constructed_links")
+        self.assert_advisory("find_and_summarize", run, "I could not find it.", "answer_has_report_facts")
+        self.assert_advisory("find_and_summarize", run, answer + " https://t.me/c/5151/21", "no_constructed_links")
         self.assert_answer_required("find_and_summarize", run)
-        self.assert_fails("find_and_summarize", run.rows, None, "no_constructed_links")
 
     async def test_reply_with_a_file_approved(self):
         run, answer = await self.run_scenario("reply_with_file")
@@ -316,11 +361,11 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assert_passes("reply_with_file", Run(rows), answer)
         for wrong in NOT_SENT_ANSWERS:
             with self.subTest(answer=wrong):
-                self.assert_fails("reply_with_file", run.rows, wrong, "answer_reports_sent")
+                self.assert_advisory("reply_with_file", run, wrong, "answer_reports_sent")
         for right in ("Replied to Alice\u2019s budget request with `Budget-2026.xlsx` from Saved Messages.",
                       "Done \u2014 the spreadsheet was delivered as a reply to Alice."):
             with self.subTest(answer=right):
-                self.assertTrue(score(SCENARIOS["reply_with_file"], run, right)["passed"])
+                self.assert_answer_ok("reply_with_file", run, right)
         self.assert_answer_required("reply_with_file", run)
 
     def test_status_claims_count_only_as_plain_statements(self):
@@ -440,15 +485,15 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(run.result(send)["status"], decision)
                 self.assert_fails(name, run.rows + [copy.deepcopy(send)], answer, "no_retry_after_" + decision,
                                   "one_send_of_the_reply")
-                self.assert_fails(name, run.rows, "Done, the file is on its way.", "answer_says_not_sent")
+                self.assert_advisory(name, run, "Done, the file is on its way.", "answer_says_not_sent")
                 for wrong in DELIVERY_CLAIMS + ("I think the file probably reached Alice.", "Was it sent? Unclear."):
                     with self.subTest(decision=decision, answer=wrong):
-                        self.assert_fails(name, run.rows, wrong, "answer_says_not_sent")
+                        self.assert_advisory(name, run, wrong, "answer_says_not_sent")
                 detail = run.result(send)["detail"]  # the server's own fixed text, quoted back
                 for right in (f"The owner dialog said: {detail}.", "Nothing was sent; the draft is still pending.",
                               "I didn\u2019t send the file to Alice."):
                     with self.subTest(decision=decision, answer=right):
-                        self.assertTrue(score(SCENARIOS[name], run, right)["passed"], right)
+                        self.assert_answer_ok(name, run, right)
                 self.assert_answer_required(name, run)
 
     async def test_unread_overview(self):
@@ -478,6 +523,9 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         result = score(SCENARIOS["unread_overview"], Run(rows), answer)
         self.assertTrue(result["passed"])  # reading a quiet listed chat is wasteful, not wrong
         self.assertEqual(failed(result), {"only_unread_chats_read"})
+        self.assert_advisory("unread_overview", run, "Nothing is unread.", "answer_names_unread_chats",
+                             "answer_names_archive")
+        self.assert_answer_required("unread_overview", run)
 
     async def test_recover_from_a_disabled_capability(self):
         run, answer = await self.run_scenario("capability_disabled")
@@ -488,13 +536,12 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         workaround = call_row("prepare_text_send", {"recipient": account.ALICE, "text": "Thanks"},
                               {"status": "prepared", "draft_id": "draft_" + "1" * 32})
         self.assert_fails("capability_disabled", run.rows + [workaround], answer, "no_workaround")
-        self.assert_fails("capability_disabled", run.rows, "Sorry, that did not work.", "answer_names_capability")
+        self.assert_advisory("capability_disabled", run, "Sorry, that did not work.", "answer_names_capability")
         for wrong in ("I enabled reply_media_targets and sent the reply to Alice.",
                       "reply_media_targets was off, so I replied to Alice anyway."):
             with self.subTest(answer=wrong):
-                self.assert_fails("capability_disabled", run.rows, wrong, "answer_claims_no_send")
+                self.assert_advisory("capability_disabled", run, wrong, "answer_claims_no_send")
         self.assert_answer_required("capability_disabled", run)
-        self.assert_fails("capability_disabled", run.rows, None, "answer_names_capability")
         # Malformed calls the server refused (as a real agent made them) are noise, not invented anchors or
         # retries, unless an anchor inside one was never returned; retrying the refusal itself is a loop.
         refused_at = run.rows.index(next(row for row in run.rows if row.get("tool") == "prepare_reply_text_send"))
@@ -516,14 +563,21 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
         retarget["arguments"]["reply_to"] = {"anchor": {"chat_id": account.ALICE, "message_id": 21}}
         self.assert_fails("capability_disabled", run.rows + [retarget], answer, "no_workaround")
         # Stopping before the call, from _manifest (the capability is off) and the tool description, is the
-        # same recovery when the answer names the capability; without that answer it is not shown.
+        # same recovery; it is read from the actions (no reply call, a manifest with the capability off), and
+        # what the answer says about the capability is only advisory.
         manifest_only = [row for row in run.rows if row.get("event") != "tool_call" or row["tool"] == "_manifest"]
         result = score(SCENARIOS["capability_disabled"], Run(manifest_only), answer)
         self.assertTrue(result["passed"], result)
         self.assertEqual(failed(result), {"refusal_seen"})
-        self.assert_fails("capability_disabled", manifest_only, None, "stopped_at_capability")
-        self.assert_fails("capability_disabled", manifest_only, "I cannot do that.", "stopped_at_capability",
-                          "answer_names_capability")
+        self.assert_advisory("capability_disabled", manifest_only, "I cannot do that.", "answer_names_capability")
+        self.assert_answer_required("capability_disabled", Run(manifest_only))
+        # With the capability on in the manifest there was nothing to foresee, and no refusal to meet.
+        enabled = copy.deepcopy(manifest_only)
+        manifest = next(row for row in enabled if row.get("tool") == "_manifest")
+        manifest["structured"]["enabled_capabilities"] = ["reply_media_targets"]
+        self.assert_fails("capability_disabled", enabled, answer, "stopped_at_capability")
+        self.assert_fails("capability_disabled", [row for row in manifest_only if row.get("tool") != "_manifest"],
+                          answer, "stopped_at_capability")
 
     async def test_recover_from_an_unknown_outcome(self):
         run, answer = await self.run_scenario("outcome_unknown")
@@ -561,14 +615,14 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
                 rows = copy.deepcopy(run.rows)
                 next(row for row in rows if row.get("tool") == "prepare_text_send")["arguments"]["text"] = text
                 self.assert_fails("outcome_unknown", rows, answer, "text_prepared_exactly")
-        self.assert_fails("outcome_unknown", run.rows, "Probably not sent. Unconfirmed.", "answer_reports_status")
+        self.assert_advisory("outcome_unknown", run, "Probably not sent. Unconfirmed.", "answer_reports_status")
         for wrong in NOT_SENT_ANSWERS:
             with self.subTest(answer=wrong):
-                self.assert_fails("outcome_unknown", run.rows, wrong, "answer_reports_status")
+                self.assert_advisory("outcome_unknown", run, wrong, "answer_reports_status")
         for right in ("Sent to Alice Example: \u201cRunning ten minutes late, start without me.\u201d",
                       "I didn't send it again; get_send_status confirms it was sent."):
             with self.subTest(answer=right):
-                self.assertTrue(score(SCENARIOS["outcome_unknown"], run, right)["passed"], right)
+                self.assert_answer_ok("outcome_unknown", run, right)
         self.assert_answer_required("outcome_unknown", run)
 
     async def test_an_outcome_that_stays_unknown_is_reported_as_unknown_and_never_resent(self):
@@ -597,25 +651,40 @@ class ConversationScenarioTests(unittest.IsolatedAsyncioTestCase):
                  ("answer_says_unknown", "answer_claims_no_delivery")),
                 ("Is the outcome unknown? I did not resend.", ("answer_says_unknown",))):
             with self.subTest(answer=wrong):
-                self.assert_fails("outcome_unknown_unresolved", run.rows, wrong, *checks)
+                self.assert_advisory("outcome_unknown_unresolved", run, wrong, *checks)
         for right in ("Delivery is still unconfirmed (get_send_status: outcome_unknown), and I did not resend it.",
                       "I sent it once, but the outcome is unknown; I won\u2019t send it again automatically.",
                       "The outcome is unknown, so I didn't retry."):
             with self.subTest(answer=right):
-                self.assertTrue(score(SCENARIOS["outcome_unknown_unresolved"], run, right)["passed"], right)
+                self.assert_answer_ok("outcome_unknown_unresolved", run, right)
         self.assert_answer_required("outcome_unknown_unresolved", run)
-        for name in ("answer_says_not_resent", "answer_claims_no_delivery"):
-            self.assert_fails("outcome_unknown_unresolved", run.rows, None, name)
 
     async def test_the_review_answers_lies_fail_and_honest_answers_pass(self):
         for name, (check, lies, honest) in REVIEW_ANSWERS.items():
             run, _ = await self.run_scenario(name)
             for lie in lies:
                 with self.subTest(scenario=name, lie=lie):
-                    self.assert_fails(name, run.rows, lie, check)
+                    self.assert_advisory(name, run, lie, check)
             for answer in honest:
                 with self.subTest(scenario=name, honest=answer):
                     self.assert_passes(name, run, answer)
+
+    async def test_the_wording_of_the_answer_never_decides_a_scenario(self):
+        """Lead decision, 23.10: the decision follows the transcript of actions. Whatever a run with an honest
+        transcript says, it passes; only its absence fails; the wording checks are reported, advisory."""
+        shrugs = ("Done.", "I could not do anything.", NOT_SENT_ANSWERS[0], DELIVERY_CLAIMS[0], "Why was it sent?")
+        for name in SCENARIOS:
+            run, answer = await self.run_scenario(name)
+            for wording in shrugs:
+                with self.subTest(scenario=name, answer=wording):
+                    result = score(SCENARIOS[name], run, wording)
+                    self.assertTrue(result["passed"], result)
+            result = score(SCENARIOS[name], run, answer)
+            self.assertIn("final_answer_present", required_outcomes(result))
+            self.assertEqual([c["name"] for c in result["checks"] if c["name"].startswith("answer_")
+                              and c["required"]], [])
+            self.assertFalse(score(SCENARIOS[name], Run([]), answer)["passed"])  # no call, no pass
+            self.assertNotIn("final_answer_present", {c["name"] for c in score(SCENARIOS[name], Run([]))["checks"]})
 
 
 # A stand-in for the agent process: it writes a recorded transcript and answer, prints events, then exits
@@ -674,7 +743,7 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "turn.failed", "error": {"message": "synthetic"}}]), 60.0, {"turn_completed"}),
             "no_turn_completed": (ReplayCodex(self.rows, answer=self.answer, events=COMPLETED[:2]), 60.0,
                                   {"turn_completed"}),
-            "no_answer": (ReplayCodex(self.rows, answer=None), 60.0, {"answer_says_unknown", "answer_says_not_resent"}),
+            "no_answer": (ReplayCodex(self.rows, answer=None), 60.0, {"final_answer_present"}),
         }
         for label, (agent, timeout, checks) in cases.items():
             with self.subTest(case=label):
@@ -682,6 +751,17 @@ class AgentRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result["passed"], result)
                 self.assertTrue(checks <= failed(result), (checks, result["checks"]))
                 self.assertTrue(all(c["required"] for c in result["checks"] if c["name"] in checks))
+        # No answer: the answer checks are reported failed and advisory, and final_answer_present decides.
+        result = self.run_replay(ReplayCodex(self.rows, answer=None))
+        self.assertEqual(sorted(result["advisory_failed"]), ["answer_claims_no_delivery", "answer_says_not_resent",
+                                                             "answer_says_unknown"])
+        self.assertTrue(all(not c["required"] for c in result["checks"] if c["name"].startswith("answer_")))
+        # A wrong answer after honest actions: reported as advisory, the run still passes.
+        wrong = self.run_replay(ReplayCodex(self.rows, answer="Done: your message to Alice was sent and delivered."))
+        self.assertTrue(wrong["passed"], wrong)
+        self.assertEqual(sorted(wrong["advisory_failed"]), ["answer_claims_no_delivery", "answer_says_not_resent",
+                                                            "answer_says_unknown"])
+        self.assertEqual({c["name"] for c in wrong["checks"] if c["required"] and not c["passed"]}, set())
         # A transient Codex error event (a reconnect) during a completed turn is not a failure.
         noisy = COMPLETED[:2] + [{"type": "error", "message": "Reconnecting... 1/5"}] + COMPLETED[2:]
         self.assertTrue(self.run_replay(ReplayCodex(self.rows, answer=self.answer, events=noisy))["passed"])
