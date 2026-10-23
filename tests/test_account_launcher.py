@@ -128,7 +128,8 @@ class AccountChangeGrammarTests(unittest.TestCase):
     def test_every_code_an_account_transaction_can_pass_through_is_in_the_closed_set(self):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
-        self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete'},
+        self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
+                              'accounts_present'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
 

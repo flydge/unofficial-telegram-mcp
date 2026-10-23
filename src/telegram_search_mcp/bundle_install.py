@@ -707,10 +707,16 @@ def _read_file(path, maximum, max_mode=0o600):
     finally:os.close(fd)
 
 
-def _desktop_discard(j, home):
+def _key(name, alias=None):
+    """A journal record's name: the default's as it always was, a named alias's `<name>:<alias>` (0.55 spec 3D:
+    per-alias journal keys), so a change without aliases journals exactly what 0.54 journaled."""
+    return name if alias is None else name+':'+alias
+
+
+def _desktop_discard(j, home, alias=None):
     """Our journaled Claude Desktop temporaries (a write, a best-effort restore) a killed attempt left."""
     for name in ('claude_desktop_write','claude_desktop_restore'):
-        j.discard(name,claude_desktop_registration.config_path(home),
+        j.discard(_key(name,alias),claude_desktop_registration.config_path(home),
                   lambda _,record:claude_desktop_registration.discard_temporary(home,record))
 
 
@@ -720,43 +726,49 @@ _CLIENT_WRITES = (('registration', 'codex'), ('codex', 'codex'), ('claude_deskto
                   ('policy', 'policy'), ('policy_restore', 'policy'))
 
 
-def _client_temporaries(publications, home, config, plist, session_root):
+def _client_temporaries(publications, home, config, plist, session_root, aliases=()):
     """Every temporary a transaction's journaled writes left beside the files it touches outside the root (the
     Codex config, the Claude Desktop config, the broker plist and runtime.toml), each provably ours
     (`_discard_journaled`). Run by a late refusal's restore and by every finishing action (install, upgrade and
     rollback before the commit; uninstall for its own journal and a parked change's): a step skipped since (a
     repeat refused before it, its outcome recorded, a parked change an uninstall goes over) would otherwise leave
-    a copy of a client file there for good."""
+    a copy of a client file there for good. `aliases`: the named aliases whose own records (`_key`) the journal
+    may hold, beside their own broker plist and runtime.toml."""
     paths={'codex':config,'desktop':claude_desktop_registration.config_path(home),'plist':plist,
            'policy':session_root/'runtime.toml'}
     def desktop(_, record):claude_desktop_registration.discard_temporary(home,record)
     for name,key in _CLIENT_WRITES:
         _discard_journaled(publications,name,paths[key],desktop if key=='desktop' else discard_temporary)
+    for alias in aliases:
+        jobs=alias_jobs(alias,home)
+        own={**paths,'plist':jobs.broker_plist,'policy':jobs.policy}
+        for name,key in _CLIENT_WRITES:
+            _discard_journaled(publications,_key(name,alias),own[key],desktop if key=='desktop' else discard_temporary)
 
 
-def _settle_codex_attempts(j):
+def _settle_codex_attempts(j, key='registration'):
     """In a late refusal's restore, once its `undo` discarded their temporaries: the Codex write's attempts shrink to
     the one that proves this transaction's own write (the last with its flushed object), so attempts never pile up
     across cycles and every run the user starts has fresh ones (no `recovery_limit` from repeated refusals)."""
-    attempts=j.attempts('registration')
+    attempts=j.attempts(key)
     proof=[a for a in attempts if 'object' in a][-1:]
     if len(attempts)>len(proof):
-        if proof:j.update(put=('registration',proof[0]))
-        else:j.update(clear=('registration',))
+        if proof:j.update(put=(key,proof[0]))
+        else:j.update(clear=(key,))
 
 
-def _desktop_write(j, home, plan):
+def _desktop_write(j, home, plan, alias=None):
     """One journaled compare-before-replace attempt; the confirming read decides its outcome."""
     def write(temporary, admit):
         try:claude_desktop_registration.write(home,plan,admit,temporary)
         except ConfigConflict:pass
-    j.attempt('claude_desktop_write',write)
+    j.attempt(_key('claude_desktop_write',alias),write)
 
 
-def _desktop_again(j, plan):
+def _desktop_again(j, plan, alias=None):
     """After an interruption, whether our write may be made again: a plan over the current bytes (our entry still
     absent, owned or adopted; every neighbour as the file holds it now), within the bounded attempts."""
-    return plan is not None and len(j.attempts('claude_desktop_write'))<8
+    return plan is not None and len(j.attempts(_key('claude_desktop_write',alias)))<8
 
 
 CLAUDE_SKILLS = CLAUDE_SKILLS_STATUSES
@@ -861,7 +873,9 @@ def _probe_python(payload):
     if type(arguments) is not list or not arguments or type(arguments[0]) is not str:return None,None
     python=Path(arguments[0])
     if not python.is_absolute() or '..' in python.parts:return None,None
-    if arguments[1:4]==['-I','-S','-B'] and len(arguments)==6:return python,python.parent.parent.parent/'app'
+    # The bundle form: the default's six arguments, or a named alias's eight (`broker --account <alias>`, spec 3C).
+    if arguments[1:4]==['-I','-S','-B'] and (len(arguments)==6 or len(arguments)==8 and arguments[5:7]==['broker','--account']):
+        return python,python.parent.parent.parent/'app'
     return python,None
 
 
@@ -899,12 +913,23 @@ class _Service:
     before the first rewrite) and bootstraps the previous broker when it was loaded; the next run starts a new
     cycle. Every repeat is a run the user starts, so cycles are not limited, and the journal does not grow
     with them: a finished restore drops its cycle's write records (`_CYCLE_WRITES`).
+
+    `alias` is a named alias's broker (0.55 spec 3D): its own label and plist, and every journal record and
+    checkpoint of it under its own key (`_key`); None is the default's, journaled as before.
     """
 
-    def __init__(self, plist, label, target, *, known=(), adopted=None, runner, pending, home):
+    def __init__(self, plist, label, target, *, known=(), adopted=None, runner, pending, home, alias=None):
         self.plist,self.label,self.target=plist,label,target
         self.known=dict(known);self.adopted=adopted;self.runner=runner;self.pending=pending;self.home=home
+        self.alias=alias
         self.stopping=False  # This run issued a bootout its cycle may not have recorded yet.
+
+    def k(self, name):
+        """This broker's journal record (or checkpoint) name."""
+        return _key(name,self.alias)
+
+    def _previous_file(self, j):
+        return j.tx/('service.previous' if self.alias is None else 'service-'+self.alias+'.previous')
 
     def kind(self):
         """('absent'|'to'|<known name>|'adopted', bytes, payload); anything else raises service_conflict."""
@@ -945,7 +970,7 @@ class _Service:
         if self.pending(self.home,python,app)!='none':raise InstallError('pending_send_unresolved')
 
     def _observed(self, j):
-        observed=j.recorded('service')
+        observed=j.recorded(self.k('service'))
         if (observed is None or type(observed.get('loaded')) is not bool
                 or observed.get('plist') not in ('absent','to','adopted',*self.known)):
             raise InstallError('transaction_conflict')
@@ -978,7 +1003,7 @@ class _Service:
         """The definition a live registration from our plist path runs when it is the one the stop replaced (the
         kept `service.previous` bytes) or a known one; else None."""
         candidates=list(self.known.values())
-        if j.recorded('service_previous') is not None:
+        if j.recorded(self.k('service_previous')) is not None:
             try:candidates.insert(0,plistlib.loads(self._kept(j)))
             except (ValueError,TypeError,plistlib.InvalidFileException):pass
         for value in candidates:
@@ -990,7 +1015,7 @@ class _Service:
     def cycle(self, j):
         """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
         while `restoring`."""
-        record=j.recorded('service_cycle')
+        record=j.recorded(self.k('service_cycle'))
         if record is None:return 0,None,None
         number,state,code=record.get('cycle'),record.get('state'),record.get('code')
         if (type(number) is not int or number<1 or state not in _CYCLE_STATES
@@ -1006,9 +1031,9 @@ class _Service:
     def observe(self, j):
         """Before the first client write: record the observation once; while a recorded loaded broker runs,
         every run passes the pending-send gate here, so a late send refuses with no client changed."""
-        if j.recorded('service') is None:
+        if j.recorded(self.k('service')) is None:
             kind,loaded=self.check()
-            j.update(single=('service',{'plist':kind,'loaded':loaded}))
+            j.update(single=(self.k('service'),{'plist':kind,'loaded':loaded}))
             return
         if self._observed(j)['loaded'] and not self.stopped(j):self._recheck()
 
@@ -1028,29 +1053,30 @@ class _Service:
         if state!='stopped':
             if self._recheck():
                 self.stopping=True;_bootout(self.runner,self.label)
-            j.update(put=('service_cycle',{'cycle':number+1,'state':'stopped'}));j.checkpoint('stopped:service')
+            j.update(put=(self.k('service_cycle'),{'cycle':number+1,'state':'stopped'}));j.checkpoint(self.k('stopped:service'))
         elif self._previous_loaded(j):
             self.stopping=True;_bootout(self.runner,self.label)
         if observed['plist']!='absent':
-            j.discard('plist',self.plist)
+            j.discard(self.k('plist'),self.plist)
             kind,data,_=self.kind()
             if kind!='to':
                 if kind!='absent':self._keep(j,data)
-                j.write('plist',self.plist,_plist_bytes(self.target),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
+                j.write(self.k('plist'),self.plist,_plist_bytes(self.target),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
 
     def _keep(self, j, data):
         """Once, before the first rewrite: the definition's exact bytes kept in the transaction directory, their
         hash journaled first, so a restore writes them back byte for byte."""
-        if j.recorded('service_previous') is None:j.update(single=('service_previous',{'sha256':digest(data),'bytes':len(data)}))
-        if not os.path.lexists(j.tx/'service.previous'):
-            if digest(data)!=j.recorded('service_previous')['sha256']:raise InstallError('service_conflict')
-            create(j.tx/'service.previous',data,maximum=MAX_PLIST_BYTES)
+        if j.recorded(self.k('service_previous')) is None:
+            j.update(single=(self.k('service_previous'),{'sha256':digest(data),'bytes':len(data)}))
+        if not os.path.lexists(self._previous_file(j)):
+            if digest(data)!=j.recorded(self.k('service_previous'))['sha256']:raise InstallError('service_conflict')
+            create(self._previous_file(j),data,maximum=MAX_PLIST_BYTES)
         self._kept(j)
 
     def _kept(self, j):
-        record=j.recorded('service_previous')
-        data=read(j.tx/'service.previous',MAX_PLIST_BYTES,mode=0o600) if record is not None else None
+        record=j.recorded(self.k('service_previous'))
+        data=read(self._previous_file(j),MAX_PLIST_BYTES,mode=0o600) if record is not None else None
         if data is None or digest(data)!=record.get('sha256') or len(data)!=record.get('bytes'):
             raise InstallError('transaction_conflict')
         return data
@@ -1060,6 +1086,17 @@ class _Service:
         finishes that restore and raises the same code."""
         _,state,code=self.cycle(j)
         return code if state=='restoring' else None
+
+    def begin_restore(self, j, code):
+        """The restore's write-ahead `restoring` record, once; False when this cycle stopped nothing (no restore)."""
+        number,state,_=self.cycle(j)
+        if state!='restoring':
+            if state!='stopped':
+                if not self.stopping:return False
+                number+=1  # This run's bootout came before its cycle's record.
+            j.update(put=(self.k('service_cycle'),{'cycle':number,'state':'restoring','code':code}))
+            j.checkpoint(self.k('recorded:service_restore'))
+        return True
 
     def restore(self, j, code, undo):
         """Before the refusal `code`, raised after the stop and short of the commit: the target's broker booted
@@ -1078,35 +1115,31 @@ class _Service:
         not rewritten it yet) there is nothing to restore, and no broker is started from a missing plist. A cycle
         whose stop changed nothing restores nothing. The closing record drops the cycle's write records, whose
         temporaries the restore has discarded."""
-        number,state,_=self.cycle(j)
-        if state!='restoring':
-            if state!='stopped':
-                if not self.stopping:return
-                number+=1  # This run's bootout came before its cycle's record.
-            j.update(put=('service_cycle',{'cycle':number,'state':'restoring','code':code}))
-            j.checkpoint('recorded:service_restore')
+        if not self.begin_restore(j,code):return
+        number,_,_=self.cycle(j)
         observed=self._observed(j)
         live=_live(self.runner,self.label)
         if live is not None and observed['plist']!='to' and _matches_live(live,self.plist,self.target):
             _bootout(self.runner,self.label);live=None
         undo()
         if observed['plist']!='absent':
-            j.discard('plist',self.plist);j.discard('plist_restore',self.plist)
+            j.discard(self.k('plist'),self.plist);j.discard(self.k('plist_restore'),self.plist)
             kind,data,_=self.kind()
-            kept=j.recorded('service_previous') is not None
+            kept=j.recorded(self.k('service_previous')) is not None
             if kind=='to' and observed['plist']!='to' and not kept:
                 # The stop wrote the target's over a definition removed meanwhile: there was none to keep, so the
                 # previous state is no plist.
                 _unlink_exact(self.plist,data)
             elif kind=='to' and observed['plist']!='to' or kind=='absent' and kept:
-                j.write('plist_restore',self.plist,self._kept(j),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
+                j.write(self.k('plist_restore'),self.plist,self._kept(j),data,existed=kind!='absent',maximum=MAX_PLIST_BYTES)
         if live is None:
             if observed['loaded'] and self.kind()[0]!='absent':_bootstrap(self.runner,self.plist)
         else:
             kind,_,payload=self.kind()
             self._loaded_payload(live,kind,payload)
-        j.update(put=('service_cycle',{'cycle':number,'state':'restored'}),clear=_CYCLE_WRITES)
-        j.checkpoint('restored:service')
+        j.update(put=(self.k('service_cycle'),{'cycle':number,'state':'restored'}),
+                 clear=tuple(self.k(n) for n in _CYCLE_WRITES))
+        j.checkpoint(self.k('restored:service'))
 
     def restart(self, j):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
@@ -1114,7 +1147,7 @@ class _Service:
         or a cleanup) is written again first, as the stop writes it; any other definition refuses. The definition
         the stop replaced, loaded again between its bootout and the rewrite (`_previous_loaded`), is gated and
         booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
-        observed=j.recorded('service')
+        observed=j.recorded(self.k('service'))
         if observed is None:return 'not_loaded'
         if not observed['loaded']:
             if observed['plist']!='absent':
@@ -1123,10 +1156,10 @@ class _Service:
                 if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
             return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
-        if j.recorded('service_restarted') is None:
+        if j.recorded(self.k('service_restarted')) is None:
             if self.kind()[0]=='absent':
-                j.discard('plist',self.plist)
-                j.write('plist',self.plist,_plist_bytes(self.target),b'',existed=False,maximum=MAX_PLIST_BYTES)
+                j.discard(self.k('plist'),self.plist)
+                j.write(self.k('plist'),self.plist,_plist_bytes(self.target),b'',existed=False,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
             live=_live(self.runner,self.label)
             if live is not None and not _matches_live(live,self.plist,self.target):
@@ -1134,7 +1167,7 @@ class _Service:
                 if previous is None:raise InstallError('service_conflict')
                 self.gate(previous);_bootout(self.runner,self.label);live=None
             if live is None:_bootstrap(self.runner,self.plist)
-            j.update(single=('service_restarted',{'attempt':1}));j.checkpoint('restarted')
+            j.update(single=(self.k('service_restarted'),{'attempt':1}));j.checkpoint(self.k('restarted'))
         return 'restarted'
 
 
@@ -1165,35 +1198,36 @@ def _policy_candidate(data, old, new):
     return candidate
 
 
-def _policy_step(j, session_root, old, new):
+def _policy_step(j, session_root, old, new, alias=None):
+    """runtime.toml's version line from `old` to `new` (journaled `policy`); `alias` a named alias's root and keys."""
     policy=session_root/'runtime.toml'
     if not os.path.lexists(session_root):return
-    j.discard('policy',policy)
+    j.discard(_key('policy',alias),policy)
     data,exists=_read_file(policy,MAX_POLICY_BYTES)
     candidate=_policy_candidate(data,old,new) if exists else None
     if candidate is not None and candidate!=data:
         # Write-ahead, once: the value a late refusal's restore puts back (`_policy_back`).
-        if j.recorded('policy_previous') is None:
-            j.update(single=('policy_previous',{'version':next(_PIN.fullmatch(line).group(1).decode()
-                                                               for line in data.split(b'\n') if _PIN.fullmatch(line))}))
-        j.write('policy',policy,candidate,data,existed=True,maximum=MAX_POLICY_BYTES)
+        if j.recorded(_key('policy_previous',alias)) is None:
+            j.update(single=(_key('policy_previous',alias),{'version':next(_PIN.fullmatch(line).group(1).decode()
+                                                                           for line in data.split(b'\n') if _PIN.fullmatch(line))}))
+        j.write(_key('policy',alias),policy,candidate,data,existed=True,maximum=MAX_POLICY_BYTES)
 
 
-def _policy_back(j, session_root, new):
+def _policy_back(j, session_root, new, alias=None):
     """Part of a late refusal's restore, before the broker starts again: the version line this transaction
     rewrote to `new` goes back to the value recorded before its first rewrite, so the restored broker accepts
     its pin (journaled `policy_restore`). A line that no longer names `new` stays as it is."""
-    record=j.recorded('policy_previous')
+    record=j.recorded(_key('policy_previous',alias))
     if record is None or not os.path.lexists(session_root):return
     value=record.get('version')
     if type(value) is not str or not _VALUE.fullmatch(value):raise InstallError('transaction_conflict')
     policy=session_root/'runtime.toml'
-    j.discard('policy',policy);j.discard('policy_restore',policy)
+    j.discard(_key('policy',alias),policy);j.discard(_key('policy_restore',alias),policy)
     data,exists=_read_file(policy,MAX_POLICY_BYTES)
     try:back=_policy_candidate(data,new,value) if exists else None
     except InstallError:return
     if back is not None and back!=data:
-        j.write('policy_restore',policy,back,data,existed=True,maximum=MAX_POLICY_BYTES)
+        j.write(_key('policy_restore',alias),policy,back,data,existed=True,maximum=MAX_POLICY_BYTES)
 
 
 _POLICY_BODY = 'runtime.toml without enabled_capabilities'
@@ -1509,7 +1543,7 @@ def _installed_mode(root):
 def install(release, index_path, index_sha256, *, installation_root, codex_home,
             skills_root, user_home, checkpoint=lambda _: None, claude_candidates=None,
             claude_runner=subprocess.run, claude_code=None, adopt_legacy=False,
-            launchctl=subprocess.run, pending_sends=None):
+            launchctl=subprocess.run, pending_sends=None, alias_pending=None):
     """First install, its recovery, or (over a receipt-bound installation of another index) an upgrade.
 
     `claude_code` is `user`, `plugin` or `skip`, and is part of the transaction identity. None (the option not
@@ -1537,7 +1571,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
     (`downgrade_refused`): going back is only `rollback`. Once any change exists, the installed release's own kit
     goes through `_change` too: its repeat result (`upgraded`, or after a rollback back to it `rolled_back`, with
     `installation: reused`), after the same conflict checks. Over an absent root, an uninstall interrupted after its
-    retiring rename is finished first (`_stale_intent`).
+    retiring rename is finished first (`_stale_intent`). An upgrade goes over every named alias too (`_change`;
+    `alias_pending` is its brokers' injectable pending-send probe), and no path may overlap the accounts tree.
     """
     try:
         require_platform()
@@ -1555,7 +1590,9 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         index_bytes=read(index_path,2*1024*1024);config=codex/'config.toml'
         from .config import _owner_paths
         session_root,_,agent_label,plist=_owner_paths(home)
-        if (any(root==p or root.is_relative_to(p) or p.is_relative_to(root) for p in (release,session_root,codex,skills,claude_skills,desktop))
+        # The accounts tree holds every named alias's root (0.55 spec 3D), so the check covers each of them.
+        if (any(root==p or root.is_relative_to(p) or p.is_relative_to(root)
+                for p in (release,session_root,codex,skills,claude_skills,desktop,accounts_root(home)))
                 or any(a.is_relative_to(b) for a,b in ((skills,claude_skills),(claude_skills,skills),(skills,desktop),
                                                        (desktop,skills),(claude_skills,desktop),(desktop,claude_skills)))):
             raise InstallError('overlapping_paths')
@@ -1569,7 +1606,8 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
             source=dict(release=release,index=index,index_bytes=index_bytes,index_sha256=index_sha256,manifest=manifest)
             return _change('upgrade',root,home,codex=codex,skills=skills,claude_code=claude_code,source=source,
                            adopt=adopt_legacy,checkpoint=checkpoint,cli=cli,claude_runner=claude_runner,
-                           launchctl=launchctl,pending_sends=probe)
+                           launchctl=launchctl,pending_sends=probe,alias_pending=alias_pending,
+                           claude_candidates=claude_candidates)
         installed=root/'releases'/index_sha256
         tx=root/'transactions'/('install_'+index_sha256[:24])
         registration=Registration(str(installed/'python/bin/python3'),('-I','-S','-B',str(installed/'launcher.py'),'mcp'),{},tuple(manifest['tools']))
@@ -1882,8 +1920,9 @@ def _changing(root, index_sha256):
 
 
 def rollback(installation_root, *, user_home, checkpoint=lambda _: None, claude_candidates=None,
-             claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None):
-    """Back to the release before the last upgrade, only while no newer session state exists."""
+             claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None, alias_pending=None):
+    """Back to the release before the last upgrade, only while no newer session state exists (each named alias's
+    included); to a release older than 0.55 only while no alias exists (`accounts_present`)."""
     try:
         require_platform()
         root,home=Path(installation_root),Path(user_home)
@@ -1899,14 +1938,15 @@ def rollback(installation_root, *, user_home, checkpoint=lambda _: None, claude_
         if mode=='user':
             cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
         return _change('rollback',root,home,checkpoint=checkpoint,cli=cli,claude_runner=claude_runner,launchctl=launchctl,
-                       pending_sends=default_pending_sends if pending_sends is None else pending_sends)
+                       pending_sends=default_pending_sends if pending_sends is None else pending_sends,
+                       alias_pending=alias_pending,claude_candidates=claude_candidates)
     except InstallError:raise
     except _REFUSALS:
         raise InstallError('installation_refused') from None
 
 
 def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, source=None, adopt=False,
-            checkpoint, cli, claude_runner, launchctl, pending_sends):
+            checkpoint, cli, claude_runner, launchctl, pending_sends, alias_pending=None, claude_candidates=None):
     """Upgrade (to `source`) or rollback (to the receipt's previous release) of an installed root.
 
     Every refusal of a downgrade or a foreign or drifted object comes before the transaction exists; so does
@@ -1924,9 +1964,19 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     client entries already written stay. The change is then parked (`_parked`): the same command stops the
     broker again and resumes, as often as it is repeated, and `uninstall` goes over it, removing what it wrote;
     another kit or a rollback names it (`transaction_pending`).
+
+    Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists goes the default's way in the same
+    transaction, each under its own journal keys (`_key`): its broker observed, gated (`alias_pending`, through its
+    own socket; any answer but `none` refuses the whole change) and stopped after the default's, its plist rewritten
+    to the target release before the commit, its runtime.toml version line, and, with its accounts.json record, its
+    Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its record republished beside
+    receipt.json. A late refusal restores every stopped broker, the default's first. A rollback checks each alias's
+    session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any alias
+    exists; with none left it retires the registry and the default's readiness record after its commit.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
+    alias_probe=account_pending_sends if alias_pending is None else alias_pending
     with SessionOwnerLease(root/'.install.lock') as lease:
         if set(p.name for p in root.iterdir())-_ROOT_NAMES:
             raise InstallError('runtime_conflict')
@@ -2000,7 +2050,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 if to_root.exists() or to_root.is_symlink():
                     validate_tree(to_root,to_root/'bundle-index.json',to_index,installed=True)
             if kind=='rollback':
-                state=unique_json(read(root/'transactions'/current['transaction']/'journal.json',mode=0o600)).get('state')
+                upgraded=unique_json(read(root/'transactions'/current['transaction']/'journal.json',mode=0o600))
+                state=upgraded.get('state')
                 now=_state(session_root)
                 if type(state) is not dict or now['enrollment.json']!=state.get('enrollment.json'):raise InstallError('rollback_refused')
                 if now['runtime.toml']!=state.get('runtime.toml'):
@@ -2052,6 +2103,47 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 data,exists=_read_file(session_root/'runtime.toml',MAX_POLICY_BYTES)
                 if exists:_policy_candidate(data,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
             if len(_adopted_file(root)[1])+len(adopted)>MAX_ADOPTED:raise InstallError('recovery_limit')
+            # Every named alias, before the transaction exists too: its entries owned or absent, its broker the current
+            # or the target release's exact definition and gated, its version line, and on a rollback its state.
+            registry,sidecar=accounts_state(root,home)
+            aliases=sorted(set(registry)|set(sidecar))
+            older=kind=='rollback' and _version_key(target['package_version'])<_version_key(_ACCOUNTS_FIRST)
+            if aliases and older:raise InstallError('accounts_present')
+            recorded=_change_accounts(upgraded,root) if kind=='rollback' and aliases else {}
+            entries,chain={},change.candidate
+            for alias in aliases:
+                jobs,record,server=alias_jobs(alias,home),sidecar.get(alias),alias_server_name(alias)
+                planned=None
+                if record is not None:
+                    to_entry=_alias_commands(to_root,alias)
+                    owner=_record_codex(record)
+                    mine=owned_subtree(chain,server)
+                    if mine is not None and digest(mine)!=owner.post_subtree_hash:raise InstallError('registration_conflict')
+                    try:
+                        plan=merge_registration(chain,_alias_registration(to_root,alias,to_manifest['tools'])[0],
+                                                owner if mine is not None else None,name=server)
+                    except ConfigConflict:raise InstallError('registration_conflict') from None
+                    chain,planned=plan.candidate,plan.post_subtree_hash
+                    if (mode in _ACCOUNT_CLAUDE_MODES and claude_registration.state(home,*to_entry,server)=='different'
+                            and _claude_owned(root,home,alias) is None):
+                        raise InstallError('claude_registration_conflict')
+                    owned=_desktop_owned(root,home,alias)
+                    observed,_=claude_desktop_registration.observe_change(
+                        home,_alias_commands(owned,alias) if owned else None,*to_entry,name=server)
+                    if observed=='different':raise InstallError('claude_desktop_registration_conflict')
+                    if observed=='unsupported':raise InstallError('claude_desktop_config_unsupported')
+                _alias_broker(alias,home,to_root,from_root,launchctl,alias_probe).check()
+                if os.path.lexists(jobs.root):
+                    data,exists=_read_file(jobs.policy,MAX_POLICY_BYTES)
+                    if exists:_policy_candidate(data,current['package_version'],to_manifest['package_version'])
+                if kind=='rollback':
+                    _alias_state_check(alias,home,recorded,current['package_version'],target['package_version'])
+                entries[alias]={'record':record,'state':_state(jobs.root),'codex':planned}
+            # With none left, a rollback below 0.55 retires the registry and the default's readiness record after its
+            # commit, under a name journaled now.
+            from .broker_readiness import NAME as readiness
+            retire=('retired-%s-registry.json'%uuid.uuid4().hex if older and (account_registry.present(accounts_root(home))
+                    or os.path.lexists(session_root/'run'/readiness)) else None)
             identity=dict(schema_version=1,kind=kind,index_sha256=to_index,release_root=str(to_root),installation_root=str(root),
                           codex_home=str(codex),skills_root=str(skills),claude_skills_root=str(claude_skills),user_home=str(home),
                           package_version=to_manifest['package_version'],claude_code_mode=mode,from_index_sha256=from_index,
@@ -2060,8 +2152,10 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 new_owner=Receipt(ownership.installation_id,tx_name,None if 'codex' in adopted else change.pre_subtree_hash,
                                   change.post_subtree_hash,None if 'codex' in adopted else change.pre_subtree)
                 records={'adopted':[{c:{'sha256':digest(d),'bytes':len(d)} for c,d in adopted.items()}]} if adopted else {}
-                value={'journal.json':encoded({**identity,'stage':'prepared','config_existed':existed,'publications':records,
-                                               'state':_state(session_root)}),
+                opened={**identity,'stage':'prepared','config_existed':existed,'publications':records,'state':_state(session_root)}
+                if entries:opened['accounts']=entries  # Only with a named alias: else 0.54's journal.
+                if retire:opened['retire']=retire
+                value={'journal.json':encoded(opened),
                        'receipt.previous':previous_bytes,'config.preimage':change.source,'config.candidate':change.candidate,
                        **{'adopted-'+c:d for c,d in adopted.items()}}
                 if kind=='upgrade':value['registration.json']=new_owner.to_bytes()
@@ -2084,6 +2178,17 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         fresh=(adopt_registration(before,to_registration) if 'codex' in adopted
                else _codex_change(before,to_registration,ownership))
         if candidate!=fresh.candidate or new_ownership.post_subtree_hash!=fresh.post_subtree_hash:raise InstallError('transaction_conflict')
+        # The named aliases this change goes over, as its opening journaled them.
+        entries=_change_accounts(j.value,root)
+        aliases=sorted(entries)
+        owned_aliases=[a for a in aliases if entries[a]['record'] is not None]
+        retire=j.value.get('retire')
+        if retire is not None and (kind!='rollback' or aliases or type(retire) is not str or not _RETIRED_REGISTRY.fullmatch(retire)):
+            raise InstallError('transaction_conflict')
+        alias_cli=cli if mode=='user' else None
+        if mode=='plugin' and owned_aliases:
+            alias_cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None
+                                                 else claude_candidates)
         if not j.reached('release_pending'):_record_adopted(j,root,adopted,name)
         checkpoint('prepared')
         # Release: the new one is copied once; an existing exact tree (an earlier upgrade) is reused.
@@ -2100,14 +2205,25 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         to_payload=_service_payload(to_root,label)
         service=_Service(plist,label,to_payload,known=payloads,adopted=adopted['service']['sha256'] if 'service' in adopted else None,
                          runner=launchctl,pending=pending_sends,home=home)
-        # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
-        unfinished=service.unfinished(j)
+        brokers=[(alias,_alias_broker(alias,home,to_root,from_root,launchctl,alias_probe)) for alias in aliases]
+        services=[service,*(broker for _,broker in brokers)]
         def undo():
-            _client_temporaries(j.value['publications'],home,config,plist,session_root)
+            _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
             _settle_codex_attempts(j)
+            for alias in owned_aliases:_settle_codex_attempts(j,_key('registration',alias))
             _policy_back(j,session_root,to_manifest['package_version'])
+        def restore_all(code):
+            """Every stopped broker marked first (a kill leaves each unrestored one `restoring`), then restored, the
+            default's first; each alias's version line goes back before its broker starts again."""
+            for each in services:each.begin_restore(j,code)
+            service.restore(j,code,undo)
+            for alias,broker in brokers:
+                broker.restore(j,code,lambda alias=alias:_policy_back(j,alias_jobs(alias,home).root,
+                                                                       to_manifest['package_version'],alias))
+        # A restore a kill interrupted is finished first, and its refusal raised again (`_Service.restore`).
+        unfinished=next((code for code in (each.unfinished(j) for each in services) if code is not None),None)
         if unfinished is not None:
-            service.restore(j,unfinished,undo);raise InstallError(unfinished)
+            restore_all(unfinished);raise InstallError(unfinished)
         # The broker observation, its pending-send gate and the stop of a loaded broker (gated again right before it)
         # all come before the first client write: no session can start between the last gate and the stop, and a
         # send that starts before it refuses with every client entry, the plist and the session unchanged. Every run
@@ -2115,8 +2231,10 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         # the next run stops it again.
         try:
             if not j.reached('complete'):
-                service.observe(j)
-                j.advance('service_pending');service.stop(j);j.advance('service')
+                for each in services:each.observe(j)
+                j.advance('service_pending')
+                for each in services:each.stop(j)
+                j.advance('service')
             checkpoint('service')
             # Codex: our owned subtree replaced in place, over the current bytes (`_codex_write`); until the commit
             # every run writes it again if it was removed since and checks it. After the commit it is done: a table
@@ -2131,6 +2249,15 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 _codex_write(j,config,before,j['config_existed'],candidate,new_ownership.post_subtree_hash,replan,'target_conflict')
                 j.advance('registration')
                 _codex_check(config,to_registration,new_ownership,'target_conflict')
+                # Each alias's entry after the default's, over the file as the default's write left it.
+                for alias in owned_aliases:
+                    server,owner=alias_server_name(alias),_record_codex(entries[alias]['record'])
+                    registration_a=_alias_registration(to_root,alias,to_manifest['tools'])[0]
+                    def plan(source, present, registration_a=registration_a, owner=owner, server=server):
+                        return merge_registration(source,registration_a,owner if present else None,name=server)
+                    _alias_codex_write(j,config,alias,plan,owner.post_subtree_hash,entries[alias]['codex'],'target_conflict')
+                    if j.recorded(_key('registered',alias)) is None:j.update(single=(_key('registered',alias),{'attempt':1}))
+                    _alias_codex_check(config,alias,entries[alias]['codex'],'target_conflict')
             checkpoint('registration')
             # Once receipt.json is the receipt this change published, the skill copies are done: it records them, and
             # they are not written or checked again. One the user edited, replaced or removed since stays as it is
@@ -2223,25 +2350,110 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 _desktop_write(j,home,plan)
                 checkpoint('published:claude_desktop_add')
                 return 'registered' if state()=='exact' else 'failed'
+            def register_alias_claude(alias):
+                """An alias's user-scope entry (`user` and `plugin` mode alike) re-pointed like the default's: the entry
+                it owns (`_claude_owned`) removed, then the target's added, each write-ahead under its own keys and at
+                most once; an entry the user removed is added back; a foreign one is never touched."""
+                if mode not in _ACCOUNT_CLAUDE_MODES:return 'skipped'
+                server,to_entry=alias_server_name(alias),_alias_commands(to_root,alias)
+                def state():return claude_registration.state(home,*to_entry,server)
+                if j.recorded(_key('claude_add',alias)) is not None:return 'registered' if state()=='exact' else 'failed'
+                now=state()
+                if now=='exact':return 'registered' if j.recorded(_key('claude_remove',alias)) else 'reused'
+                if now=='unavailable':return 'unavailable'
+                if j.recorded(_key('claude_remove',alias)) is None and now=='different':
+                    if _claude_owned(root,home,alias) is None:return 'failed'
+                    if alias_cli is None:return 'not_found'
+                    j.update(single=(_key('claude_remove',alias),{'attempt':1}));checkpoint(_key('recorded:claude_remove',alias))
+                    try:claude_registration.remove(claude_runner,alias_cli,home,server)
+                    except claude_registration.ClaudeCliError:pass
+                    checkpoint(_key('published:claude_remove',alias))
+                    now=state()
+                if now!='absent':return 'failed'
+                if alias_cli is None:return 'not_found'
+                j.update(single=(_key('claude_add',alias),{'attempt':1}));checkpoint(_key('recorded:claude_add',alias))
+                try:claude_registration.add(claude_runner,alias_cli,home,*to_entry,server)
+                except claude_registration.ClaudeCliError:pass
+                checkpoint(_key('published:claude_add',alias))
+                return 'registered' if state()=='exact' else 'failed'
+            def register_alias_desktop(alias):
+                """An alias's entry beside the default's re-pointed like it: the owned entry (`_desktop_owned`) replaced
+                or an absent one added, compare-before-replace under its own keys; written again after an interruption
+                while still owned or absent."""
+                server,to_entry=alias_server_name(alias),_alias_commands(to_root,alias)
+                def state():return claude_desktop_registration.state(home,*to_entry,server)
+                add=j.recorded(_key('claude_desktop_add',alias))
+                if add is not None:
+                    _desktop_discard(j,home,alias)
+                    if state()=='exact':return 'registered'
+                owned=_desktop_owned(root,home,alias)
+                observed,plan=claude_desktop_registration.observe_change(
+                    home,_alias_commands(owned,alias) if owned else None,*to_entry,name=server)
+                if add is not None:
+                    if observed not in ('owned','absent') or not _desktop_again(j,plan,alias):return 'failed'
+                else:
+                    if observed in ('skipped','unavailable'):return observed
+                    if observed=='exact':return 'reused'
+                    if observed=='unsupported':return 'unavailable'
+                    if observed not in ('owned','absent'):return 'failed'
+                    owner=claude_desktop_registration.receipt(ownership.installation_id,name,*to_entry,server)
+                    j.update(single=(_key('claude_desktop_add',alias),{'attempt':1,'existed':plan.existed,
+                                                                       'source_sha256':plan.source_sha256,
+                                                                       'candidate_sha256':plan.candidate_sha256,
+                                                                       'ownership':unique_json(owner.to_bytes())}))
+                    checkpoint(_key('recorded:claude_desktop_add',alias))
+                _desktop_write(j,home,plan,alias)
+                checkpoint(_key('published:claude_desktop_add',alias))
+                return 'registered' if state()=='exact' else 'failed'
             claude_status=outcome('claude_code')
             if claude_status is None:
                 j.advance('claude_code_pending');claude_status=register_claude()
                 j.update(single=('claude_code',{'status':claude_status}))
             if claude_status not in CLAUDE_MODE_STATUSES[mode]:raise InstallError('transaction_conflict')
+            # Each alias's outcome, once, after the default's; within the same stage, so a resume finds it by its record.
+            alias_claude={}
+            for alias in owned_aliases:
+                if outcome(_key('claude_code',alias)) is None:
+                    j.update(single=(_key('claude_code',alias),{'status':register_alias_claude(alias)}))
+                alias_claude[alias]=outcome(_key('claude_code',alias))
+                if alias_claude[alias] not in ACCOUNT_CLAUDE_STATUSES:raise InstallError('transaction_conflict')
             j.advance('claude_code');checkpoint('claude_code')
             desktop_status=outcome('claude_desktop')
             if desktop_status is None:
                 j.advance('claude_desktop_pending');desktop_status=register_desktop()
                 j.update(single=('claude_desktop',{'status':desktop_status}))
             if desktop_status not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
+            alias_desktop={}
+            for alias in owned_aliases:
+                if outcome(_key('claude_desktop',alias)) is None:
+                    j.update(single=(_key('claude_desktop',alias),{'status':register_alias_desktop(alias)}))
+                alias_desktop[alias]=outcome(_key('claude_desktop',alias))
+                if alias_desktop[alias] not in CLAUDE_DESKTOP_STATUSES:raise InstallError('transaction_conflict')
             j.advance('claude_desktop');checkpoint('claude_desktop')
             # Checked by every run before the commit: a late refusal's restore puts the old line back.
             if not j.reached('complete'):
                 j.advance('policy_pending')
                 _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
+                for alias in aliases:
+                    _policy_step(j,alias_jobs(alias,home).root,current['package_version'],to_manifest['package_version'],alias)
                 j.advance('policy')
-                _client_temporaries(j.value['publications'],home,config,plist,session_root)
+                _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
             checkpoint('policy')
+            # Each alias's accounts.json record re-pointed at the target release, beside receipt.json (bound packet).
+            if owned_aliases:
+                republished={}
+                for alias in owned_aliases:
+                    add_a=j.recorded(_key('claude_desktop_add',alias))
+                    republished[alias]=_account_record({
+                        'transaction':name,'release_root':str(to_root),
+                        'codex':unique_json(Receipt(ownership.installation_id,name,None,entries[alias]['codex'],None).to_bytes()),
+                        'claude_code':alias_claude[alias],'claude_desktop':alias_desktop[alias],
+                        'claude_desktop_ownership':add_a['ownership'] if alias_desktop[alias]=='registered' and add_a else None},root)
+                data_s,now_s=_accounts_file(root)
+                opening={alias:entries[alias]['record'] for alias in owned_aliases}
+                if now_s not in (opening,republished):raise InstallError('metadata_conflict')
+                _publish_accounts(j,root,data_s,republished)
+                checkpoint('accounts')
             # Ownership follows the entry: the one this transaction wrote, else the one it left in place (`_client_owners`).
             add=j.recorded('claude_desktop_add')
             desktop_owner=add['ownership'] if desktop_status=='registered' and add else desktop_owned[2] if desktop_owned else None
@@ -2272,17 +2484,32 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             j.advance('pointer_pending')
             j.replace('pointer',root/'current.json',lambda p:create(p,pointer),_exact(pointer),_exact(_pointer(current)))
         except _REFUSALS as error:
-            # Short of the commit the old release keeps serving: its definition and broker come back first.
-            if _uncommitted(root/'current.json',_pointer(current)):service.restore(j,_refusal(error),undo)
+            # Short of the commit the old release keeps serving: its definitions and brokers come back first.
+            if _uncommitted(root/'current.json',_pointer(current)):restore_all(_refusal(error))
             raise
         j.advance('complete');checkpoint('complete')
+        # A rollback below 0.55 with no alias left: the registry and the default's readiness record retire before the
+        # older release's broker starts.
+        retired=_retire_accounts(j,home,session_root) if retire is not None else None
         restarted=service.restart(j)
+        alias_restarted={alias:broker.restart(j) for alias,broker in brokers}
         j.advance('finished')
         result={'status':'upgraded' if kind=='upgrade' else 'rolled_back','installation':'upgraded' if kind=='upgrade' else 'rolled_back',
                 'release_root':str(to_root),'package_version':to_manifest['package_version'],'previous_release_root':str(from_root),
                 'claude_code':claude_status,'claude_skills':claude_skills_status,'claude_desktop':desktop_status,
                 'service':restarted,'next_action':'restart_mcp_clients'}
         if adopted:result['adopted']=sorted(adopted)
+        if retired is not None:result['account_registry']=retired
+        if aliases:
+            # Per alias: its broker, and with its record its entries (a manual outcome names its manual entry).
+            result['accounts']={}
+            for alias in aliases:
+                value={'service':alias_restarted[alias]}
+                if alias in owned_aliases:
+                    value.update(codex='registered',claude_code=alias_claude[alias],claude_desktop=alias_desktop[alias])
+                    _result_extras(value,alias_claude[alias],alias_desktop[alias],*_alias_commands(to_root,alias),
+                                   alias_server_name(alias))
+                result['accounts'][alias]=value
         _plugin_note(result,mode,home)
         return _result_extras(result,claude_status,desktop_status,to_command,to_arguments)
 
@@ -2377,15 +2604,43 @@ def _retired_origin(path):
     return origin if intent is not None and path.name in _retired_names(origin,intent) else None
 
 
-def _codex_removal(config, owners):
-    """('remove', source, candidate) for our exact Codex subtree (any of `owners`), else ('absent'|'kept', source, None)."""
+def _codex_removal(config, owners, name=None):
+    """('remove', source, candidate) for our exact Codex subtree (any of `owners`), else ('absent'|'kept', source, None).
+    `name` is a named alias's entry (None: the default's)."""
     source,exists=_config(config)
-    subtree=owned_subtree(source) if exists else None
+    subtree=owned_subtree(source,name) if exists else None
     if subtree is None:return 'absent',source,None
     owner=next((o for o in owners if digest(subtree)==o.post_subtree_hash),None)
     if owner is None:return 'kept',source,None
-    plan=rollback_registration(source,Receipt(owner.installation_id,owner.transaction_id,None,owner.post_subtree_hash,None))
+    plan=rollback_registration(source,Receipt(owner.installation_id,owner.transaction_id,None,owner.post_subtree_hash,None),
+                               name=name)
     return 'remove',source,plan.candidate
+
+
+def _uninstall_accounts(journal, root):
+    """An uninstall journal's named aliases (`accounts`, written at its opening only when one exists): {alias: the
+    accounts.json record its entries are owned by, or None}; anything else refuses."""
+    accounts=journal.get('accounts',{})
+    if type(accounts) is not dict or len(accounts)>3*account_registry.MAX_ALIASES:raise InstallError('transaction_conflict')
+    for alias,record in accounts.items():
+        if not named_alias(alias):raise InstallError('transaction_conflict')
+        if record is not None:
+            try:_account_record(record,root)
+            except InstallError:raise InstallError('transaction_conflict') from None
+    return accounts
+
+
+def _alias_codex_owners(root, alias, record, parked):
+    """The Codex receipts an uninstall removes an alias's entry by: its record's, and a parked change's (the record it
+    opened over, and the entry it re-pointed once a write of it was journaled with its flushed object)."""
+    owners=[_record_codex(record)] if record is not None else []
+    entry=_change_accounts(parked[1],root).get(alias) if parked else None
+    if entry is not None and entry['record'] is not None:
+        opened=_record_codex(entry['record'])
+        owners.append(opened)
+        if any(type(a) is dict and 'object' in a for a in parked[1]['publications'].get(_key('registration',alias),[])):
+            owners.append(Receipt(opened.installation_id,parked[0],None,entry['codex'],None))
+    return owners
 
 
 def _adoption_backups(root, receipt, parked=None):
@@ -2412,7 +2667,11 @@ def _parked(journal):
         return False
     cycle=_record(journal,'service_cycle')
     if cycle is None:return _CHANGE_STEPS.index(stage)<_CHANGE_STEPS.index('service')
-    return cycle.get('state')=='restored'
+    # Every named alias's broker put back too (none stopped, or its restore finished).
+    aliases=journal.get('accounts',{})
+    if type(aliases) is not dict:raise InstallError('transaction_conflict')
+    return cycle.get('state')=='restored' and all((_record(journal,_key('service_cycle',a)) or {'state':'restored'}).get('state')
+                                                  =='restored' for a in aliases)
 
 
 def _bound(path, binding):
@@ -2469,7 +2728,7 @@ def _uninstall_service(service):
 
 
 def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude_candidates=None,
-              claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None):
+              claude_runner=subprocess.run, launchctl=subprocess.run, pending_sends=None, alias_pending=None):
     """Remove only owned objects: the broker plist (exact label booted out first), the Codex entry the receipt owns,
     the Claude Code and Claude Desktop entries the installation owns (`_client_owners`), the owned skill copies and
     the installation root with its releases. The Telegram session, enrollment and Keychain are never touched;
@@ -2485,11 +2744,19 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     install intent the closing sweep reads is checked before any client removal or the retiring rename, so a
     lookalike at its recorded staged name never stops an uninstall halfway. Repeated with the root absent (or from
     the retired root's own launcher), it finishes the sweep an interruption after that rename left.
+
+    Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists (and a parked change's) goes the
+    default's way, under its own journal keys: its exact broker definition booted out by its own label (pending-send
+    gate first, through `alias_pending`; any answer but `none` refuses) and removed, its connect job booted out, and
+    the Codex, Claude Code and Claude Desktop entries its record owns removed. Its root, session and policy, and the
+    registry, are never touched, as the default's session is not: a later install re-registers an alias with its
+    `account-add`, keeping its session.
     """
     try:
         require_platform()
         root,home=Path(installation_root),Path(user_home)
         probe=default_pending_sends if pending_sends is None else pending_sends
+        alias_probe=account_pending_sends if alias_pending is None else alias_pending
         if not os.path.lexists(root):
             _sweep(root)
             return {'status':'uninstalled','installation':'absent'}
@@ -2534,6 +2801,19 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                                   parked[0] if parked else None,home)
             backups=_adoption_backups(root,receipt,parked)
             service=_Service(plist,label,_service_payload(installed,label),runner=launchctl,pending=probe,home=home)
+            # The named aliases: as journaled at the opening on a resume, else every one the registry, accounts.json or
+            # a parked change lists, each with the record its entries are owned by.
+            if journal is not None and journal.get('kind')=='uninstall':
+                accounts=_uninstall_accounts(journal,root)
+            else:
+                registry,sidecar=accounts_state(root,home)
+                parked_accounts=_change_accounts(parked[1],root) if parked else {}
+                accounts={alias:sidecar.get(alias) or (parked_accounts.get(alias) or {}).get('record')
+                          for alias in sorted(set(registry)|set(sidecar)|set(parked_accounts))}
+            aliases=sorted(accounts)
+            brokers={alias:_alias_broker(alias,home,installed,installed,launchctl,alias_probe) for alias in aliases}
+            alias_owners={alias:_alias_codex_owners(root,alias,accounts[alias],parked) for alias in aliases}
+            alias_observed={}
             observed=None
             if journal is None or journal.get('kind')!='uninstall':
                 # Every refusal before the transaction exists: a refused uninstall leaves nothing that blocks a
@@ -2543,16 +2823,23 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                         raise InstallError('transaction_conflict')
                 _codex_removal(config,codex_owners)
                 observed=_uninstall_service(service)
+                for alias in aliases:
+                    _codex_removal(config,alias_owners[alias],alias_server_name(alias))
+                    alias_observed[alias]=_uninstall_service(brokers[alias])  # Its pending-send gate included.
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
-                name=_open_change(root,lambda _:{'journal.json':encoded({**identity,'stage':'prepared','publications':{}})})
+                opened={**identity,'stage':'prepared','publications':{}}
+                if aliases:opened['accounts']=accounts  # Only with a named alias: else 0.54's journal.
+                name=_open_change(root,lambda _:{'journal.json':encoded(opened)})
             else:_sweep_staging(root)
             tx=root/'transactions'/name
             j=_Journal(tx,lease,_UNINSTALL_STEPS,checkpoint)
             if j['index_sha256']!=receipt['index_sha256'] or j['installation_root']!=str(root):raise InstallError('transaction_conflict')
             # A parked change's temporaries beside the client files (a kill in its Claude Desktop write, then a
             # repeat refused before that step): its journal goes with the root, so they are removed first.
-            if parked:_client_temporaries(parked[1]['publications'],home,config,plist,session_root)
+            if parked:_client_temporaries(parked[1]['publications'],home,config,plist,session_root,
+                                          sorted(_change_accounts(parked[1],root)))
+            if j.value.get('accounts',{})!=accounts:raise InstallError('transaction_conflict')
             def done(step,status):
                 if j.recorded(step) is None:j.update(single=(step,{'status':status}))
                 j.advance(step);checkpoint(step)
@@ -2578,6 +2865,40 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 else:status='absent' if kind=='absent' else 'kept'
             else:status=None
             out['service']=done('service',status)
+            alias_out={alias:{} for alias in aliases}
+            def recorded(step, alias, status):
+                """An alias's step outcome, once (its own key); the stage is the default's."""
+                if j.recorded(_key(step,alias)) is None:j.update(single=(_key(step,alias),{'status':status}))
+                checkpoint(_key(step,alias))
+                return j.recorded(_key(step,alias))['status']
+            for alias in aliases:
+                broker,jobs=brokers[alias],alias_jobs(alias,home)
+                # Its broker: only the exact definition, booted out by its own label, as the default's.
+                if j.recorded(_key('service',alias)) is None:
+                    kind,loaded=alias_observed.get(alias) or _uninstall_service(broker)
+                    owned_key=_key('service_owned',alias)
+                    if kind=='to':
+                        if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'to'}))
+                        if loaded and _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
+                        checkpoint(_key('stopped:service',alias))
+                        status='removed' if _unlink_exact(broker.plist,broker.kind()[1]) else 'kept'
+                    elif kind=='absent' and loaded:
+                        if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'absent'}))
+                        if _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
+                        checkpoint(_key('stopped:service',alias))
+                        status='removed'
+                    elif kind=='absent' and j.recorded(owned_key) is not None:status='removed'
+                    else:status='absent' if kind=='absent' else 'kept'
+                else:status=None
+                alias_out[alias]['service']=recorded('service',alias,status)
+                # Its connect job (its plist lives in its run directory, with its session: never touched).
+                if j.recorded(_key('connect',alias)) is None:
+                    if _live(launchctl,jobs.connect_label) is not None:
+                        if j.recorded(_key('connect_loaded',alias)) is None:j.update(single=(_key('connect_loaded',alias),{'attempt':1}))
+                        _bootout(launchctl,jobs.connect_label)
+                    status='stopped' if j.recorded(_key('connect_loaded',alias)) is not None else 'not_loaded'
+                else:status=None
+                alias_out[alias]['connect_job']=recorded('connect',alias,status)
             # Codex: our subtree removed only while it is exactly what our ownership receipt records.
             if j.recorded('registration') is None:
                 j.discard('codex',config)
@@ -2589,6 +2910,17 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     status='removed'  # Our journaled replacement landed before an interruption.
             else:status=None
             out['codex']=done('registration',status)
+            for alias in aliases:
+                if j.recorded(_key('registration',alias)) is None:
+                    j.discard(_key('codex',alias),config)
+                    status,source,candidate=_codex_removal(config,alias_owners[alias],alias_server_name(alias))
+                    if status=='remove':
+                        j.write(_key('codex',alias),config,candidate,source,existed=True,maximum=MAX_CONFIG_BYTES)
+                        status='removed'
+                    elif status=='absent' and any('object' in a for a in j.attempts(_key('codex',alias))):
+                        status='removed'
+                else:status=None
+                alias_out[alias]['codex']=recorded('registration',alias,status)
             # Claude Code: our owned user-scope entry, write-ahead; while it stays exactly ours it is removed again.
             if j.recorded('claude_code') is None:
                 status='skipped'
@@ -2616,6 +2948,36 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                         else:raise InstallError('uninstall_incomplete')
             else:status=None
             out['claude_code']=done('claude_code',status)
+            for alias in aliases:
+                if j.recorded(_key('claude_code',alias)) is None:
+                    status='skipped'
+                    if receipt['claude_code_mode'] in _ACCOUNT_CLAUDE_MODES:
+                        server,attempts=alias_server_name(alias),j.attempts(_key('claude_remove',alias))
+                        def observe(alias=alias, server=server):
+                            """(state, owned) of its entry: exact while it runs one of our releases (with its record)."""
+                            owned=_claude_owned(root,home,alias) if accounts[alias] is not None else None
+                            return claude_registration.state(home,*_alias_commands(owned or installed,alias),server),owned
+                        state,owned=observe()
+                        if not attempts and state=='absent':status='absent'
+                        elif not attempts and state=='unavailable':status='unavailable'
+                        elif not attempts and (state!='exact' or owned is None):status='kept'
+                        else:
+                            cli=None
+                            if state=='exact':
+                                cli=claude_registration.locate(claude_registration.candidate_paths(home) if claude_candidates is None else claude_candidates)
+                            if state=='exact' and cli is not None and len(attempts)<8:
+                                j.update(publication=(_key('claude_remove',alias),{'attempt':len(attempts)+1}))
+                                checkpoint(_key('recorded:claude_remove',alias))
+                                try:claude_registration.remove(claude_runner,cli,home,server)
+                                except claude_registration.ClaudeCliError:pass
+                                checkpoint(_key('published:claude_remove',alias))
+                                state,owned=observe()
+                            if not attempts and cli is None:status='not_found'
+                            elif state=='absent':status='removed'
+                            elif state=='different':status='kept'  # No longer ours.
+                            else:raise InstallError('uninstall_incomplete')
+                else:status=None
+                alias_out[alias]['claude_code']=recorded('claude_code',alias,status)
             # Claude Desktop: our owned entry removed, neighbours and the file's mode kept; compare-before-replace,
             # so a still exact entry is removed again after an interruption.
             if j.recorded('claude_desktop') is None:
@@ -2642,6 +3004,34 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     else:raise InstallError('uninstall_incomplete')
             else:status=None
             out['claude_desktop']=done('claude_desktop',status)
+            for alias in aliases:
+                if j.recorded(_key('claude_desktop',alias)) is None:
+                    server,add=alias_server_name(alias),j.recorded(_key('claude_desktop_add',alias))
+                    if add is not None:_desktop_discard(j,home,alias)
+                    def observe(alias=alias, server=server):
+                        owned=_desktop_owned(root,home,alias) if accounts[alias] is not None else None
+                        return claude_desktop_registration.observe_removal(home,*_alias_commands(owned or installed,alias),
+                                                                           server),owned
+                    (state,plan),owned=observe()
+                    status=None
+                    if add is None:
+                        if state in ('skipped','unavailable','absent'):status=state
+                        elif state!='exact' or owned is None:status='kept'
+                        else:
+                            j.update(single=(_key('claude_desktop_add',alias),{'attempt':1,'existed':plan.existed,
+                                                                               'source_sha256':plan.source_sha256,
+                                                                               'candidate_sha256':plan.candidate_sha256}))
+                            checkpoint(_key('recorded:claude_desktop_add',alias))
+                    if status is None:
+                        if state=='exact' and len(j.attempts(_key('claude_desktop_write',alias)))<8:
+                            _desktop_write(j,home,plan,alias)
+                            checkpoint(_key('published:claude_desktop_add',alias))
+                            (state,_),owned=observe()
+                        if state in ('absent','skipped'):status='removed'
+                        elif state=='different':status='kept'  # No longer ours.
+                        else:raise InstallError('uninstall_incomplete')
+                else:status=None
+                alias_out[alias]['claude_desktop']=recorded('claude_desktop',alias,status)
             # Skill copies: only the exact directories the receipt (or a parked change's journal) binds; moved into the
             # retiring root.
             if j.recorded('skills') is None:
@@ -2678,12 +3068,13 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     if not kept.exists():
                         if digest(read(origin,MAX_BACKUP_BYTES,mode=0o600))!=value['sha256']:raise InstallError('transaction_conflict')
                         _rename(origin,kept)
-            _client_temporaries(j.value['publications'],home,config,plist,session_root)
+            _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
             j.advance('retired');checkpoint('retired')
             retired=root.parent/('.'+root.name+'-removed-'+uuid.uuid4().hex)
             _rename(root,retired);checkpoint('published:retired')
         _sweep(root)
         result={'status':'uninstalled','installation':'removed','next_action':'restart_mcp_clients',**out}
+        if aliases:result['accounts']=alias_out
         if kept_root is not None:result['legacy_backups']=str(kept_root)
         return result
     except InstallError:raise
@@ -2754,6 +3145,8 @@ def client_status(installation_root, user_home):
 
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _ACCOUNT_TRANSACTION = re.compile(r'account_[1-9][0-9]{0,2}\Z')
+# The transaction that last wrote a record: an account-add, or an upgrade or rollback that re-pointed its entries.
+_RECORD_TRANSACTION = re.compile(r'(?:account|change)_[1-9][0-9]{0,2}\Z')
 _ACCOUNT_STAGING = re.compile(r'\.account_[1-9][0-9]{0,2}-staging-[a-z0-9_]{8}\Z')
 _ACCOUNT_STAGED_FILES = frozenset({'journal.json', 'config.preimage', 'config.candidate', 'registration.json'})
 _ACCOUNT_ADD_STEPS = ['prepared', 'registry', 'default_check', 'registration_pending', 'registration',
@@ -2773,11 +3166,12 @@ _RETIRED_ACCOUNTS = 'accounts.retired'
 
 def _account_record(value, root):
     """One alias's sidecar record in its closed shape (account-remove also journals it), else `metadata_conflict`:
-    the transaction that wrote it, the release its entries run, the Codex receipt, the Claude Code outcome and the
-    Claude Desktop outcome with its ownership. Never a user id."""
+    the transaction that wrote it (an account-add, or the upgrade or rollback that re-pointed its entries), the
+    release its entries run, the Codex receipt, the Claude Code outcome and the Claude Desktop outcome with its
+    ownership. Never a user id."""
     release = value.get('release_root') if type(value) is dict else None
     ok = (type(value) is dict and set(value) == ACCOUNT_RECORD_KEYS and type(value['transaction']) is str
-          and _ACCOUNT_TRANSACTION.fullmatch(value['transaction']) is not None and type(release) is str
+          and _RECORD_TRANSACTION.fullmatch(value['transaction']) is not None and type(release) is str
           and _HEX64.fullmatch(Path(release).name) is not None and release == str(root/'releases'/Path(release).name)
           and type(value['claude_code']) is str and value['claude_code'] in ACCOUNT_CLAUDE_STATUSES
           and type(value['claude_desktop']) is str and value['claude_desktop'] in CLAUDE_DESKTOP_STATUSES
@@ -2949,13 +3343,196 @@ def _alias_commands(installed, alias):
     return command, [*arguments, '--account', alias]
 
 
-def _alias_registration(installed, alias):
-    """The alias's Codex registration over the release's own tools; never required (spec 3D)."""
-    tools = unique_json(read(installed/'manifest/release.json')).get('tools')
+def _alias_registration(installed, alias, tools=None):
+    """The alias's Codex registration over the release's own tools (its manifest's, or `tools` for a release not yet
+    copied); never required (spec 3D)."""
+    if tools is None:
+        tools = unique_json(read(installed/'manifest/release.json')).get('tools')
     if type(tools) is not list or not tools or any(type(t) is not str for t in tools):
         raise InstallError('metadata_conflict')
     command, arguments = _alias_commands(installed, alias)
     return Registration(command, tuple(arguments), {}, tuple(tools), required=False), max(tools, key=len)
+
+
+# --- Upgrade, rollback and uninstall over the default and every alias (0.55 spec 3D, part 2) -----------------------
+#
+# A change journals each named alias under its own keys (`_key`): its broker's stop cycle, plist and runtime.toml
+# version line, its Codex, Claude Code and Claude Desktop entries, and, beside receipt.json, its accounts.json record
+# re-pointed at the target release. Without an alias the journal, its keys and its `state` are 0.54's.
+
+# The first release that knows named aliases: a rollback to an older one refuses `accounts_present` while any exists.
+_ACCOUNTS_FIRST = '0.55.0.dev0'
+_RETIRED_REGISTRY = re.compile(r'retired-[0-9a-f]{32}-registry\.json\Z')
+_STATE_KEYS = frozenset({'enrollment.json', 'runtime.toml', _POLICY_BODY})
+
+
+def _releases(root):
+    """This installation's release trees (`releases/<index sha256>`), a bounded listing."""
+    with open_owned_directory(root/'releases', private=True):
+        pass
+    found = []
+    for count, path in enumerate((root/'releases').iterdir()):
+        if count > MAX_CHANGES:
+            raise InstallError('recovery_limit')
+        if _HEX64.fullmatch(path.name) and path.is_dir() and not path.is_symlink():
+            found.append(path)
+    return sorted(found)
+
+
+def _alias_owned(root, alias, observe):
+    """The release whose `mcp --account <alias>` entry `observe(command, arguments)` finds exact, else None.
+
+    Lead decision (part 2, owner review pending): with its record, an alias's Claude Code or Claude Desktop entry is
+    the installation's while it runs one of this installation's own releases, so an entry a change could not re-point
+    (left on the release it ran) or the printed manual command never becomes an entry nothing owns. Codex ownership
+    stays the receipt's hash."""
+    for release in _releases(root):
+        if observe(*_alias_commands(release, alias)) == 'exact':
+            return release
+    return None
+
+
+def _claude_owned(root, home, alias):
+    name = alias_server_name(alias)
+    return _alias_owned(root, alias, lambda command, arguments: claude_registration.state(home, command, arguments, name))
+
+
+def _desktop_owned(root, home, alias):
+    name = alias_server_name(alias)
+    return _alias_owned(root, alias, lambda command, arguments:
+                        claude_desktop_registration.state(home, command, arguments, name))
+
+
+def _alias_broker(alias, home, target_root, from_root, runner, pending):
+    """A named alias's broker LaunchAgent as a `_Service`: its own label and plist, the exact definitions of the
+    target and the current release (spec 3C), its pending-send gate through its own socket and policy, and its own
+    journal keys."""
+    jobs = alias_jobs(alias, home)
+    target = _service_payload(target_root, jobs.broker_label, alias) if target_root.exists() else None
+    known = {'from': _service_payload(from_root, jobs.broker_label, alias)} if from_root.exists() else {}
+
+    def gate(home, python, app):
+        return pending(home, python, app, jobs.socket, jobs.policy)
+    return _Service(jobs.broker_plist, jobs.broker_label, target, known=known, runner=runner, pending=gate, home=home,
+                    alias=alias)
+
+
+def _session_state(value):
+    """A recorded `_state`: its closed keys, each a sha256 or None."""
+    return (type(value) is dict and set(value) <= _STATE_KEYS and {'enrollment.json', 'runtime.toml'} <= set(value)
+            and all(v is None or type(v) is str and _HEX64.fullmatch(v) for v in value.values()))
+
+
+def _change_accounts(journal, root):
+    """A change journal's named aliases (`accounts`, written at its opening only when one exists): {alias: {'record':
+    its accounts.json record or None, 'state': its session state, 'codex': the post hash its re-pointed Codex entry
+    has (None without a record)}}; anything else refuses."""
+    accounts = journal.get('accounts', {})
+    if type(accounts) is not dict or len(accounts) > 2*account_registry.MAX_ALIASES:
+        raise InstallError('transaction_conflict')
+    for alias, entry in accounts.items():
+        if (not named_alias(alias) or type(entry) is not dict or set(entry) != {'record', 'state', 'codex'}
+                or not _session_state(entry['state']) or (entry['record'] is None) != (entry['codex'] is None)
+                or entry['codex'] is not None and (type(entry['codex']) is not str or not _HEX64.fullmatch(entry['codex']))):
+            raise InstallError('transaction_conflict')
+        if entry['record'] is not None:
+            try:
+                _account_record(entry['record'], root)
+            except InstallError:
+                raise InstallError('transaction_conflict') from None
+    return accounts
+
+
+def _alias_state_check(alias, home, recorded, current_version, target_version):
+    """A rollback's per-alias state check, as the default's: the alias's session state the upgrade recorded at its
+    opening (an alias added since has none: its session is newer state), its runtime.toml equal but for the version
+    line set back, or the owner's profile switch."""
+    jobs = alias_jobs(alias, home)
+    state = (recorded.get(alias) or {}).get('state')
+    now = _state(jobs.root)
+    if not _session_state(state) or now['enrollment.json'] != state['enrollment.json']:
+        raise InstallError('rollback_refused')
+    if now['runtime.toml'] != state['runtime.toml']:
+        data, exists = _read_file(jobs.policy, MAX_POLICY_BYTES)
+        back = _policy_candidate(data, current_version, target_version) if exists else None
+        if not _same_policy(back, state):
+            raise InstallError('rollback_refused')
+
+
+def _alias_codex_write(j, config, alias, plan, owned_hash, post_hash, code):
+    """A named alias's Codex entry re-pointed over the file as it is now (journaled `registration:<alias>`, landed
+    `registered:<alias>`), run by every run until the commit like the default's (`_codex_write`): while its entry is
+    still the one its record owns (`owned_hash`), or was removed, the same edit is planned again over the current
+    bytes (`plan`, which must yield `post_hash`), keeping every neighbour, the default's included, as the file holds
+    it; once landed our written entry is done; any other entry refuses as `code`, untouched."""
+    key, name = _key('registration', alias), alias_server_name(alias)
+    j.discard(key, config)
+    bound = j.proof(key)
+    if bound is not None and 'object' in bound:
+        try:
+            require_object_binding(config, bound['object'])
+            return
+        except RuntimePathError:
+            pass
+    landed = j.recorded(_key('registered', alias)) is not None
+    for _ in range(3):
+        current, exists = _read_file(config, MAX_CONFIG_BYTES)
+        try:
+            mine = owned_subtree(current, name) if exists else None
+            if landed and mine is not None and digest(mine) == post_hash:
+                return
+            if mine is not None and digest(mine) != owned_hash:
+                raise InstallError(code)
+            change = plan(current, mine is not None)
+        except ConfigConflict:
+            raise InstallError(code) from None
+        if change.post_subtree_hash != post_hash:
+            raise InstallError(code)
+        try:
+            j.write(key, config, change.candidate, current, existed=exists, maximum=MAX_CONFIG_BYTES)
+            return
+        except ConfigConflict as error:  # Changed between the write's record and its replace.
+            if error.code != 'concurrent_change':
+                raise
+        except InstallError as error:  # Changed between this read and the write's own.
+            if str(error) != 'target_conflict':
+                raise
+    raise InstallError(code)
+
+
+def _alias_codex_check(config, alias, post_hash, code):
+    """After an alias's Codex step: its entry is exactly the one this transaction wrote, else `code`."""
+    try:
+        mine = owned_subtree(read_config(config), alias_server_name(alias))
+    except ConfigConflict:
+        mine = None
+    if mine is None or digest(mine) != post_hash:
+        raise InstallError(code)
+
+
+def _retire_accounts(j, home, session_root):
+    """After the commit of a rollback to a release that knows no aliases (refused before it while one exists): the
+    alias registry, which then holds only the default's pin, moves aside beside itself under the journaled name, and
+    the default broker's readiness record (spec 3C) into the transaction; neither is deleted. The older release keeps
+    no pin while it serves, so a later 0.55 starts again from no registry, and the default tree is 0.54's."""
+    if j.recorded('retired_registry') is None:
+        try:
+            status = account_registry.retire(accounts_root(home), j['retire'])
+        except account_registry.RegistryError as error:
+            raise InstallError(error.code) from None
+        if status == 'aliases':
+            raise InstallError('accounts_present')
+        j.update(single=('retired_registry', {'status': status}))
+    if j.recorded('retired_readiness') is None:
+        from .broker_readiness import NAME
+        record, retired = session_root/'run'/NAME, j.tx/'readiness.retired'
+        status = 'retired' if os.path.lexists(retired) else 'absent'
+        if status == 'absent' and os.path.lexists(record):
+            _rename(record, retired)
+            j.checkpoint('published:readiness_retired')
+            status = 'retired'
+        j.update(single=('retired_readiness', {'status': status}))
+    return j.recorded('retired_registry')['status']
 
 
 # Run under the default broker's own interpreter (the receipt-bound release's): one `check`, which pins an authorized
@@ -3397,16 +3974,17 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 if alias not in registry and alias not in records:
                     raise InstallError('alias_unknown')
                 record = records.get(alias)
-                entry = _alias_commands(Path(record['release_root']) if record else installed, alias)
                 source, exists = _config(config)
                 current = owned_subtree(source, name) if exists else None
                 if current is not None and (record is None or digest(current) != _record_codex(record).post_subtree_hash):
                     raise InstallError('registration_conflict')
                 if mode in _ACCOUNT_CLAUDE_MODES:
-                    state = claude_registration.state(home, *entry, name)
+                    state = claude_registration.state(home, *_alias_commands(_claude_owned(root, home, alias) or installed,
+                                                                             alias), name)
                     if state == 'different' or state == 'exact' and record is None:
                         raise InstallError('claude_registration_conflict')
-                state, _ = claude_desktop_registration.observe_removal(home, *entry, name)
+                state, _ = claude_desktop_registration.observe_removal(
+                    home, *_alias_commands(_desktop_owned(root, home, alias) or installed, alias), name)
                 if state == 'different' or state == 'exact' and record is None:
                     raise InstallError('claude_desktop_registration_conflict')
                 if state == 'unsupported':
@@ -3429,7 +4007,15 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 _account_record(record, root)
             if type(aside) is not str or re.fullmatch(r'removed-%s-[0-9a-f]{32}' % alias, aside) is None:
                 raise InstallError('transaction_conflict')
-            entry = _alias_commands(Path(record['release_root']) if record else installed, alias)
+
+            def claude_state():
+                """Its Claude Code entry against the release it runs when that is one of ours (`_alias_owned`)."""
+                return claude_registration.state(home, *_alias_commands(_claude_owned(root, home, alias) or installed,
+                                                                        alias), name)
+
+            def desktop_removal():
+                return claude_desktop_registration.observe_removal(
+                    home, *_alias_commands(_desktop_owned(root, home, alias) or installed, alias), name)
             checkpoint('prepared')
 
             def done(step, status):
@@ -3488,7 +4074,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 status = 'skipped'
                 if mode in _ACCOUNT_CLAUDE_MODES:
                     attempts = j.attempts('claude_remove')
-                    state = claude_registration.state(home, *entry, name)
+                    state = claude_state()
                     if not attempts and state == 'absent':
                         status = 'absent'
                     elif not attempts and state == 'unavailable':
@@ -3508,7 +4094,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                             except claude_registration.ClaudeCliError:
                                 pass
                             checkpoint('published:claude_remove')
-                            state = claude_registration.state(home, *entry, name)
+                            state = claude_state()
                         if not attempts and cli is None and state == 'exact':
                             status = 'not_found'
                         elif state == 'absent':
@@ -3525,7 +4111,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 add = j.recorded('claude_desktop_add')
                 if add is not None:
                     _desktop_discard(j, home)
-                state, plan = claude_desktop_registration.observe_removal(home, *entry, name)
+                state, plan = desktop_removal()
                 status = None
                 if add is None:
                     if state in ('skipped', 'unavailable', 'absent'):
@@ -3543,7 +4129,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     if state == 'exact' and len(j.attempts('claude_desktop_write')) < 8:
                         _desktop_write(j, home, plan)
                         checkpoint('published:claude_desktop_add')
-                        state, _ = claude_desktop_registration.observe_removal(home, *entry, name)
+                        state, _ = desktop_removal()
                     if state in ('absent', 'skipped'):
                         status = 'removed'
                     elif state == 'different':

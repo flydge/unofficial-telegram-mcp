@@ -413,6 +413,48 @@ def remove_alias(alias: str, home: Path, *, sleeper: Callable[[float], None] = t
     _change(root, change, create=False, sleeper=sleeper)
 
 
+_RETIRED = re.compile(r"retired-[0-9a-f]{32}-registry\.json\Z")
+
+
+def retire(root: Path, aside: str, *, sleeper: Callable[[float], None] = time.sleep) -> str:
+    """Move a registry that lists no alias aside, under its lease, to `aside` in the same directory: a closed name
+    outside the alias grammar, so it is never read as a registry or taken for an alias root. Never deletes.
+
+    'retired' (now, or by an earlier attempt: `aside` exists), 'absent' (no registry), or 'aliases' (it lists an
+    alias: nothing moves). Used by a rollback to a release that knows no aliases (0.55 spec 3D), which would leave the
+    default's pin unmaintained while it serves; a later 0.55 then starts again from no registry (0.54).
+    """
+    if type(aside) is not str or _RETIRED.fullmatch(aside) is None:
+        raise RegistryError("registry_invalid")
+    try:
+        os.lstat(root)
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    directory = _open_root(root)
+    try:
+        with _lease(directory, sleeper):
+            _sweep_temporaries(directory)
+            try:
+                os.stat(aside, dir_fd=directory, follow_symlinks=False)
+                return "retired"
+            except FileNotFoundError:
+                pass
+            current = _load_at(directory)
+            if current is None:
+                return "absent"
+            if current.aliases:
+                return "aliases"
+            os.rename(REGISTRY_NAME, aside, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+            return "retired"
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    finally:
+        os.close(directory)
+
+
 def pin_account(root: Path, alias: str, user_id: int, *, sleeper: Callable[[float], None] = time.sleep) -> None:
     """The account pin, for the broker of `alias` whose session is authorized as `user_id`.
 
