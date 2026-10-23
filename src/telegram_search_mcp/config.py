@@ -21,8 +21,14 @@ class ConfigurationError(RuntimeError):
 DEFAULT_ALIAS = "default"
 # A named alias is a closed token; `default` matches it but is reserved for today's single account.
 ALIAS_GRAMMAR = re.compile(r"[a-z][a-z0-9]{0,11}")
-# Set only by named_aliases_for_tests until the phase B registry admits named aliases.
+# Every named alias's root lies in this sibling of the legacy tree, beside the alias registry (spec 2).
+ACCOUNTS_DIRECTORY = "TelegramSearchMCP-accounts"
+# Set only by named_aliases_for_tests: the explicit test hook admits a named alias without a registry.
 _NAMED_ALIASES_ADMITTED: ContextVar[bool] = ContextVar("telegram_search_mcp_named_aliases", default=False)
+# Set only by for_alias around the build of an alias the registry admits.
+_REGISTERED: ContextVar[str | None] = ContextVar("telegram_search_mcp_registered_alias", default=None)
+# Set only by _layout around its own construction: no other call builds an AccountPaths.
+_BUILDING: ContextVar[bool] = ContextVar("telegram_search_mcp_account_paths_building", default=False)
 
 
 class AccountPathsError(ConfigurationError):
@@ -35,10 +41,10 @@ class AccountPathsError(ConfigurationError):
 
 @contextmanager
 def named_aliases_for_tests() -> Iterator[None]:
-    """The explicit test hook: inside it, and only there, an AccountPaths may hold a named alias.
+    """The explicit test hook: inside it an AccountPaths may hold a named alias the registry never admitted.
 
-    Nothing in src or packaging enters it (tests/test_account_paths.py checks); phase B's registry becomes
-    the only other way in.
+    Nothing in src or packaging enters it (tests/test_account_paths.py checks); outside it only a
+    registered alias is admitted, by `for_alias`.
     """
     token = _NAMED_ALIASES_ADMITTED.set(True)
     try:
@@ -47,16 +53,37 @@ def named_aliases_for_tests() -> Iterator[None]:
         _NAMED_ALIASES_ADMITTED.reset(token)
 
 
+def accounts_root(home: Path) -> Path:
+    """The directory of every named alias's root and of the alias registry: a sibling of the legacy tree."""
+    return Path(home) / "Library" / "Application Support" / ACCOUNTS_DIRECTORY
+
+
+def alias_server_name(alias: str) -> str:
+    """The MCP server name of an alias, read through the product identity at call time like every product name."""
+    from . import product_identity as identity
+    return identity.MCP_SERVER_NAME if alias == DEFAULT_ALIAS else f"{identity.MCP_SERVER_NAME}_{alias}"
+
+
+def alias_socket_path(alias: str, home: Path) -> Path:
+    """The broker socket a named alias would bind, by the same layout as its AccountPaths but without building
+    one: the registry measures it against the macOS limit before it admits the alias."""
+    if type(alias) is not str or alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is None:
+        raise AccountPathsError()
+    return AccountPaths._fields(alias, accounts_root(home) / alias, "", "", Path(), "")["socket"]
+
+
 @dataclass(frozen=True)
 class AccountPaths:
     """Every per-account location and name; the default alias is today's single account in today's paths.
 
-    `for_alias(DEFAULT_ALIAS, home)` is the only public constructor until the alias registry exists
-    (0.55 phase B); any other alias refuses with `alias_unavailable`. Every construction, the generated
-    __init__, dataclasses.replace and `relocated` included, refuses a named alias outside
-    named_aliases_for_tests. The Keychain service is the one name every alias shares (spec decision 6);
-    the Whisper model stays shared outside (WHISPER_MODEL_PATH). Call sites take `account=None` for the
-    default alias, which keeps every 0.54 call and constant.
+    `for_alias(alias, home)` is the only public constructor: the default alias is today's layout, and a named
+    alias is admitted only when the alias registry lists it (0.55 phase B); anything else refuses with
+    `alias_unavailable`. The generated __init__ and dataclasses.replace always refuse: only the private layout
+    builds an instance, so a default AccountPaths cannot be rebuilt with other paths; subclasses are refused.
+    `relocated` (the inert SetupPaths(root) test boundary) keeps the alias and its admission rule. The Keychain
+    service is the one name every alias shares (spec decision 6); the Whisper model stays shared outside
+    (WHISPER_MODEL_PATH). Call sites take `account=None` for the default alias, which keeps every 0.54 call and
+    constant.
     """
     alias: str
     root: Path
@@ -82,33 +109,56 @@ class AccountPaths:
     broker_plist: Path
     connect_label: str
 
+    def __init_subclass__(cls, /, **kwargs) -> None:
+        raise TypeError("account paths are final")
+
     def __post_init__(self) -> None:
-        if type(self.alias) is not str or (self.alias != DEFAULT_ALIAS and (
-                not _NAMED_ALIASES_ADMITTED.get() or ALIAS_GRAMMAR.fullmatch(self.alias) is None)):
+        if (not _BUILDING.get() or type(self.alias) is not str or (self.alias != DEFAULT_ALIAS and (
+                ALIAS_GRAMMAR.fullmatch(self.alias) is None
+                or not (_NAMED_ALIASES_ADMITTED.get() or _REGISTERED.get() == self.alias)))):
             raise AccountPathsError()
 
     @property
     def server_name(self) -> str:
         """The MCP server name, read through the product identity at call time like every product name."""
-        from . import product_identity as identity
-        return identity.MCP_SERVER_NAME if self.alias == DEFAULT_ALIAS else f"{identity.MCP_SERVER_NAME}_{self.alias}"
+        return alias_server_name(self.alias)
+
+    @property
+    def accounts_root(self) -> Path:
+        """The alias registry's directory: the legacy tree's sibling for the default, a named root's parent."""
+        return self.root.parent / ACCOUNTS_DIRECTORY if self.alias == DEFAULT_ALIAS else self.root.parent
 
     @classmethod
     def for_alias(cls, alias: str, home: Path) -> AccountPaths:
-        if type(alias) is not str or alias != DEFAULT_ALIAS:
+        """The default alias's 0.54 layout, or a named alias the registry under `home` lists.
+
+        Reads the registry only for a named alias and creates nothing: the alias is checked before any
+        directory exists. An absent registry admits no named alias (0.54).
+        """
+        if type(alias) is not str or (alias != DEFAULT_ALIAS and ALIAS_GRAMMAR.fullmatch(alias) is None):
             raise AccountPathsError()
-        return cls._home_layout(DEFAULT_ALIAS, Path(home), ("TelegramSearchMCP",), "")
+        home = Path(home)
+        if alias == DEFAULT_ALIAS:
+            return cls._home_layout(DEFAULT_ALIAS, home, ("TelegramSearchMCP",), "")
+        from .account_registry import admits
+        if not admits(alias, home):
+            raise AccountPathsError()
+        token = _REGISTERED.set(alias)
+        try:
+            return cls._derive(alias, home)
+        finally:
+            _REGISTERED.reset(token)
 
     @classmethod
     def _derive(cls, alias: str, home: Path) -> AccountPaths:
         """A named alias's layout: a sibling of the legacy tree, never inside it (spec decision 6).
 
         Private, and `default` is reserved: it never takes this layout. Building the result needs the
-        explicit test hook until the registry (phase B) admits named aliases.
+        registry's admission (through for_alias) or the explicit test hook.
         """
         if type(alias) is not str or alias == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(alias) is None:
             raise AccountPathsError()
-        return cls._home_layout(alias, Path(home), ("TelegramSearchMCP-accounts", alias), f".a.{alias}")
+        return cls._home_layout(alias, Path(home), (ACCOUNTS_DIRECTORY, alias), f".a.{alias}")
 
     @classmethod
     def _home_layout(cls, alias: str, home: Path, root: tuple[str, ...], job_suffix: str) -> AccountPaths:
@@ -126,18 +176,27 @@ class AccountPaths:
     @classmethod
     def _layout(cls, alias: str, root: Path, keychain_service: str, broker_label: str, broker_plist: Path,
                 connect_label: str) -> AccountPaths:
+        token = _BUILDING.set(True)
+        try:
+            return cls(**cls._fields(alias, root, keychain_service, broker_label, broker_plist, connect_label))
+        finally:
+            _BUILDING.reset(token)
+
+    @staticmethod
+    def _fields(alias: str, root: Path, keychain_service: str, broker_label: str, broker_plist: Path,
+                connect_label: str) -> dict[str, object]:
         session, run = root / "tdlib", root / "run"
         artifacts, uploads, staging = root / "artifacts", root / "incoming-uploads", root / "outgoing-staging"
-        return cls(alias=alias, root=root, session=session, database=session / "db", files=session / "files",
-                   run=run, socket=run / "broker.sock", broker_lock=run / "broker.lock",
-                   connect_lock=run / "connect.lock", connect_status=run / "connect-status.json",
-                   connect_plist=run / f"{connect_label}.plist",
-                   artifacts=artifacts, artifacts_quarantine=artifacts.with_name(artifacts.name + "-quarantine"),
-                   uploads=uploads, uploads_quarantine=uploads.with_name(uploads.name + "-quarantine"),
-                   staging=staging, staging_quarantine=staging.with_name(staging.name + "-quarantine"),
-                   policy=root / "runtime.toml", enrollment_record=root / "enrollment.json",
-                   keychain_service=keychain_service, broker_label=broker_label, broker_plist=broker_plist,
-                   connect_label=connect_label)
+        return dict(alias=alias, root=root, session=session, database=session / "db", files=session / "files",
+                    run=run, socket=run / "broker.sock", broker_lock=run / "broker.lock",
+                    connect_lock=run / "connect.lock", connect_status=run / "connect-status.json",
+                    connect_plist=run / f"{connect_label}.plist",
+                    artifacts=artifacts, artifacts_quarantine=artifacts.with_name(artifacts.name + "-quarantine"),
+                    uploads=uploads, uploads_quarantine=uploads.with_name(uploads.name + "-quarantine"),
+                    staging=staging, staging_quarantine=staging.with_name(staging.name + "-quarantine"),
+                    policy=root / "runtime.toml", enrollment_record=root / "enrollment.json",
+                    keychain_service=keychain_service, broker_label=broker_label, broker_plist=broker_plist,
+                    connect_label=connect_label)
 
 
 def _owner_paths(home: Path) -> tuple[Path, str, str, Path]:
