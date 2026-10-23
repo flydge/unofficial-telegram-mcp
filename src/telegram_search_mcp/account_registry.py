@@ -1,6 +1,6 @@
 """The local alias registry (0.55 spec 2): which named accounts exist, and which Telegram user each one is.
 
-`TelegramSearchMCP-accounts/registry.json`, owner-only, with a closed schema:
+`registry.json` in the accounts directory (config.ACCOUNTS_DIRECTORY), owner-only, with a closed schema:
 `{"version": 1, "aliases": {"<alias>": {"user_id": int|null}}, "default_user_id": int|null}`, at most eight
 aliases. It exists only after the first alias is added; without it every path behaves as in 0.54 and nothing
 here writes. Writes are atomic and owner-only, under the registry's own lease.
@@ -235,15 +235,18 @@ def _load_at(directory: int) -> Registry | None:
 def _lease(directory: int, sleeper: Callable[[float], None]) -> Iterator[None]:
     """The registry's exclusive writer lease: bounded waiting, then `registry_busy`."""
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    created = False
     try:
         try:
             descriptor = os.open(LEASE_NAME, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
-            os.fchmod(descriptor, 0o600)
+            created = True
         except FileExistsError:
             descriptor = os.open(LEASE_NAME, flags, dir_fd=directory)
     except OSError:
         raise RegistryError("registry_unsafe") from None
     try:
+        if created:
+            os.fchmod(descriptor, 0o600)
         metadata = os.fstat(descriptor)
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1
                 or stat.S_IMODE(metadata.st_mode) != 0o600):
