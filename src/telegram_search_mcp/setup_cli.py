@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavailable
+from . import broker_readiness
 from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPaths, ConfigurationError, load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
@@ -31,8 +32,9 @@ first connect; without it an installed bundle supplies its own application ident
 status reads enrollment metadata and an existing broker handshake only;
 it does not initialize TDLib, read Keychain, start services or prove Ready.
 status --account <alias> also reports whether that alias's broker LaunchAgent
-is loaded and whether its running broker's session is authorized, never the
-Telegram account.
+is loaded and the readiness its running broker recorded at its last account
+check; it never asks for a check, so it never starts TDLib or pins an account,
+and never reports the Telegram account.
 connect-helper is internal: connect starts it as a transient launchd job.
 Every command takes a trailing --account <alias> for a registered account
 alias; without it the command serves the default account.
@@ -86,16 +88,14 @@ def existing_broker_status(paths):
         if client is not None: client.close()
 
 
-# The broker's closed check answers as a named alias's `authorized` (0.55 spec 3C); anything else is unknown (None).
-_AUTHORIZED = {'ready': True, 'blocked': False}
-
-
 def account_status(paths, broker):
     """A named alias's service facts: its alias, whether its own broker LaunchAgent is loaded and whether its
-    running broker's session is authorized (the check answers ready or blocked; None when unknown).
+    running broker's session is authorized, as that broker recorded at its last account check (broker_readiness:
+    true, false for a session not authorized or refused by the pin, None when unknown or recorded by an earlier
+    broker).
 
-    Only that alias's label and socket are asked; the Telegram account is never read or reported. An account
-    refused by the pin answers blocked, so it reads as not authorized.
+    Read-only: one handshake names the running broker's generation; no check is sent, so nothing starts TDLib or
+    writes a pin. Only that alias's label, socket and run directory are read; the account is never read or reported.
     """
     try:
         loaded = launch_agent_status(account=paths.account)
@@ -104,9 +104,8 @@ def account_status(paths, broker):
     authorized, client = None, None
     if broker == 'compatible_running':
         try:
-            client = _client(paths, 10)
-            client.handshake()
-            authorized = _AUTHORIZED.get(client.check())
+            client = _client(paths, 1)
+            authorized = broker_readiness.read(paths.account.run, client.handshake().get('broker_generation'))
         except Exception:
             authorized = None
         finally:

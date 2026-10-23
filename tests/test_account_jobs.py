@@ -207,38 +207,60 @@ class BrokerAgentTests(Home):
 
 
 class AliasStatusTests(Home):
-    """`status --account <alias>`: loaded and authorized for that alias's own broker, never the account."""
+    """`status --account <alias>`: loaded and authorized for that alias's own broker, never the account.
 
-    def status(self, args, *, broker='not_running', check=None, loaded=False):
+    Read-only: `authorized` is the running broker's recorded readiness (broker_readiness), read beside a handshake;
+    status never sends `check`, so it never starts TDLib or writes the first pin."""
+    GENERATION = 'broker_' + 'b' * 32
+
+    def status(self, args, *, broker='not_running', handshake=None, loaded=False):
         client = mock.Mock()
-        client.check.side_effect = check if isinstance(check, Exception) else None
-        client.check.return_value = check
+        client.handshake.side_effect = handshake if isinstance(handshake, Exception) else None
+        client.handshake.return_value = {'broker_generation': self.GENERATION} if handshake is None else handshake
         with mock.patch.object(setup_cli, 'existing_broker_status', return_value=broker), \
                 mock.patch.object(setup_cli, '_client', return_value=client) as made, \
                 mock.patch.object(setup_cli, 'launch_agent_status', return_value=loaded) as agent:
             code, out, err = run(setup_cli.main, args)
+        client.check.assert_not_called()
         return code, json.loads(out), made, agent
 
-    def test_a_named_alias_reports_loaded_and_authorized(self):
+    def test_a_named_alias_reports_loaded_and_the_recorded_readiness(self):
+        from telegram_search_mcp import broker_readiness
         code, value, made, agent = self.status(['status', '--account', 'work'])
         self.assertEqual(code, 0)
         self.assertEqual(value, {'state': 'new', 'broker': 'not_running', 'alias': 'work', 'loaded': False,
                                  'authorized': None})
         agent.assert_called_once_with(account=self.work)
         made.assert_not_called()  # No broker: nothing is asked.
-        for check, authorized in (('ready', True), ('blocked', False), (TimeoutError(), None), ('other', None)):
-            with self.subTest(check=check):
+        self.work.run.mkdir(parents=True, mode=0o700)
+        for recorded, generation, authorized in ((True, self.GENERATION, True), (False, self.GENERATION, False),
+                                                 (None, self.GENERATION, None), (True, 'broker_' + 'c' * 32, None)):
+            with self.subTest(recorded=recorded, generation=generation):
+                broker_readiness.record(self.work.run, generation, recorded)
                 _, value, made, _ = self.status(['status', '--account', 'work'], broker='compatible_running',
-                                                check=check, loaded=True)
+                                                loaded=True)
                 self.assertEqual((value['loaded'], value['authorized']), (True, authorized))
                 self.assertEqual(made.call_args.args[0], SetupPaths.from_account(self.work))
+                made.return_value.handshake.assert_called_once_with()
                 made.return_value.close.assert_called_once_with()
+        broker_readiness.record(self.work.run, self.GENERATION, True)
+        for handshake in (TimeoutError(), {}, {'broker_generation': 7}):
+            with self.subTest(handshake=handshake):
+                _, value, _, _ = self.status(['status', '--account', 'work'], broker='compatible_running',
+                                             handshake=handshake)
+                self.assertIsNone(value['authorized'])
 
     def test_the_default_status_keeps_its_054_keys(self):
-        code, value, made, agent = self.status(['status'], broker='compatible_running', check='ready')
+        code, value, made, agent = self.status(['status'], broker='compatible_running')
         self.assertEqual((code, set(value)), (0, {'state', 'broker'}))
         agent.assert_not_called()
         made.assert_not_called()
+
+    def test_the_help_says_status_never_starts_tdlib_or_pins(self):
+        self.assertIn("status --account <alias> also reports whether that alias's broker LaunchAgent\nis loaded and "
+                      "the readiness its running broker recorded at its last account\ncheck; it never asks for a "
+                      "check, so it never starts TDLib or pins an account,\nand never reports the Telegram account.",
+                      setup_cli._HELP)
 
     def test_a_launchd_failure_reports_unknown(self):
         with mock.patch.object(setup_cli, 'existing_broker_status', return_value='not_running'), \

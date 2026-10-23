@@ -40,7 +40,7 @@ from .broker_protocol import (
     send_frame,
 )
 from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths, ensure_private_directory, RuntimePolicy, load_runtime_policy
-from . import account_registry
+from . import account_registry, broker_readiness
 from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
                        require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
@@ -106,6 +106,9 @@ SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'se
 # check for the same reason: owner-local bytes. Every other operation, any added later included, is checked.
 ACCOUNT_CHECK_EXEMPT = frozenset({'health', 'release_client', 'check', 'create_local_artifact',
                                   'begin_local_upload', 'append_local_upload', 'finish_local_upload'})
+
+
+_UNRECORDED = object()
 
 
 class BrokerStartupError(RuntimeError):
@@ -265,6 +268,9 @@ class Broker(SelectionBrokerMixin):
         self._accounts_root = account_paths.accounts_root
         # (client, authorization epoch, user id) of the last session the pin admitted; never leaves the broker.
         self._account_session: tuple[object, object, int] | None = None
+        # The readiness last recorded for status (broker_readiness); _UNRECORDED until the first write succeeds.
+        self._readiness_lock = threading.Lock()
+        self._readiness: object = _UNRECORDED
         self._verify_peer_uid = verify_peer_uid
         self._peer_uid_loader = peer_uid_loader
         self._max_clients = max_clients
@@ -453,7 +459,32 @@ class Broker(SelectionBrokerMixin):
         return account
 
     def _account_check(self, *, client=None, user_id=None) -> None:
+        """The account pin (`_pin_session`), and its outcome recorded as this broker's readiness for status (spec
+        3C): admitted true, not authorized or refused false, an unverified account unknown."""
+        try:
+            admitted = self._pin_session(client=client, user_id=user_id)
+        except AccountBlocked as blocked:
+            self._record_readiness(None if blocked.code == 'account_unverified' else False)
+            raise
+        if admitted is not None:
+            self._record_readiness(admitted)
+
+    def _record_readiness(self, authorized: bool | None) -> None:
+        """Record a changed readiness in this broker's run directory, only once a registry exists or for a named
+        alias: without one nothing is written (0.54). Best effort; a failed write leaves no record (unknown)."""
+        with self._readiness_lock:
+            if self._readiness is authorized:
+                return
+            if self._alias == account_registry.DEFAULT_ALIAS and not account_registry.present(self._accounts_root):
+                return
+            written = broker_readiness.record(self._socket_path.parent, self._generation, authorized)
+            self._readiness = authorized if written else _UNRECORDED
+
+    def _pin_session(self, *, client=None, user_id=None) -> bool | None:
         """The account pin, at authorization and before every Telegram-sourced grant (spec 2).
+
+        Returns None without a registry (the default alias), False for a session that is not authorized, and True
+        for an admitted one; a refusal raises AccountBlocked.
 
         Without a registry it reads nothing but the registry's absence: 0.54. With one, the authorized
         session's user id is pinned for this alias at the first check (the default alias's in
@@ -466,7 +497,7 @@ class Broker(SelectionBrokerMixin):
             if self._alias != account_registry.DEFAULT_ALIAS:  # a named alias exists only in the registry
                 self._artifact_authority.invalidate_account()
                 raise AccountBlocked('alias_unavailable')
-            return
+            return None
         if client is None:
             client = self._shared_client()
         epoch = getattr(client, 'send_observation_epoch', None)
@@ -482,7 +513,7 @@ class Broker(SelectionBrokerMixin):
                 try:
                     client.ensure_ready()
                 except AuthorizationBlocked:
-                    return  # not authorized: the operation itself reports it blocked and grants nothing
+                    return False  # not authorized: the operation itself reports it blocked and grants nothing
                 except TDLibError:
                     # Any other failure fails closed: the session's account could not be read, so nothing runs.
                     self._artifact_authority.invalidate_account()
@@ -498,6 +529,7 @@ class Broker(SelectionBrokerMixin):
             self._artifact_authority.invalidate_account()
             raise AccountBlocked(error.code) from None
         self._account_session = (client, epoch, user_id) if epoch is not None else None
+        return True
 
     def _observed_owner(self, client_id) -> DraftOwner | None:
         """This client's DraftOwner under the account the broker last observed, or None; no provider read.
@@ -962,9 +994,13 @@ class Broker(SelectionBrokerMixin):
             try:
                 self._shared_client().ensure_ready()
                 self._account_check()  # At authorization: the first authorized check pins the account.
+            except AccountBlocked:
+                return {"status": "blocked"}  # Recorded by the account check.
             except AuthorizationBlocked:
+                self._record_readiness(False)
                 return {"status": "blocked"}
             except TDLibError:
+                self._record_readiness(None)
                 return {"status": "error"}
             return {"status": "ready"}
         if operation == "health":
