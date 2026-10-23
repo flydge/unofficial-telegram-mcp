@@ -102,10 +102,10 @@ def succeeded(old_id, new_id, content_type, **changes):
             'message': message(new_id, content_type, **{'sending_state': None, **changes})}
 
 
-def failed(old_id, content_type, code=400):
+def failed(old_id, content_type, code=400, chat_id=RECIPIENT):
     return {'@type': 'updateMessageSendFailed', 'old_message_id': old_id,
-            'message': message(old_id, content_type, sending_state={'@type': 'messageSendingStateFailed',
-                                                                   'error': {'@type': 'error', 'code': code}}),
+            'message': message(old_id, content_type, chat_id, sending_state={'@type': 'messageSendingStateFailed',
+                                                                            'error': {'@type': 'error', 'code': code}}),
             'error': {'@type': 'error', 'code': code, 'message': 'PRIVATE PROVIDER TEXT'}}
 
 
@@ -436,8 +436,11 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(observations.snapshot('a').status, 'failed')
 
     def test_malformed_final_messages_make_the_slot_a_conflict(self):
+        # In the album's own chat, or in a chat that cannot be read: a message of another chat is ignored (below).
         bad = [succeeded(-11, 801, 'messageDocument'), succeeded(-11, -801, 'messagePhoto'),
-               succeeded(-11, 801, 'messagePhoto', chat_id=RECIPIENT + 1),
+               succeeded(-11, 801, 'messagePhoto', chat_id=None), succeeded(-11, 801, 'messagePhoto', chat_id=0),
+               succeeded(-11, 801, 'messagePhoto', chat_id=str(RECIPIENT + 1)),
+               {**succeeded(-11, 801, 'messagePhoto'), 'message': None},
                succeeded(-11, 801, 'messagePhoto', is_outgoing=False),
                succeeded(-11, 801, 'messagePhoto', sending_state={'@type': 'messageSendingStatePending',
                                                                   'sending_id': 5}),
@@ -456,6 +459,54 @@ class ObservationTests(unittest.TestCase):
         final['message']['content']['video'] = None
         video.reduce(final)
         self.assertEqual(self.slots(video)[1][1], ('conflict', -12, None))
+
+    def foreign(self):
+        """Terminal updates for the album's temporary IDs in another chat: TDLib numbers temporary IDs per chat."""
+        other = RECIPIENT + 1
+        return [succeeded(-11, 901, 'messagePhoto', chat_id=other), failed(-12, 'messageVideo', chat_id=other),
+                succeeded(-13, 903, 'messageDocument', chat_id=other),  # malformed for the slot, but not ours
+                {**failed(-11, 'messagePhoto', chat_id=other), 'error': None},
+                succeeded(-12, 902, 'messageVideo', chat_id=-RECIPIENT)]
+
+    def test_a_terminal_update_of_another_chat_is_ignored_once_bound(self):
+        observations = self.observed()
+        observations.reduce(result())
+        for event in self.foreign():
+            observations.reduce(event)
+        self.assertEqual(self.slots(observations), ('bound', [('pending', -11, None), ('pending', -12, None),
+                                                             ('pending', -13, None)]))
+        observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+        observations.reduce(failed(-12, 'messageVideo'))
+        observations.reduce(succeeded(-13, 803, 'messagePhoto'))
+        self.assertEqual(self.slots(observations), ('bound', [('sent', -11, 801), ('failed', -12, None),
+                                                             ('sent', -13, 803)]))
+
+    def test_a_terminal_update_of_another_chat_ahead_of_the_result_is_never_buffered(self):
+        from telegram_search_mcp.send_observations import MAX_EARLY_ALBUM_UPDATES
+        observations = self.observed()
+        for _ in range(MAX_EARLY_ALBUM_UPDATES):
+            for event in self.foreign():
+                observations.reduce(event)
+        self.assertEqual(observations.snapshot('a').early, ())
+        # The album's own end for the same temporary ID is not a second end: it binds with the result.
+        observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+        observations.reduce(succeeded(-11, 901, 'messagePhoto', chat_id=RECIPIENT + 1))
+        observations.reduce(result())
+        self.assertEqual(self.slots(observations), ('bound', [('sent', -11, 801), ('pending', -12, None),
+                                                             ('pending', -13, None)]))
+        observations.reduce(failed(-12, 'messageVideo'))
+        self.assertEqual(self.slots(observations)[1][1], ('failed', -12, None))
+
+    def test_a_single_send_also_ignores_a_terminal_update_of_another_chat(self):
+        from telegram_search_mcp.send_observations import SendObservations
+        observations = SendObservations()
+        observations.register('s', 'x', 9, RECIPIENT, 'messageDocument')
+        observations.reduce({**pending(-21, 'messageDocument', 9), '@extra': 'x'})
+        observations.reduce(succeeded(-21, 921, 'messageDocument', chat_id=RECIPIENT + 1))
+        observations.reduce(failed(-21, 'messageDocument', chat_id=RECIPIENT + 1))
+        self.assertEqual((observations.snapshot('s').status, observations.snapshot('s').temporary_id), ('pending', -21))
+        observations.reduce(succeeded(-21, 821, 'messageDocument'))
+        self.assertEqual((observations.snapshot('s').status, observations.snapshot('s').message_id), ('sent', 821))
 
     def test_late_updates_after_expiry_change_nothing(self):
         from telegram_search_mcp.send_observations import RETENTION_SECONDS

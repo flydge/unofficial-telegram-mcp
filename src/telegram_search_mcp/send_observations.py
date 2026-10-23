@@ -69,7 +69,7 @@ class AlbumObservation:
     negative media_album_id and the content types in input order bind each slot to its temporary ID; `failed`
     when the request itself was rejected (no message was created); `conflict` on any mismatch, after which
     every slot stays unknown. A slot becomes terminal only through updateMessageSendSucceeded or
-    updateMessageSendFailed for its bound temporary ID; deletion or absence never proves failure."""
+    updateMessageSendFailed for its bound (chat, temporary ID); deletion or absence never proves failure."""
     attempt_id: str
     extra: str
     sending_id: int
@@ -117,6 +117,14 @@ def _album_terminal(event, chat_id, content_type):
             and type(inner.get('code')) is int and inner['code'] == error['code']):
         return ('failed', None)
     return ('conflict', None)
+
+
+def _other_chat(event, chat_id):
+    """A terminal update for another chat's message. The pinned TDLib (d1085f9) numbers temporary message IDs per
+    chat, so the same temporary ID in another chat is someone else's message: never evidence for a slot. A message
+    whose chat cannot be read is not another chat's; it stays evidence (a conflict) against the slot."""
+    value = event.get('message')
+    return isinstance(value, dict) and integer(value.get('chat_id')) and value['chat_id'] != chat_id
 
 
 def _album_binding(event, observation):
@@ -188,6 +196,8 @@ def _reduce_album(old, event):
     if kind not in ('updateMessageSendSucceeded', 'updateMessageSendFailed') or not integer(event.get('old_message_id')):
         return old  # updateNewMessage never binds; deletion or absence never ends a slot.
     old_id = event['old_message_id']
+    if _other_chat(event, old.chat_id):
+        return old  # Slots bind by (chat, temporary ID): never buffered, never a second end, never a conflict.
     if old.status == 'registered':
         value = event.get('message')
         content_type = value.get('content', {}).get('@type') if isinstance(value, dict) and isinstance(
