@@ -1,0 +1,7 @@
+{
+  "structure": {
+    "get_album_send_status": "new tool (0.56 albums): the closed album status, separate from the frozen get_send_status",
+    "prepare_album_send": "new tool (0.56 albums): one ordered album of 2-10 owned artifacts as an immutable draft",
+    "send_prepared_album": "new tool (0.56 albums): one approved sendMessageAlbum attempt with per-item outcomes"
+  }
+}

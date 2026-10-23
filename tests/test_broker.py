@@ -492,6 +492,9 @@ client.close()
             "apply_prepared_archive",
             "prepare_text_edit",
             "apply_prepared_text_edit",
+            "prepare_album_send",
+            "send_prepared_album",
+            "get_album_send_status",
         ]
         # Registration order, filtered by the loaded policy (tools/list lists only usable tools).
         usable = set(available_tools(RuntimePolicy().enabled_capabilities))

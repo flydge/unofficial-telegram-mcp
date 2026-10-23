@@ -47,6 +47,9 @@ from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendRespon
     SendPreparedForwardResponse, UNAVAILABLE as FORWARD_UNAVAILABLE)
 from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
     SendPreparedVideoResponse, UNAVAILABLE as VIDEO_UNAVAILABLE)
+from .album_drafts import (GetAlbumSendStatusRequest, GetAlbumSendStatusResponse, PrepareAlbumSendRequest,
+    PrepareAlbumSendResponse, SendPreparedAlbumRequest, SendPreparedAlbumResponse, album_status,
+    SEND_DETAILS as ALBUM_SEND_DETAILS, UNAVAILABLE as ALBUM_UNAVAILABLE)
 from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveResponse, ApplyPreparedArchiveRequest,
     ApplyPreparedArchiveResponse, UNAVAILABLE as ARCHIVE_UNAVAILABLE)
 from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
@@ -242,6 +245,13 @@ def _request_launchd_restart(account: AccountPaths | None = None) -> None:
 # A starting broker reads its Keychain key and opens an encrypted database before
 # it creates its socket (about 4 s observed on a real Mac); wait for it, bounded.
 BROKER_STARTUP_WAIT_SECONDS = 10.0
+# Operations whose broker work is bounded by 30 seconds get that request deadline; every other one (each send or
+# apply included: the broker's 330-second send budget) keeps the whole request timeout.
+SHORT_DEADLINE_OPERATIONS = frozenset({
+    "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send",
+    "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send",
+    "prepare_chat_archive", "prepare_text_edit", "get_send_status", "search_chats", "verify_target",
+    "read_target_messages", "read_presentation", "prepare_album_send", "get_album_send_status"})
 
 
 from .selection_client import SelectionClientMixin, selected_method, selection_wire, strict_selection_response
@@ -368,7 +378,8 @@ class BrokerClient(SelectionClientMixin):
                 raise CompatibilityError("capability_disabled")
         except CompatibilityError as error:
             raise BrokerCompatibilityError(error.code) from None
-        deadline = time.monotonic() + min(self._request_timeout, 30 if operation in {"get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send", "prepare_chat_archive", "prepare_text_edit", "get_send_status", "search_chats", "verify_target", "read_target_messages", "read_presentation"} else self._request_timeout)
+        deadline = time.monotonic() + min(self._request_timeout,
+                                          30 if operation in SHORT_DEADLINE_OPERATIONS else self._request_timeout)
         try:
             connection = self._connector(self._socket_path)
         except OSError:
@@ -1789,6 +1800,47 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError, ValueError):
             return SendPreparedVideoResponse(status="outcome_unknown", draft_id=request.draft_id,
                                              detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_album_send(self, request: PrepareAlbumSendRequest) -> PrepareAlbumSendResponse:
+        """The broker's preview must state this exact request: recipient, group, and every item's artifact and
+        normalized caption in order (the preview model itself re-derives the album digest and totals)."""
+        from .outgoing_drafts import _safe_caption
+        try:
+            response = PrepareAlbumSendResponse.model_validate(
+                self._request("prepare_album_send", request.model_dump(mode="json")))
+            if response.album is not None:
+                preview = response.album
+                if (preview.recipient.chat_id != request.recipient or preview.group != request.group or
+                        [(item.artifact_id, item.raw_caption) for item in preview.items] !=
+                        [(item.artifact_id, _safe_caption(item.caption)) for item in request.items]):
+                    raise BrokerUnavailable("album preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareAlbumSendResponse(status="unavailable", detail=ALBUM_UNAVAILABLE)
+
+    def send_prepared_album(self, request: SendPreparedAlbumRequest) -> SendPreparedAlbumResponse:
+        try:
+            response = SendPreparedAlbumResponse.model_validate(
+                self._request("send_prepared_album", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("album receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return SendPreparedAlbumResponse(status="error", draft_id=request.draft_id,
+                                             detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return SendPreparedAlbumResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                             detail=ALBUM_SEND_DETAILS["lost"])
+
+    def get_album_send_status(self, request: GetAlbumSendStatusRequest) -> GetAlbumSendStatusResponse:
+        try:
+            response = GetAlbumSendStatusResponse.model_validate(
+                self._request("get_album_send_status", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise BrokerUnavailable("album status does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError):
+            return album_status(request.draft_id)
 
     def prepare_chat_archive(self, request: PrepareChatArchiveRequest) -> PrepareChatArchiveResponse:
         try:

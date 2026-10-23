@@ -25,15 +25,23 @@ from telegram_search_mcp.server import _TOOL_CAPABILITIES, _TOOL_NAMES, build_se
 from test_guard_refusals import CONNECT_DEFAULT
 from tool_listing import FULL_POLICY, full_listing
 
-PER_TOOL, TOTAL = 1500, 30000
+# The 0.54 budget: 1,500 characters per tool and 30,000 in total for its 55 tools. Each later tool grows the total by
+# at most 600 characters, recorded here: 0.56 albums add prepare_album_send, send_prepared_album and
+# get_album_send_status (+1,800).
+PER_TOOL, TOTAL_054, PER_ADDED_TOOL = 1500, 30000, 600
+ADDED_SINCE_054 = ('prepare_album_send', 'send_prepared_album', 'get_album_send_status')
+TOTAL = TOTAL_054 + PER_ADDED_TOOL * len(ADDED_SINCE_054)
 JARGON = re.compile(r"private v\d|\bv\d{1,2}\b|\bipc ?2\b|canonical|prewire|contract ?1\b|display bytes", re.I)
 SEND_APPLY = ('send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward', 'send_prepared_video',
               'apply_prepared_archive', 'apply_prepared_text_edit')
 MANDATORY = ('local dialog', 'outcome_unknown', 'get_send_status', 'never resend')
+# An album has its own status tool; get_send_status knows no album.
+ALBUM_MANDATORY = ('local dialog', 'outcome_unknown', 'partial', 'get_album_send_status', 'never resend')
 # Results without Telegram-originated strings need not repeat the untrusted-data rule.
 LOCAL_ONLY = {'_manifest', 'create_local_artifact', 'begin_local_upload', 'append_local_upload', 'finish_local_upload',
               'issue_local_upload_authority', 'consume_local_upload_result', 'cancel_local_upload_authority',
-              'list_drafts', 'get_send_status', 'cancel_draft', *SEND_APPLY}
+              'list_drafts', 'get_send_status', 'cancel_draft', *SEND_APPLY, 'send_prepared_album',
+              'get_album_send_status'}
 READ_ONLY_PREFIXES = ('_manifest', 'resolve_', 'discover_', 'search_', 'get_', 'read_', 'analyze_', 'list_',
                       'verify_', 'retain_', 'prepare_')
 TOOL_LIKE = re.compile(r"\b(?:prepare|send_prepared|apply_prepared|get|read|list|update|refresh|cancel|retain|verify|"
@@ -120,10 +128,12 @@ class DescriptionBudgetTests(unittest.IsolatedAsyncioTestCase):
 
     def test_budget_is_measured_on_the_built_registration(self):
         self.assertEqual(set(self.tools), set(_TOOL_NAMES))
+        self.assertEqual(len(_TOOL_NAMES), 55 + len(ADDED_SINCE_054))
+        self.assertLessEqual(set(ADDED_SINCE_054), set(_TOOL_NAMES))
         lengths = {name: len(tool.description) for name, tool in self.tools.items()}
         for name, length in lengths.items():
             with self.subTest(tool=name):
-                self.assertLessEqual(length, PER_TOOL)
+                self.assertLessEqual(length, PER_ADDED_TOOL if name in ADDED_SINCE_054 else PER_TOOL)
         self.assertLessEqual(sum(lengths.values()), TOTAL)
 
     def test_no_internal_history(self):
@@ -152,6 +162,9 @@ class DescriptionBudgetTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=name):
                 for phrase in MANDATORY:
                     self.assertIn(phrase, self.tools[name].description)
+        for phrase in ALBUM_MANDATORY:
+            self.assertIn(phrase, self.tools['send_prepared_album'].description)
+        self.assertNotIn('get_send_status', self.tools['send_prepared_album'].description)
 
     def test_telegram_data_is_named_untrusted(self):
         for name, tool in self.tools.items():
@@ -342,7 +355,7 @@ class InputRefusalTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(leak.casefold(), text.casefold())
 
     async def test_every_tool_names_what_failed_in_one_closed_text(self):
-        """All 55 tools: missing names exactly the absent required parameters, invalid exactly the declared
+        """Every tool: missing names exactly the absent required parameters, invalid exactly the declared
         parameters whose value failed, and undeclared keys are only counted."""
         tools = await full_listing()
         self.assertEqual(len(tools), len(_TOOL_NAMES))
@@ -463,7 +476,7 @@ class InputRefusalTests(unittest.IsolatedAsyncioTestCase):
                             self.assertRefused(result, refusal(name, invalid=(source, selected)))
 
     async def test_fuzzed_keys_and_values_never_reach_the_refusal(self):
-        """Random undeclared keys and random values for declared parameters, across all 55 tools: every
+        """Random undeclared keys and random values for declared parameters, across every tool: every
         refusal parses under the closed grammar, names only declared parameters, counts the undeclared keys
         exactly and contains no caller key or value."""
         rng = random.Random(0x54_1)

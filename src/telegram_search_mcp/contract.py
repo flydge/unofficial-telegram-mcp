@@ -16,6 +16,8 @@ OPERATION_CAPABILITIES = {
     "retain_selection": "retained_selections",
     **{name: "forward_send" for name in ("prepare_forward_send", "send_prepared_forward")},
     **{name: "video_send" for name in ("prepare_video_send", "send_prepared_video")},
+    # 0.56: an album with a video item also needs video_send; that per-draft conjunction is the broker's.
+    **{name: "album_send" for name in ("prepare_album_send", "send_prepared_album", "get_album_send_status")},
     **{name: "archive_chats" for name in ("prepare_chat_archive", "apply_prepared_archive")},
     **{name: "edit_own_text" for name in ("prepare_text_edit", "apply_prepared_text_edit")},
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},

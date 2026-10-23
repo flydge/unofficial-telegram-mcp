@@ -54,6 +54,9 @@ from .forward_drafts import (PrepareForwardSendRequest, PrepareForwardSendRespon
     SendPreparedForwardResponse, ForwardMode, PositiveMessageId)
 from .video_drafts import (PrepareVideoSendRequest, PrepareVideoSendResponse, SendPreparedVideoRequest,
     SendPreparedVideoResponse)
+from .album_drafts import (AlbumItemRequest, GetAlbumSendStatusRequest, GetAlbumSendStatusResponse, Group as AlbumGroup,
+    MAX_ITEMS as ALBUM_MAX_ITEMS, MIN_ITEMS as ALBUM_MIN_ITEMS, PrepareAlbumSendRequest, PrepareAlbumSendResponse,
+    SendPreparedAlbumRequest, SendPreparedAlbumResponse)
 from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveResponse, ApplyPreparedArchiveRequest,
     ApplyPreparedArchiveResponse, ChatList)
 from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
@@ -162,6 +165,9 @@ _TOOL_NAMES = [
     "apply_prepared_archive",
     "prepare_text_edit",
     "apply_prepared_text_edit",
+    "prepare_album_send",
+    "send_prepared_album",
+    "get_album_send_status",
 ]
 # Each tool's full capability requirement, the guard's own rule; `_manifest` needs none.
 _TOOL_CAPABILITIES = {name: required_capabilities(OPERATION_CAPABILITIES[TOOL_OPERATIONS[name]])
@@ -200,7 +206,8 @@ _INSTRUCTIONS = (
     "Actions: prepare, then show a concise preview (recipient, exact text or file, expiry). Only "
     "after the user says yes, call the send or apply tool. A macOS dialog then appears on this Mac "
     "for 120 s with Cancel as the default. declined, timeout or dialog_unavailable sends nothing and "
-    "leaves the draft pending. outcome_unknown → call get_send_status; never send again.\n"
+    "leaves the draft pending. outcome_unknown → call get_send_status (get_album_send_status for an album); "
+    "never send again.\n"
     "Recovery: when a response carries next_action, follow it (check_connection, connect_account, "
     "update_installation, enable_capability, search_again, restart_listing, check_send_status). "
     "capability_disabled → tell the owner which capability to enable. selection_unavailable → retain "
@@ -218,11 +225,11 @@ _CURSOR = "resend the same arguments with next_cursor within 300 seconds (single
 _OWN_DRAFTS = "drafts cannot be listed, updated, refreshed or cancelled through the generic draft tools"
 
 
-def _approval(effect: str) -> str:
+def _approval(effect: str, unknown: str = "outcome_unknown means it may have reached Telegram: call get_send_status "
+                                          "and never resend.") -> str:
     return ("Call it only after the user approved this exact preview; the owner then approves in a local dialog "
-            f"on this Mac (120 s). A declined, timed-out or unavailable dialog {effect} nothing. outcome_unknown "
-            "means it may have reached Telegram: call get_send_status and never resend. A repeated call replays "
-            "the receipt.")
+            f"on this Mac (120 s). A declined, timed-out or unavailable dialog {effect} nothing. {unknown} A repeated "
+            "call replays the receipt.")
 
 
 # Source-dependent reply capabilities beyond each reply tool's own, one per entity family.
@@ -498,6 +505,25 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "marked edited and the old text cannot be restored.",
         "applied requires the returned message to carry exactly the new text; message_changed means no attempt. "
         + _approval("changes")),
+    # 0.56 albums; each description adds at most 600 characters to the surface budget (tests/test_surface_054.py).
+    "prepare_album_send": ("Prepare an album send",
+        "Prepare 2–10 owned artifacts as one ordered album: photos and videos (group media) or documents (group "
+        "documents).",
+        "A video item also needs video_send. Items are checked locally (256 MiB in total); captions are plain text; "
+        "refusal codes never name the item. " + _PREVIEW + " Preparing again for the same items and recipient "
+        "supersedes the earlier one. Album " + _OWN_DRAFTS + ". " + _UNTRUSTED),
+    "send_prepared_album": ("Send a prepared album",
+        "Revalidate the account, recipient and item bytes, then make exactly one album send attempt with per-item "
+        "outcomes (sent, failed, outcome_unknown; a mix is partial).",
+        "recipient_changed means nothing was sent. " + _approval(
+            "sends", "outcome_unknown or partial with unconfirmed items may reach Telegram (large albums can "
+            "outlast the wait): call get_album_send_status and never resend.")),
+    "get_album_send_status": ("Check album send status",
+        "Report one album's send attempt: pending, sent, failed, partial or outcome_unknown, with each item's status "
+        "and final message ID.",
+        "Use it after outcome_unknown or partial instead of sending again; it never sends or retries, and may settle "
+        "late items. sent requires an exact final message ID. Observations last at most 900 seconds; this is not "
+        "delivery or read status."),
 }
 
 
@@ -555,6 +581,9 @@ _FIELD_DOCS = {
     "after_draft_id": "Last draft_id of the previous page.",
     "draft_text": "Replacement text of a text draft.",
     "draft_caption": "Replacement caption of a file draft.",
+    "album_items": "2–10 {artifact_id, caption} in send order; artifact_ids as from get_attachment or "
+                   "create_local_artifact.",
+    "album_group": "media: photos and videos (the default); documents: documents only.",
 }
 
 
@@ -610,6 +639,7 @@ _RULE_PARAMETERS: dict[str, tuple[str, ...]] = {
     "PrepareReplyTextSendRequest": ("outgoing_entities",),
     "UpdateReplyDraftRequest": ("outgoing_entities",),
     "UpdateDraftRequest": ("outgoing_entities",),
+    "PrepareAlbumSendRequest": ("items",),
 }
 
 
@@ -1073,7 +1103,9 @@ def build_server(
                 "bulk and moderation operations",
                 "unapproved sends and automatic send retries",
                 "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
-                "video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
+                "video replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
+                "album audio items, mixed document and media albums, album replies, topics, formatted captions and "
+                "spoilers, and album resends",
                 "viewMessages and read receipts",
                 "caller-controlled attachment paths and file IDs",
                 "credentials, filesystem paths, and account wildcards in tool input",
@@ -1809,6 +1841,23 @@ def build_server(
         return get_service().apply_prepared_text_edit(ApplyPreparedTextEditRequest(draft_id=draft_id,
                                                                                    approved=approved))
 
+    @server.tool(name="prepare_album_send", annotations=_READ_ONLY_STATEFUL, structured_output=True)
+    def prepare_album_send(recipient: Annotated[ChatId, _about("recipient")],
+                           items: Annotated[list[AlbumItemRequest],
+                                            Field(min_length=ALBUM_MIN_ITEMS, max_length=ALBUM_MAX_ITEMS),
+                                            _about("album_items")],
+                           group: Annotated[AlbumGroup, _about("album_group")] = "media") -> PrepareAlbumSendResponse:
+        return get_service().prepare_album_send(PrepareAlbumSendRequest(recipient=recipient, items=items, group=group))
+
+    @server.tool(name="send_prepared_album", annotations=_TRANSFER, structured_output=True)
+    def send_prepared_album(draft_id: Annotated[DraftId, _about("draft_id")],
+                            approved: Annotated[bool, Field(strict=True), _about("approved")]) -> SendPreparedAlbumResponse:
+        return get_service().send_prepared_album(SendPreparedAlbumRequest(draft_id=draft_id, approved=approved))
+
+    @server.tool(name="get_album_send_status", annotations=_READ_ONLY, structured_output=True)
+    def get_album_send_status(draft_id: Annotated[DraftId, _about("draft_id")]) -> GetAlbumSendStatusResponse:
+        return get_service().get_album_send_status(GetAlbumSendStatusRequest(draft_id=draft_id))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
@@ -1817,7 +1866,8 @@ def build_server(
             ("send_prepared_forward",SendPreparedForwardRequest),("prepare_video_send",PrepareVideoSendRequest),
             ("send_prepared_video",SendPreparedVideoRequest),("prepare_chat_archive",PrepareChatArchiveRequest),
             ("apply_prepared_archive",ApplyPreparedArchiveRequest),("prepare_text_edit",PrepareTextEditRequest),
-            ("apply_prepared_text_edit",ApplyPreparedTextEditRequest)):
+            ("apply_prepared_text_edit",ApplyPreparedTextEditRequest),("prepare_album_send",PrepareAlbumSendRequest),
+            ("send_prepared_album",SendPreparedAlbumRequest),("get_album_send_status",GetAlbumSendStatusRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):

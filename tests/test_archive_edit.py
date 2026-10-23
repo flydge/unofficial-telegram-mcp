@@ -330,8 +330,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         tools = {tool['name']: tool for tool in schema_document(build_server(policy=RuntimePolicy()))['tools']}
         self.assertEqual(len(tools), len(_TOOL_NAMES))  # the registration, independent of the listing policy
         new = {'prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'}
+        later = {'prepare_album_send', 'send_prepared_album', 'get_album_send_status'}  # 0.56 albums, after this slice
         self.assertTrue(new <= set(tools))
-        existing = [tools[name] for name in sorted(set(tools) - new)]
+        existing = [tools[name] for name in sorted(set(tools) - new - later)]
         self.assertEqual(len(existing), 51)
         changed = changed_since_0_52()
         if not changed:
@@ -353,16 +354,17 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         async with Client(build_server(service_factory=lambda: self.fail('provider opened'), policy=full)) as consumer:
             tools = {t.name: t for t in (await consumer.list_tools()).tools}
         self.assertEqual(len(tools), len(_TOOL_NAMES))
-        self.assertEqual(list(tools)[-4:], ['prepare_chat_archive', 'apply_prepared_archive',
-                                            'prepare_text_edit', 'apply_prepared_text_edit'])
+        # The 0.56 album tools follow these four in registration order.
+        ours = ['prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit']
+        self.assertEqual(list(tools)[-7:-3], ours)
         self.assertEqual(set(tools['prepare_chat_archive'].input_schema['properties']), {'chat', 'target_list'})
         self.assertEqual(set(tools['prepare_text_edit'].input_schema['properties']),
                          {'chat', 'message_id', 'new_text'})
-        for name in list(tools)[-4:]:
+        for name in ours:
             self.assertFalse(tools[name].input_schema['additionalProperties'])
             # 0.54: preparation creates local draft state only, so it is read-only.
             self.assertEqual(tools[name].annotations.read_only_hint, name.startswith('prepare_'))
-        self.assertEqual([name for name in list(tools)[-4:] if tools[name].annotations.destructive_hint],
+        self.assertEqual([name for name in ours if tools[name].annotations.destructive_hint],
                          ['apply_prepared_text_edit'])
         for policy, archive_on, edit_on in ((RuntimePolicy(), False, False),
                                             (RuntimePolicy(enabled_capabilities=('send',)), False, False),

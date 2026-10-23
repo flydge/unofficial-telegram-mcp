@@ -57,15 +57,15 @@ selects one, and a candidate list never authorizes a multi-chat search.
    hypothesis. Otherwise show the few candidates with short evidence and ask. Never search candidates to
    break a tie.
 
-The evidence is Telegram's lexical search, not embeddings or a semantic score. A candidate can qualify
-through its messages even when its title shares no word with the hypotheses.
+The evidence is Telegram's lexical search, not a semantic score; a candidate can qualify through its messages
+alone.
 
 ## Thorough search
 
 For a fact about a person, plan or event:
 
 - **Candidate ledger.** For a person or remembered conversation, keep every plausible account (chat ID,
-  title, evidence, identity status, search status) in working memory only, never persisted. Two accounts
+  title, evidence, identity and search status) in working memory only, never persisted. Two accounts
   with the same name both stay open: a handle seen in a group or an answer found in one account closes
   neither. Ask one short identity question when ownership is unclear; meanwhile continue with the confirmed
   targets. Search every account the user confirms and keep coverage per account.
@@ -119,6 +119,7 @@ For a fact about a person, plan or event:
 | File reply | `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft`, `refresh_reply_artifact_draft` | `reply_artifact_send`, `send` |
 | Forward or copy one message | `prepare_forward_send`, `send_prepared_forward` | `forward_send`, `send` |
 | One native video | `prepare_video_send`, `send_prepared_video` | `video_send`, `send` |
+| Album of 2–10 files | `prepare_album_send`, `send_prepared_album`, `get_album_send_status` | `album_send`, `send` |
 | Move a chat to Archive or Main | `prepare_chat_archive`, `apply_prepared_archive` | `archive_chats`, `send`, `read` |
 | Edit one own text message | `prepare_text_edit`, `apply_prepared_text_edit` | `edit_own_text`, `send`, `read` |
 
@@ -138,22 +139,20 @@ A text reply is sent with `send_prepared_text`, a file reply with `send_prepared
   `sender`, `direction` and `topic`. `search_correspondence` makes one bounded pass over one exact chat
   (numeric or exact `@username`) with `text`, `file_name`, `mime_type`, `media_type` or `contains_number`;
   check `coverage.complete`. Prefer `search_messages` for text when it is available. `search_chats` reads one
-  chat page per call: `current_index` is the chat in progress and `coverage` holds each chat's `state`
-  (`pending`, `active`, `stopped`).
+  chat page per call; `coverage` holds each chat's `state`.
 - **Files.** `get_attachment` copies one message's original file into the owner-only cache and returns an
   `artifact_id` valid for 12 hours: PDF, DOCX, UTF-8 text and code, JPEG/PNG/WebP (64 MiB), audio and video
   (256 MiB). Telegram XLSX and PPTX files return `unsupported`; `read_spreadsheet` and
-  `read_presentation` read local XLSX and PPTX artifacts (call once without a selection for the catalog,
-  then select). Formulas and code are never run, links never followed, and there is no OCR.
+  `read_presentation` read local XLSX and PPTX artifacts (first call without a selection lists them).
+  Formulas and code are never run, links never followed, and there is no OCR.
 - **Saving a file locally.** Only to a destination the user names:
   `telegram-search-transfer download --artifact-id ISSUED_ID --destination ABSOLUTE_PATH`. It never
   overwrites; success is exit 0 with a receipt matching the artifact's size and SHA-256. Keep bytes out of
   the chat. On a refusal or a stop, report it: keep any final file and the helper's partial
   files, and never retry, overwrite, delete, resume or choose another destination yourself.
 - **New local files.** Small UTF-8 or base64 content goes through `create_local_artifact` (512 KiB). For a
-  file the user selected, follow the four steps in the `issue_local_upload_authority` description (manifest,
-  issue, helper upload through stdin, `consume_local_upload_result`). Never pass paths to MCP tools or put
-  the upload secret in arguments, environment, logs or prose.
+  file the user selected, follow the four steps in the `issue_local_upload_authority` description. Never pass
+  paths to MCP tools or put the upload secret in arguments, environment, logs or prose.
 - **Retained selections.** `retain_selection` turns chosen messages, a verified chat's messages or an owned
   file into a memory-only `selection_id` for the readers and draft tools. It lives for the policy's
   `selection_ttl_seconds` (default 900, at most 1800), never renews, and carries no recipient or approval.
@@ -205,8 +204,8 @@ sends and never states delivery or read status.
 working, so show the new preview and ask again. A draft with a forum topic cannot be refreshed: prepare it
 again. `list_drafts` and `cancel_draft` cover this connection's text, file and reply drafts; `get_draft`
 shows text and file drafts, `get_reply_draft` and `get_reply_artifact_draft` reply drafts. Forward, video,
-archive and edit drafts have no update, refresh or cancel: prepare again (that supersedes the earlier draft)
-or let them expire.
+album, archive and edit drafts have no update, refresh or cancel: prepare again (that supersedes the earlier
+draft) or let them expire.
 
 **Replies.** `reply_to` is one committed message in the recipient chat, or use `reply_selection_id`. The
 source may need more default-off capabilities: `reply_media_targets` for a document, static photo or OGG
@@ -222,10 +221,11 @@ will not be a reply.
 `formatted_text_send`; offsets count UTF-16 units of the final normalized text, and source formatting is
 never copied. After a topic refusal, never fall back to General, another topic or the plain chat.
 
-**Forward, video, archive, edit.** Settle the choice with the user first: `mode` forward (recipients see the
-original sender) or copy (a new message from the owner); Archive or Main; the complete new text of one own
+**Forward, video, album, archive, edit.** Settle the choice with the user first: `mode` forward (recipients see
+the original sender) or copy (a new message from the owner); Archive or Main; the complete new text of one own
 plain-text message (old formatting is lost and recipients see it marked edited). Show the entire preview;
-video facts are declared by the file, not decoded. A `refused` result names a closed `refusal` code: report
+video facts are declared by the file, not decoded. An album is 2–10 own files in order (a video item also needs
+`video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend. A `refused` result names a closed `refusal` code: report
 it, and never work around it by re-sending a download, re-encoding, retyping or using the Telegram app.
 Telegram may move an archived chat back to Main when a new message arrives. After `outcome_unknown` on an
 archive move or edit, check the chat or message (`list_chats`, `read_messages`) and ask; never apply again.
@@ -239,10 +239,10 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects this MCP client |
 | `connect_account` | authorization not ready (`blocked`) | The owner connects the account with the telegram-setup skill (QR code on their phone), then reconnects |
 | `update_installation` | `config_stale` | The policy changed or a pin no longer matches: the owner restarts or updates the matching components; then call `_manifest` again |
-| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile: the refusal text names it; for a structured result find them in `_manifest` `capability_profiles`. Only the owner switches it, in Terminal, after quitting every MCP client (it refuses while one used Telegram in the last 5 minutes), then reconnects. Never run the switch or edit the policy yourself, even with a shell |
+| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile: the refusal text names it; for a structured result find them in `_manifest` `capability_profiles`. Only the owner switches it, in Terminal, after quitting every MCP client, then reconnects. Never run the switch or edit the policy yourself, even with a shell |
 | `search_again` | `selection_unavailable` | Choose the source again from search or read results and call `retain_selection` again; never reuse the old `selection_id` |
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
-| `check_send_status` | `outcome_unknown` | Call `get_send_status`; never resend |
+| `check_send_status` | `outcome_unknown` | Call `get_send_status` (`get_album_send_status` for an album); never resend |
 
 Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments` names only the missing or
 invalid schema parameters (never values): fix those once, without looping; `unknown_tool` means refresh

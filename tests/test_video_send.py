@@ -272,8 +272,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         from telegram_search_mcp.server import build_server
         good = {'artifact_id': 'artifact_' + 'c' * 32 + '_' + 'd' * 64 + '_10', 'recipient': RECIPIENT}
         tools = await full_listing()
-        self.assertEqual(list(tools)[-6:], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
-                                            'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
+        self.assertEqual(list(tools)[-9:-3], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
+                                              'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
+        self.assertEqual(list(tools)[-3:], ['prepare_album_send', 'send_prepared_album', 'get_album_send_status'])
         self.assertEqual(set(tools['prepare_video_send'].input_schema['properties']),
                          {'artifact_id', 'recipient', 'caption'})
         self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})
