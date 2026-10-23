@@ -25,7 +25,7 @@ _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'l
     # The account pin at login, as connect reports it (0.55 spec 3C): never a user id, only these fixed codes.
     'account_mismatch', 'account_duplicate', 'alias_unavailable',
     # A named alias's login run from an installed release (review fix 055d3, account_registry.login_admission).
-    'transaction_pending'})
+    'transaction_pending', 'newer_state_kept'})
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,7 @@ class SetupResult:
             'account_duplicate': 'review_enrollment_binding_without_resetting',
             'alias_unavailable': 'stop_and_report',
             'transaction_pending': 'finish_pending_installer_action_then_retry',
+            'newer_state_kept': 'upgrade_installation_or_remove_account',
             'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
             'auth_destroy_failed': 'exit_setup_process_then_resume_in_foreground_native_terminal',
             'unsupported_auth_state': 'complete_supported_auth_with_official_telegram_guidance',
@@ -148,7 +149,8 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     which a login never creates: a missing root, or an alias the registry no
     longer lists, refuses `alias_unavailable` (review fix 055d3). Run from an
     installed release it then refuses `transaction_pending` while an installer
-    transaction is unfinished (account_registry.login_admission). The default's
+    transaction is unfinished, and `newer_state_kept` while the alias's state
+    is another release's (account_registry.login_admission). The default's
     keeps 0.54's behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)

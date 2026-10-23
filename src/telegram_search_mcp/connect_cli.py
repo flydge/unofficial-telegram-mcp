@@ -342,8 +342,8 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
     if lock is None:
         return response
     try:  # Released right after the bootstrap; an inline run holds it throughout.
-        # A named alias run from an installed release, with the lock held: no installer transaction may be pending
-        # (review fix 055d3); refused before any stop, job or status change.
+        # A named alias run from an installed release, with the lock held: no installer transaction may be pending,
+        # and its state must be this release's (review fix 055d3); refused before any stop, job or status change.
         refused = account_registry.login_admission(paths.account)
         if refused is not None:
             return _refused(refused)

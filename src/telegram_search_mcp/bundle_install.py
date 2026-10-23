@@ -1201,17 +1201,20 @@ class _Service:
 
         On a rollback (`newer`, review fix 055d2, low) the alias's state check runs again first: when its session
         state changed since the upgrade recorded it (that login made it), the older release must not take it over.
-        Lead decision (owner review pending): the alias stays off the target, whole, on the release its session was
-        made with: its plist is left as that release's exact definition, the version line this change moved before
-        its commit goes back (`back`, journaled), no broker is booted out or started, and the outcome is journaled
-        once (`appeared:<alias>`) and answered `newer_state_kept`."""
+        Lead decision (owner review pending): the alias stays off the target on the release its session was made
+        with: the version line this change moved before its commit goes back (`back`, journaled), and the outcome is
+        journaled once (`appeared:<alias>`) and answered `newer_state_kept`. Its definition, which names a release
+        current.json no longer names (its launcher would refuse to start under this receipt, and KeepAlive would
+        respawn it for good), is set aside (`_set_aside`, review fix 055d3): offline until the next upgrade moves the
+        alias on, or its account-remove."""
         kind,data,_=self.kind()
-        if (newer is not None and kind not in ('absent','to')
-                and (j.recorded(self.k('appeared')) is not None or newer())):
+        if newer is not None and (j.recorded(self.k('appeared')) is not None
+                                  or kind not in ('absent','to') and newer()):
             if j.recorded(self.k('appeared')) is None:
                 j.update(single=(self.k('appeared'),{'status':'newer_state_kept'}))
                 j.checkpoint(self.k('recorded:appeared'))
             if back is not None:back()
+            self._set_aside(j)
             return j.recorded(self.k('appeared'))['status']
         live=_live(self.runner,self.label)
         stale=live is not None and not _matches_live(live,self.plist,self.target)
@@ -1226,6 +1229,32 @@ class _Service:
             j.write(self.k('plist'),self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
         return 'not_loaded'
+
+
+    def _set_aside(self, j):
+        """A rollback's `newer_state_kept` alias (review fix 055d3): its broker definition, naming the newer release,
+        leaves launchd's reach. A broker loaded from it is gated and booted out first; its exact bytes are kept in the
+        transaction directory (`service-<alias>.newer`, their hash journaled first, `appeared_plist`), then the plist
+        is unlinked, never overwritten. No session data is touched. Idempotent by state: a plist already gone (or the
+        target's) is left as it is. A definition other than the one recorded refuses `service_conflict`."""
+        kind,data,payload=self.kind()
+        if kind in ('absent','to'):return
+        live=_live(self.runner,self.label)
+        if live is not None:
+            self.gate(self._loaded_payload(live,kind,payload))
+            _bootout(self.runner,self.label)
+        if j.recorded(self.k('appeared_plist')) is None:
+            j.update(single=(self.k('appeared_plist'),{'sha256':digest(data),'bytes':len(data)}))
+            j.checkpoint(self.k('recorded:appeared_plist'))
+        record,kept=j.recorded(self.k('appeared_plist')),j.tx/('service-%s.newer'%self.alias)
+        if digest(data)!=record.get('sha256') or len(data)!=record.get('bytes'):raise InstallError('service_conflict')
+        if not os.path.lexists(kept):
+            create(kept,data,maximum=MAX_PLIST_BYTES)
+            j.checkpoint(self.k('kept:appeared_plist'))
+        elif read(kept,MAX_PLIST_BYTES,mode=0o600)!=data:
+            raise InstallError('transaction_conflict')
+        if not _unlink_exact(self.plist,data):raise InstallError('service_conflict')
+        j.checkpoint(self.k('removed:appeared_plist'))
 
 
 def _payload_release(payload):
@@ -2079,7 +2108,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     its accounts.json record, its Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its
     record republished beside receipt.json. A plist absent at its observation is verified again after the commit: one
     a login wrote between two runs is moved to the target's (`_Service._appeared`), but on a rollback an alias whose
-    session state that login changed stays whole on its release (`newer_state_kept`). A late refusal restores every
+    session state that login changed stays on its release (`newer_state_kept`), offline: its plist set aside into
+    the transaction (review fix 055d3), until the next upgrade or its account-remove. A late refusal restores every
     stopped broker, the default's first. A rollback checks each alias's session state like the default's, and to a
     release older than 0.55 refuses `accounts_present` while any alias exists; with none left it retires the registry
     and the default's readiness record after its commit and restart.
@@ -2614,7 +2644,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         # An alias whose plist was absent at the observation is verified again (`_Service._appeared`): a login that
         # finished between two runs of a parked change has its version line and definition moved to the target's; on a
         # rollback only while its session state is still the one the upgrade recorded (review fix 055d2), else it stays
-        # whole on the release that session was made with (`newer_state_kept`).
+        # on the release that session was made with (`newer_state_kept`), its plist set aside (review fix 055d3).
         def newer(alias):
             upgraded_now=unique_json(read(root/'transactions'/current['transaction']/'journal.json',mode=0o600))
             try:_alias_state_check(alias,home,_change_accounts(upgraded_now,root),alias_versions,to_version)

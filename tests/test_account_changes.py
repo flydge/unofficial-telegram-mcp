@@ -1160,11 +1160,13 @@ class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
         self.jobs.broker_plist.chmod(0o600)
         self.launchctl.load(self.jobs.broker_label)
 
-    def test_an_alias_a_login_gave_a_session_between_the_runs_stays_on_that_release(self):
-        self.added()  # Never logged in: no root, no plist at the upgrade or at the rollback's observation.
+    def kept_on_newer(self, checkpoint=None):
+        """`work` added, never logged in; an upgrade; a rollback parked by a late refusal; a first login between the
+        runs from the release current.json still names; the repeated rollback (with `checkpoint`). Returns (old root,
+        newer root, the rollback's transaction directory, its result or None when `checkpoint` raised)."""
+        self.added()  # Never logged in: no plist at the upgrade or at the rollback's observation.
         old = self.release
-        new = self.newer()
-        self.install(new)
+        self.install(self.newer())
         new_root = self.release
         policy = self.session_root / 'runtime.toml'
         saved = policy.read_bytes()
@@ -1176,35 +1178,134 @@ class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
             self.change('rollback', checkpoint=park)
         policy.write_bytes(saved)
         self.login_from(new_root, NEW_VERSION)  # Between the runs: the release current.json still names.
+        tx = sorted(self.runtime.glob('transactions/change_*'), key=lambda p: int(p.name[7:]))[-1]
+        try:
+            result = self.change('rollback', checkpoint=checkpoint or (lambda _: None))
+        except KeyboardInterrupt:
+            result = None
+        return old, new_root, tx, result
+
+    def assert_kept_on_newer(self, old, new_root, tx, result):
+        self.assertEqual((result['status'], result['accounts']['work']['service']), ('rolled_back', 'newer_state_kept'))
+        self.assertEqual(self.pointer()['release_root'], str(old))
+        payload = bundle_install._service_payload(new_root, self.jobs.broker_label, 'work')
+        # Review fix (055d3, R3): no KeepAlive plist naming a release current.json no longer names; its exact bytes
+        # are kept in the rollback's transaction directory, and no broker runs.
+        self.assertFalse(self.jobs.broker_plist.exists())
+        self.assertEqual(plistlib.loads((tx / 'service-work.newer').read_bytes()), payload)
+        self.assertEqual(oct((tx / 'service-work.newer').stat().st_mode & 0o777), '0o600')
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+        # Its session stays whole on the release it was made with: enrollment and the version line naming it.
+        self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
+                      (self.jobs.root / 'runtime.toml').read_bytes())
+        self.assertEqual((self.jobs.root / 'enrollment.json').read_bytes(), b'{"synthetic": "alias enrollment"}\n')
+        self.assertEqual([p.name for p in self.jobs.root.iterdir() if p.name.startswith('.')], [])  # No temporary.
+        self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir() if p.name.startswith('.')], [])
+
+    def logins_refused(self, release, version, code):
+        """`connect`, `setup` and `resume --account work` run by `release` (as `version`): each refuses `code` and
+        changes nothing."""
+        from test_onboarding import MemoryStore, Terminal
+        from telegram_search_mcp import bundle_runtime, connect_cli
+        from telegram_search_mcp.enrollment import SetupPaths
+        from telegram_search_mcp.setup_wizard import run_setup
+        paths = SetupPaths.from_account(config.AccountPaths.for_alias('work', self.home))
+        # The synthetic enrollment is no valid record (`connect` would refuse `enrollment_inconsistent` first): set
+        # aside for the attempts, so the login reaches its connect.lock.
+        (self.jobs.root / 'enrollment.json').unlink()
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('nothing may run')
+        selection = bundle_runtime.Selection(release, 'x' * 64)
+        try:
+            with mock.patch.object(bundle_runtime, '_SELECTION', selection), \
+                    mock.patch('telegram_search_mcp.__version__', version):
+                before, calls = (self.change_snapshot(), tree(self.jobs.root)), len(self.launchctl.calls)
+                value, status = connect_cli.connect(paths, client_factory=never, terminal=Terminal(), inline=never,
+                                                    runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)
+                outcomes = [value.get('code')]
+                for resume in (False, True):
+                    outcomes.append(run_setup(paths, Terminal(), MemoryStore(), never, handoff=never, resume=resume,
+                                              bundled_loader=lambda: None).code)
+                self.assertEqual(outcomes, [code] * 3)
+                self.assertEqual((self.change_snapshot(), tree(self.jobs.root)), before)
+                self.assertLessEqual({c[0] for c in self.launchctl.calls[calls:]}, {'print'})
+        finally:
+            (self.jobs.root / 'enrollment.json').write_bytes(b'{"synthetic": "alias enrollment"}\n')
+            (self.jobs.root / 'enrollment.json').chmod(0o600)
+
+    def test_an_alias_a_login_gave_a_session_between_the_runs_stays_on_that_release_offline(self):
         kills = []
 
         def kill_once(stage):
             if stage == 'recorded:appeared:work' and not kills:
                 kills.append(stage)
                 raise KeyboardInterrupt
-        with self.assertRaises(KeyboardInterrupt):
-            self.change('rollback', checkpoint=kill_once)
+        old, new_root, tx, result = self.kept_on_newer(kill_once)
+        self.assertIsNone(result)
         result = self.change('rollback')
-        self.assertEqual((result['status'], result['accounts']['work']['service']), ('rolled_back', 'newer_state_kept'))
-        self.assertEqual(self.pointer()['release_root'], str(old))
-        # Whole on the release its session was made with: that release's definition and version line, no broker of the
-        # older release; the one the login started was stopped by the repeat and none is started.
-        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
-                         bundle_install._service_payload(new_root, self.jobs.broker_label, 'work'))
-        self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
-                      (self.jobs.root / 'runtime.toml').read_bytes())
-        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
-        self.assertEqual([p.name for p in self.jobs.root.iterdir() if p.name.startswith('.')], [])  # No temporary.
-        # The next upgrade, to a third release, moves it on whole: the definition is of this installation's own shape
-        # and the version line names one of its releases.
+        self.assert_kept_on_newer(old, new_root, tx, result)
+        # No documented command is left unable to serve or remove it: a login run by the current (older) release
+        # refuses `newer_state_kept` with nothing changed, rather than ending `broker_start_failed` after a login.
+        self.logins_refused(old, OLD_VERSION, 'newer_state_kept')
+        # The next upgrade, to a third release, moves it on: its version line names one of this installation's
+        # releases; the plist stays absent and none is started (`not_loaded`), so its next `connect` starts the third
+        # release's broker, admitted again.
         third = self.newer('c', '0.55.0.dev2')
         result = self.install(third)
         third_root = self.release_root(third)
         self.assertEqual((result['status'], result['accounts']['work']['service']), ('upgraded', 'not_loaded'))
-        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
-                         bundle_install._service_payload(third_root, self.jobs.broker_label, 'work'))
+        self.assertFalse(self.jobs.broker_plist.exists())
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
         self.assertIn(b'expected_package_version = "0.55.0.dev2"', (self.jobs.root / 'runtime.toml').read_bytes())
         self.assertEqual(self.entries('work', third_root), {'codex': True, 'claude': True, 'desktop': True})
+        from telegram_search_mcp import account_registry, bundle_runtime
+        with mock.patch.object(bundle_runtime, '_SELECTION', bundle_runtime.Selection(third_root, 'x' * 64)), \
+                mock.patch('telegram_search_mcp.__version__', '0.55.0.dev2'):
+            self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('work', self.home)))
+
+    def test_account_remove_retires_an_alias_kept_on_the_newer_release(self):
+        old, new_root, tx, result = self.kept_on_newer()
+        self.assert_kept_on_newer(old, new_root, tx, result)
+        removed = self.account('account_remove')
+        self.assertEqual((removed['status'], removed['service'], removed['codex'], removed['claude_code'],
+                          removed['claude_desktop'], removed['session']),
+                         ('account_removed', 'absent', 'removed', 'removed', 'removed', 'moved'))
+        self.assertFalse(self.jobs.root.exists() or self.jobs.broker_plist.exists())
+        self.assertEqual(self.account('account_add')['status'], 'account_added')
+
+    def test_a_kill_inside_the_set_aside_resumes_to_the_same_state(self):
+        for stage in ('recorded:appeared:work', 'recorded:appeared_plist:work', 'kept:appeared_plist:work',
+                      'removed:appeared_plist:work'):
+            with self.subTest(stage=stage):
+                self.setUp()
+
+                def die(value, stage=stage):
+                    if value == stage:
+                        raise KeyboardInterrupt
+                old, new_root, tx, result = self.kept_on_newer(die)
+                self.assertIsNone(result)
+                self.assert_kept_on_newer(old, new_root, tx, self.change('rollback'))
+
+    def test_a_broker_loaded_from_it_meanwhile_is_gated_and_booted_out_first(self):
+        """Killed after the outcome's record, then launchd loads the newer release's plist (a GUI login; no login runs
+        while the rollback is pending): the repeat gates that broker and boots it out before it sets the plist aside;
+        a pending send on it refuses with nothing set aside, and the retry finishes once it settled."""
+        def die(value):
+            if value == 'recorded:appeared:work':
+                raise KeyboardInterrupt
+        old, new_root, tx, _ = self.kept_on_newer(die)
+        self.launchctl.load(self.jobs.broker_label)
+        self.alias_answers = ['pending']
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.change('rollback')
+        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertTrue(self.jobs.broker_plist.exists())
+        self.assertIsNotNone(self.launchctl.job(self.jobs.broker_label))
+        probes = len(self.alias_probes)
+        result = self.change('rollback')
+        self.assertEqual(self.alias_probes[probes][0], new_root / 'python/bin/python3')  # Its own interpreter.
+        self.assert_kept_on_newer(old, new_root, tx, result)
 
 
 class UninstallLoginGapTests(AliasChangeHarness, unittest.TestCase):

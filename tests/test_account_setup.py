@@ -292,7 +292,8 @@ class CodeTableTests(unittest.TestCase):
     def test_setup_reports_the_connect_pin_codes_and_next_actions(self):
         from telegram_search_mcp import connect_flow
         from telegram_search_mcp.setup_wizard import SetupResult, _result
-        for code in ('account_mismatch', 'account_duplicate', 'alias_unavailable'):
+        for code in ('account_mismatch', 'account_duplicate', 'alias_unavailable', 'transaction_pending',
+                     'newer_state_kept'):
             with self.subTest(code=code):
                 result = _result(code, closed=True)
                 self.assertIsInstance(result, SetupResult)

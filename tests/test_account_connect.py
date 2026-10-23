@@ -211,7 +211,10 @@ class CodeTableTests(unittest.TestCase):
     def test_the_pin_codes_are_closed_status_codes_with_their_next_action(self):
         for code, action in (('account_mismatch', 'review_enrollment_binding_without_resetting'),
                              ('account_duplicate', 'review_enrollment_binding_without_resetting'),
-                             ('alias_unavailable', 'stop_and_report')):
+                             ('alias_unavailable', 'stop_and_report'),
+                             # Review fix 055d3: a named alias's login from an installed release.
+                             ('transaction_pending', 'finish_pending_installer_action_then_retry'),
+                             ('newer_state_kept', 'upgrade_installation_or_remove_account')):
             self.assertIn(code, connect_flow.STATUS_CODES)
             self.assertEqual(connect_flow.next_action('failed', code), action)
             self.assertEqual(connect_cli._report('failed', code), ({'status': 'failed', 'code': code,
