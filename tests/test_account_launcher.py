@@ -307,6 +307,36 @@ class AccountsStatusTests(AccountHarness, unittest.TestCase):
                          (False, False, True))
         self.assertNotIn('user_id', json.dumps(report))
 
+    def test_a_manual_outcome_reads_registered_once_the_printed_command_ran(self):
+        """Review fix (055d2, low): a recorded manual outcome (failed, not_found, unavailable) was read as unregistered
+        without looking, so `registered` stayed false after the owner ran the printed command; now its entry is observed
+        like a registered one: exact counts, missing or different does not. For an alias and for the default."""
+        self.codex_present()
+        self.desktop_present()
+        (self.home / '.claude').mkdir(mode=0o755, exist_ok=True)
+        self.session()
+        self.claude()
+        missing = (self.base / 'no-claude',)  # No Claude Code CLI found: the manual command is printed.
+        with mock.patch('telegram_search_mcp.__version__', self.BASE_VERSION):
+            installed = self.install(self.build('a', version=self.BASE_VERSION), claude_candidates=missing)
+        self.service(installed['release_root'])
+        added = self.account('account_add', claude_candidates=missing)
+        self.assertEqual((installed['claude_code'], added['claude_code']), ('not_found', 'not_found'))
+        self.assertEqual(self.report()['default']['registered'], False)
+        self.assertEqual(self.report()['work']['registered'], False)
+        # The owner runs the printed commands: the exact entries.
+        command, arguments = self.commands(self.release)
+        self.claude().set_entry('telegram_search', {'type': 'stdio', 'command': command, 'args': arguments})
+        self.claude().set_entry('telegram_search_work', {'type': 'stdio', 'command': command,
+                                                         'args': arguments + ['--account', 'work']})
+        report = self.report()
+        self.assertEqual((report['default']['registered'], report['work']['registered']), (True, True))
+        # A different entry is not ours.
+        self.claude().set_entry('telegram_search', {'type': 'stdio', 'command': '/x', 'args': []})
+        self.claude().set_entry('telegram_search_work', {'type': 'stdio', 'command': '/x', 'args': []})
+        report = self.report()
+        self.assertEqual((report['default']['registered'], report['work']['registered']), (False, False))
+
     def test_an_unreadable_registry_reports_unavailable(self):
         self.added()
         (config.accounts_root(self.home) / 'registry.json').chmod(0o644)

@@ -4301,8 +4301,11 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
 
 
 def _entries_registered(home, config, owner_hash, entry, claude_status, desktop_status, name=None):
-    """Whether every client entry an account's record says the installation registered is present and exactly its
-    own: True, False, or None when a client config cannot be read. Read-only."""
+    """Whether every client entry an account's record (or the default's receipt) says the installation registered, or
+    left to the owner's printed command (a manual outcome: failed, not_found, unavailable), is present and exactly its
+    own: True, False when one is missing or different, or None when a client config cannot be read. A manual outcome
+    is observed like a registered one (review fix 055d2, low): once the owner ran the printed command, the exact
+    entry counts. Read-only."""
     try:
         source, exists = _config(config)
         current = owned_subtree(source, name) if exists else None
@@ -4312,10 +4315,8 @@ def _entries_registered(home, config, owner_hash, entry, claude_status, desktop_
         return False
     states = []
     for status, observe in ((claude_status, claude_registration.state), (desktop_status, claude_desktop_registration.state)):
-        if status in ('registered', 'reused'):
+        if status in ('registered', 'reused') or status in _MANUAL:
             states.append(observe(home, *entry, name))
-        elif status in _MANUAL:
-            return False
     if 'unavailable' in states:
         return None
     return all(state == 'exact' for state in states)
