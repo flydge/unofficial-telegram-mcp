@@ -64,6 +64,24 @@ def alias_server_name(alias: str) -> str:
     return identity.MCP_SERVER_NAME if alias == DEFAULT_ALIAS else f"{identity.MCP_SERVER_NAME}_{alias}"
 
 
+def named_alias(value: object) -> bool:
+    """A named account alias: the closed token, never the reserved `default`."""
+    return type(value) is str and value != DEFAULT_ALIAS and ALIAS_GRAMMAR.fullmatch(value) is not None
+
+
+def server_name(name: object = None) -> str:
+    """A client entry's MCP server name (0.55 spec 3D): the default alias's for None, else exactly the default's or a
+    named alias's `<server>_<alias>` (AccountPaths.server_name), read through the product identity at call time;
+    anything else raises ValueError, echoing nothing."""
+    default = alias_server_name(DEFAULT_ALIAS)
+    if name is None:
+        return default
+    prefix = default + "_"
+    if type(name) is not str or not (name == default or name.startswith(prefix) and named_alias(name[len(prefix):])):
+        raise ValueError("invalid server name")
+    return name
+
+
 def alias_socket_path(alias: str, home: Path) -> Path:
     """The broker socket a named alias would bind, by the same layout as its AccountPaths but without building
     one: the registry measures it against the macOS limit before it admits the alias."""

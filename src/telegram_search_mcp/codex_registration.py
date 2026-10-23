@@ -21,10 +21,9 @@ import uuid
 import tomlkit
 from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.items import Comment, InlineTable, Table, Trivia, Whitespace
-from . import product_identity as identity
 from .bundle_paths import _validate_descriptor_acl, file_metadata_identity, RuntimePathError
+from .config import DEFAULT_ALIAS, alias_server_name, named_alias, server_name
 
-SERVER_NAME = identity.MCP_SERVER_NAME
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
 MAX_SUBTREE_BYTES = 32 * 1024
@@ -61,6 +60,13 @@ def _identifier(value: object) -> bool:
     return type(value) is str and _ID.fullmatch(value) is not None
 
 
+def _name(name: object = None) -> str:
+    try:
+        return server_name(name)
+    except ValueError:
+        raise ConfigConflict('invalid_registration') from None
+
+
 def _text(value: object, limit: int = 4096) -> bool:
     try:
         return (type(value) is str and 0 < len(value.encode('utf-8')) <= limit
@@ -71,6 +77,8 @@ def _text(value: object, limit: int = 4096) -> bool:
 
 @dataclass(frozen=True, repr=False)
 class Registration:
+    """The launcher's `mcp` entry: `-I -S -B <launcher> mcp`, or for a named alias (0.55 spec 3D) `... mcp --account
+    <alias>`, which is never required (an alias that is not connected yet must not block Codex)."""
     command: str
     args: tuple[str, ...]
     env: Mapping[str, str]
@@ -81,8 +89,10 @@ class Registration:
     required: bool = True
 
     def __post_init__(self):
-        isolated = (type(self.command) is str and type(self.args) is tuple and len(self.args)==5 and self.args[:3]==('-I','-S','-B')
-                    and self.args[-1]=='mcp' and type(self.args[3]) is str
+        named = type(self.args) is tuple and len(self.args) == 7
+        isolated = (type(self.command) is str and type(self.args) is tuple and len(self.args) in (5, 7)
+                    and self.args[:3]==('-I','-S','-B') and self.args[4]=='mcp' and type(self.args[3]) is str
+                    and (not named or self.args[5] == '--account' and named_alias(self.args[6]) and self.required is False)
                     and Path(self.command).name=='python3' and Path(self.command).parent.name=='bin'
                     and Path(self.command).parent.parent.name=='python'
                     and Path(self.args[3])==Path(self.command).parent.parent.parent/'launcher.py'
@@ -114,6 +124,11 @@ class Registration:
     def __repr__(self):
         return 'Registration(<redacted>)'
 
+    @property
+    def server_name(self) -> str:
+        """The server name its argv names: the default's, or `<server>_<alias>` for `mcp --account <alias>`."""
+        return alias_server_name(DEFAULT_ALIAS if len(self.args) == 5 else self.args[6])
+
     def _values(self):
         return dict(command=self.command, args=list(self.args), enabled=self.enabled,
                     required=self.required, startup_timeout_sec=self.startup_timeout_sec,
@@ -130,13 +145,13 @@ def _parse(source: bytes):
         raise ConfigConflict('invalid_config') from None
 
 
-def _owned(document):
+def _owned(document, name=None):
     servers = document.get('mcp_servers')
     if servers is None:
         return None
     if not isinstance(servers, (Table, InlineTable, OutOfOrderTableProxy)):
         raise ConfigConflict('invalid_config')
-    entry = servers.get(SERVER_NAME)
+    entry = servers.get(_name(name))
     if entry is not None and not isinstance(entry, (Table, InlineTable, OutOfOrderTableProxy)):
         raise ConfigConflict('invalid_config')
     return entry
@@ -158,13 +173,14 @@ def _tail(table):
         return table, index
 
 
-def _subtree(entry) -> bytes | None:
+def _subtree(entry, name=None) -> bytes | None:
     if entry is None:
         return None
+    name = _name(name)
     if isinstance(entry, InlineTable):
         # Render before copying: tomlkit deepcopy drops InlineTable's _new
         # formatting flag, which otherwise changes generated comma spacing.
-        encoded = ('[mcp_servers]\n' + SERVER_NAME + ' = ' + entry.as_string() + '\n').encode('utf-8')
+        encoded = ('[mcp_servers]\n' + name + ' = ' + entry.as_string() + '\n').encode('utf-8')
         if len(encoded) > MAX_SUBTREE_BYTES:
             raise ConfigConflict('invalid_registration')
         return encoded
@@ -174,7 +190,7 @@ def _subtree(entry) -> bytes | None:
     if isinstance(owned, Table):
         table, index = _tail(owned)
         del table.value.body[index:]
-    servers.add(SERVER_NAME, owned)
+    servers.add(name, owned)
     document.add('mcp_servers', servers)
     encoded = tomlkit.dumps(document).encode('utf-8')
     # tomlkit attaches blank separators preceding the next table to this table.
@@ -189,7 +205,7 @@ def _subtree(entry) -> bytes | None:
     return encoded
 
 
-def _span(source: bytes) -> tuple[int, int] | None:
+def _span(source: bytes, name=None) -> tuple[int, int] | None:
     """Byte offsets of our standard table's own lines in `source` (its header through its last key, without the
     trailing comments `_tail` leaves to the user), or None when our entry is not one such table.
 
@@ -198,7 +214,7 @@ def _span(source: bytes) -> tuple[int, int] | None:
     """
     text = source.decode('utf-8')
     document = tomlkit.parse(text)
-    entry = _owned(document)
+    entry = _owned(document, name)
     if not isinstance(entry, Table) or entry.is_super_table():
         return None
     token = uuid.uuid4().hex
@@ -216,10 +232,10 @@ def _span(source: bytes) -> tuple[int, int] | None:
     return len(text[:first].encode('utf-8')), len(text[:last - len(start)].encode('utf-8'))
 
 
-def _splice(source: bytes, own: bytes) -> bytes | None:
+def _splice(source: bytes, own: bytes, name=None) -> bytes | None:
     """`source` with our table's own lines replaced by `own` (b'' removes them) and every other byte kept, or
     None when they cannot be located exactly (`_span`)."""
-    found = _span(source)
+    found = _span(source, name)
     if found is None:
         return None
     return source[:found[0]] + own + source[found[1]:]
@@ -243,7 +259,7 @@ def _validate_preimage(encoded: bytes | None, client: str = 'codex'):
     try:
         document = _parse(encoded)
         entry = _owned(document)
-        if entry is None or set(document) != {'mcp_servers'} or set(document['mcp_servers']) != {SERVER_NAME}:
+        if entry is None or set(document) != {'mcp_servers'} or set(document['mcp_servers']) != {_name()}:
             raise ConfigConflict('invalid_receipt')
         values = entry.unwrap()
         expected = {'command', 'args', 'enabled_tools', 'startup_timeout_sec', 'tool_timeout_sec', 'enabled', 'required'}
@@ -341,6 +357,8 @@ class ConfigChange:
     pre_subtree: bytes | None = field(repr=False)
     post_subtree: bytes | None = field(repr=False)
     ownership: Receipt | None = field(default=None, repr=False)
+    # The entry's server name: None for the default alias's (0.54), else a named alias's.
+    name: str | None = None
 
     @property
     def expected_source_hash(self) -> str:
@@ -370,15 +388,27 @@ def _check_ownership(current: bytes | None, ownership: Receipt | None):
         raise ConfigConflict('ownership_conflict')
 
 
-def merge_registration(source: bytes, desired: Registration, ownership: Receipt | None = None) -> ConfigChange:
+def _named(desired: Registration, name) -> str | None:
+    """`name` (None for the default alias) when it is the server name `desired`'s argv names, else a refusal."""
+    if type(desired) is not Registration or _name(name) != desired.server_name:
+        raise ConfigConflict('invalid_registration')
+    return name
+
+
+def merge_registration(source: bytes, desired: Registration, ownership: Receipt | None = None, *,
+                       name: str | None = None) -> ConfigChange:
+    """Our entry set to `desired`. `name` is a named alias's server name (AccountPaths.server_name), the one its
+    `--account` argv names; None is the default's, whose bytes stay 0.54's. Every other server, another
+    alias's or the default's included, is a neighbour kept byte for byte."""
+    name = _named(desired, name)
     document = _parse(source)
-    current = _subtree(_owned(document))
+    current = _subtree(_owned(document, name), name)
     _check_ownership(current, ownership)
     inline = isinstance(document.get('mcp_servers'), InlineTable)
     replacement = _entry(desired, inline=inline)
-    wanted = _subtree(replacement)
+    wanted = _subtree(replacement, name)
     if current == wanted:
-        return ConfigChange(source, source, current, current, ownership)
+        return ConfigChange(source, source, current, current, ownership, name)
     if current is None and not inline:
         # Append the new child rather than asking a composite parent proxy to
         # choose an insertion site among interleaved unrelated sections.
@@ -386,41 +416,43 @@ def merge_registration(source: bytes, desired: Registration, ownership: Receipt 
         candidate = source + separator + wanted
     else:
         # Only our own lines change; the comments after them stay the user's (`_tail`).
-        candidate = None if inline else _splice(source, wanted)
+        candidate = None if inline else _splice(source, wanted, name)
         if candidate is None:
-            document['mcp_servers'][SERVER_NAME] = replacement
+            document['mcp_servers'][_name(name)] = replacement
             candidate = tomlkit.dumps(document).encode('utf-8')
-        elif _subtree(_owned(_parse(candidate))) != wanted:
+        elif _subtree(_owned(_parse(candidate), name), name) != wanted:
             raise ConfigConflict('invalid_change')
-    after = _subtree(_owned(_parse(candidate)))
-    return ConfigChange(source, candidate, current, after, ownership)
+    after = _subtree(_owned(_parse(candidate), name), name)
+    return ConfigChange(source, candidate, current, after, ownership, name)
 
 
-def rollback_registration(source: bytes, receipt: Receipt) -> ConfigChange:
-    if type(receipt) is not Receipt:
+def rollback_registration(source: bytes, receipt: Receipt, *, name: str | None = None) -> ConfigChange:
+    """Our entry put back to the receipt's preimage, or removed when it has none. `name` as for
+    `merge_registration`; a named alias's entry is only ever added where none existed, so its receipt has none."""
+    if type(receipt) is not Receipt or name is not None and receipt.pre_subtree is not None:
         raise ConfigConflict('ownership_conflict')
     document = _parse(source)
-    current = _subtree(_owned(document))
+    current = _subtree(_owned(document, name), name)
     _check_ownership(current, receipt)
     # Only our own lines change; the comments after them stay the user's (`_tail`).
     standard = receipt.pre_subtree is None or not receipt.pre_subtree.startswith(b'[mcp_servers]\n')
-    candidate = _splice(source, receipt.pre_subtree or b'') if current is not None and standard else None
-    if candidate is not None and _subtree(_owned(_parse(candidate))) != receipt.pre_subtree:
+    candidate = _splice(source, receipt.pre_subtree or b'', name) if current is not None and standard else None
+    if candidate is not None and _subtree(_owned(_parse(candidate), name), name) != receipt.pre_subtree:
         raise ConfigConflict('invalid_change')
     if candidate is None:
         if receipt.pre_subtree is None:
             if current is not None:
-                del document['mcp_servers'][SERVER_NAME]
+                del document['mcp_servers'][_name(name)]
                 if (not document['mcp_servers'] and isinstance(document['mcp_servers'], Table)
                         and document['mcp_servers'].is_super_table()):
                     del document['mcp_servers']
         else:
             if 'mcp_servers' not in document:
                 document.add('mcp_servers', tomlkit.table(is_super_table=True))
-            document['mcp_servers'][SERVER_NAME] = deepcopy(_owned(_parse(receipt.pre_subtree)))
+            document['mcp_servers'][_name()] = deepcopy(_owned(_parse(receipt.pre_subtree)))
         candidate = tomlkit.dumps(document).encode('utf-8')
-    after = _subtree(_owned(_parse(candidate)))
-    return ConfigChange(source, candidate, current, after, receipt)
+    after = _subtree(_owned(_parse(candidate), name), name)
+    return ConfigChange(source, candidate, current, after, receipt, name)
 
 
 def _open_parent(path: Path) -> int:
@@ -609,8 +641,10 @@ def adopt_registration(source: bytes, desired: Registration) -> ConfigChange:
     """`--adopt-legacy` only: replace a foreign entry the caller has recorded and backed up.
 
     The change's `pre_subtree` is the foreign subtree (never persisted in a Receipt); its ownership
-    receipt carries no preimage, so a later rollback removes ours instead of restoring theirs.
+    receipt carries no preimage, so a later rollback removes ours instead of restoring theirs. The default alias's
+    entry only: a named alias's entry is never adopted.
     """
+    _named(desired, None)
     document = _parse(source)
     current = _subtree(_owned(document))
     if current is None:
@@ -620,7 +654,7 @@ def adopt_registration(source: bytes, desired: Registration) -> ConfigChange:
     # Only the foreign table's own lines change; the comments after them stay the user's (`_tail`).
     candidate = None if inline else _splice(source, _subtree(replacement))
     if candidate is None:
-        document['mcp_servers'][SERVER_NAME] = replacement
+        document['mcp_servers'][_name()] = replacement
         candidate = tomlkit.dumps(document).encode('utf-8')
     after = _subtree(_owned(_parse(candidate)))
     if after != _subtree(replacement) or _neighbors(source) != _neighbors(candidate):
@@ -628,18 +662,19 @@ def adopt_registration(source: bytes, desired: Registration) -> ConfigChange:
     return ConfigChange(source, candidate, current, after, None)
 
 
-def owned_subtree(source: bytes) -> bytes | None:
-    """The exact bytes of the current `telegram_search` subtree (for an adoption backup), or None."""
-    return _subtree(_owned(_parse(source)))
+def owned_subtree(source: bytes, name: str | None = None) -> bytes | None:
+    """The exact bytes of the current `telegram_search` subtree (for an adoption backup), or None; with `name`, a
+    named alias's entry (AccountPaths.server_name) instead."""
+    return _subtree(_owned(_parse(source), name), name)
 
 
-def _neighbors(source: bytes) -> bytes:
-    removed = _splice(source, b'')
+def _neighbors(source: bytes, name=None) -> bytes:
+    removed = _splice(source, b'', name)
     if removed is not None:
         return removed.rstrip(b'\r\n')
     document = _parse(source)
-    if _owned(document) is not None:
-        del document['mcp_servers'][SERVER_NAME]
+    if _owned(document, name) is not None:
+        del document['mcp_servers'][_name(name)]
     if ('mcp_servers' in document and not document['mcp_servers']
             and isinstance(document['mcp_servers'], Table) and document['mcp_servers'].is_super_table()):
         del document['mcp_servers']
@@ -655,9 +690,10 @@ def commit_transaction(change: ConfigChange, expected_hash: str, config_path: Pa
         raise ConfigConflict('invalid_change')
     if change.ownership is not None and change.ownership.installation_id != installation_id:
         raise ConfigConflict('ownership_conflict')
-    if (_subtree(_owned(_parse(change.source))) != change.pre_subtree
-            or _subtree(_owned(_parse(change.candidate))) != change.post_subtree
-            or _neighbors(change.source) != _neighbors(change.candidate)):
+    name = change.name
+    if (_subtree(_owned(_parse(change.source), name), name) != change.pre_subtree
+            or _subtree(_owned(_parse(change.candidate), name), name) != change.post_subtree
+            or _neighbors(change.source, name) != _neighbors(change.candidate, name)):
         raise ConfigConflict('invalid_change')
     _check_ownership(change.pre_subtree, change.ownership)
     _validate_preimage(change.pre_subtree)

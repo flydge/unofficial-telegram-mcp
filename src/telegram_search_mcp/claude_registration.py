@@ -17,11 +17,10 @@ from pathlib import Path
 import stat
 import subprocess
 
-from . import product_identity as identity
 from .bundle_paths import (MissingRuntimePath, RuntimePathError, open_owned_file, file_metadata_identity,
                            _safe_metadata, _validate_descriptor_acl, _path_binding_identity)
+from .config import server_name
 
-SERVER_NAME = identity.MCP_SERVER_NAME
 WRITE_TIMEOUT = 30
 MAX_CONFIG_BYTES = 64 * 1024 * 1024
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
@@ -52,9 +51,10 @@ def payload(command, args):
     return json.dumps({'type': 'stdio', 'command': command, 'args': list(args)}, separators=(',', ':'))
 
 
-def manual_command(command, args):
-    """Nonsecret argv the user can run themselves to register this server."""
-    return ['claude', 'mcp', 'add-json', '--scope', 'user', SERVER_NAME, payload(command, args)]
+def manual_command(command, args, name=None):
+    """Nonsecret argv the user can run themselves to register this server. `name` is a named alias's server name
+    (AccountPaths.server_name), always user scope (0.55 spec 3D); None is the default's."""
+    return ['claude', 'mcp', 'add-json', '--scope', 'user', server_name(name), payload(command, args)]
 
 
 # --- reads: ~/.claude.json only ------------------------------------------------------------
@@ -100,18 +100,21 @@ def _exact(value, command, args):
             and value.get('env', {}) == {} and type(value.get('env', {})) is dict)
 
 
-def state(home, command, args):
-    """'absent', 'exact' (stdio, this command and argument list, no env or url), 'different' or 'unavailable'."""
+def state(home, command, args, name=None):
+    """'absent', 'exact' (stdio, this command and argument list, no env or url), 'different' or 'unavailable' for the
+    entry `name` (None: the default's)."""
+    name = server_name(name)
     servers = _servers(home)
     if servers is None: return 'unavailable'
-    if SERVER_NAME not in servers: return 'absent'
-    return 'exact' if _exact(servers[SERVER_NAME], command, args) else 'different'
+    if name not in servers: return 'absent'
+    return 'exact' if _exact(servers[name], command, args) else 'different'
 
 
 def present(home):
-    """Plugin mode's read-only note: 'present' when a user-scope entry exists, else 'absent' or 'unavailable'."""
+    """Plugin mode's read-only note: 'present' when the default's user-scope entry exists (it would list the
+    plugin's tool set twice; an alias's entry has its own name), else 'absent' or 'unavailable'."""
     servers = _servers(home)
-    return 'unavailable' if servers is None else 'present' if SERVER_NAME in servers else 'absent'
+    return 'unavailable' if servers is None else 'present' if server_name() in servers else 'absent'
 
 
 def canonical(value):
@@ -120,10 +123,10 @@ def canonical(value):
 
 def entry_backup(home):
     """Canonical bytes of the user-scope entry (an `--adopt-legacy` backup), or None."""
-    servers = _servers(home)
-    if servers is None or SERVER_NAME not in servers: return None
+    servers, name = _servers(home), server_name()
+    if servers is None or name not in servers: return None
     try:
-        return canonical(servers[SERVER_NAME]).encode()
+        return canonical(servers[name]).encode()
     except (ValueError, TypeError, RecursionError):
         return None
 
@@ -223,9 +226,9 @@ def _run(runner, cli, home, arguments):
         raise ClaudeCliError()
 
 
-def add(runner, cli, home, command, args):
-    _run(runner, cli, home, ['add-json', '--scope', 'user', SERVER_NAME, payload(command, args)])
+def add(runner, cli, home, command, args, name=None):
+    _run(runner, cli, home, ['add-json', '--scope', 'user', server_name(name), payload(command, args)])
 
 
-def remove(runner, cli, home):
-    _run(runner, cli, home, ['remove', '--scope', 'user', SERVER_NAME])
+def remove(runner, cli, home, name=None):
+    _run(runner, cli, home, ['remove', '--scope', 'user', server_name(name)])

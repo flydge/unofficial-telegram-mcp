@@ -3,8 +3,8 @@
 Not renamed here, on purpose: the Python package, the `TelegramSearchMCP` support paths, the
 Keychain service, launchd labels, `TELEGRAM_SEARCH_*` environment keys and the intent file.
 Callers read these through the module (`identity.DISPLAY_NAME`), so one edit here renames the
-product everywhere. A few values are captured at import (the connect page assets and the
-registration modules' SERVER_NAME), so patching them at runtime does not reach those. Files that
+product everywhere. A few values are captured at import (the connect page assets), so patching them
+at runtime does not reach those; the client registrations read the server name at call time. Files that
 cannot import this module (packaging/bootstrap.sh and the plugin's bin/mcp-entry, which spell the
 installation root `BUNDLE_ROOT_NAME`, the JSON manifests and the shipped skill copies) are each listed in
 tests/test_product_identity.py, which also compares the root those two scripts spell with this one.
