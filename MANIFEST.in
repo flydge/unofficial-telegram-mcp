@@ -18,6 +18,8 @@ global-exclude __pycache__ *.py[cod] .DS_Store
 include tests/fixtures/legacy_0_16_tool_hashes.json
 include tests/fixtures/legacy_0_17_tool_hashes.json
 include tests/fixtures/legacy_0_52_tool_hashes.json
+include tests/fixtures/legacy_0_52_structure_hashes.json
+recursive-include tests/fixtures/schema_changes *.json
 include tests/fixtures/reply_source_v1_v7.json
 include tests/fixtures/reply_email_legacy_goldens.json
 include tests/fixtures/reply_email_v17_goldens.json
@@ -32,6 +34,7 @@ include docs/release-notes-0.51.0.md
 include docs/release-notes-0.52.0.md
 include docs/release-notes-0.53.0rc1.md
 include docs/release-notes-0.53.0rc2.md
+include docs/release-notes-0.54.0rc1.md
 include docs/assets/unofficial-telegram-mcp-header.png
 include CHANGELOG.md
 include docs/third-party-notices.md

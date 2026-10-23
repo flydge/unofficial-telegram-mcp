@@ -4,7 +4,7 @@ Not collected by pytest, and never run by the suite: it starts a real model. Syn
 agent's only Telegram server is tests/conversation_demo_server.py, which never reaches Telegram.
 
     python tests/conversation_agent_run.py --agent codex [--scenario NAME ...] [--timeout SECONDS]
-        [--model MODEL] [--out DIRECTORY]
+        [--model MODEL] [--out DIRECTORY]   (default: every scenario)
     python tests/conversation_agent_run.py --agent claude [--claude-bin PATH] ...
 
 codex: `codex exec --ignore-user-config` (documented in `codex exec --help`: the user's config.toml
@@ -22,8 +22,14 @@ to a fresh temporary directory so the user's Claude configuration is neither rea
 Without a usable login there, the run is reported as unavailable.
 
 Each scenario gets its own owner-only directory under --out (default: a new temporary directory)
-holding the demo transcript, the agent's event stream and its final answer. The report (JSON on
-stdout and report.json) carries the commit, agent version, date and, per scenario, the rubric
+holding the demo transcript, the agent's event stream and its final answer. A scenario passes only
+when the agent exited 0 before the deadline, its turn completed (Codex `turn.completed` and no
+`turn.failed`; Claude a successful `result`), it ran no shell command and used no other MCP server,
+and every required rubric check passed. The decision rests on the server's transcript of actions; a
+missing final answer fails the required final_answer_present, while the checks on the answer's wording
+(`answer_*`, `no_constructed_links`) are advisory: reported with `required: false` and listed in each
+scenario's `advisory_failed` (and after PASS or FAIL on stderr), never decisive. The report (JSON on
+stdout and report.json) carries the commit, agent version, model, date and, per scenario, the rubric
 result. Exit status: 0 when every scenario passed, 1 when one failed, 2 when the agent is unavailable.
 """
 from __future__ import annotations
@@ -152,20 +158,27 @@ class Codex:
 
     @staticmethod
     def observations(events: Path) -> dict:
-        shell, other_mcp, errors = 0, set(), []
+        """Shell use, other MCP servers and the turn's end. An `error` event alone (Codex logs a transient
+        reconnect that way) is reported, not decisive; a `turn.failed` or no `turn.completed` is."""
+        shell, other_mcp, errors, completed, failures = 0, set(), [], False, 0
         for line in events.read_text("utf-8", errors="replace").splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
+                continue
+            if not isinstance(event, dict):
                 continue
             item = event.get("item") or {}
             if item.get("type") == "command_execution":
                 shell += 1
             if item.get("type") == "mcp_tool_call" and item.get("server") not in (None, SERVER_NAME):
                 other_mcp.add(item.get("server"))
+            completed = completed or event.get("type") == "turn.completed"
+            failures += event.get("type") == "turn.failed"
             if event.get("type") in {"error", "turn.failed"}:
                 errors.append(str(event.get("message") or event.get("error"))[:300])
-        return {"shell_commands": shell, "other_mcp_servers": sorted(other_mcp), "errors": errors[:5]}
+        return {"shell_commands": shell, "other_mcp_servers": sorted(other_mcp), "errors": errors[:5],
+                "turn_completed": completed and not failures, "turn_failures": failures}
 
 
 class ClaudeCode:
@@ -215,16 +228,23 @@ class ClaudeCode:
 
     @staticmethod
     def observations(events: Path) -> dict:
-        shell = 0
+        """Shell use and the turn's end: a `result` event of subtype success that is not an error (a run out
+        of turns ends with error_max_turns and no answer)."""
+        shell, results = 0, []
         for line in events.read_text("utf-8", errors="replace").splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "result":
+                results.append(event.get("subtype") == "success" and event.get("is_error") is False)
             for block in ((event.get("message") or {}).get("content") or []):
                 if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
                     shell += 1
-        return {"shell_commands": shell}
+        return {"shell_commands": shell, "turn_completed": bool(results) and all(results),
+                "turn_failures": results.count(False)}
 
 
 def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
@@ -247,24 +267,34 @@ def run_scenario(agent, scenario, base: Path, timeout: float) -> dict:
         time.sleep(30 * attempt)
     result = rubrics.score(scenario, run, answer)
     observed = agent.observations(events)
-    result["checks"].append({"name": "no_shell", "passed": observed["shell_commands"] == 0, "required": True,
-                             "detail": f"{observed['shell_commands']} shell command(s)"})
-    result["passed"] = result["passed"] and observed["shell_commands"] == 0
+    # The agent's own end decides too: a hang, a crash or a failed turn is never a pass.
+    gates = [("agent_exited_cleanly", code == 0 and not timed_out, "timed out" if timed_out else f"exit {code}"),
+             ("turn_completed", observed["turn_completed"], f"{observed['turn_failures']} failed turn(s)"),
+             ("no_shell", observed["shell_commands"] == 0, f"{observed['shell_commands']} shell command(s)")]
     if observed.get("other_mcp_servers"):
-        result["checks"].append({"name": "only_demo_server", "passed": False, "required": True,
-                                 "detail": ", ".join(observed["other_mcp_servers"])})
-        result["passed"] = False
+        gates.append(("only_demo_server", False, ", ".join(observed["other_mcp_servers"])))
+    for name, passed, detail in gates:
+        result["checks"].append({"name": name, "passed": bool(passed), "required": True, "detail": detail})
+    result["passed"] = result["passed"] and all(passed for _, passed, _ in gates)
     unavailable = not run.calls and any(marker in stream for marker in UNAVAILABLE_MARKERS)
     return {**result, "agent": agent.name, "exit": code, "timed_out": timed_out, "unavailable": unavailable,
             "attempts": attempt, "seconds": round(time.monotonic() - started, 1), "answer": (answer or "")[:2000],
             "observed": observed, "directory": str(workdir)}
 
 
-def main(argv=None) -> int:
+def scenario_names(selected: list[str] | None) -> list[str]:
+    """Every scenario by default or with `all`; otherwise the ones named, once each, in order."""
+    if not selected or "all" in selected:
+        return list(rubrics.SCENARIOS)
+    return list(dict.fromkeys(selected))
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the conversation scenarios through a real agent.")
     parser.add_argument("--agent", choices=("codex", "claude"), required=True)
     parser.add_argument("--scenario", action="append", choices=sorted(rubrics.SCENARIOS) + ["all"],
-                        help="repeatable; default: the five core scenarios; all adds the approval variants")
+                        help="repeatable; default: every scenario (the same as all), the declined, timed-out and "
+                             "unresolved variants included")
     parser.add_argument("--timeout", type=float, default=420.0, help="seconds per scenario (default 420)")
     parser.add_argument("--model")
     parser.add_argument("--skills", choices=("none", "user"), default="none",
@@ -272,6 +302,11 @@ def main(argv=None) -> int:
     parser.add_argument("--codex-bin")
     parser.add_argument("--claude-bin")
     parser.add_argument("--out", type=Path, help="report directory (default: a new temporary directory)")
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
     arguments = parser.parse_args(argv)
     if not 30 <= arguments.timeout <= 1800:
         parser.error("--timeout must be 30..1800 seconds")
@@ -288,18 +323,19 @@ def main(argv=None) -> int:
         config = base / "claude-config"
         config.mkdir(mode=0o700, exist_ok=True)
         agent = ClaudeCode(arguments.claude_bin, arguments.model, config)
-    report = {"agent": agent.name, "version": agent.version(), "commit": git_commit(), "skills": arguments.skills,
+    report = {"agent": agent.name, "version": agent.version(), "model": arguments.model or "agent default",
+              "commit": git_commit(), "skills": arguments.skills,
               "date": datetime.now(timezone.utc).isoformat(timespec="seconds"), "directory": str(base),
               "scenarios": []}
     if report["version"] is None:
         report["unavailable"] = f"{agent.name} --version failed or the binary is missing"
     else:
-        names = arguments.scenario or list(rubrics.CORE)
-        names = list(rubrics.SCENARIOS) if "all" in names else names
-        for name in names:
+        for name in scenario_names(arguments.scenario):
             result = run_scenario(agent, rubrics.SCENARIOS[name], base, arguments.timeout)
             report["scenarios"].append(result)
-            print(f"{name}: {'PASS' if result['passed'] else 'FAIL'} ({result['seconds']} s)", file=sys.stderr)
+            advisory = f"; advisory: {', '.join(result['advisory_failed'])}" if result["advisory_failed"] else ""
+            print(f"{name}: {'PASS' if result['passed'] else 'FAIL'} ({result['seconds']} s{advisory})",
+                  file=sys.stderr)
             if result["unavailable"]:
                 report["unavailable"] = f"{agent.name} could not run non-interactively (no usable login)"
                 break

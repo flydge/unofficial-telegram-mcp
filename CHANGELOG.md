@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.54.0.dev0 — unreleased
+## 0.54.0rc1 — release candidate, 2026-10-23 (not published)
 
-Development of 0.54.0, conversational usability ([spec](docs/plans/0.54-conversational-usability-spec.md),
+Release candidate of 0.54.0, conversational usability ([release notes](docs/release-notes-0.54.0rc1.md), [spec](docs/plans/0.54-conversational-usability-spec.md),
 [task record](docs/plans/0.54-conversational-usability-spec.tasks.md)): short tool contracts with titles,
 normalized annotations and prompts; argument refusals that name only schema parameters; approval statuses
 `declined`, `timeout` and `dialog_unavailable` with one dialog renderer; `capability_disabled` reply results

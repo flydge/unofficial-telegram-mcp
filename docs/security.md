@@ -2197,6 +2197,17 @@ different action or kit started over an unfinished one refuses (`transaction_pen
 The release trees of earlier versions stay in `releases/` until an uninstall removes the root. The
 checks are cooperative: they detect drift and refuse; they do not make arbitrary editors take the lease.
 
+## Capability profile switch (0.54 candidate)
+
+`launcher.py capabilities enable|disable <profile>` is an owner action in Terminal; the MCP surface never
+runs it and the skills tell an assistant never to run it, even with a shell. It changes only the
+`enabled_capabilities` line of the installed `runtime.toml` (owner-only file in an owner-only directory,
+validated as a policy, compare-and-swap, atomic replace), only after the loaded broker is confirmed to be
+the installed release's own definition and only after the broker reports no send in flight, no open approval
+dialog, no unsettled send outcome and no active client context. A restart failure after the write is
+reported as `changed` with `broker: restart_failed`, never as a refusal. Profiles grant nothing by
+themselves: the broker enforces the policy file it loads, and every send still needs the owner's dialog.
+
 ## Retained-selection boundary (B2B candidate)
 
 The default-off `retained_selections` capability adds one closed issuer and exact

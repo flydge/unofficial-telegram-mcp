@@ -1,3 +1,3 @@
 """Local Telegram MCP package."""
 
-__version__ = "0.54.0.dev0"
+__version__ = "0.54.0rc1"
