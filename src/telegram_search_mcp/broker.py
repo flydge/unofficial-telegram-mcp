@@ -502,7 +502,7 @@ class Broker(SelectionBrokerMixin):
     def _observed_owner(self, client_id) -> DraftOwner | None:
         """This client's DraftOwner under the account the broker last observed, or None; no provider read.
 
-        Content-free routing only (a send budget, an attempt outcome): every grant re-reads the account.
+        Content-free routing only (the send budget): every grant re-reads the account.
         """
         account = self._artifact_authority.observed_account()
         try:
