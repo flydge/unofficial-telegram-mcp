@@ -6,6 +6,7 @@ validator, observation reducer and broker are production code. No live TDLib and
 from __future__ import annotations
 
 import copy
+import re
 import tempfile
 import unittest
 from collections import deque
@@ -563,6 +564,39 @@ class ContractTests(Store, unittest.TestCase):
                             slots=[{'position': 1, 'status': 'pending'}, {'position': 2, 'status': 'failed'}])):
             with self.subTest(values=values), self.assertRaises(ValidationError):
                 SendPreparedAlbumResponse(draft_id=did, detail='x', **values)
+
+    def test_unconfirmed_items_point_to_the_album_status_and_never_to_a_resend(self):
+        """Part 2, work item 4: a large album's outcome_unknown says so and names get_album_send_status; a partial
+        album with an unconfirmed item carries check_send_status too, a settled one carries no hint."""
+        from telegram_search_mcp.album_drafts import SEND_DETAILS, SendPreparedAlbumResponse, album_status
+        did, sha = 'draft_' + '1' * 32, 'a' * 64
+        for key in ('outcome_unknown', 'partial_unknown', 'replay_unknown', 'lost'):
+            with self.subTest(detail=key):
+                self.assertIn('get_album_send_status', SEND_DETAILS[key])
+                self.assertIn('never resend', SEND_DETAILS[key])
+        self.assertIn('large album', SEND_DETAILS['outcome_unknown'])
+        for detail in SEND_DETAILS.values():
+            self.assertLessEqual(len(detail), 200)
+            self.assertNotIn('get_send_status', detail)
+            # Every resend or retry the text names is negated: never a suggestion to send again.
+            for match in re.finditer(r'(\w+) (?:resend|retry)', detail):
+                self.assertIn(match.group(1), ('never', 'no'), detail)
+            self.assertNotIn('try again', detail)
+        sent, failed, unknown = ({'status': 'sent', 'message_id': 5}, {'status': 'failed'}, {'status': 'outcome_unknown'})
+        def slots(*values):
+            return [{'position': index, **value} for index, value in enumerate(values, start=1)]
+        for status, items, hint in (('partial', slots(sent, unknown), 'check_send_status'),
+                                    ('partial', slots(sent, failed), None),
+                                    ('outcome_unknown', slots(failed, unknown), 'check_send_status'),
+                                    ('sent', slots(sent, sent), None), ('failed', slots(failed, failed), None)):
+            with self.subTest(status=status, items=items):
+                response = SendPreparedAlbumResponse(status=status, draft_id=did, album_sha256=sha, slots=items,
+                                                     detail='x')
+                self.assertEqual(response.next_action, hint)
+                outcomes = [(item['status'], item.get('message_id')) for item in items]
+                self.assertEqual(album_status(did, 'provider', album_sha256=sha, outcomes=outcomes).next_action, hint)
+        self.assertEqual(SendPreparedAlbumResponse(status='outcome_unknown', draft_id=did, detail='x').next_action,
+                         'check_send_status')
 
     def test_request_is_closed_two_to_ten_distinct_items(self):
         from pydantic import ValidationError
@@ -1139,14 +1173,16 @@ class CapabilityConjunctionTests(BrokerFixture, unittest.TestCase):
         self.assertEqual(self.broker._drafts.known_ids(), set())
 
     def test_video_items_also_need_video_send(self):
-        from telegram_search_mcp.contract import CapabilityDisabled
         photo, video, jpeg = self.media()
         self.set_policy('artifacts', 'send', 'album_send')
         self.assertEqual(self.prepare(photo, jpeg)['items'][0]['kind'], 'photo')  # Photos alone need no video_send.
         before = len(self.raw.sent)
-        with self.assertRaises(CapabilityDisabled) as refused:
-            self.dispatch('prepare_album_send', self.request(photo, video))
-        self.assertEqual(refused.exception.missing, ('video_send',))
+        # Part 2: a structured refusal naming only the missing capability, so the client can tell the owner.
+        self.assertEqual(self.dispatch('prepare_album_send', self.request(photo, video)),
+                         {'status': 'capability_disabled', 'album': None, 'refusal': None,
+                          'missing_capabilities': ['video_send'],
+                          'detail': 'album needs capabilities the owner has not enabled: missing_capabilities',
+                          'next_action': 'enable_capability'})
         # Refused before the recipient is read (only the account was).
         self.assertNotIn('getChat', [request['@type'] for request in self.raw.sent[before:]])
         self.assertEqual(len(self.broker._drafts.known_ids()), 1)

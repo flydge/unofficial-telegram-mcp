@@ -91,7 +91,7 @@ from . import album_drafts
 from .album_drafts import (AlbumDraftPreview, AlbumRecipient, AlbumRefusal, AlbumSpec, GetAlbumSendStatusRequest,
     GetAlbumSendStatusResponse, PrepareAlbumSendRequest, PrepareAlbumSendResponse, SendPreparedAlbumRequest,
     SendPreparedAlbumResponse, album_status, slot_list, PREPARED as ALBUM_PREPARED, REFUSED as ALBUM_REFUSED,
-    UNAVAILABLE as ALBUM_UNAVAILABLE)
+    UNAVAILABLE as ALBUM_UNAVAILABLE, DISABLED as ALBUM_DISABLED, SEND_DETAILS as ALBUM_SEND_DETAILS)
 from .send_observations import album_outcomes
 from .archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveRefusal, ArchiveSpec, PrepareChatArchiveRequest,
     PrepareChatArchiveResponse, ApplyPreparedArchiveRequest, ApplyPreparedArchiveResponse,
@@ -107,9 +107,9 @@ RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do no
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
                              'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit',
                              'send_prepared_album'})
-# The 0.56 album operations (part 1, the core): reachable through broker dispatch. Their MCP tools, IPC
-# operation names and contract capability rows are added with the tool surface; until then the broker checks
-# the album policy itself (`_require_album_policy`), before admission.
+# The 0.56 album operations. The contract row (album_send, then send) is checked with every other operation's; the
+# broker also checks the album policy itself (`_require_album_policy`) before admission, and the per-draft video
+# conjunction (video_send for a video item) wherever a draft is read.
 ALBUM_OPERATIONS = frozenset({'prepare_album_send', 'send_prepared_album', 'get_album_send_status'})
 
 
@@ -2611,8 +2611,10 @@ class Broker(SelectionBrokerMixin):
             return PrepareAlbumSendResponse(status='prepared', album=preview, detail=ALBUM_PREPARED)
         except AlbumRefusal as refusal:
             return PrepareAlbumSendResponse(status='refused', refusal=refusal.code, detail=ALBUM_REFUSED)
-        except CapabilityDisabled:
-            raise
+        except CapabilityDisabled as error:
+            # Only the missing names (video_send for a video item), before the recipient is read; no draft.
+            return PrepareAlbumSendResponse(status='capability_disabled', missing_capabilities=list(error.missing),
+                                            detail=ALBUM_DISABLED)
         except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError,
                 ArtifactStoreError, ArtifactUnavailable):
             return PrepareAlbumSendResponse(status='unavailable', detail=ALBUM_UNAVAILABLE)
@@ -2628,11 +2630,9 @@ class Broker(SelectionBrokerMixin):
 
     @staticmethod
     def _album_result(result, receipt, spec: AlbumSpec, *, recipient: int, replay: bool = False):
-        detail = ('previous provider attempt receipt; no new send was attempted' if replay else {
-            'sent': 'TDLib confirmed every item',
-            'failed': 'TDLib reported a failure for every item; no resend is authorized',
-            'partial': 'some items were confirmed and some were not; never resend the album',
-            'outcome_unknown': 'delivery is unconfirmed; do not retry automatically'}[receipt.status])
+        unconfirmed = any(slot[0] == 'outcome_unknown' for slot in receipt.slots)
+        detail = ALBUM_SEND_DETAILS[('replay_unknown' if unconfirmed else 'replay') if replay else
+                                    'partial_unknown' if receipt.status == 'partial' and unconfirmed else receipt.status]
         return result(receipt.status, detail, recipient=recipient, album_sha256=spec.sha256,
                       slots=slot_list(receipt.slots))
 

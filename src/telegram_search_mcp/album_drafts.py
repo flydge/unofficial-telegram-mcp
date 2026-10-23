@@ -21,9 +21,9 @@ from pydantic import Field, field_validator, model_validator
 from .artifact_store import DOCUMENT_LIMIT
 from .draft_models import _Closed, AccountId, DraftId, Hash
 from .forward_drafts import _Frozen, _utc, escaped, unescaped
-from .next_actions import NextAction, NextActionHint, next_action_field
+from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 from .outgoing_media import PHOTO_FORMATS, PHOTO_LIMIT
-from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, digest
+from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, MissingCapabilities, digest
 from .sanitize import sanitize_telegram_text
 from .schemas import ArtifactId, ChatId
 from .video_probe import MAX_ASPECT, MAX_FILE_BYTES, MAX_SECONDS, MAX_SIDE, MIN_SIDE, VideoFacts
@@ -31,6 +31,22 @@ from .video_probe import MAX_ASPECT, MAX_FILE_BYTES, MAX_SECONDS, MAX_SIDE, MIN_
 PREPARED = 'immutable album draft prepared; inspect every item and obtain fresh approval'
 REFUSED = 'an item is not eligible for this album; no draft was created'
 UNAVAILABLE = 'album draft is unavailable'
+DISABLED = 'album needs capabilities the owner has not enabled: missing_capabilities'
+# Fixed send details: a provider outcome, a replay, and a lost response. Unconfirmed items point to the album's own
+# status tool (get_send_status knows no album) and never to a resend.
+SEND_DETAILS = {
+    'sent': 'TDLib confirmed every item',
+    'failed': 'TDLib reported a failure for every item; no resend is authorized',
+    'partial': 'some items were confirmed and the others failed; never resend the album',
+    'partial_unknown': ('some items are confirmed and some are unconfirmed: call get_album_send_status, '
+                        'never resend the album'),
+    'outcome_unknown': ('no item is confirmed yet; a large album can outlast the wait: call get_album_send_status, '
+                        'never resend'),
+    'replay': 'previous provider attempt receipt; no new send was attempted',
+    'replay_unknown': ('previous provider attempt receipt; no new send was attempted; call get_album_send_status for '
+                       'the unconfirmed items, never resend'),
+    'lost': 'broker response is unavailable; call get_album_send_status, never resend',
+}
 PREVIEW_VERSION = 1
 MIN_ITEMS, MAX_ITEMS = 2, 10
 # At most 256 MiB in total: headroom in the 512 MiB outgoing staging pool, quarantine included.
@@ -436,18 +452,27 @@ class PrepareAlbumSendRequest(_Closed):
         return self
 
 
-class PrepareAlbumSendResponse(_Closed):
-    status: Literal['prepared', 'refused', 'unavailable']
+class PrepareAlbumSendResponse(NextActionHint, _Closed):
+    """`capability_disabled` names only the missing capabilities (video_send for an album with a video item), from
+    the closed set and never from input; `unavailable` reveals nothing."""
+    status: Literal['prepared', 'refused', 'capability_disabled', 'unavailable']
     album: AlbumDraftPreview | None = None
     refusal: Refusal | None = None
+    missing_capabilities: MissingCapabilities | None = optional_field()
     detail: Literal['immutable album draft prepared; inspect every item and obtain fresh approval',
-                    'an item is not eligible for this album; no draft was created', 'album draft is unavailable']
+                    'an item is not eligible for this album; no draft was created', 'album draft is unavailable',
+                    'album needs capabilities the owner has not enabled: missing_capabilities']
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def shape(self):
-        expected = {'prepared': PREPARED, 'refused': REFUSED, 'unavailable': UNAVAILABLE}[self.status]
+        expected = {'prepared': PREPARED, 'refused': REFUSED, 'unavailable': UNAVAILABLE,
+                    'capability_disabled': DISABLED}[self.status]
+        names = self.missing_capabilities
         if (self.detail != expected or (self.status == 'prepared') != (self.album is not None) or
-                (self.status == 'refused') != (self.refusal is not None)):
+                (self.status == 'refused') != (self.refusal is not None) or
+                (self.status == 'capability_disabled') != (names is not None) or
+                (names is not None and len(set(names)) != len(names))):
             raise ValueError('invalid album preparation response')
         return self
 
@@ -487,7 +512,17 @@ class SendPreparedAlbumRequest(_Closed):
     approved: StrictBool
 
 
-class SendPreparedAlbumResponse(NextActionHint, _Closed):
+class _UnconfirmedSlots(NextActionHint):
+    """A `partial` album with an unconfirmed item carries check_send_status like outcome_unknown: its album status can
+    still settle that item. A partial album whose items all ended carries no hint."""
+
+    def next_action_condition(self):
+        if self.status == 'partial' and any(slot.status == 'outcome_unknown' for slot in self.slots):
+            return 'outcome_unknown'
+        return super().next_action_condition()
+
+
+class SendPreparedAlbumResponse(_UnconfirmedSlots, _Closed):
     status: SendStatus
     draft_id: DraftId
     recipient: ChatId | None = None
@@ -536,7 +571,7 @@ class GetAlbumSendStatusRequest(_Closed):
     draft_id: DraftId
 
 
-class GetAlbumSendStatusResponse(NextActionHint, GetAlbumSendStatusRequest):
+class GetAlbumSendStatusResponse(_UnconfirmedSlots, GetAlbumSendStatusRequest):
     """Closed, content-free album status, separate from the frozen get_send_status."""
     status: StatusValue
     evidence: Evidence
