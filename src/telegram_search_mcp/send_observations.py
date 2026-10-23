@@ -46,6 +46,146 @@ class SendObservation:
 
 FORWARD_CONTENT_TYPES = frozenset({'messageText', 'messagePhoto', 'messageDocument', 'messageVoiceNote',
                                    'messageVideo', 'messageAudio', 'messageAnimation'})
+# Album items (0.56): photos and videos mixed, or documents only; audio is deferred.
+ALBUM_CONTENT_GROUPS = (frozenset({'messagePhoto', 'messageVideo'}), frozenset({'messageDocument'}))
+# Terminal updates that overtake the album's `messages` result, kept until it binds; bounded.
+MAX_EARLY_ALBUM_UPDATES = 16
+
+
+@dataclass(frozen=True)
+class AlbumSlot:
+    """One album item: bound to its temporary message ID only by the exact `messages` result."""
+    content_type: str
+    temporary_id: int | None = None
+    status: str = "pending"  # pending | sent | failed | conflict
+    message_id: int | None = None
+
+
+@dataclass(frozen=True)
+class AlbumObservation:
+    """One sendMessageAlbum attempt with N slots in send order.
+
+    `registered` until the exact result arrives; `bound` once N pending messages with this sending_id, one
+    negative media_album_id and the content types in input order bind each slot to its temporary ID; `failed`
+    when the request itself was rejected (no message was created); `conflict` on any mismatch, after which
+    every slot stays unknown. A slot becomes terminal only through updateMessageSendSucceeded or
+    updateMessageSendFailed for its bound temporary ID; deletion or absence never proves failure."""
+    attempt_id: str
+    extra: str
+    sending_id: int
+    chat_id: int
+    content_types: tuple[str, ...]
+    started_at: float
+    status: str = "registered"
+    slots: tuple[AlbumSlot, ...] = ()
+    media_album_id: int | None = None
+    early: tuple[tuple[int, str, int | None, str], ...] = ()  # (old ID, sent|failed|conflict, final ID, type)
+
+
+def _wire_int64(value):
+    """TDLib's JSON int64 (a decimal string), or None."""
+    if type(value) is not str or not 1 <= len(value) <= 20:
+        return None
+    digits = value[1:] if value.startswith('-') else value
+    if not digits.isascii() or not digits.isdigit() or (len(digits) > 1 and digits.startswith('0')) or value == '-0':
+        return None
+    parsed = int(value)
+    return parsed if -(1 << 63) <= parsed < (1 << 63) else None
+
+
+def _album_message(value, chat_id, content_type, *, final=False):
+    return (isinstance(value, dict) and value.get('@type') == 'message'
+            and integer(value.get('chat_id')) and value['chat_id'] == chat_id
+            and integer(value.get('id'), positive=final) and value.get('is_outgoing') is True
+            and isinstance(value.get('content'), dict) and value['content'].get('@type') == content_type
+            and (not final or (value.get('sending_state') is None and
+                               (content_type != 'messageVideo' or _video_matches(value['content'])))))
+
+
+def _album_terminal(event, chat_id, content_type):
+    """'sent' with the final ID, or 'failed', for an exact terminal update of `content_type`; else 'conflict'."""
+    value = event.get('message')
+    if event.get('@type') == 'updateMessageSendSucceeded':
+        return ('sent', value['id']) if _album_message(value, chat_id, content_type, final=True) else ('conflict', None)
+    error = event.get('error')
+    state = value.get('sending_state') if isinstance(value, dict) else None
+    inner = state.get('error') if isinstance(state, dict) else None
+    if (_album_message(value, chat_id, content_type) and isinstance(error, dict) and error.get('@type') == 'error'
+            and type(error.get('code')) is int and 0 < error['code'] < 2**31
+            and isinstance(state, dict) and state.get('@type') == 'messageSendingStateFailed'
+            and isinstance(inner, dict) and inner.get('@type') == 'error'
+            and type(inner.get('code')) is int and inner['code'] == error['code']):
+        return ('failed', None)
+    return ('conflict', None)
+
+
+def _album_binding(event, observation):
+    """(temporary IDs, media_album_id) from the exact `messages` result, or None for any mismatch."""
+    count = len(observation.content_types)
+    messages = event.get('messages')
+    if not (event.get('@type') == 'messages' and type(event.get('total_count')) is int and
+            event['total_count'] == count and type(messages) is list and len(messages) == count):
+        return None
+    temporary, album_ids = [], set()
+    for value, content_type in zip(messages, observation.content_types):
+        state = value.get('sending_state') if isinstance(value, dict) else None
+        if (not _album_message(value, observation.chat_id, content_type) or not isinstance(state, dict)
+                or set(state) != {'@type', 'sending_id'} or state.get('@type') != 'messageSendingStatePending'
+                or type(state.get('sending_id')) is not int or state['sending_id'] != observation.sending_id):
+            return None
+        album_id = _wire_int64(value.get('media_album_id'))
+        if album_id is None or album_id >= 0:
+            return None
+        temporary.append(value['id'])
+        album_ids.add(album_id)
+    if len(set(temporary)) != count or len(album_ids) != 1:
+        return None
+    return tuple(temporary), album_ids.pop()
+
+
+def _reduce_album(old, event):
+    if old.status in ('failed', 'conflict'):
+        return old
+    kind = event.get('@type')
+    if event.get('@extra') == old.extra:
+        if old.status != 'registered':
+            return replace(old, status='conflict')  # One request has exactly one result.
+        if kind == 'error' and type(event.get('code')) is int and 0 < event['code'] < 2**31:
+            return replace(old, status='failed')
+        binding = _album_binding(event, old)
+        if binding is None:
+            return replace(old, status='conflict')
+        temporary, album_id = binding
+        slots = [AlbumSlot(content_type, temporary_id) for content_type, temporary_id in zip(old.content_types, temporary)]
+        for old_id, status, message_id, content_type in old.early:
+            for index, slot in enumerate(slots):
+                if slot.temporary_id == old_id and slot.status == 'pending':
+                    slots[index] = (replace(slot, status=status, message_id=message_id)
+                                    if content_type == slot.content_type else replace(slot, status='conflict'))
+        return replace(old, status='bound', slots=tuple(slots), media_album_id=album_id, early=())
+    if kind not in ('updateMessageSendSucceeded', 'updateMessageSendFailed') or not integer(event.get('old_message_id')):
+        return old  # updateNewMessage never binds; deletion or absence never ends a slot.
+    old_id = event['old_message_id']
+    if old.status == 'registered':
+        value = event.get('message')
+        content_type = value.get('content', {}).get('@type') if isinstance(value, dict) and isinstance(
+            value.get('content'), dict) else None
+        if any(row[0] == old_id for row in old.early):  # Two ends for one message contradict each other.
+            return replace(old, early=tuple(row if row[0] != old_id else (old_id, 'conflict', None, row[3])
+                                            for row in old.early))
+        if content_type not in old.content_types or len(old.early) >= MAX_EARLY_ALBUM_UPDATES:
+            return old
+        status, message_id = _album_terminal(event, old.chat_id, content_type)
+        return replace(old, early=(*old.early, (old_id, status, message_id, content_type)))
+    for index, slot in enumerate(old.slots):
+        if slot.temporary_id == old_id:
+            if slot.status != 'pending':
+                return old  # Terminal is final.
+            status, message_id = _album_terminal(event, old.chat_id, slot.content_type)
+            slots = list(old.slots)
+            slots[index] = replace(slot, status=status, message_id=message_id)
+            return replace(old, slots=tuple(slots))
+    return old
 
 
 def integer(value, *, positive=False):
@@ -228,6 +368,21 @@ class SendObservations:
                 raise ObservationUnavailable("send observation capacity or correlation is unavailable")
             self._entries[attempt_id] = SendObservation(attempt_id,extra,sending_id,chat_id,content_type,self._clock(),text_sha256,reply_anchor=reply_anchor,caption_sha256=caption_sha256,voice_duration=voice_duration,waveform_sha256=waveform_sha256,waveform_size=waveform_size,forum_topic_id=forum_topic_id,outgoing_entities=outgoing_entities,saved_messages_topic_id=saved_messages_topic_id,forward=forward,forward_self=forward_self,video=video)
 
+    def register_album(self, attempt_id, extra, sending_id, chat_id, content_types):
+        """One album attempt: its N content types in send order, correlated like a single send."""
+        if (type(content_types) is not tuple or not 2 <= len(content_types) <= 10 or
+                not any(set(content_types) <= group for group in ALBUM_CONTENT_GROUPS) or
+                not integer(chat_id) or type(sending_id) is not int or not 0 < sending_id < 2**31 or
+                type(attempt_id) is not str or not attempt_id or type(extra) is not str or not extra):
+            raise ObservationUnavailable('invalid album observation')
+        with self._lock:
+            self._prune()
+            if (attempt_id in self._entries or len(self._entries) >= self._capacity or
+                    any(v.sending_id == sending_id or v.extra == extra for v in self._entries.values())):
+                raise ObservationUnavailable("send observation capacity or correlation is unavailable")
+            self._entries[attempt_id] = AlbumObservation(attempt_id, extra, sending_id, chat_id, content_types,
+                self._clock(), slots=tuple(AlbumSlot(content_type) for content_type in content_types))
+
     def discard_unattempted(self, attempt_id):
         """Remove a registration refused before transport under the provider lock.
 
@@ -351,6 +506,9 @@ class SendObservations:
         with self._lock:
             self._prune()
             for key,old in list(self._entries.items()):
+                if isinstance(old, AlbumObservation):
+                    self._entries[key] = _reduce_album(old, event)
+                    continue
                 if old.forward and old.status == "sent" and event.get("@extra") == old.extra:
                     # A success that overtook the forwardMessages result stands only
                     # with an exact result; anything else makes the outcome a conflict.

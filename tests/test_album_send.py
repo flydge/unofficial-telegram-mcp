@@ -95,7 +95,7 @@ def pending(identifier, content_type, sending_id, **changes):
 
 def succeeded(old_id, new_id, content_type, **changes):
     return {'@type': 'updateMessageSendSucceeded', 'old_message_id': old_id,
-            'message': message(new_id, content_type, sending_state=None, **changes)}
+            'message': message(new_id, content_type, **{'sending_state': None, **changes})}
 
 
 def failed(old_id, content_type, code=400):
@@ -304,6 +304,163 @@ class TransportShapeTests(unittest.TestCase):
         twin['photo']['photo']['path'] = str(root / f'draft_{1:032x}' / 'other.jpg')
         self.refused(album_request([same, twin]))
         self.refused(album_request([same, copy.deepcopy(same)]))
+
+
+TYPES = ('messagePhoto', 'messageVideo', 'messagePhoto')
+
+
+def news(types=TYPES, sending_id=5):
+    return [{'@type': 'updateNewMessage', 'message': pending(-11 - i, kind, sending_id)} for i, kind in enumerate(types)]
+
+
+def result(types=TYPES, sending_id=5, extra='e', **changes):
+    return {'@type': 'messages', 'total_count': len(types),
+            'messages': [pending(-11 - i, kind, sending_id) for i, kind in enumerate(types)], '@extra': extra, **changes}
+
+
+class ObservationTests(unittest.TestCase):
+    """Criterion 4: one observation with N slots, bound only by the exact `messages` result."""
+
+    def observed(self, types=TYPES, clock=None):
+        from telegram_search_mcp.send_observations import SendObservations
+        observations = SendObservations(**({'clock': clock} if clock is not None else {}))
+        observations.register_album('a', 'e', 5, RECIPIENT, types)
+        return observations
+
+    def slots(self, observations):
+        snapshot = observations.snapshot('a')
+        return snapshot.status, [(slot.status, slot.temporary_id, slot.message_id) for slot in snapshot.slots]
+
+    def test_registration_is_closed_and_shares_correlation_with_single_sends(self):
+        from telegram_search_mcp.send_observations import ObservationUnavailable, SendObservations
+        observations = SendObservations()
+        for types in ((), ('messagePhoto',), ('messageDocument',) * 11, ('messagePhoto', 'messageDocument'),
+                      ('messageVoiceNote', 'messagePhoto'), ('messageAudio', 'messageAudio'),
+                      ('messageText', 'messageText'), ['messagePhoto', 'messagePhoto'], 'messagePhoto'):
+            with self.subTest(types=types), self.assertRaises(ObservationUnavailable):
+                observations.register_album('a', 'e', 5, RECIPIENT, types)
+        with self.assertRaises(ObservationUnavailable):
+            observations.register_album('a', 'e', 5, 0, TYPES)
+        observations.register('single', 'x', 5, RECIPIENT, 'messageDocument')
+        with self.assertRaises(ObservationUnavailable):
+            observations.register_album('a', 'e', 5, RECIPIENT, TYPES)  # same sending_id
+        with self.assertRaises(ObservationUnavailable):
+            observations.register_album('a', 'x', 6, RECIPIENT, TYPES)  # same extra
+        observations.register_album('a', 'e', 6, RECIPIENT, ('messageDocument', 'messageDocument'))
+        self.assertFalse(observations.sending_id_available(6))
+        with self.assertRaises(ObservationUnavailable):
+            observations.register('b', 'y', 6, RECIPIENT, 'messageDocument')
+        snapshot = observations.snapshot('a')
+        self.assertEqual((snapshot.status, len(snapshot.slots)), ('registered', 2))
+        observations.discard_unattempted('a')
+        self.assertIsNone(observations.snapshot('a'))
+
+    def test_new_messages_before_the_result_never_bind(self):
+        observations = self.observed()
+        for event in news():
+            observations.reduce(event)
+        self.assertEqual(self.slots(observations), ('registered', [('pending', None, None)] * 3))
+        observations.reduce(result())
+        self.assertEqual(self.slots(observations), ('bound', [('pending', -11, None), ('pending', -12, None),
+                                                             ('pending', -13, None)]))
+        self.assertEqual(observations.snapshot('a').media_album_id, int(ALBUM_ID))
+
+    def test_each_slot_ends_only_by_its_own_bound_terminal_update(self):
+        observations = self.observed()
+        observations.reduce(result())
+        observations.reduce(succeeded(-12, 802, 'messageVideo'))
+        observations.reduce(failed(-11, 'messagePhoto'))
+        observations.reduce({'@type': 'updateDeleteMessages', 'chat_id': RECIPIENT, 'message_ids': [-13],
+                             'is_permanent': True, 'from_cache': False})
+        observations.reduce(succeeded(-99, 803, 'messagePhoto'))  # not one of ours
+        self.assertEqual(self.slots(observations), ('bound', [('failed', -11, None), ('sent', -12, 802),
+                                                             ('pending', -13, None)]))
+        # Terminal is final: a later contradicting update changes nothing.
+        observations.reduce(failed(-12, 'messageVideo'))
+        observations.reduce(succeeded(-11, 804, 'messagePhoto'))
+        self.assertEqual(self.slots(observations)[1][:2], [('failed', -11, None), ('sent', -12, 802)])
+
+    def test_terminal_updates_that_overtake_the_result_apply_only_once_exactly_bound(self):
+        observations = self.observed()
+        observations.reduce(succeeded(-13, 903, 'messagePhoto'))
+        observations.reduce(failed(-12, 'messageVideo'))
+        observations.reduce(succeeded(-50, 950, 'messagePhoto'))  # someone else's message
+        self.assertEqual(self.slots(observations), ('registered', [('pending', None, None)] * 3))
+        observations.reduce(result())
+        self.assertEqual(self.slots(observations), ('bound', [('pending', -11, None), ('failed', -12, None),
+                                                             ('sent', -13, 903)]))
+        early = self.observed()
+        early.reduce(succeeded(-12, 902, 'messagePhoto'))  # the right id with the wrong content type
+        early.reduce(result())
+        self.assertEqual(self.slots(early)[1][1], ('conflict', -12, None))
+
+    def test_any_mismatch_in_the_result_is_a_conflict_and_every_slot_stays_unknown(self):
+        def changed(index, **fields):
+            def apply(value):
+                value = copy.deepcopy(value)
+                value['messages'][index].update(fields)
+                return value
+            return apply
+        tampered = [
+            lambda r: {**r, 'total_count': 2}, lambda r: {**r, 'messages': r['messages'][:2]},
+            lambda r: {**r, 'messages': [r['messages'][1], r['messages'][0], r['messages'][2]]},
+            changed(0, content=message_content('messageDocument')), changed(1, sending_state=None),
+            changed(2, sending_state={'@type': 'messageSendingStatePending', 'sending_id': 6}),
+            changed(1, media_album_id='-7000000000000000002'), changed(0, media_album_id='0'),
+            changed(0, media_album_id='7000000000000000001'), changed(0, media_album_id=-7),
+            changed(1, id=-11), changed(2, chat_id=RECIPIENT + 1), changed(0, is_outgoing=False),
+            changed(0, id=0), lambda r: {**r, '@type': 'message'}, lambda r: {**r, 'messages': None},
+            lambda r: {**r, 'total_count': '3'}]
+        for tamper in tampered:
+            observations = self.observed()
+            observations.reduce(tamper(result()))
+            for index, kind in enumerate(TYPES):
+                observations.reduce(succeeded(-11 - index, 801 + index, kind))
+            with self.subTest(tamper=tamper):
+                self.assertEqual(observations.snapshot('a').status, 'conflict')
+        observations = self.observed()
+        observations.reduce(result())
+        observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+        observations.reduce(result())  # a second result for the same request
+        self.assertEqual(observations.snapshot('a').status, 'conflict')
+
+    def test_a_rejected_request_fails_every_slot(self):
+        observations = self.observed()
+        observations.reduce({'@type': 'error', 'code': 400, 'message': 'PRIVATE', '@extra': 'e'})
+        self.assertEqual(observations.snapshot('a').status, 'failed')
+        observations.reduce(result())
+        self.assertEqual(observations.snapshot('a').status, 'failed')
+
+    def test_malformed_final_messages_make_the_slot_a_conflict(self):
+        bad = [succeeded(-11, 801, 'messageDocument'), succeeded(-11, -801, 'messagePhoto'),
+               succeeded(-11, 801, 'messagePhoto', chat_id=RECIPIENT + 1),
+               succeeded(-11, 801, 'messagePhoto', is_outgoing=False),
+               succeeded(-11, 801, 'messagePhoto', sending_state={'@type': 'messageSendingStatePending',
+                                                                  'sending_id': 5}),
+               {**failed(-11, 'messagePhoto'), 'error': {'@type': 'error', 'code': 401}},
+               {**failed(-11, 'messagePhoto'), 'error': None}]
+        for event in bad:
+            observations = self.observed()
+            observations.reduce(result())
+            observations.reduce(event)
+            observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+            with self.subTest(event=repr(event)[:90]):
+                self.assertEqual(self.slots(observations)[1][0], ('conflict', -11, None))
+        video = self.observed()
+        video.reduce(result())
+        final = succeeded(-12, 802, 'messageVideo')
+        final['message']['content']['video'] = None
+        video.reduce(final)
+        self.assertEqual(self.slots(video)[1][1], ('conflict', -12, None))
+
+    def test_late_updates_after_expiry_change_nothing(self):
+        from telegram_search_mcp.send_observations import RETENTION_SECONDS
+        now = [100.0]
+        observations = self.observed(clock=lambda: now[0])
+        observations.reduce(result())
+        now[0] += RETENTION_SECONDS
+        observations.reduce(succeeded(-11, 801, 'messagePhoto'))
+        self.assertIsNone(observations.snapshot('a'))
 
 
 if __name__ == '__main__':
