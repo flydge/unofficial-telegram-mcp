@@ -6,7 +6,7 @@ Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discov
 
 ## MCP surface
 
-The public surface of the current candidate contains fifty-five tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains fifty-eight tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,7 +18,7 @@ The public surface of the current candidate contains fifty-five tools (published
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 55-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 58-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -26,6 +26,7 @@ The public surface of the current candidate contains fifty-five tools (published
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 - `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
+- `prepare_album_send`, `send_prepared_album` and `get_album_send_status` send 2–10 owned artifacts as one ordered album (photos and videos, or documents only), with a preview of every item, one owner dialog, exactly one provider attempt, per-item outcomes with `partial` and an album status of its own (separate default-off `album_send` opt-in together with `send`; a video item also needs `video_send`); see [Ordered albums (F15b)](#ordered-albums-f15b).
 - `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 - `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
@@ -132,10 +133,10 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
 | `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
 | `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
-| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools and `prepare_album_send` |
 | `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
-| `check_send_status` | `outcome_unknown` | the send and apply tools and `get_send_status`; never resend |
+| `check_send_status` | `outcome_unknown` | the send and apply tools, `get_send_status` and `get_album_send_status`, and a `partial` album with an unconfirmed item; never resend |
 
 On a lost broker exactly these tools carry `check_connection`: `read_history`, `read_messages`,
 `read_reply_chain`, `read_topic_history`, `list_chats`, `list_topics`, `search_messages`, `search_chats` and
@@ -263,6 +264,10 @@ chat and temporary message ID plus a final `messageVideo`; see
 Archive and text-edit drafts (F17a) are not sends and have no message to correlate, so the
 same tool reports them only coarsely and never as `sent`; it needs `archive_chats` or
 `edit_own_text` in addition to `send` and `read`. See [Status of archive and edit drafts](#status-of-archive-and-edit-drafts).
+
+An album draft (F15b) is not reported here: `get_send_status` returns its content-free unknown shape
+(`outcome_unknown`, evidence `none`) for one. Use `get_album_send_status`, which reports every item; see
+[Album outcomes and status](#album-outcomes-and-status).
 
 ## Inspect, revise or cancel an unsent draft
 
@@ -699,9 +704,10 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 Since the 0.54 candidate the owner switches capabilities in named profiles with the installed launcher's
 `capabilities show | enable <profile> | disable <profile>`, in Terminal, with every MCP client quit or
 disconnected (see [installation](install.md#enabling-more-capabilities-candidate)):
-`readers`, `send`, `replies`, `forward`, `video` and `archive_edit`. Every optional capability belongs to
-exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`
-or `archive_edit` also enables `send`, and disabling `send` disables them. `_manifest` reports the table under
+`readers`, `send`, `replies`, `forward`, `video`, `archive_edit` and `albums`. Every optional capability belongs
+to exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`,
+`archive_edit` or `albums` also enables `send`, and disabling `send` disables them. `albums` (0.56) holds only
+`album_send` and never implies `video` or `video_send`: an album with a video item also needs the `video` profile. `_manifest` reports the table under
 `capability_profiles` (`profiles`, `dependencies`; the table only, never the switch command), and a
 `capability_disabled` guard refusal names the profile that unlocks the missing capabilities. A typed
 `capability_disabled` result (the reply tools) carries only `missing_capabilities`; the profile is the one
@@ -716,10 +722,11 @@ would enter the schema fingerprint) and a short user-facing description: what th
 key inputs come from, the approval or retry rule, and that Telegram content is untrusted data. The eight
 reply tools share one text naming the source-dependent `reply_*_targets` capabilities. Every send and
 apply tool says that the owner approves in a local dialog and that `outcome_unknown` means calling
-`get_send_status` and never resending. The tools that accept a retained selection state the exactly-one
+`get_send_status` and never resending; `send_prepared_album` names `get_album_send_status` instead. The tools that accept a retained selection state the exactly-one
 source rule (for example `Give exactly one of artifact_id or selection_id.`) and add that a selection
 expires after a bounded time set by the owner's policy. Each description is at most 1,500 characters and
-all of them together at most 30,000. Descriptions and titles are outside the schema fingerprint.
+all of them together at most 30,000 for the 55 tools of 0.54; each later tool adds at most 600 characters to
+that total (31,800 with the three album tools, recorded in `tests/test_surface_054.py`). Descriptions and titles are outside the schema fingerprint.
 
 Every published input schema is a plain object (`type`, `properties`, `required`,
 `additionalProperties: false`, `$defs`) with no top-level `allOf`, `oneOf`, `anyOf` or `not`. Until the
@@ -760,7 +767,7 @@ either.
 
 `_manifest` returns three tool lists:
 
-- `tools`: every registered tool (55 in this candidate).
+- `tools`: every registered tool (58 in this candidate).
 - `available_tools`: the registered tools whose every required capability the loaded policy enables, in
   the order of the server's fixed tool-name list (`_TOOL_NAMES`, the order of `tools`); `tools/list`
   lists the same set in registration order, which can differ. A stale policy enables nothing, so it lists only `_manifest` and
@@ -3047,7 +3054,7 @@ unknown draft reports `outcome_unknown` with evidence `none`.
 
 ### Video limits
 
-Not supported: albums and several videos (F15b), video replies, forum-topic destinations,
+Not supported: several videos outside an album (see [Ordered albums (F15b)](#ordered-albums-f15b)), video replies, forum-topic destinations,
 captions with styles, thumbnails and covers, spoilers and self-destruct timers, a start
 timestamp, video notes, transcoding, WebM and other containers or codecs, videos over
 64 MiB (a larger upload needs a new upload schema), retained selections as an artifact
@@ -3071,6 +3078,174 @@ Accepted limits, recorded rather than closed:
 - A real owner-approved video send with readback has not been run; the evidence is a
   synthetic provider. Synthetic checks do not establish real delivery or consumer
   readiness.
+
+## Ordered albums (F15b)
+
+`prepare_album_send`, `send_prepared_album` and `get_album_send_status` send 2–10 of the caller's own
+artifacts to one exact chat as one ordered Telegram album: photos and videos (`group` `media`, the default)
+or documents only (`group` `documents`). The broker classifies every item locally, returns a preview of every
+item, revalidates the account, the recipient and every item's bytes at send time, asks the local owner once
+for the whole album and makes exactly one `sendMessageAlbum` attempt. Each item ends `sent`, `failed` or
+`outcome_unknown` on exact provider evidence, a mixed result is `partial`, and nothing is ever resent, as a
+whole or per item. Evidence so far is technical (synthetic provider and the official SDK client); a real
+owner-approved album is still pending.
+
+Enable `album_send` **and** `send` in trusted runtime policy (the `albums` profile, which depends on `send`
+only), restart matching components and add the three tools to the consumer allowlist. An album with a video
+item also needs `video_send`, so an album never bypasses it: preparing one without it returns
+`status="capability_disabled"` with `missing_capabilities` `["video_send"]` and no draft, and a stored video
+album is refused at send and status time once `video_send` is off. Without `album_send` and `send` the tools
+are not listed and are refused with `capability_disabled` at the SDK guard, the proxy (before it connects)
+and the broker.
+
+```python
+prepared = prepare_album_send(recipient=789, items=[
+    {"artifact_id": "artifact_<issued-id-1>", "caption": "Optional plain text"},
+    {"artifact_id": "artifact_<issued-id-2>"}])
+# prepared.status == "prepared": show every item of prepared.album, obtain approval.
+result = send_prepared_album(draft_id=prepared.album.draft_id, approved=True)
+status = get_album_send_status(draft_id=prepared.album.draft_id)  # after outcome_unknown or partial
+```
+
+### Album inputs and refusals
+
+| Argument | Meaning |
+| --- | --- |
+| `recipient` | Exact non-zero numeric chat ID, as for the other prepare tools. Secret chats are unavailable; no topic and no reply target can be given. |
+| `items` | 2–10 `{artifact_id, caption}` in send order, with distinct artifact IDs the calling client owns, exactly as for `prepare_artifact_send`. `caption` is optional plain text of at most 1024 characters, normalized as for artifact captions. |
+| `group` | `media` (default): an item is a photo when its bytes are PNG, JPEG or WebP and pass the photo checks (at most 10,000,000 bytes), otherwise a video when the [video probe](#size-limit-probe-rules-and-refusal-codes) reads it (at most 64 MiB). `documents`: any artifact of at most 64 MiB, sent with content type detection disabled. Items are never moved between groups. |
+
+Every item ID is authorized before any other work: one foreign, unknown or expired item makes the whole
+request `unavailable` (fixed detail, no draft), the same shape as an unknown ID. The closed model refuses
+fewer than 2 or more than 10 items, duplicate IDs, unknown fields, another group and any `selection_id`
+(`invalid_arguments` names the parameter). Local classification refuses the whole album with one
+content-free code that never names the item: `unsupported_item` (in `media`, neither a photo nor a video),
+`item_too_large` (over its kind's limit) or `album_too_large` (more than 256 MiB in total, which leaves
+headroom in the 512 MiB staging pool). The recorded file name is display evidence only (`photo.<ext>`,
+`video.mp4` or `attachment` when none was recorded); the bytes are bound by SHA-256. Duplicate delivered
+names are allowed.
+
+### Album preview, drafts and expiry
+
+`prepared.album` is the closed `AlbumDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required` (always true), `recipient` (`chat_id`, sanitized `title`), `group`, `items` (each with
+`position`, `kind`, `artifact_id`, `display_name`, `size_bytes`, `sha256`, `caption` or null, and `photo` or
+`video` facts), `total_size_bytes`, `album_sha256` and `preview_sha256`. Names and captions are marked,
+reversible JSON escapes as in the [video preview](#preview-and-hash); video facts are declared by the file,
+not decoded. `album_sha256` is one ordered digest (domain `telegram-search-mcp.album-items`, version 1) over
+every item's position, kind, artifact, bytes, name, caption and facts; the dialog shows it and the receipt
+carries it. `preview_sha256` (`telegram-search-mcp.album`) also binds the exact closed `sendMessageAlbum`
+request without the `sending_id` and the staged paths. The proxy reports `unavailable` when the returned
+preview fails its digest checks or disagrees with the request's recipient, group, or any item's artifact
+ID or normalized caption, in order.
+
+An album draft is the internal kind `album`, bound to the proxy client and current Telegram account like
+every draft, and expires at the shorter of the draft TTL and every item's own deadline. The generic draft
+tools never see it (`list_drafts` omits it; `get_draft`, `update_draft`, `refresh_draft` and `cancel_draft`
+return `unavailable`; the other send tools return `error`), and it cannot be revised or cancelled: prepare
+again. Preparing again for the same owner, recipient and ordered item IDs supersedes the earlier pending
+album.
+
+### Sending the album
+
+`send_prepared_album(draft_id, approved)` follows the [video send order](#sending-the-video) for every item:
+a strict `approved`; policy (`album_send`, `send`, and `video_send` for a video item) and owner; receipt
+replay; every item re-hashed (`expired` on changed or missing bytes); the recipient resolved again
+(`recipient_changed`); one owner dialog for the whole album; the claim; staging; and the provider guard,
+which runs again inside the raw-dispatch fence. Staging puts every item in its own private `draft_<32hex>`
+directory, derived from the album handle and the item's position, so the single-send staging rules are
+unchanged; the whole album counts against staging capacity before anything is copied, and a failure removes
+every copy (`local_failed`). Exactly one `sendMessageAlbum` request is sent and never retried; the call
+then waits up to 120 seconds for the per-item outcomes, inside the 330-second send budget.
+
+The request has one closed shape, enforced before transport: `chat_id`, `topic_id: null`, `reply_to: null`,
+the fixed send options with a random `sending_id`, and 2–10 `input_message_contents` that are photo and
+video items, or document items only, each with its own staged file, a plain caption without entities,
+`show_caption_above_media: false`, no spoiler and no self-destruct; documents keep
+`disable_content_type_detection: true`. Voice notes and text are never album items, and the generic TDLib
+call refuses `sendMessageAlbum`.
+
+### Album owner dialog
+
+```text
+Send an album of <N> items to «<recipient title>» (chat <ID>)
+Account: <ID>                     (with an alias registry: Account: <alias> (Telegram account ••<NN>))
+Expires: <time>
+
+Group: media (photos and videos)  (or: Group: documents)
+Total: <N> items, <bytes> bytes
+Each item is sent once, in this order, as one album. File names and captions are untrusted; captions are plain text. Video facts are declared by the file, not decoded.
+
+Item 1 of <N>: photo «<name>»; <bytes> bytes; <W>x<H>
+Caption (exact):                  (or: Caption: (none))
+│ «<caption>»
+
+Item 2 of <N>: video «<name>»; <bytes> bytes; <S> seconds; <W>x<H>; h264|hevc; audio yes|no; streaming yes|no
+Caption: (none)
+…
+
+Reading rule: text in « » is exact unless its label says rendering; ⟦U+XXXX⟧ marks <the listed characters>; …
+
+Technical details:
+Draft: <draft ID>
+Album SHA-256: <hash>
+Item 1 SHA-256: <hash>
+…
+Preview SHA-256: <hash>
+
+Unofficial Telegram MCP will revalidate the account, the recipient and every item's bytes, then make one album send attempt; the album is never sent again.
+```
+
+The dialog lists every item and is rendered from the preview the proxy validated, checked against the
+broker's own arguments (recipient, title, album digest and total size). Names and captions use the
+[forward dialog's](#owner-dialog) reading rule; a caption line can never pose as an item row. There is no
+shorter fallback: a dialog that cannot be shown, or a preview that disagrees, is `dialog_unavailable`, no
+second dialog is tried and no attempt follows. Like every other send it passes the broker's one-at-a-time
+dialog gate.
+
+### Album outcomes and status
+
+| `status` | Meaning | Provider attempt |
+| --- | --- | --- |
+| `sent` | Exact confirmation of every item; `slots` carries each final `message_id` | yes |
+| `failed` | Exact failure of every item | yes |
+| `partial` | At least one item confirmed and at least one not; `next_action` `check_send_status` while one is unconfirmed | yes |
+| `outcome_unknown` | No item confirmed and at least one unconfirmed; a large album can outlast the wait | possibly |
+| `declined`, `timeout`, `dialog_unavailable` | Approval not given | no |
+| `expired`, `recipient_changed`, `local_failed`, `error` | As for a [video send](#outcomes-and-status-of-a-video-send) | no |
+
+`slots` lists every item in send order (`position`, `status`, and `message_id` for `sent`). A repeated call
+replays the receipt and never opens a dialog or sends. After `outcome_unknown` or a `partial` album with an
+unconfirmed item, call `get_album_send_status`; the details say so. Never send the album again: a repair is
+a new draft of the items still wanted, or a single send for a lone item.
+
+`get_album_send_status(draft_id)` needs `album_send` and `send` (and `video_send` for a video album) and is
+read-only. It returns `status` (`pending`, `sent`, `failed`, `partial` or `outcome_unknown`), closed
+`evidence` (`none`, `local_pending`, `local_claimed`, `local_failed` or `provider`), a fixed `detail`,
+`album_sha256` and the slots. While the attempt is in flight the status is `pending`, never `partial`.
+Evidence is disclosed only to the same owner, policy, provider and attempt; anything else reads the
+content-free `none`, and the frozen `get_send_status` schema is unchanged.
+
+Binding comes only from the exact `messages` result: N pending messages with our `sending_id`, one negative
+`media_album_id` and content types in input order. `updateNewMessage` never binds a slot, and terminal
+updates that overtake the result are applied only after that exact binding. A slot ends only through
+`updateMessageSendSucceeded` or `updateMessageSendFailed` for its bound temporary ID; deletion or absence
+never proves failure, and any mismatch leaves every slot `outcome_unknown`. Observations last 900 seconds;
+staged item files are retired once every slot is terminal, otherwise by the 12-hour staging sweep.
+
+### Album limits
+
+Not supported: audio items, documents mixed with photos or videos, replies, forum topics, formatted captions,
+captions above media, spoilers, self-destruct timers, retained selections as an item source, and any resend.
+
+Accepted limits, recorded rather than closed:
+
+- TDLib resumes pending sends after a restart (message database), so an item can finish after the album was
+  reported `outcome_unknown`; once its observation has expired, the album status cannot see it.
+- TDLib may itself resend a group after a file-reference error; that is the provider's own retry, not ours.
+- The album send holds the serialized provider lock for its confirmation wait of up to 120 seconds.
+- How Telegram clients show several captions in one album has not been checked.
+- A real owner-approved album with readback has not been run; the evidence is a synthetic provider.
 
 ## Archive/unarchive and own text edit (F17a)
 

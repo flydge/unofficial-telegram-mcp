@@ -114,7 +114,8 @@ connecting there. A kit is ready. Until that run happens, the bundle path is ver
 - **Real evidence:** a 3-second H.264 MP4 was sent with its caption and read back.
 - **Accepted limits:** the provider lock is held during the upload wait, and later calls after lost
   authority still read `expired`.
-- **Not started:** albums (F15b).
+- **In development:** albums (F15b): tools, owner dialog and multi-account isolation with synthetic evidence
+  only; the owner session (one real album sent and read back) is pending.
 
 **F17a archive/unarchive and own text edit** ([spec](plans/0.54-archive-and-edit-spec.md)):
 - **What it does:** four tools behind the independent default-off `archive_chats` and
@@ -224,7 +225,7 @@ different license are being considered, with no committed migration date; see
 | F12 | Send-status inspection/correlation | Implemented | Unknown after state loss remains unknown; no automatic send retry or crash-boundary exactly-once promise. |
 | F13 | Replies, topic sends and outgoing styles | Partial | Plain/topic/reply paths and five text styles exist; retained rare source entities, formatted captions and applicable remaining live scenarios are not complete. |
 | F14 | Forward/copy | Partial (0.52 candidate): one-message forward/copy with real owner-approved copy and forward, read back through the official MCP SDK client (20.10.2026) | Visual check of the forward header in a Telegram app. Multiple messages and albums (F15), topic destinations, retained-selection sources and caption editing are out of scope. |
-| F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); albums (F15b) planned | Ordered albums (F15b) with partial outcomes. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
+| F15 | Native video and albums | Partial (0.52 candidate): one native video (F15a) with a real owner-approved send, read back (20.10.2026); ordered albums (F15b) in development with synthetic evidence only | Ordered albums (F15b) with partial outcomes. Videos over 64 MiB, replies, topic destinations, thumbnails and transcoding remain out of scope. Sending a document does not count as native video. |
 | F16 | Multiple accounts | Planned | Trusted local account registry, isolated ownership and real two-account validation. First-time single-account setup should be completed earlier. |
 | F17 | Archive/edit/delete/pin actions | Partial (0.52 candidate): archive/unarchive of one chat and plain-text edit of one own message (F17a), with real owner-approved runs read back (20.10.2026) | Caption edits, styled edits, pin/unpin and deletion each still need separate opt-ins, previews, permissions, final-state checks and per-action real approvals. Folders, bulk operations and other people's messages are out of scope. |
 | F18 | Full consumer/install/upgrade matrix | Partial | Current SDK, persistent Inspector and native Codex checks exist. The 0.52 candidate adds real Codex (`codex exec`) and Claude Code searches on the owner's Mac. The 0.53 candidate adds Claude Desktop registration, the plugin, a policy-filtered `tools/list` and upgrade, rollback and uninstall of the installed bundle, with synthetic and ad hoc evidence only. Still open: clean-user onboarding, real Claude Desktop and plugin runs, a real upgrade and rollback on an installed bundle (the owner's migration), full source-family/protocol/recovery coverage and controlled TDLib upgrades. |

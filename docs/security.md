@@ -325,7 +325,8 @@ Historical custom index files from an older version are not read or updated, but
 - unapproved sends, automatic send retries, deletes, pins and unpins, reactions, or moderation operations
 - published 0.51.0: every edit and chat-list move. The current candidate reaches only one approved Main/Archive move of one chat and one approved plain-text edit of one own text message (default-off `archive_chats` and `edit_own_text`, each together with `send` and `read`); caption edits, styled edits, other people's messages, chat folders, bulk and scheduled operations stay unreachable
 - multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies
-- video albums, replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB
+- video replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB
+- album audio items, documents mixed with media, album replies or topics, formatted album captions, spoilers and any album resend
 - broad attachment or thumbnail downloads outside one exact selected anchor
 - null-list global search, `searchPublicChats`, or public-chat crawling
 - secret-chat access
@@ -2527,6 +2528,39 @@ Residual risks, recorded rather than closed:
 - Real owner-approved forward and copy delivery with readback has not been run; the
   evidence is a synthetic provider. The same-UID cooperative client boundary is
   unchanged, with no hostile same-UID secrecy claim.
+
+## Ordered album boundary (F15b candidate)
+
+`prepare_album_send`, `send_prepared_album` and `get_album_send_status` add the default-off `album_send`
+capability, effective only together with `send`; the SDK guard, the proxy before it connects and the broker
+before dispatch enforce the pair, and tools/list omits the three tools without both. An album with a video
+item also needs `video_send`, checked after the local classification and before the recipient is read, again
+before any receipt replay, dialog or provider work at send time, after the dialog, inside the provider guard,
+in the raw-dispatch fence and for the status, so an album never bypasses the video capability. The authority
+is 2–10 owned artifacts (photos and videos, or documents only, at most 256 MiB in total) to one exact chat as
+one album, after one owner dialog that lists every item; it never covers audio, replies, topics, formatted
+captions, spoilers, secret chats or a resend.
+
+Every item ID is authorized before any other work, and one foreign or unknown item makes the whole request the
+content-free `unavailable`. Items are classified locally (`validate_photo`, the [video probe](#native-video-boundary-f15a-candidate),
+documents with content type detection disabled); the refusal codes `unsupported_item`, `item_too_large` and
+`album_too_large` never name the item. One ordered digest binds every item's position, kind, artifact, bytes,
+name, caption and facts; the preview, the dialog and the receipt carry it, the proxy checks the preview against
+the request, and the dialog checks it against the broker's own arguments. The draft (internal kind `album`) is
+bound to the proxy client and current account and is invisible to the generic draft tools; its handle is one
+more kind in the multi-account isolation matrix.
+
+At send time every item is re-hashed and the recipient resolved again. Staging copies each item into its own
+private `draft_<32hex>` directory derived from the album handle, so the one-file-per-directory rule of single
+sends holds. `sendMessageAlbum` is the only added request constructor and the generic TDLib call refuses it;
+its closed shape has exact keys, `topic_id` and `reply_to` null, the fixed send options with a random
+`sending_id`, and 2–10 per-kind contents with plain captions (voice notes and text excluded). Exactly one
+attempt is made and never retried. Slots bind only from the exact `messages` result and end only by the
+terminal update for their bound temporary ID; `updateNewMessage`, deletion and absence never decide an outcome.
+A mixed outcome is `partial`, unknown stays `outcome_unknown`, and evidence is disclosed only to the same
+owner, policy, provider and attempt. The album has its own status model; the frozen `get_send_status` schema
+is unchanged and reports an album as its content-free unknown shape. Evidence is technical (synthetic provider
+and the official SDK client); a real owner-approved album is pending.
 
 ## Native video boundary (F15a candidate)
 

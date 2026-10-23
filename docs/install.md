@@ -216,8 +216,9 @@ switch, then reconnect the clients:
 | `forward` | `forward_send` | `send` |
 | `video` | `video_send` | `send` |
 | `archive_edit` | `archive_chats`, `edit_own_text` | `send` |
+| `albums` | `album_send` (an album with a video item also needs `video`) | `send` |
 
-Disabling `send` also disables `replies`, `forward`, `video` and `archive_edit`; the base `read` and
+Disabling `send` also disables `replies`, `forward`, `video`, `archive_edit` and `albums`; the base `read` and
 `artifacts` are not a profile and stay. The action changes only the `enabled_capabilities` line (every other
 byte, pins and comments included, stays) through a validated atomic replace. Every refusal comes before
 that write and changes nothing:
@@ -1004,7 +1005,7 @@ The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stder
 
 Merge the server block from [`.codex/config.toml.example`](../.codex/config.toml.example) into `.codex/config.toml` in the project where you want to use Unofficial Telegram MCP. Preserve any existing settings. Replace **both** absolute-path placeholders. The example does not expand `~` or shell variables.
 
-The current candidate example lists all 55 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
+The current candidate example lists all 58 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
 
 Install the optional skill by copying [the skill file](../skills/telegram-search/SKILL.md) to `~/.agents/skills/telegram-search/SKILL.md`. Back up an existing copy first. The skill supplies search and approval guidance; the broker enforces its own permissions.
 
@@ -1068,6 +1069,7 @@ Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decima
 | Text or attachment replies | `send` plus `reply_text_send` or `reply_artifact_send` respectively |
 | Exact forward/copy of one message (candidate) | `send` and `forward_send`; see the [forward/copy reference](reference.md#exact-forwardcopy-f14). Off by default; each send still needs the preview, approval and local confirmation |
 | One native MP4/MOV video of at most 64 MiB (candidate) | `send` and `video_send`, plus `artifacts` to supply the file; see the [native video reference](reference.md#native-video-send-f15a). Off by default; each send still needs the preview, approval and local confirmation |
+| One ordered album of 2–10 photos and videos, or documents (candidate) | `send` and `album_send`, plus `video_send` when an item is a video and `artifacts` to supply the files; see the [albums reference](reference.md#ordered-albums-f15b). Off by default; each album still needs the preview of every item, approval and one local confirmation |
 | Move one chat between Main and Archive (candidate) | `send`, `read` and `archive_chats`; see the [archive and edit reference](reference.md#archiveunarchive-and-own-text-edit-f17a). Off by default; each move still needs the preview, approval and local confirmation. Requires `read` because `prepare_chat_archive` reveals that chat's title, kind and list membership |
 | Edit the plain text of one own text message (candidate) | `send`, `read` and `edit_own_text`; see the [archive and edit reference](reference.md#archiveunarchive-and-own-text-edit-f17a). Off by default, independent of `archive_chats`; each edit still needs the preview, approval and local confirmation. Requires `read` because `prepare_text_edit` reveals that message's text, formatting and edit date |
 
