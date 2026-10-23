@@ -30,14 +30,14 @@ first connect; without it an installed bundle supplies its own application ident
 status reads enrollment metadata and an existing broker handshake only;
 it does not initialize TDLib, read Keychain, start services or prove Ready.
 connect-helper is internal: connect starts it as a transient launchd job.
-Every other command takes a trailing --account <alias> for a registered account
+Every command takes a trailing --account <alias> for a registered account
 alias; without it the command serves the default account.
 Pinned TDLib and an installed matching Python package remain prerequisites.
 '''
 COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
-# The commands that take a trailing `--account <alias>` (0.55 spec 3B); connect-helper's job becomes per alias in
-# phase C. Without the flag a command's argv and behaviour are the default alias's, byte for byte.
-ACCOUNT_COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials')
+# The commands that take a trailing `--account <alias>` (0.55 spec 3B); connect-helper's is the argv of the alias's
+# own connect job (3C). Without the flag a command's argv and behaviour are the default alias's, byte for byte.
+ACCOUNT_COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
 # The closed refusal codes of an --account the registry does not admit; anything else is alias_unavailable.
 ACCOUNT_CODES = frozenset({'alias_unavailable', 'alias_path_too_long', 'registry_invalid', 'registry_unsafe'})
 

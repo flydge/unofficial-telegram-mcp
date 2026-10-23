@@ -64,12 +64,11 @@ def run(main, args):
 class SetupGrammarTests(Home):
     def test_each_account_command_takes_the_flag_and_resolves_the_registered_alias(self):
         self.assertEqual(setup_cli.ACCOUNT_COMMANDS, ('setup', 'resume', 'status', 'connect', 'wait', 'cancel',
-                                                      'api-credentials'))
+                                                      'api-credentials', 'connect-helper'))
         for command in setup_cli.ACCOUNT_COMMANDS:
             with self.subTest(command=command):
                 self.assertEqual(setup_cli.account_argument([command, '--account', 'work']), ([command], 'work'))
                 self.assertEqual(setup_cli.account_argument([command]), ([command], None))
-        self.assertIsNone(setup_cli.account_argument(['connect-helper', '--account', 'work']))
         self.assertEqual(setup_cli.account_paths('work'), SetupPaths.from_account(self.work))
 
     def test_status_and_connect_commands_run_on_the_aliases_paths(self):
@@ -97,7 +96,7 @@ class SetupGrammarTests(Home):
             setup.assert_not_called()
 
     def test_flag_grammar_violations_are_invalid_arguments_and_never_echo(self):
-        for args in [*OUTSIDE, ['connect-helper', '--account', 'work']]:
+        for args in [*OUTSIDE, ['connect-helper', '--account', 'default'], ['connect-helper', '--account']]:
             with self.subTest(args=args), mock.patch.object(setup_cli, 'SetupPaths') as paths:
                 code, out, err = run(setup_cli.main, args)
             self.assertEqual((code, json.loads(out)['code']), (2, 'invalid_arguments'))
@@ -140,8 +139,8 @@ class LauncherGrammarTests(Home):
     def test_the_account_actions_are_exactly_the_documented_ones(self):
         module = launcher_module('account_launcher_grammar')
         self.assertEqual(module.ACCOUNT_ACTIONS, ('mcp', 'broker', 'setup', 'resume', 'connect', 'wait', 'cancel',
-                                                  'api-credentials', 'status'))
-        self.assertEqual(set(module.ACCOUNT_ACTIONS), set(module.ACTIONS) - {'connect-helper'})
+                                                  'api-credentials', 'status', 'connect-helper'))
+        self.assertEqual(set(module.ACCOUNT_ACTIONS), set(module.ACTIONS))
         for action in module.ACCOUNT_ACTIONS:
             self.assertEqual(module.account_action([action, '--account', 'work']), ([action], 'work'))
         for alias in ('a', 'w0rk', 'abcdefghijkl'):
@@ -152,7 +151,7 @@ class LauncherGrammarTests(Home):
 
         class Reached(Exception):
             pass
-        refused = [*OUTSIDE, ['connect-helper', '--account', 'work'], ['capabilities', 'show', '--account', 'work'],
+        refused = [*OUTSIDE, ['connect-helper', '--account', 'default'], ['capabilities', 'show', '--account', 'work'],
                    ['rollback', '--account', 'work'], ['mcp', '--account', 'ｗork']]
         for args in refused:
             with self.subTest(args=args), mock.patch.object(module, '_read', side_effect=Reached()) as reader:
@@ -383,15 +382,11 @@ class BrokerArgumentTests(Home):
         with mock.patch.object(launch_agent, 'run_broker', return_value=0) as broker:
             self.assertEqual(run(launch_agent.main, ['run', '--account', 'work'])[0], 0)
             self.assertEqual(run(launch_agent.main, ['run'])[0], 0)
-        self.assertEqual(broker.call_args_list, [mock.call(self.work), mock.call()])
+        self.assertEqual(broker.call_args_list, [mock.call(account=self.work), mock.call()])
 
     def test_broker_argv_refusals_are_fixed(self):
         with mock.patch.object(launch_agent, 'run_broker') as broker, \
                 mock.patch.object(launch_agent, 'install_launch_agent') as install:
-            for args in (['install', '--account', 'work'], ['status', '--account', 'work'],
-                         ['uninstall', '--account', 'work']):
-                with self.subTest(args=args):
-                    self.assertEqual(run(launch_agent.main, args), (1, '', 'BROKER_LIFECYCLE_FAILED\n'))
             code, out, err = run(launch_agent.main, ['run', '--account', SENTINEL])
             self.assertEqual(code, 2)
             self.assertNotIn(SENTINEL, out + err)
@@ -399,25 +394,6 @@ class BrokerArgumentTests(Home):
             self.assertEqual(run(launch_agent.main, ['run', '--account', 'work']), (1, '', 'BROKER_LIFECYCLE_FAILED\n'))
         broker.assert_not_called()
         install.assert_not_called()
-
-    def test_no_named_job_is_written_or_started_before_phase_c(self):
-        python = Path(sys.executable)
-        self.work.broker_plist.parent.mkdir(parents=True, mode=0o700)
-        calls = []
-        for build in (lambda: launch_agent.write_launch_agent(plist_path=self.work.broker_plist,
-                                                              python_executable=python, account=self.work),
-                      lambda: launch_agent.install_launch_agent(python_executable=python, account=self.work,
-                                                                runner=lambda *a, **k: calls.append(a),
-                                                                preflight=lambda: calls.append('preflight')),
-                      lambda: launch_agent.start_enrolled_broker(python_executable=python, account=self.work,
-                                                                 runner=lambda *a, **k: calls.append(a)),
-                      lambda: launch_agent.restore_enrolled_broker(python_executable=python, account=self.work,
-                                                                   runner=lambda *a, **k: calls.append(a)),
-                      lambda: launch_agent.connect_job_payload(python_executable=python, account=self.work)):
-            with self.assertRaises(launch_agent.LaunchAgentError):
-                build()
-        self.assertEqual(calls, [])
-        self.assertEqual(list(self.work.broker_plist.parent.iterdir()), [])
 
 
 if __name__ == '__main__':
