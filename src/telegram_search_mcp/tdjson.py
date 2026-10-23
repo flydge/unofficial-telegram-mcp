@@ -914,7 +914,7 @@ class LegacyTDJson:
         self.close()
 
 
-from .send_observations import SendObservations, ObservationUnavailable, album_outcomes
+from .send_observations import SendObservations, ObservationUnavailable, album_outcomes, other_chat_update
 
 
 class TDLibClient:
@@ -1809,7 +1809,8 @@ class TDLibClient:
                         return observation.message_id
                 elif (response.get("@type") == "updateMessageSendSucceeded"
                         and type(response.get("old_message_id")) is int
-                        and response["old_message_id"] == observation.temporary_id):
+                        and response["old_message_id"] == observation.temporary_id
+                        and not other_chat_update(response, observation.chat_id)):
                     raise MessageSendOutcomeUnknown("TDLib returned an invalid final message")
             raise MessageSendOutcomeUnknown("TDLib forward confirmation timed out")
 
@@ -2503,7 +2504,8 @@ class TDLibClient:
                     return observation.message_id
                 if (observation is not None and response.get("@type") == "updateMessageSendSucceeded"
                         and type(response.get("old_message_id")) is int
-                        and response["old_message_id"] == observation.temporary_id):
+                        and response["old_message_id"] == observation.temporary_id
+                        and not other_chat_update(response, observation.chat_id)):
                     raise MessageSendOutcomeUnknown("TDLib returned an invalid final message")
                 if response.get("@extra") == extra and observation is not None and observation.status != "pending":
                     raise MessageSendOutcomeUnknown("TDLib returned an invalid preliminary message")

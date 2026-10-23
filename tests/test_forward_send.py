@@ -236,7 +236,11 @@ class Raw:
                     self.fail_receive = True; return
                 self.events.append({**result, '@extra': request['@extra']}); return
             self.events.append({**result, '@extra': request['@extra']})
-            if self.mode in ('sent', 'foreign_pending'):
+            if self.mode == 'other_chat_first':  # Another chat's message with the same temporary ID ends first.
+                self.events.append({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                                    'message': outgoing(901, content_type, chat_id=request['chat_id'] + 1,
+                                                        sender_id={'@type': 'messageSenderUser', 'user_id': 8})})
+            if self.mode in ('sent', 'foreign_pending', 'other_chat_first'):
                 self.events.append(success)
             elif self.mode == 'failed':
                 self.events.append({'@type': 'updateMessageSendFailed', 'old_message_id': -10,
@@ -1228,6 +1232,13 @@ class CriticReviewTests(ForwardFixture, unittest.TestCase):
         self.assertIn('no provider attempt was made', replay['detail'])
         self.assertNotIn('previous provider attempt', replay['detail'])
         self.assertEqual(self.forwards(), [])
+
+    def test_an_end_of_another_chat_with_the_same_temporary_id_is_not_ours(self):
+        self.raw.mode = 'other_chat_first'
+        did = self.prepare()['draft_id']
+        result = self.send(did)
+        self.assertEqual((result['status'], result['message_id']), ('sent', 701))
+        self.assertEqual(len(self.forwards()), 1)
 
     def test_foreign_sending_id_with_matching_chat_and_type_is_not_matched(self):
         self.raw.mode = 'foreign_pending'

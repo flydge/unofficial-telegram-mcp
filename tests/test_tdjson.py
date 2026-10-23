@@ -283,6 +283,41 @@ class TDLibBoundaryTests(unittest.TestCase):
         self.assertEqual(content["document"]["document"]["path"], str(path))
         self.assertEqual(content["caption"]["text"], "reviewed")
 
+    def test_a_terminal_update_of_another_chat_never_ends_the_wait(self) -> None:
+        """TDLib numbers temporary message IDs per chat: another chat's end for the same ID is not ours."""
+        class SendRaw:
+            def __init__(self) -> None:
+                self.sent: list[dict[str, Any]] = []
+                self.pending: deque[dict[str, Any]] = deque()
+
+            def send(self, payload: dict[str, Any]) -> None:
+                self.sent.append(payload)
+                chat_id = payload["chat_id"]
+                final = lambda chat, identifier: {"@type": "message", "id": identifier, "chat_id": chat,
+                                                  "is_outgoing": True, "content": {"@type": "messageDocument"}}
+                self.pending.extend([
+                    {"@type": "message", "id": -99, "chat_id": chat_id,
+                     "is_outgoing": True, "content": {"@type": "messageDocument"},
+                     "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
+                    {"@type": "updateMessageSendSucceeded", "old_message_id": -99, "message": final(chat_id + 1, 300)},
+                    {"@type": "updateMessageSendSucceeded", "old_message_id": -99, "message": final(-chat_id, 301)},
+                    {"@type": "updateMessageSendSucceeded", "old_message_id": -99, "message": final(chat_id, 200)},
+                ])
+
+            def receive(self, timeout: float) -> dict[str, Any] | None:
+                del timeout
+                return self.pending.popleft() if self.pending else None
+
+            def close(self) -> None:
+                pass
+
+        raw = SendRaw()
+        client = TDLibClient(raw=raw)
+        client._ready = True
+        path = Path.home() / "Library/Application Support/TelegramSearchMCP/outgoing-staging/draft_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/report.txt"
+        self.assertEqual(client.send_document_message(123, path, "reviewed"), 200)
+        self.assertEqual(len(raw.sent), 1)
+
     def test_download_file_polls_without_holding_provider_lock_and_returns_completed_path(self) -> None:
         raw = ScriptedRaw({
             "downloadFile": [{"@type": "file", "id": 44, "local": {"is_downloading_completed": False, "path": ""}}],

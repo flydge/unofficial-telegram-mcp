@@ -119,7 +119,7 @@ def _album_terminal(event, chat_id, content_type):
     return ('conflict', None)
 
 
-def _other_chat(event, chat_id):
+def other_chat_update(event, chat_id):
     """A terminal update for another chat's message. The pinned TDLib (d1085f9) numbers temporary message IDs per
     chat, so the same temporary ID in another chat is someone else's message: never evidence for a slot. A message
     whose chat cannot be read is not another chat's; it stays evidence (a conflict) against the slot."""
@@ -196,7 +196,7 @@ def _reduce_album(old, event):
     if kind not in ('updateMessageSendSucceeded', 'updateMessageSendFailed') or not integer(event.get('old_message_id')):
         return old  # updateNewMessage never binds; deletion or absence never ends a slot.
     old_id = event['old_message_id']
-    if _other_chat(event, old.chat_id):
+    if other_chat_update(event, old.chat_id):
         return old  # Slots bind by (chat, temporary ID): never buffered, never a second end, never a conflict.
     if old.status == 'registered':
         value = event.get('message')
