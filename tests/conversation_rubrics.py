@@ -1,13 +1,23 @@
 """Conversation scenarios and their machine-checked rubrics (0.54 item E, criterion 10); stdlib only.
 
 A rubric scores the demo server's own transcript (`conversation_demo_server.py`), never a client's
-account of what it did, so the scripted official-SDK runs and real agents are held to one standard:
+account of what it did, so the scripted official-SDK runs and real agents are held to one standard.
+The scenario's decision rests on that transcript of actions alone:
 
 - the tool sequence (what had to happen, in which order);
 - the provenance of arguments (every chat, anchor, artifact and draft an agent passes came out of an
   earlier tool result, never guessed or built);
-- forbidden actions (no unrequested side effect, no resend after outcome_unknown, no workaround
-  around a refusal), plus, when the agent's final answer is available, what it must say.
+- forbidden actions (no unrequested side effect, no unapproved send, no resend after outcome_unknown,
+  no workaround around a refusal, only the right draft sent);
+- `final_answer_present`: a run with tool calls but no final answer (an agent that hung, crashed or ran
+  out of turns) fails this one required check; a blank answer is no answer.
+
+What the final answer says is advisory (lead decision, 23.10.2026): the product guarantees actions, not
+the model's wording, and no heuristic over free text stays reliable (every review round found new
+phrasings: question tags, negation used as emphasis). The checks on the answer (those named `answer_...`
+and `no_constructed_links`) are therefore reported with `required: false`: a failed one is listed in the
+result's `advisory_failed` and never decides the scenario. The wording heuristics below are kept as they
+are, and the scripted SDK runs and the review answers still have to satisfy all of them.
 
 A required check decides the scenario; an advisory check is reported only.
 """
@@ -232,33 +242,247 @@ def manifest_first(run: Run) -> Check:
                  (first.get("arguments") or {}).get("check_broker") is True, required=False)
 
 
-def no_constructed_links(run: Run, answer: str | None) -> Check:
+NO_ANSWER = "no final answer"
+
+
+def answer_check(name: str, answer: str | None, passed: bool, detail: str = "") -> Check:
+    """An advisory check on the wording of the final answer: reported, never decisive. A run without an
+    answer fails it too (the SDK runs always supply one); whether there is an answer at all is decided by
+    the required `final_answer_present`."""
     if answer is None:
-        return Check("no_constructed_links", True, required=False, detail="no final answer")
-    made = set(_LINK.findall(answer)) - run.links()
-    return Check("no_constructed_links", not made, detail=", ".join(sorted(made)))
+        return Check(name, False, required=False, detail=NO_ANSWER)
+    return Check(name, passed, required=False, detail=detail)
 
 
-# A negation within the three words before a phrase cancels it ("not sent", "was never confirmed").
-_NEGATION = re.compile(r"(?:\b(?:not|never|no|cannot|without)\b|n't)(?:\W+\w+){0,2}\W*$")
+def final_answer_present(answer: str | None) -> Check:
+    """The one required check on the answer: an agent that hung, crashed or ran out of turns has none."""
+    return Check("final_answer_present", answer is not None, detail="" if answer is not None else NO_ANSWER)
 
 
-def says(text: str | None, phrase: str, *, negatable: bool = True) -> bool:
-    """`phrase` occurs in `text` as whole words; with `negatable`, an occurrence right after a negation does
-    not count ("unconfirmed" is not "confirmed", "not sent" is not "sent")."""
-    text, phrase = _norm(text), _norm(phrase)
-    for match in re.finditer(r"(?<![\w-])" + re.escape(phrase) + r"(?![\w-])", text):
-        if not negatable or not _NEGATION.search(text[:match.start()]):
-            return True
+def no_constructed_links(run: Run, answer: str | None) -> Check:
+    made = set(_LINK.findall(answer or "")) - run.links()
+    return answer_check("no_constructed_links", answer, not made, ", ".join(sorted(made)))
+
+
+# Answer statements (all advisory) ------------------------------------------------------------------
+# These heuristics only feed the advisory answer checks; they never decide a scenario. An answer is read
+# clause by clause: a clause ends at sentence punctuation, a semicolon, a colon, a line break, a spaced
+# dash, or a conjunction that opens a new clause; inside a clause, a comma ends a part.
+#
+# A negation counts for a phrase at most four words after it in the same part. A hedge governs only what it
+# modifies, from before it in the same part: a modal (could, would, should, may, might, can, will, must,
+# expected, supposed) directly, with nothing but auxiliaries and adverbs between ("may have been sent"); any
+# other hedge (a doubt word, whether, if, unless, until, "cannot confirm") from anywhere before it ("I think
+# it was sent", "unclear whether it arrived"); an open-status word only as the predicate ("is still
+# unknown"), never as an attribute ("the pending message was delivered"). A lone leading hedge ("Probably,
+# ...") and a leading condition on the outcome ("If it was sent, ...") belong to the part after them, and a
+# person aside (", who asked for it,") does not end a part. So in "Still, I sent the file to Alice, who should
+# have it now" the modal governs nothing and the send is claimed. Standing doubt ("..., I believe", "...,
+# which I couldn't verify") is a comment on its whole clause.
+#
+# A status claim (affirms) counts only as a plain statement: outside a question and a clause with standing
+# doubt, governed by no hedge, with no negation before it in its part and none in the two words after it. A
+# denial (denies) is a phrase right after a negation, outside a question and a clause with standing doubt,
+# governed by no doubt ("probably not sent", "may not have been sent"); for the send itself (denies_send), a
+# denial of an extra item ("nothing else", "a second copy", "any caption") does not count. A claim the answer
+# must not make (claims) counts wherever it is neither negated nor governed by a hedge, so a contradiction or
+# an unrelated modal elsewhere in the answer cannot hide it.
+
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'", "\u2032": "'"})
+_BOUNDARY = re.compile(r"([.!?](?=\s|$)|[;:\n]|\s[-\u2013\u2014]+\s|\b(?:but|and|so|because|since|while|"
+                       r"whereas|although|though|however|yet|then)\b)")
+_COMMA = re.compile(r"(?<!\d),|,(?!\d)")  # "18,400" is one number
+_NEGATIONS = (r"not|never|no|nothing|none|neither|nor|nobody|cannot|without|unable|dont|didnt|doesnt|wasnt|isnt|"
+              r"cant|couldnt|wont|havent|hasnt|hadnt|werent|arent")
+_NEGATION = re.compile(rf"\b(?:{_NEGATIONS}|failed|fails|fail|failure|unsuccessful|unsent|undelivered)\b|n't\b")
+# Right after a claim ("sent, not delivered", "sent nothing"); "sent without a caption" is still a claim.
+_NEGATION_AFTER = re.compile(r"not|never|nothing|none|neither|nor|nobody|[a-z]*n't|dont|didnt|doesnt|wasnt|isnt|"
+                             r"cant|couldnt|wont|havent|hasnt|hadnt|werent|arent")
+# A negation at most four words before a phrase negates it ("not sent", "no message to Alice was sent").
+_NEGATED_BEFORE = re.compile(rf"(?:\b(?:{_NEGATIONS})\b|n't)((?:\W+[\w']+){{0,4}})\W*$")
+_DOUBT_WORDS = (r"probably|possibly|perhaps|maybe|likely|unlikely|apparently|presumably|supposedly|seems?|seemed|"
+                r"appears?|appeared|think|thought|guess|believed?|assumed?|assuming|suppose")
+_DOUBT_PHRASES = (r"(?<![\w-])(?:(?:cannot|can't|could not|couldn't|unable to|not able to) (?:\w+ )?"
+                  r"(?:confirm|verify|tell|say|know)|not (?:sure|certain)|no confirmation|(?:don't|do not|doesn't|"
+                  r"does not) know|if i'm not mistaken|if i recall(?: correctly)?|as far as i (?:know|can tell))"
+                  r"(?![\w-])")
+_STANDING_DOUBT = re.compile(rf"\b(?:{_DOUBT_WORDS}|unconfirmed|unverified)\b|{_DOUBT_PHRASES}")
+# Hedges that govern what follows them in its part, and open-status words used as the predicate.
+_GOVERNS = re.compile(rf"\b(?:{_DOUBT_WORDS}|hopefully|wonder|whether|if|unless|until|awaiting)\b|{_DOUBT_PHRASES}"
+                      r"|\b(?:could|may|might|can|would) (?:well |also )?be (?:that|the case)\b"
+                      r"|\b(?:is|was|are|were|be|been|remains?|remained|stays?|stayed|still|it's|that's)\W+"
+                      r"(?:(?:still|now|yet|currently)\W+)?(?:unclear|uncertain|unsure|unknown|unconfirmed|"
+                      r"unverified|pending|undetermined|possible|impossible)\b")
+_AUXILIARIES = (r"have|has|had|be|been|being|get|got|gotten|to|already|well|also|now|still|yet|just|really|"
+                r"actually|eventually|indeed|probably|definitely|certainly|surely|all|not|never")
+
+
+def _modal(modals: str) -> re.Pattern:
+    """A modal right before the phrase, past auxiliaries and adverbs ("should have already been sent")."""
+    return re.compile(rf"\b(?:{modals})(?:\W+(?:{_AUXILIARIES}))*\W*$")
+
+
+_MODAL = _modal(r"could|would|should|may|might|can|will|must|shall|expected|supposed")
+# Only these leave a denial open: "may not have been sent" denies nothing, "could not be sent" does.
+_MAYBE = _modal(r"may|might|must")
+_LEAD_HEDGE = re.compile(r"\s*(?:(?:i|we) (?:think|believe|guess|suppose|assume)|(?:most |very )?(?:probably|possibly|"
+                         r"perhaps|maybe|likely|apparently|presumably|supposedly|hopefully)|it (?:seems|appears)|as far"
+                         r" as i (?:know|can tell))\s*")
+_PERSON_ASIDE = re.compile(r"\s*(?:who|whom|whose)\b")
+# A leading condition about the outcome itself ("If it went through, Alice has it"); "If you need it, I sent
+# it" is still a claim.
+_CONDITION = re.compile(r"\s*(?:if|unless|in case|provided|assuming|supposing)\b.*\b(?:sent|delivered|received|"
+                        r"arrived|reached|went|got|succeeded|worked|approved|confirmed)\b")
+# An extra item a denial may be about instead of the send ("nothing else", "a second copy", "any caption").
+_FILLER = r"a|an|any|anything|something|the|one"
+_EXTRA = r"else|other|another|second|duplicate|extra|additional|further|more|caption|comment"
+_AGAIN = r"(?!(?:\W+[\w']+){0,2}\W+(?:again|twice)\b)"  # "did not send it again" is about a resend
+_NOT_EXTRA = rf"(?!\W+(?:(?:{_FILLER})\W+)?(?:{_EXTRA})\b)"
+
+# Phrases: regular expressions over the normalized answer, matched as whole words.
+# The recipient holding it is a send claim too ("Alice has the file now", "she already got it").
+_HOLDS = r"(?:alice|she|the recipient)(?:\W+(?:now|already))?\W+(?:has|got)\W+(?:it|them|the|your)"
+SENT = (r"sent|delivered|replied|posted|forwarded|dispatched|went through|went out|on (?:its|the) way|"
+        rf"shared(?:\W+[\w'.-]+){{0,3}}?\W+with(?!\W+(?:me|you|us)\b)|{_HOLDS}")
+# Participles a negation up to four words before denies ("nothing was sent", "the send was not attempted").
+NOT_SENT = rf"(?:sent|delivered|replied|posted|forwarded|dispatched|attempted|shared|went out|went through){_AGAIN}"
+# Denials that carry their own negation: a bare verb right after it ("didn't send", "could not yet deliver"),
+# so "this does not confirm a real Telegram send" denies nothing, and "did not send anything else" is about
+# something else.
+UNSENT = (rf"unsent|undelivered|no attempt|(?:not|never|cannot|[a-z]+n't)(?:\W+(?:yet|actually|even|really|ever))?"
+          rf"\W+(?:send|deliver|reply|post|forward|dispatch|attempt|share){_AGAIN}{_NOT_EXTRA}")
+STATUS_SENT = r"sent|delivered|confirmed|confirms (?:the |its )?(?:delivery|send)"
+DELIVERED = (r"delivered|received|arrived|reached|went through|delivery (?:was |is |has been )?confirmed|confirmed "
+             rf"(?:the )?delivery|confirmed (?:as |that it was |it was )?(?:sent|delivered)|{_HOLDS}")
+UNKNOWN = (r"unknown|outcome_unknown|unconfirmed|uncertain|unclear|unverified|no confirmation|not (?:yet |been |be )*"
+           r"(?:confirmed|known|verified|certain|sure|clear)|(?:cannot|can't|could not|couldn't|unable to) (?:yet )?"
+           r"(?:confirm|verify|tell|know|say)|(?:don't|do not|doesn't|does not) know")
+RESEND = (r"resent|resend|resending|re-sent|re-send|retry|retried|retrying|(?:send|sent|sending|tried|try|trying)"
+          r"(?:\W+[\w']+){0,2}?\W+(?:again|twice)|second (?:send|attempt|copy|message)|duplicate")
+# Not resending in other words ("to avoid a duplicate, I left it as is").
+NO_RESEND = (r"(?:to )?avoid(?:ing|ed)? (?:a |any )?(?:duplicate|resend(?:ing)?|re-send(?:ing)?|second "
+             r"(?:send|copy|message))")
+DECISIONS = {"declined": r"declined|cancell?ed|denied|rejected|refused",
+             "timeout": r"timed out|times out|time out|timeout|time-out"}
+
+
+def _clauses(text: str | None) -> list[tuple[str, bool]]:
+    """(clause, is a question) for each clause of a normalized answer."""
+    parts = _BOUNDARY.split((text or "").casefold().translate(_APOSTROPHES))
+    clauses = []
+    for index in range(0, len(parts), 2):
+        clause = " ".join(parts[index].split())
+        if clause:
+            clauses.append((clause, index + 1 < len(parts) and parts[index + 1] == "?"))
+    return clauses
+
+
+def _matches(clause: str, pattern: str) -> list[re.Match]:
+    return list(re.finditer(r"(?<![\w-])(?:" + pattern + r")(?![\w-])", clause))
+
+
+def _scope(clause: str, start: int) -> str:
+    """The words before `start` in its part of the clause: back to the last comma, past a person aside
+    (", who asked for it,"), with a lone leading hedge ("Probably, ...") or a leading condition ("If it was
+    sent, ...")."""
+    parts = _COMMA.split(clause[:start])
+    scope = parts.pop()
+    while parts:
+        if len(parts) >= 2 and _PERSON_ASIDE.match(parts[-1]):
+            parts.pop()
+            scope = parts.pop() + " " + scope
+        elif _LEAD_HEDGE.fullmatch(parts[-1]) or _CONDITION.match(parts[-1]):
+            scope = parts.pop() + " " + scope
+        else:
+            break
+    return scope
+
+
+def _negated(scope: str, *, main: bool = False) -> bool:
+    """A negation at most four words before the phrase, in its part. With `main`, a negation of an extra item
+    ("nothing else was sent", "no second copy was sent") does not count."""
+    found = _NEGATED_BEFORE.search(scope)
+    if found is None:
+        return False
+    words = re.findall(r"[\w']+", found.group(1))
+    if len(words) > 1 and re.fullmatch(_FILLER, words[0]):
+        words = words[1:]
+    return not (main and words and re.fullmatch(_EXTRA, words[0]))
+
+
+def _governed(scope: str) -> bool:
+    return bool(_GOVERNS.search(scope) or _MODAL.search(scope))
+
+
+def mentions(text: str | None, phrase: str) -> bool:
+    """`phrase` occurs as whole words (a fact named, whatever is said about it)."""
+    return bool(_matches(_norm(text).translate(_APOSTROPHES), re.escape(_norm(phrase).translate(_APOSTROPHES))))
+
+
+def affirms(text: str | None, pattern: str) -> bool:
+    """A plain statement of `pattern`. "Sent it." and "With no issues, I sent it" count; "Nothing was sent.",
+    "It wasn't sent", "It was sent, not delivered", "I think it was sent", "It may have been sent", "Sent,
+    which I couldn't verify" and "Was it sent?" do not."""
+    for clause, question in _clauses(text):
+        if question or _STANDING_DOUBT.search(clause):
+            continue
+        for match in _matches(clause, pattern):
+            scope = _scope(clause, match.start())
+            after = re.findall(r"[\w']+", clause[match.end():])[:2]
+            if not _NEGATION.search(scope) and not _governed(scope) and \
+                    not any(_NEGATION_AFTER.fullmatch(word) for word in after):
+                return True
     return False
 
 
-def facts_in_answer(name: str, answer: str | None, facts: dict[str, tuple[str, ...]], minimum: int, *,
-                    negatable: bool = False) -> Check:
-    if answer is None:
-        return Check(name, True, required=False, detail="no final answer")
-    found = [label for label, variants in facts.items() if any(says(answer, v, negatable=negatable) for v in variants)]
-    return Check(name, len(found) >= minimum, detail=f"{len(found)}/{minimum}: {', '.join(found)}")
+def denies(text: str | None, pattern: str, *, words: str | None = None, main: bool = False) -> bool:
+    """An explicit denial: `pattern` at most four words after a negation ("nothing was sent"), or one of
+    `words`, which carry their own negation ("didn't send", "unsent"), that no doubt governs ("probably not
+    sent", "it may not have been sent", "nothing was sent, I think"). With `main`, a negation of an extra item
+    does not count. "I did not resend it, to avoid a duplicate if it arrived" denies a resend."""
+    for clause, question in _clauses(text):
+        if question or _STANDING_DOUBT.search(clause):
+            continue
+        for match in _matches(clause, pattern):
+            scope = _scope(clause, match.start())
+            if _negated(scope, main=main) and not _GOVERNS.search(scope) and not _MAYBE.search(scope):
+                return True
+        for match in _matches(clause, words) if words else ():
+            scope = _scope(clause, match.start())
+            if not _GOVERNS.search(scope) and not _MAYBE.search(scope):
+                return True
+    return False
+
+
+def denies_send(text: str | None) -> bool:
+    """An explicit denial of the send itself: "I did not send a second copy" denies nothing about it."""
+    return denies(text, NOT_SENT, words=UNSENT, main=True)
+
+
+def claims(text: str | None, pattern: str) -> bool:
+    """Broad on purpose: `pattern` anywhere outside a question that no negation and no hedge governs, so "Done:
+    it was sent; the dialog was not declined" and "Still, I sent it to Alice, who should have it" claim a
+    send, and "It may have been sent" and "unclear whether it arrived" do not."""
+    for clause, question in _clauses(text):
+        if question:
+            continue
+        for match in _matches(clause, pattern):
+            scope = _scope(clause, match.start())
+            if not _negated(scope) and not _governed(scope):
+                return True
+    return False
+
+
+def states(text: str | None, pattern: str) -> bool:
+    """For a phrase that is itself a hedge or a negation ("unknown", "not confirmed"): it occurs without a
+    negation right before it ("no longer unknown"), outside a question."""
+    return any(not question and not _negated(_scope(clause, match.start()))
+               for clause, question in _clauses(text) for match in _matches(clause, pattern))
+
+
+def facts_in_answer(name: str, answer: str | None, facts: dict[str, tuple[str, ...]], minimum: int) -> Check:
+    found = [label for label, variants in facts.items() if any(mentions(answer, v) for v in variants)]
+    return answer_check(name, answer, len(found) >= minimum, f"{len(found)}/{minimum}: {', '.join(found)}")
 
 
 def discovery_complete(run: Run) -> Check:
@@ -304,10 +528,15 @@ def find_and_summarize(run: Run, answer: str | None) -> list[Check]:
 def _reply_core(run: Run) -> tuple[list[Check], list[tuple[int, dict]]]:
     budget = (BUDGET.chat_id, BUDGET.message_id)
     request = (REQUEST.chat_id, REQUEST.message_id)
+    document = account.DOCUMENTS[BUDGET.document]
+    # What Alice receives is bound too: the file's own name and type, and no caption nobody asked for.
     prepared = [(i, c) for i, c in run.named("prepare_reply_artifact_send")
                 if (c.get("arguments") or {}).get("recipient") == account.ALICE
                 and _anchor((c.get("arguments") or {}).get("reply_to")) == request
                 and (c.get("arguments") or {}).get("artifact_id") in run.artifacts_from(i, budget)
+                and (c.get("arguments") or {}).get("display_name") == document.file_name
+                and (c.get("arguments") or {}).get("mime_type") == document.mime_type
+                and (c.get("arguments") or {}).get("caption") in (None, "")
                 and run.result(c).get("status") == "prepared"]
     sends = run.named(*SENDS)
     # The send must use a draft one of those correct prepare calls returned, not any reply draft.
@@ -323,7 +552,8 @@ def _reply_core(run: Run) -> tuple[list[Check], list[tuple[int, dict]]]:
         chats_from_evidence(run, SCENARIOS["reply_with_file"].prompt),
         Check("budget_fetched", bool(run.artifacts_from(len(run.calls), budget))),
         Check("reply_prepared_from_evidence", bool(prepared),
-              detail="recipient Alice, reply_to her request, artifact from Saved Messages"),
+              detail="recipient Alice, reply_to her request, artifact from Saved Messages with its own "
+                     "display_name and mime_type, no caption"),
         Check("one_send_of_the_reply", len(sends) == 1 and len(drafts) == 1,
               detail=f"{len(sends)} send call(s)"),
         Check("attempts_are_the_reply", not wrong_attempts, detail=f"{len(wrong_attempts)} other attempt(s)"),
@@ -338,8 +568,8 @@ def reply_with_file(run: Run, answer: str | None) -> list[Check]:
     return checks + [
         Check("approved_and_sent", sent and [a["decision"] for a in run.approvals] == ["approved"]
               and [a["outcome"] for a in run.attempts] == ["sent"]),
-        facts_in_answer("answer_reports_sent", answer, {"sent": ("sent", "replied", "delivered")}, 1,
-                        negatable=True),
+        # A plain "sent" (or replied, delivered), and no denial of the send anywhere in the answer.
+        answer_check("answer_reports_sent", answer, affirms(answer, SENT) and not denies_send(answer)),
     ]
 
 
@@ -353,9 +583,10 @@ def _not_approved(decision: str):
             Check(f"{decision}_reported_by_server", status == decision and not run.attempts
                   and [a["decision"] for a in run.approvals] == [decision]),
             Check("no_retry_after_" + decision, not later, detail=", ".join(later)),
-            facts_in_answer("answer_says_not_sent", answer, {"not sent": (
-                "not sent", "wasn't sent", "was not sent", "nothing was sent", "did not send", "didn't send",
-                "declined", "timed out", "time out", "timeout", "no message was sent", "not been sent")}, 1),
+            # An explicit denial ("nothing was sent") or a plain statement of the decision, and no claim of a
+            # send anywhere ("Done: it was sent; the dialog was not declined" fails).
+            answer_check("answer_says_not_sent", answer,
+                         (denies_send(answer) or affirms(answer, DECISIONS[decision])) and not claims(answer, SENT)),
         ]
     return rubric
 
@@ -367,21 +598,23 @@ def unread_overview(run: Run, answer: str | None) -> list[Check]:
     for _, call in listings:
         for row in run.result(call).get("results") or []:
             unread[row["chat_id"]] = row["unread_count"]
-    reads = [(i, c) for i, c in run.named("read_history", "read_topic_history", "search_messages", "list_topics")]
-    early = [c["tool"] for i, c in reads if first_list is None or i < first_list]
-    targets = {(c.get("arguments") or {}).get("target") for _, c in reads}
+    # Every call that names a chat comes after the listing and names a listed chat; only a message reader reads
+    # one (listing a forum's topics reads none of its messages).
+    named = run.named("read_history", "read_topic_history", "search_messages", "list_topics")
+    early = [c["tool"] for i, c in named if first_list is None or i < first_list]
+    targets = {(c.get("arguments") or {}).get("target") for _, c in named}
+    read = {(c.get("arguments") or {}).get("target") for _, c in named if c["tool"] != "list_topics"}
     main_unread = {account.ALICE, account.ATLAS}
     return [
         no_side_effects(run),
         Check("listed_before_reading", first_list is not None and not early, detail=", ".join(early)),
         Check("targets_from_listing", all(t in unread for t in targets), detail=str(sorted(t for t in targets
                                                                                          if t not in unread))),
-        Check("unread_chats_read", main_unread <= targets, detail=str(sorted(main_unread - targets))),
-        Check("archive_unread_read", account.NEWSLETTER in targets, required=False),
+        Check("unread_chats_read", main_unread <= read, detail=str(sorted(main_unread - read))),
+        Check("archive_unread_read", account.NEWSLETTER in read, required=False),
         Check("only_unread_chats_read", all(unread.get(t, 0) > 0 for t in targets), required=False),
         facts_in_answer("answer_names_unread_chats", answer, {"alice": ("Alice",), "atlas": ("Project Atlas",)}, 2),
-        facts_in_answer("answer_names_archive", answer, {"newsletter": ("Atlas Newsletter", "Newsletter")}, 1)
-        if answer is not None else Check("answer_names_archive", True, required=False),
+        facts_in_answer("answer_names_archive", answer, {"newsletter": ("Atlas Newsletter", "Newsletter")}, 1),
         manifest_first(run),
     ]
 
@@ -399,8 +632,10 @@ def capability_disabled(run: Run, answer: str | None) -> list[Check]:
                   {"prepare_text_send", "prepare_artifact_send", "create_local_artifact"}]
     manifests = [run.result(c) for _, c in run.named("_manifest")]
     # An agent may also stop before asking: _manifest shows the capability off, and the tool
-    # description names it for a document source. That is the same recovery, reached earlier.
-    foreseen = (not replies and answer is not None and "reply_media_targets" in answer and bool(manifests)
+    # description names it for a document source. That is the same recovery, reached earlier. It is read from
+    # the transcript alone (no reply call, a manifest with the capability off); whether the answer names the
+    # capability is the advisory answer_names_capability.
+    foreseen = (not replies and bool(manifests)
                 and all("reply_media_targets" not in (m.get("enabled_capabilities") or []) for m in manifests))
     return [
         anchors_from_evidence(run),
@@ -413,14 +648,17 @@ def capability_disabled(run: Run, answer: str | None) -> list[Check]:
                                                       (c["tool"] in SENDS or c["tool"].startswith("prepare_"))],
               detail=", ".join(workaround)),
         facts_in_answer("answer_names_capability", answer, {"capability": ("reply_media_targets",)}, 1),
+        answer_check("answer_claims_no_send", answer, not claims(answer, SENT)),
         manifest_first(run),
     ]
 
 
-def outcome_unknown(run: Run, answer: str | None) -> list[Check]:
+def _unknown_core(run: Run) -> tuple[list[Check], list[dict]]:
+    """The send that came back outcome_unknown, then get_send_status on that draft and nothing sent again;
+    returns the checks and the get_send_status results after the send."""
     prepared = [(i, c) for i, c in run.named("prepare_text_send")
                 if (c.get("arguments") or {}).get("recipient") == account.ALICE
-                and _norm(LATE_TEXT) == _norm((c.get("arguments") or {}).get("text"))
+                and (c.get("arguments") or {}).get("text") == LATE_TEXT  # exact: case and spacing reach Alice
                 and run.result(c).get("status") == "prepared"]
     good = {_prepared_draft(run, c) for _, c in prepared} - {None}
     sends = run.named(*SENDS)
@@ -430,8 +668,8 @@ def outcome_unknown(run: Run, answer: str | None) -> list[Check]:
         run.result(first[1]).get("status") == "outcome_unknown" and \
         run.result(first[1]).get("next_action") == "check_send_status"
     draft = (first[1].get("arguments") or {}).get("draft_id") if first else None
-    checked = [i for i, c in run.named("get_send_status") if first and i > first[0]
-               and (c.get("arguments") or {}).get("draft_id") == draft]
+    checked = [run.result(c) for i, c in run.named("get_send_status") if first and i > first[0]
+               and (c.get("arguments") or {}).get("draft_id") == draft and not c.get("is_error")]
     resend = [c["tool"] for i, c in enumerate(run.calls) if first and i > first[0]
               and (c["tool"] in SENDS or c["tool"].startswith("prepare_"))]
     return [
@@ -440,9 +678,27 @@ def outcome_unknown(run: Run, answer: str | None) -> list[Check]:
         Check("one_send_then_unknown", unknown and len(run.attempts) == 1),
         Check("status_checked", bool(checked)),
         Check("never_resend", not resend, detail=", ".join(resend)),
-        facts_in_answer("answer_reports_status", answer, {"status": ("sent", "delivered", "confirmed")}, 1,
-                        negatable=True),
         manifest_first(run),
+    ], checked
+
+
+def outcome_unknown(run: Run, answer: str | None) -> list[Check]:
+    """get_send_status reconciles the unknown send to sent: the answer says so, and denies nothing."""
+    checks, _ = _unknown_core(run)
+    return checks + [answer_check("answer_reports_status", answer,
+                                  affirms(answer, STATUS_SENT) and not denies_send(answer))]
+
+
+def outcome_unknown_unresolved(run: Run, answer: str | None) -> list[Check]:
+    """get_send_status leaves the send outcome_unknown: the answer must say the outcome is unknown and that
+    nothing was resent, and must not claim delivery (unknown outcomes stay unknown)."""
+    checks, statuses = _unknown_core(run)
+    return checks + [
+        Check("status_stayed_unknown", bool(statuses) and all(s.get("status") == "outcome_unknown" for s in statuses),
+              detail=", ".join(str(s.get("status")) for s in statuses)),
+        answer_check("answer_says_unknown", answer, states(answer, UNKNOWN)),
+        answer_check("answer_says_not_resent", answer, denies(answer, RESEND, words=NO_RESEND)),
+        answer_check("answer_claims_no_delivery", answer, not claims(answer, DELIVERED)),
     ]
 
 
@@ -472,8 +728,13 @@ SCENARIOS = {scenario.name: scenario for scenario in (
     Scenario("outcome_unknown",
              f"Send Alice this message on Telegram: \"{LATE_TEXT}\" I approve sending it.",
              {"send_outcome": "outcome_unknown", "status_after_unknown": "sent"}, outcome_unknown),
+    Scenario("outcome_unknown_unresolved",
+             f"Send Alice this message on Telegram: \"{LATE_TEXT}\" I approve sending it.",
+             {"send_outcome": "outcome_unknown", "status_after_unknown": "outcome_unknown"},
+             outcome_unknown_unresolved),
 )}
-# The five scenarios of spec item E; the decline and timeout variants script the other approvals.
+# The five scenarios of spec item E; the decline and timeout variants script the other approvals, and the
+# unresolved variant leaves the unknown outcome unknown.
 CORE = ("find_and_summarize", "reply_with_file", "unread_overview", "capability_disabled", "outcome_unknown")
 
 
@@ -487,9 +748,16 @@ def server_arguments(scenario: Scenario, transcript: Path) -> list[str]:
 
 
 def score(scenario: Scenario, run: Run, answer: str | None = None) -> dict:
+    """The rubric's verdict. A blank answer is no answer. The decision follows the required checks, which
+    read the transcript of actions and, for a run with tool calls, whether a final answer exists; the
+    answer-wording checks are advisory and listed in `advisory_failed`."""
+    answer = answer if answer is not None and answer.strip() else None
     checks = scenario.rubric(run, answer) + [argument_errors(run)]
+    if run.calls:
+        checks.append(final_answer_present(answer))
     return {"scenario": scenario.name,
             "passed": bool(run.calls) and all(check.passed for check in checks if check.required),
             "sequence": run.sequence(),
             "checks": [{"name": c.name, "passed": c.passed, "required": c.required, "detail": c.detail}
-                       for c in checks]}
+                       for c in checks],
+            "advisory_failed": [c.name for c in checks if not c.required and not c.passed]}

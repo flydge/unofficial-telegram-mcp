@@ -34,6 +34,8 @@ _spec.loader.exec_module(matrix)
 gate = matrix.load_gate()
 COMMIT, OTHER = "a" * 40, "b" * 40
 WHEEL = "c" * 64
+GATE = "9" * 64
+VERSION = telegram_search_mcp.__version__
 
 # Appended to a copy of server.py: a deliberate schema change in the registration itself.
 PATCHES = {
@@ -65,24 +67,38 @@ def live_census() -> dict:
             "tools": sorted(tool["name"] for tool in document["tools"]), "schema_fingerprint": schema_fingerprint()}
 
 
-def sessions(*, failing: str | None = None, validated: int = 1, failures: tuple = ()) -> list[dict]:
-    results = []
+def sessions(*, failing: str | None = None, validated: int | None = None, failures: tuple = (),
+             approval: str = "scripted") -> list[dict]:
+    """Session results as a passing run reports them: each cell's frozen check count, the frozen surface."""
+    results, extra = [], {"approval.denial": 1} if approval == "real_dialog" else {}
+    surface = matrix.SURFACE_COUNTS
     for name in matrix.SESSIONS:
-        cells = [{"id": cell, "status": "fail" if cell == failing else "pass", "checks": 2,
+        cells = [{"id": cell, "status": "fail" if cell == failing else "pass",
+                  "checks": matrix.CELL_CHECKS[cell] + extra.get(cell, 0),
                   **({"failed_check": "synthetic"} if cell == failing else {})}
                  for cell, session, _ in matrix.CELLS if session == name]
-        results.append({"session": name, "cells": cells, "observed": {"listing_sha256": "d" * 64,
-                                                                       "approval": {"mode": "scripted",
-                                                                                    "outcome": "declined"}},
-                        "schemas": {"validated": validated, "failures": list(failures), "tools": ["_manifest"],
-                                    "unschematized": []},
+        full = name == "full"
+        count = surface["structured_results_validated"] - (len(matrix.SESSIONS) - 1) if full else 1
+        tools = [f"tool_{index}" for index in range(surface["tools_with_validated_results"])] if full else ["tool_0"]
+        results.append({"session": name, "cells": cells,
+                        "observed": {"listing_sha256": "d" * 64,
+                                     "approval": {"mode": approval,
+                                                  "outcome": "timeout" if approval == "real_dialog" else "declined"}},
+                        "schemas": {"validated": count if validated is None else validated, "failures": list(failures),
+                                    "tools": tools, "unschematized": []},
                         "sdk": {"distribution": "mcp", "version": "2.2.0"}})
     return results
 
 
-# What the recorded commit fixes (committed_facts); receipt() is consistent with it.
-FACTS = {"harness_sha256": "e" * 64, "tree_id": OTHER, "epoch": 1700000000,
-         "constraints": "packaging/constraints-0.0.0.txt", "constraints_sha256": "f" * 64, "distributions": 2}
+# What the recorded commit fixes (committed_facts) and what check re-derives; receipt() agrees with both.
+FACTS = {"harness_sha256": "e" * 64, "gate_sha256": GATE, "tree_id": OTHER, "epoch": 1700000000,
+         "constraints": "packaging/constraints-0.0.0.txt", "constraints_sha256": "f" * 64, "distributions": 2,
+         "freeze": ["mcp==2.2.0", "pydantic==2.0", f"telegram-search-mcp=={VERSION}"], "sdk_version": "2.2.0",
+         "wheel_bytes": 1, "python_target": "3.14", "build_tools": {"build": "1.3.0", "setuptools": "80.9.0"}}
+INSTALLED = {"constraints": FACTS["constraints"], "constraints_sha256": FACTS["constraints_sha256"],
+             "wheelhouse": "provided", "distributions": 2, "freeze": list(FACTS["freeze"]), "pip_check": "clean",
+             "record_entries": 10}
+DERIVED = {"install": {**INSTALLED, "wheelhouse": "downloaded"}, "listing_sha256": "d" * 64}
 
 
 def receipt(census: dict, **kwargs) -> dict:
@@ -90,10 +106,8 @@ def receipt(census: dict, **kwargs) -> dict:
         commit=COMMIT, tree=OTHER, version=census["version"],
         wheel={"file": f"telegram_search_mcp-{census['version']}-py3-none-any.whl", "sha256": WHEEL, "bytes": 1},
         build={"build": "1.3.0", "python": "3.14.6", "setuptools": "80.9.0", "source_date_epoch": FACTS["epoch"]},
-        install={"constraints": FACTS["constraints"], "constraints_sha256": FACTS["constraints_sha256"],
-                 "wheelhouse": "provided", "distributions": 2, "freeze": ["mcp==2.2.0", "pydantic==2.0", "x==1"],
-                 "pip_check": "clean", "record_entries": 10},
-        census=census, sessions=sessions(**kwargs), harness_sha256=FACTS["harness_sha256"])
+        install=dict(INSTALLED), census=census, sessions=sessions(**kwargs), harness_sha256=FACTS["harness_sha256"],
+        gate_sha256=GATE)
 
 
 def refusal(function, *args, **kwargs) -> str:
@@ -125,6 +139,11 @@ class CellSetTests(unittest.TestCase):
         from mcp_types import version
         self.assertEqual(matrix.LEGACY_REVISIONS, tuple(version.HANDSHAKE_PROTOCOL_VERSIONS))
         self.assertEqual(matrix.MODERN_REVISIONS, tuple(version.MODERN_PROTOCOL_VERSIONS))
+
+    def test_every_cell_has_a_frozen_check_count(self):
+        self.assertEqual(list(matrix.CELL_CHECKS), list(matrix.CELL_IDS))
+        self.assertTrue(all(type(count) is int and count > 0 for count in matrix.CELL_CHECKS.values()))
+        self.assertEqual(set(matrix.SURFACE_COUNTS), {"structured_results_validated", "tools_with_validated_results"})
 
     def test_the_driver_runs_every_cell_of_its_session(self):
         driver = matrix.Driver
@@ -285,87 +304,200 @@ class SchemaChangeTests(unittest.TestCase):
                                      census={**extra, "schema_fingerprint": baseline["schema_fingerprint"]}),
                              "tools_mismatch")
 
-    def test_check_command_rebuilds_and_refuses_another_wheel_or_census(self):
+    def test_check_command_rebuilds_reinstalls_and_refuses_any_difference(self):
+        """check rebuilds the wheel, reinstalls the closure and lists the tools again; it refuses another wheel,
+        census, install or listing, and a working-tree harness or gate that is not the receipt commit's."""
         census = live_census()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "receipt.json"
             matrix.write_receipt(path, receipt(census))
             wheel = Path(directory) / "synthetic.whl"
             wheel.write_bytes(b"synthetic wheel")
-            fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path(directory),
-                                   Git=lambda repo: object(), resolve_commit=lambda git, value: COMMIT)
             built = {"tree": Path(directory), "wheel": wheel}
-            for wheel_digest, observed, expected in ((WHEEL, census, None),
-                                                     ("0" * 64, census, "wheel_mismatch"),
-                                                     (WHEEL, {**census, "schema_fingerprint": "f" * 64},
-                                                      "schema_mismatch")):
-                fake.sha256_file = lambda file, digest=wheel_digest: digest
-                with self.subTest(expected=expected), mock.patch.object(matrix, "load_gate", return_value=fake), \
+            cases = (({}, None),
+                     ({"wheel": "0" * 64}, "wheel_mismatch"),
+                     ({"census": {**census, "schema_fingerprint": "f" * 64}}, "schema_mismatch"),
+                     ({"installed": {**DERIVED["install"], "record_entries": 11}}, "field_mismatch"),
+                     ({"installed": {**DERIVED["install"], "freeze": ["mcp==2.2.0", "pydantic==2.1",
+                                                                       f"telegram-search-mcp=={VERSION}"]}},
+                      "field_mismatch"),
+                     ({"listing": "0" * 64}, "field_mismatch"),
+                     ({"harness": "1" * 64}, "harness_mismatch"),
+                     ({"gate": "2" * 64}, "gate_mismatch"))
+            for change, expected in cases:
+                fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path(directory),
+                                       Git=lambda repo: object(), resolve_commit=lambda git, value: COMMIT,
+                                       sha256_file=lambda file, digest=change.get("wheel", WHEEL): digest,
+                                       matrix_loaded_sha256=change.get("gate", GATE))
+                runtime = object()
+                with self.subTest(change=sorted(change)), mock.patch.object(matrix, "load_gate", return_value=fake), \
                         mock.patch.object(matrix, "build_wheel", return_value=built), \
                         mock.patch.object(matrix, "committed_facts", return_value=FACTS), \
-                        mock.patch.object(matrix, "source_census", return_value=observed), \
+                        mock.patch.object(matrix, "harness_digest",
+                                          return_value=change.get("harness", FACTS["harness_sha256"])), \
+                        mock.patch.object(matrix, "source_census", return_value=change.get("census", census)), \
+                        mock.patch.object(matrix, "installed_runtime",
+                                          return_value=(runtime, change.get("installed", DERIVED["install"]))) \
+                        as installed, \
+                        mock.patch.object(matrix, "observed_listing",
+                                          return_value=change.get("listing", DERIVED["listing_sha256"])) as listed, \
                         contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
                     code = matrix.main(["check", "--receipt", str(path), "--repo", directory])
                 self.assertEqual((code, err.getvalue().strip()), (0, "") if expected is None else (2, expected))
                 if expected is None:
                     self.assertEqual(out.getvalue().strip(), "consumer matrix receipt verified")
+                    installed.assert_called_once()
+                    self.assertIs(listed.call_args.args[0], runtime)
+                if expected in ("harness_mismatch", "gate_mismatch"):
+                    installed.assert_not_called()
+
+
+def edit(path: str, value):
+    """An update that sets one dotted receipt field ("install.freeze", "cells.3.checks")."""
+    def update(document):
+        *parents, last = path.split(".")
+        target = document
+        for part in parents:
+            target = target[int(part)] if isinstance(target, list) else target[part]
+        target[int(last) if isinstance(target, list) else last] = value
+    return update
+
+
+def drop(path: str, key: str):
+    def update(document):
+        target = document
+        for part in path.split("."):
+            target = target[int(part)] if isinstance(target, list) else target[part]
+        del target[key]
+    return update
 
 
 class ReceiptFieldTests(unittest.TestCase):
+    def setUp(self):
+        self.census = live_census()
+
+    def check(self, document, **bindings):
+        return matrix.check_receipt(document, **{"commit": COMMIT, "wheel_sha256": WHEEL, "census": self.census,
+                                                 "committed": FACTS, "derived": DERIVED, **bindings})
+
     def test_a_valid_receipt_passes_every_field_check(self):
-        census = live_census()
-        matrix.check_receipt(receipt(census), commit=COMMIT, wheel_sha256=WHEEL, census=census, committed=FACTS)
+        self.check(receipt(self.census))
+        self.check(receipt(self.census, approval="real_dialog"))
 
-    def test_each_tampered_field_refuses(self):
-        census = live_census()
-        tampered = {
-            "harness": ("harness", {"path": "packaging/release_consumer_matrix.py", "sha256": "0" * 64},
-                        "harness_mismatch"),
-            "tree": ("tree", "0" * 40, "tree_mismatch"),
-            "approval_sent": ("approval", {"mode": "scripted", "outcome": "sent"}, "field_mismatch"),
-            "approval_mode": ("approval", {"mode": "real_dialog", "outcome": "declined"}, "field_mismatch"),
-            "sdk_revisions": ("sdk", {"distribution": "mcp", "version": "2.2.0", "revisions": []}, "field_mismatch"),
-            "sdk_version": ("sdk", {"distribution": "mcp", "version": "9.9.9",
-                                    "revisions": list(matrix.REVISIONS)}, "field_mismatch"),
-            "census_count": ("census", None, "field_mismatch"),
-        }
-        for label, (key, value, code) in tampered.items():
+    def test_each_edited_field_refuses(self):
+        """Every field the check_receipt and check_fields docstrings name refuses when it is edited."""
+        cells = {cell: index for index, cell in enumerate(matrix.CELL_IDS)}
+        other_closure = ["mcp==2.2.0", "evil==6.6.6", f"telegram-search-mcp=={VERSION}"]
+        cases = [
+            ("schema", edit("schema", "tgmcp-consumer-matrix/v1"), "receipt_invalid"),
+            ("acceptance", edit("acceptance", True), "acceptance_claimed"),
+            ("harness.sha256", edit("harness.sha256", "0" * 64), "harness_mismatch"),
+            ("harness.path", edit("harness.path", "packaging/other.py"), "harness_mismatch"),
+            ("gate.sha256", edit("gate.sha256", "0" * 64), "gate_mismatch"),
+            ("gate.path", edit("gate.path", "packaging/other.py"), "gate_mismatch"),
+            ("gate.extra", edit("gate.extra", 1), "gate_mismatch"),
+            ("tree", edit("tree", "0" * 40), "tree_mismatch"),
+            ("version", edit("version", "0.0.0"), "version_mismatch"),
+            ("wheel.sha256", edit("wheel.sha256", "0" * 64), "wheel_mismatch"),
+            ("wheel.bytes", edit("wheel.bytes", 123456789), "field_mismatch"),
+            ("wheel.file", edit("wheel.file", "other-0.0.0-py3-none-any.whl"), "field_mismatch"),
+            ("wheel.extra", edit("wheel.extra", 1), "field_mismatch"),
+            ("build.python", edit("build.python", "2.7.0"), "field_mismatch"),
+            ("build.python_list", edit("build.python", ["3.14.6"]), "field_mismatch"),
+            ("build.python_minor", edit("build.python", "3.13.9"), "field_mismatch"),
+            ("build.build", edit("build.build", "0.1"), "field_mismatch"),
+            ("build.setuptools", edit("build.setuptools", "1"), "field_mismatch"),
+            ("build.source_date_epoch", edit("build.source_date_epoch", 1), "field_mismatch"),
+            ("build.extra", edit("build.extra", 1), "field_mismatch"),
+            ("install.constraints", edit("install.constraints", "packaging/constraints-9.9.9.txt"), "field_mismatch"),
+            ("install.constraints_sha256", edit("install.constraints_sha256", "0" * 64), "field_mismatch"),
+            ("install.wheelhouse", edit("install.wheelhouse", "elsewhere"), "field_mismatch"),
+            ("install.distributions", edit("install.distributions", 3), "field_mismatch"),
+            ("install.freeze_closure", edit("install.freeze", other_closure), "field_mismatch"),
+            ("install.freeze_types", edit("install.freeze", [1, None, "x"]), "field_mismatch"),
+            ("install.pip_check", edit("install.pip_check", "broken"), "field_mismatch"),
+            ("install.record_entries", edit("install.record_entries", 1), "field_mismatch"),
+            ("install.record_entries_zero", edit("install.record_entries", 0), "field_mismatch"),
+            ("install.extra", edit("install.extra", 1), "field_mismatch"),
+            ("sdk.version", edit("sdk.version", "9.9.9"), "field_mismatch"),
+            ("sdk.version_and_freeze", lambda d: (edit("sdk.version", "9.9.9")(d), edit(
+                "install.freeze", ["mcp==9.9.9", "pydantic==2.0", f"telegram-search-mcp=={VERSION}"])(d)),
+             "field_mismatch"),
+            ("sdk.distribution", edit("sdk.distribution", "other"), "field_mismatch"),
+            ("sdk.revisions", edit("sdk.revisions", []), "field_mismatch"),
+            ("schema_fingerprint", edit("schema_fingerprint", "0" * 64), "schema_mismatch"),
+            ("census.tool_count", edit("census.tool_count", 1), "field_mismatch"),
+            ("census.capabilities", edit("census.capabilities", 1), "field_mismatch"),
+            ("census.tools_sha256", edit("census.tools_sha256", "0" * 64), "tools_mismatch"),
+            ("surface.listing_sha256", edit("surface.listing_sha256", "0" * 64), "field_mismatch"),
+            ("surface.listing_form", edit("surface.listing_sha256", "x"), "field_mismatch"),
+            ("surface.structured_results_validated", edit("surface.structured_results_validated", 999),
+             "field_mismatch"),
+            ("surface.tools_with_validated_results", edit("surface.tools_with_validated_results", 999),
+             "field_mismatch"),
+            ("surface.unschematized_tools", edit("surface.unschematized_tools", ["read_history"]), "field_mismatch"),
+            ("surface.extra", edit("surface.extra", 1), "field_mismatch"),
+            ("approval.outcome", edit("approval.outcome", "sent"), "field_mismatch"),
+            ("approval.mode", edit("approval.mode", "real_dialog"), "field_mismatch"),
+            ("cells.passing_with_failed_check", edit(f"cells.{cells['approval.denial']}.failed_check", "x"),
+             "checks_mismatch"),
+            ("cells.extra", edit("cells.0.evidence", "owner saw it pass"), "checks_mismatch"),
+            ("cells.all_one", lambda d: [cell.update(checks=1) for cell in d["cells"]], "checks_mismatch"),
+            ("owner_cells.status", edit("owner_cells.0.status", "pass"), "owner_cell_passed"),
+            ("owner_cells.extra", edit("owner_cells.0.evidence", "owner saw it pass"), "field_mismatch"),
+            ("owner_cells.client", edit("owner_cells.0.client", "someone"), "field_mismatch"),
+            ("owner_cells.provider", drop("owner_cells.0", "provider"), "field_mismatch"),
+            ("summary", edit("summary.passed", 1), "receipt_invalid"),
+        ]
+        for cell, index in cells.items():  # every cell's frozen count, lowered by one
+            cases.append((f"cells.{cell}", edit(f"cells.{index}.checks", matrix.CELL_CHECKS[cell] - 1),
+                          "checks_mismatch"))
+        for label, update, code in cases:
             with self.subTest(field=label):
-                document = receipt(census)
-                document[key] = value if value is not None else {**document["census"], "tool_count": 1}
-                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
-                                         census=census, committed=FACTS), code)
-        for key, value in (("pip_check", "broken"), ("distributions", 3), ("record_entries", 0),
-                           ("constraints_sha256", "0" * 64), ("wheelhouse", "elsewhere")):
-            with self.subTest(install=key):
-                document = receipt(census)
-                document["install"] = {**document["install"], key: value}
-                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
-                                         census=census, committed=FACTS), "field_mismatch")
-        for key, value in (("structured_results_validated", 0), ("tools_with_validated_results", 0),
-                           ("unschematized_tools", ["read_history"]), ("listing_sha256", "x")):
-            with self.subTest(surface=key):
-                document = receipt(census)
-                document["surface"] = {**document["surface"], key: value}
-                self.assertEqual(refusal(matrix.check_receipt, document, commit=COMMIT, wheel_sha256=WHEEL,
-                                         census=census, committed=FACTS), "field_mismatch")
-        document = receipt(census)
-        document["build"] = {**document["build"], "source_date_epoch": 1}
-        self.assertEqual(refusal(matrix.check_receipt, document, census=census, committed=FACTS), "field_mismatch")
+                document = receipt(self.census)
+                update(document)
+                self.assertEqual(refusal(self.check, document), code)
 
-    def test_run_refuses_a_working_tree_harness_that_differs_from_the_commits(self):
-        fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path("/"), Git=lambda repo: object(),
-                               resolve_commit=lambda git, value: COMMIT, sha256_file=lambda file: "1" * 64)
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(matrix, "load_gate", return_value=fake), \
+    def test_counts_are_frozen_without_bindings_and_follow_the_approval_mode(self):
+        document = receipt(self.census, approval="real_dialog")
+        matrix.check_receipt(document)
+        denial = matrix.CELL_IDS.index("approval.denial")
+        document["cells"][denial]["checks"] -= 1  # the scripted count under a real-dialog approval
+        self.assertEqual(refusal(matrix.check_receipt, document), "checks_mismatch")
+        document = receipt(self.census)
+        document["surface"]["structured_results_validated"] -= 1
+        self.assertEqual(refusal(matrix.check_receipt, document), "field_mismatch")
+
+    def run_command(self, fake, directory, **patches):
+        with mock.patch.object(matrix, "load_gate", return_value=fake), \
                 mock.patch.object(matrix, "build_wheel", return_value={"tree": Path(directory), "version": "0.0.0"}), \
                 mock.patch.object(matrix, "committed_facts", return_value=FACTS), \
-                mock.patch.object(matrix, "install", side_effect=AssertionError("installed")), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
+                mock.patch.object(matrix, "installed_runtime", side_effect=AssertionError("installed")), \
+                contextlib.ExitStack() as stack, contextlib.redirect_stderr(io.StringIO()) as err:
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(matrix, name, return_value=value))
             code = matrix.main(["run", "--commit", COMMIT, "--receipt", str(Path(directory) / "r.json"), "--repo",
                                 directory, "--workdir", str(Path(directory) / "work")])
-        self.assertEqual((code, err.getvalue().strip()), (2, "harness_mismatch"))
+        return code, err.getvalue().strip()
+
+    def test_run_refuses_a_working_tree_harness_or_gate_that_differs_from_the_commits(self):
+        fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path("/"), Git=lambda repo: object(),
+                               resolve_commit=lambda git, value: COMMIT, sha256_file=lambda file: "1" * 64,
+                               matrix_loaded_sha256=GATE)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self.run_command(fake, directory), (2, "harness_mismatch"))
+        fake.matrix_loaded_sha256 = "2" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self.run_command(fake, directory, harness_digest=FACTS["harness_sha256"]),
+                             (2, "gate_mismatch"))
+
+    def test_the_gate_is_hashed_from_the_bytes_it_runs(self):
+        loaded = matrix.load_gate()
+        source = (matrix.HARNESS.parent / "release_gate.py").read_bytes()
+        self.assertEqual(loaded.matrix_loaded_sha256, matrix._sha(source))
+        self.assertEqual(loaded.GATE_PATH, matrix.GATE_PATH)
+        self.assertEqual(matrix.harness_digest(), matrix._sha(matrix.HARNESS.read_bytes()))
 
 
 class SyntheticAccountTests(unittest.TestCase):
@@ -496,25 +628,33 @@ class SourceSessionsTests(unittest.TestCase):
     """The five sessions from this tree (proxy, broker and driver as subprocesses): every cell passes."""
 
     def test_every_synthetic_cell_passes_from_source(self):
+        """Every cell passes with exactly its frozen check count and the frozen surface counts; the listing
+        session (no broker, what check re-derives) sees the same tool listing as the full session."""
         census = live_census()
         runtime = matrix.Runtime(python=Path(sys.executable), proxy=[sys.executable, "-m", "telegram_search_mcp.server"],
                                  package_root=SOURCE, sdk_root=None, pythonpath=str(SOURCE))
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory) / "sessions"
             work.mkdir()
-            results = matrix.run_sessions(runtime, census, work, approval="scripted")
+            results = matrix.run_sessions(runtime, census, work, approval="scripted",
+                                          sessions=matrix.SESSIONS + ("listing",))
             logs = {path.name: path.read_text(encoding="utf-8", errors="replace")[-2000:]
                     for path in work.glob("*.log")}
+        *results, listing = results
         built = matrix.build_receipt(commit=COMMIT, tree=OTHER, version=census["version"],
                                      wheel={"file": "source", "sha256": WHEEL, "bytes": 0}, build={},
                                      install={"source": "tree"}, census=census, sessions=results,
-                                     harness_sha256="e" * 64)
+                                     harness_sha256="e" * 64, gate_sha256=GATE)
         failed = {cell["id"]: cell["failed_check"] for cell in built["cells"] if cell["status"] != "pass"}
         self.assertEqual(failed, {}, json.dumps(logs, indent=1)[-6000:])
+        self.assertEqual({cell["id"]: cell["checks"] for cell in built["cells"]}, matrix.CELL_CHECKS)
         matrix.check_receipt(built, census=census)
         self.assertEqual(built["approval"], {"mode": "scripted", "outcome": "declined"})
-        self.assertGreater(built["surface"]["structured_results_validated"], 20)
+        self.assertEqual({key: built["surface"][key] for key in matrix.SURFACE_COUNTS}, matrix.SURFACE_COUNTS)
         self.assertEqual(built["sdk"]["revisions"], list(matrix.REVISIONS))
+        self.assertEqual((listing["session"], listing["cells"]), ("listing", []))
+        self.assertRegex(built["surface"]["listing_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(listing["observed"]["listing_sha256"], built["surface"]["listing_sha256"])
 
 
 if __name__ == "__main__":
