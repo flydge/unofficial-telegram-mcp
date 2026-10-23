@@ -281,12 +281,17 @@ class AliasStatusTests(Home):
         spec = importlib.util.spec_from_file_location('launcher_alias_status', LAUNCHER)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        # Phase D adds `registered` to an alias's status and the `accounts` report to the default's (once a registry
+        # exists, as here): tests/test_account_launcher.py.
         with mock.patch.object(setup_cli, 'main', side_effect=lambda args: print('{"state": "new"}') or 0), \
-                mock.patch('telegram_search_mcp.bundle_install.client_status', return_value={'claude_desktop': 'ok'}):
+                mock.patch('telegram_search_mcp.bundle_install.client_status', return_value={'claude_desktop': 'ok'}), \
+                mock.patch('telegram_search_mcp.bundle_install.accounts_status', return_value={'default': {}}), \
+                mock.patch('telegram_search_mcp.bundle_install.account_registrations', return_value={'work': True}):
             named = run(lambda _: module.status(Path('/r/releases/x'), 'work'), None)
             default = run(lambda _: module.status(Path('/r/releases/x')), None)
-        self.assertEqual(json.loads(named[1]), {'state': 'new'})
-        self.assertEqual(json.loads(default[1]), {'state': 'new', 'clients': {'claude_desktop': 'ok'}})
+        self.assertEqual(json.loads(named[1]), {'state': 'new', 'registered': True})
+        self.assertEqual(json.loads(default[1]), {'state': 'new', 'clients': {'claude_desktop': 'ok'},
+                                                  'accounts': {'default': {}}})
 
 
 class Selection:

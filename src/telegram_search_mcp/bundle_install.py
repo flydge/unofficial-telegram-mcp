@@ -3629,8 +3629,7 @@ def accounts_status(installation_root, user_home):
     out = {}
     for alias in (DEFAULT_ALIAS, *sorted(set(registry) | set(records))):
         try:
-            paths = (SetupPaths.from_account(AccountPaths.for_alias(DEFAULT_ALIAS, home)) if alias == DEFAULT_ALIAS
-                     else setup_cli.account_paths(alias))
+            paths = SetupPaths.from_account(AccountPaths.for_alias(alias, home))  # The registry admits an alias.
             facts = setup_cli.account_status(paths, setup_cli.existing_broker_status(paths))
             loaded, authorized = facts['loaded'], facts['authorized']
         except Exception:

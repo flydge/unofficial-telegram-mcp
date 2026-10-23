@@ -154,8 +154,10 @@ class LauncherGrammarTests(Home):
 
         class Reached(Exception):
             pass
-        refused = [*OUTSIDE, ['connect-helper', '--account', 'default'], ['capabilities', 'show', '--account', 'work'],
-                   ['rollback', '--account', 'work'], ['mcp', '--account', 'ｗork']]
+        # `capabilities ... --account <alias>` is in the grammar since phase D (tests/test_account_launcher.py).
+        refused = [*OUTSIDE, ['connect-helper', '--account', 'default'], ['capabilities', 'show', '--account', 'Work'],
+                   ['capabilities', '--account', 'work', 'show'], ['rollback', '--account', 'work'],
+                   ['account-add', '--account', 'work'], ['mcp', '--account', 'ｗork']]
         for args in refused:
             with self.subTest(args=args), mock.patch.object(module, '_read', side_effect=Reached()) as reader:
                 code, out, err = run(module.main, args)

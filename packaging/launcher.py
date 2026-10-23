@@ -29,18 +29,24 @@ ALIAS_CHARACTERS=frozenset('abcdefghijklmnopqrstuvwxyz0123456789')
 # Installation changes run by an installed release: admitted by its own pinned tree, not by the
 # receipt, so an interrupted change stays resumable while receipt and pointer disagree.
 CHANGES=('rollback','uninstall')
-# The installer's closed refusal codes, echoed by a refused bootstrap-install, rollback or uninstall;
-# anything else is generic.
+# The account transactions (0.55 spec 3D), `account-add <alias>` and `account-remove <alias>`: the same admission.
+ACCOUNT_CHANGES=('account-add','account-remove')
+# The installer's closed refusal codes, echoed by a refused bootstrap-install, rollback, uninstall or account
+# transaction; anything else is generic.
 INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','initialization_conflict',
     'installation_refused','metadata_conflict','overlapping_paths','recovery_limit','registration_conflict',
     'runtime_conflict','service_conflict','skill_conflict','target_conflict','transaction_conflict',
     'claude_desktop_registration_conflict','claude_desktop_config_unsupported','pending_send_unresolved',
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
-    'service_restart_failed','downgrade_refused','uninstall_incomplete'}
+    'service_restart_failed','downgrade_refused','uninstall_incomplete',
+    'accounts_inconsistent','default_check_failed','account_remove_incomplete',
+    'alias_invalid','alias_exists','alias_unknown','alias_path_too_long','alias_name_too_long','registry_full',
+    'registry_invalid','registry_unsafe','registry_busy'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
                              'claude-telegram-search','claude-telegram-setup')})
-# A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only.
-PENDING_ACTIONS=('install','upgrade','rollback','uninstall')
+# A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only, and for an
+# account transaction its alias (`pending_account`, a closed token).
+PENDING_ACTIONS=('install','upgrade','rollback','uninstall','account-add','account-remove')
 # The owner's capability profiles (telegram_search_mcp.config.CAPABILITY_PROFILES), spelled here for the grammar.
 PROFILES=('readers','send','replies','forward','video','archive_edit')
 
@@ -181,13 +187,29 @@ def admit(root,index_path,pin,installed):
     if found!=set(names)|({'bundle-index.json'} if installed else set()): raise AdmissionError()
 
 
+def alias_token(value):
+    """A named alias: `[a-z][a-z0-9]{0,11}`, never `default` (spelled by omitting the flag)."""
+    return (type(value) is str and 1<=len(value)<=12 and value[0] in ALIAS_CHARACTERS and not value[0].isdigit()
+            and set(value)<=ALIAS_CHARACTERS and value!='default')
+
+
 def account_action(args):
     """(action argv, alias or None) for `<account action> --account <alias>`; anything else is returned unchanged."""
-    if (len(args)==3 and args[0] in ACCOUNT_ACTIONS and args[1]=='--account' and type(args[2]) is str
-            and 1<=len(args[2])<=12 and args[2][0] in ALIAS_CHARACTERS and not args[2][0].isdigit()
-            and set(args[2])<=ALIAS_CHARACTERS and args[2]!='default'):
+    if len(args)==3 and args[0] in ACCOUNT_ACTIONS and args[1]=='--account' and alias_token(args[2]):
         return args[:1],args[2]
     return args,None
+
+
+def profile_action(args):
+    """(capabilities argv, alias or None) for `capabilities show|enable <profile>|disable <profile>` with an optional
+    trailing `--account <alias>` (0.55 spec 3D); None outside that closed grammar."""
+    alias=None
+    if args[:1]==['capabilities'] and len(args)>=4 and args[-2]=='--account' and alias_token(args[-1]):
+        args,alias=args[:-2],args[-1]
+    if args[:1]==['capabilities'] and (args[1:]==['show'] or (len(args)==3 and args[1] in ('enable','disable')
+                                                             and args[2] in PROFILES)):
+        return args,alias
+    return None
 
 
 def dispatch_mcp(alias=None):
@@ -197,29 +219,42 @@ def dispatch_mcp(alias=None):
 
 
 def status(root, alias=None):
-    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`. A named alias's status is
-    its own (loaded, authorized); the default's client entries are not its, so it has no `clients`."""
+    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`, and once an alias registry
+    exists `accounts`: the default and every alias, each loaded, authorized and registered, never the account
+    (0.55 spec 3D). A named alias's status is its own (loaded, authorized, registered); the default's client
+    entries are not its, so it has no `clients`."""
     import contextlib, io
     from telegram_search_mcp.setup_cli import main as dispatch
-    from telegram_search_mcp.bundle_install import client_status
+    from telegram_search_mcp.bundle_install import account_registrations, accounts_status, client_status
     captured=io.StringIO()
     with contextlib.redirect_stdout(captured): result=dispatch(['status'] if alias is None else ['status','--account',alias])
     text=captured.getvalue()
     try: value=_json(text)
     except (ValueError,AdmissionError): value=None
-    if type(value) is dict and alias is None:
-        value['clients']=client_status(root.parent.parent,Path.home())
+    if type(value) is dict:
+        if alias is None:
+            value['clients']=client_status(root.parent.parent,Path.home())
+            accounts=accounts_status(root.parent.parent,Path.home())
+            if accounts is not None: value['accounts']=accounts
+        else: value['registered']=account_registrations(root.parent.parent,Path.home()).get(alias)
         text=json.dumps(value,sort_keys=True)+'\n'
     sys.stdout.write(text)
     return result
 
 
-def capabilities(root, args):
-    """Show, enable or disable one capability profile of the installed release's runtime.toml."""
+def capabilities(root, args, account=None):
+    """Show, enable or disable one capability profile of the installed release's runtime.toml; `account` is a named
+    alias's AccountPaths: its own runtime.toml, its broker's pending-send gate and its own label (0.55 spec 3D)."""
     from telegram_search_mcp import bundle_install, capability_profiles as profiles
     home=Path.home()
     try:
-        if args==['show']: result=profiles.show(home)
+        if args==['show']: result=profiles.show(home) if account is None else profiles.show(home,account)
+        elif account is not None:
+            result=profiles.apply(home,args[0],args[1],
+                pending=lambda: bundle_install.account_pending_sends(home,Path(sys.executable),root/'app',account.socket,
+                                                                     account.policy),
+                restartable=lambda: bundle_install.restart_receipt_broker(root,home,kickstart=False,account=account),
+                restart=lambda: bundle_install.restart_receipt_broker(root,home,account=account),account=account)
         else:
             # Every refusal comes before runtime.toml is written, the broker check (restartable) first. A restart
             # that fails after the write is part of the `changed` result (broker restart_failed, restart_command).
@@ -238,28 +273,36 @@ def main(argv=None):
     args=list(sys.argv[1:] if argv is None else argv)
     if args==['--help']:
         print('0.55.0.dev0: mcp | broker | setup | resume | status | connect | wait | cancel | '
-              'api-credentials | capabilities show|enable|disable <profile> | rollback | uninstall. setup, resume '
+              'api-credentials | capabilities show|enable|disable <profile> | rollback | uninstall | '
+              'account-add <alias> | account-remove <alias>. setup, resume '
               'and api-credentials require native Apple Terminal; connect, wait and cancel take no credentials. '
-              'mcp, broker, setup, resume, status, connect, wait, cancel and api-credentials take a trailing '
-              '--account <alias> for a registered account alias.')
+              'mcp, broker, setup, resume, status, connect, wait, cancel, api-credentials and capabilities take a '
+              'trailing --account <alias> for a registered account alias. account-add registers an alias and its '
+              'client entries without logging in; account-remove moves its session aside, never deleting it.')
         return 0
     # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
-    code='bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES) else 'bundle_admission_failed'
-    pending=None
+    code=('bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES,*ACCOUNT_CHANGES)
+          else 'bundle_admission_failed')
+    pending=pending_account=None
     try:
         root=Path(__file__).absolute().parent
-        if args in [[v] for v in CHANGES]:
+        account_change=len(args)==2 and args[0] in ACCOUNT_CHANGES and alias_token(args[1])
+        if args in [[v] for v in CHANGES] or account_change:
             pin=root.name
             if root.parent!=root.parent.parent/'releases' or not _hash(pin): raise AdmissionError()
             admit(root,root/'bundle-index.json',pin,True)
             sys.path[:]=[str(root/'app'),str(root/'installer')]+[p for p in sys.path if Path(p).is_relative_to(root/'python')]
             from telegram_search_mcp import bundle_install
             try:
-                result=getattr(bundle_install,args[0])(root.parent.parent,user_home=Path.home())
+                if account_change:
+                    result=getattr(bundle_install,args[0].replace('-','_'))(root.parent.parent,alias=args[1],
+                                                                             user_home=Path.home())
+                else:result=getattr(bundle_install,args[0])(root.parent.parent,user_home=Path.home())
             except bundle_install.InstallError as error:
                 named=error.args[0] if len(error.args)==1 else None
                 if type(named) is str and named in INSTALL_CODES: code=named
                 pending=getattr(error,'pending_action',None)
+                pending_account=getattr(error,'pending_account',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
         if args and args[0]=='bootstrap-install':
@@ -287,14 +330,15 @@ def main(argv=None):
                 named=error.args[0] if len(error.args)==1 else None
                 if type(named) is str and named in INSTALL_CODES: code=named
                 pending=getattr(error,'pending_action',None)
+                pending_account=getattr(error,'pending_account',None)
                 raise
             print(json.dumps(result,sort_keys=True)); return 0
-        # capabilities show | enable <profile> | disable <profile>: the owner's profile switch (closed grammar;
-        # the profile name is checked again against the closed table).
-        profile_change=(args[:1]==['capabilities'] and (args[1:]==['show'] or (len(args)==3 and args[1] in ('enable','disable')
-                        and args[2] in PROFILES)))
-        if not profile_change: args,alias=account_action(args)
-        else: alias=None
+        # capabilities show | enable <profile> | disable <profile> [--account <alias>]: the owner's profile switch
+        # (closed grammar; the profile name is checked again against the closed table).
+        profile=profile_action(args)
+        profile_change=profile is not None
+        if profile_change: args,alias=profile
+        else: args,alias=account_action(args)
         if args not in [[v] for v in ACTIONS] and not profile_change: raise AdmissionError()
         receipt=_json(_read(root.parent.parent/'receipt.json',mode=0o600)); pin=receipt.get('index_sha256')
         if receipt.get('release_root')!=str(root) or root!=root.parent.parent/'releases'/str(pin): raise AdmissionError()
@@ -314,7 +358,7 @@ def main(argv=None):
         if args==['status']:
             return status(root) if alias is None else status(root,alias)
         if profile_change:
-            return capabilities(root,args[1:])
+            return capabilities(root,args[1:]) if account is None else capabilities(root,args[1:],account)
         if args==['mcp']:
             return dispatch_mcp() if alias is None else dispatch_mcp(alias)
         if args==['broker']:
@@ -324,7 +368,9 @@ def main(argv=None):
         return dispatch(args if alias is None else [*args,'--account',alias])
     except (Exception,KeyboardInterrupt):
         refusal={'status':'refused','code':code}
-        if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS: refusal['pending_action']=pending
+        if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS:
+            refusal['pending_action']=pending
+            if pending in ACCOUNT_CHANGES and alias_token(pending_account): refusal['pending_account']=pending_account
         print(json.dumps(refusal),file=sys.stderr)
         return 2
 
