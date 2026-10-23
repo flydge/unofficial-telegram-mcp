@@ -7,10 +7,11 @@ Updated **2026-10-22**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## In development — **0.54.0.dev0**
+## Release candidate — **0.54.0rc1**
 
-Conversational usability: [spec](plans/0.54-conversational-usability-spec.md) and its
-[task record](plans/0.54-conversational-usability-spec.tasks.md). Later releases: 0.55 multiple accounts, 0.56
+Conversational usability: [spec](plans/0.54-conversational-usability-spec.md), its
+[task record](plans/0.54-conversational-usability-spec.tasks.md) and the [release notes](release-notes-0.54.0rc1.md). A local
+annotated tag with release-gate evidence; not published. Later releases: 0.55 multiple accounts, 0.56
 albums, 0.57 own-message actions, 0.58 reply-source families, then final acceptance (specs in `plans/`).
 
 ## Release candidate — **0.53.0rc2**
