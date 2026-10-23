@@ -293,7 +293,10 @@ class Broker(SelectionBrokerMixin):
         self._approval_dialogs = 0
 
     def _prompt_approval(self, **kwargs) -> ApprovalDecision | bool:
-        """The owner's approval dialog, counted as open while it runs."""
+        """The owner's approval dialog, counted as open while it runs. Once an alias registry exists the dialog
+        names this broker's alias and a masked account (spec 3C); without one its arguments are 0.54's."""
+        if account_registry.present(self._accounts_root):
+            kwargs = {**kwargs, 'account_alias': self._alias}
         with self._state_lock:
             self._approval_dialogs += 1
         try:
