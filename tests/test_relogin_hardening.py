@@ -88,6 +88,26 @@ class DiscoveryCursorTests(unittest.TestCase):
         client.account = 7  # The scan is gone, not paused.
         self.assertEqual(discover(service, ['garden', 'seeds'], cursor=first.next_cursor).status, 'expired')
 
+    def test_a_switch_during_the_call_drops_the_page_like_an_unknown_cursor(self):
+        scans = registry()
+        client = AccountClient(7)
+        service = TargetDiscoveryService(client=client, registry=scans, owner=(CLIENT, 'broker_g1'))
+        first = discover(service, ['garden', 'seeds'])
+        self.assertEqual(first.status, 'page')
+        reads = iter([7])  # Authorized as 7 when the call binds, as 8 after its provider reads.
+        client.get_account_id = lambda: next(reads, 8)
+        switched = discover(service, ['garden', 'seeds'], cursor=first.next_cursor)
+        unknown = discover(service, ['garden', 'seeds'], cursor='scan_' + 'x' * 32)
+        self.assertEqual(switched.model_dump(), unknown.model_dump())
+        client.get_account_id = lambda: 7  # The scan is gone with the page, not paused.
+        self.assertEqual(discover(service, ['garden', 'seeds'], cursor=first.next_cursor).status, 'expired')
+        self.assertEqual(scans._scans, {})
+        reads = iter([7])  # A first page read across a switch is dropped too, and leaves no scan behind.
+        client.get_account_id = lambda: next(reads, 8)
+        fresh = discover(service, ['garden', 'seeds'])
+        self.assertEqual((fresh.status, fresh.next_cursor, fresh.candidates), ('expired', None, []))
+        self.assertEqual(scans._scans, {})
+
     def test_a_cursor_from_another_generation_is_refused(self):
         shared = registry()
         client = AccountClient(7)

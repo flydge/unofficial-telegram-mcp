@@ -427,6 +427,18 @@ class TargetDiscoveryService:
                 global_key=global_key,
                 provider_items=provider_items,
             )
+            # The owner again, after the provider reads and before any of them is recorded or bound: a switch of
+            # account or generation during the call drops the page and the scan, the unknown cursor's answer.
+            current = self._scan_owner()
+            if current != owner:
+                self._registry.bind(
+                    cursor,
+                    hypothesis_digest=digest,
+                    hypothesis_count=len(request.hypotheses),
+                    scope=request.scope,
+                    owner=current,
+                )
+                raise DiscoveryCursorExpired()
 
             if global_key is not None and global_page is not None:
                 if integrity_partial or permanent_global:
@@ -474,7 +486,7 @@ class TargetDiscoveryService:
                 hypothesis_digest=digest,
                 hypothesis_count=len(request.hypotheses),
                 scope=request.scope,
-                owner=owner,
+                owner=current,
             )
             return self._response(
                 cursor,
