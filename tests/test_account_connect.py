@@ -19,7 +19,8 @@ from unittest import mock
 from test_connect_flow import PARAMETERS, PHONE, READY, BUNDLED, ConnectHarness, FakeUI, QrRaw, other_device
 from test_onboarding import MemoryStore
 
-from telegram_search_mcp import account_registry, bundle_install, connect_cli, connect_flow, connect_page, connect_server
+from telegram_search_mcp import (account_registry, bundle_install, connect_cli, connect_flow, connect_page,
+                                 connect_server)
 from telegram_search_mcp.config import AccountPaths
 from telegram_search_mcp.connect_flow import ConnectResult, connect_status_path, run_connect
 from telegram_search_mcp.enrollment import EnrollmentStore, SetupPaths

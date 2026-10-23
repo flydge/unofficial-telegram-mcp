@@ -653,7 +653,8 @@ class ReinstallOverKeptAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.account('account_add', 'work')
         removed = self.account('account_remove', 'play')  # The registry alone lists it.
         # Never logged in: the root it moves aside holds only the connect.lock a transaction held (review fix 055d2).
-        self.assertEqual((removed['status'], removed['codex'], removed['session']), ('account_removed', 'absent', 'moved'))
+        self.assertEqual((removed['status'], removed['codex'], removed['session']),
+                         ('account_removed', 'absent', 'moved'))
         self.assertEqual(tree(Path(removed['session_moved_to'])), LOCK_ONLY)
         self.assertEqual((self.registry(), sorted(self.sidecar()['accounts'])), (('work',), ['work']))
         removed = self.account('account_remove', 'work')
@@ -855,9 +856,10 @@ class LoginDuringChangeTests(AliasChangeHarness, unittest.TestCase):
 
 
 class LoginLockTests(AliasChangeHarness, unittest.TestCase):
-    """Review fix (055d2, lead decision A): every installer transaction over the aliases holds every alias's connect.lock
-    for each whole run, fresh or resumed, so no login runs during one; a login still holding it, or a connect job still
-    running, refuses `login_in_progress` before anything changes and the transaction stays resumable."""
+    """Review fix (055d2, lead decision A): every installer transaction over the aliases holds every alias's
+    connect.lock for each whole run, fresh or resumed, so no login runs during one; a login still holding it, or a
+    connect job still running, refuses `login_in_progress` before anything changes and the transaction stays
+    resumable."""
 
     def setUp(self):
         super().setUp()
@@ -968,12 +970,10 @@ class LoginLockTests(AliasChangeHarness, unittest.TestCase):
                         os.close(held)
                 if case == 'connect job running':
                     self.launchctl.idle(self.jobs.connect_label)
-                attempts = []
-                result = self.change('uninstall', checkpoint=lambda stage: attempts.append(stage) or self.attempt_logins(
-                    stage, ('work',)) if self.jobs.root.exists() else None)
+                result = self.change('uninstall', checkpoint=lambda stage: self.attempt_logins(stage, ('work',)))
                 self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
+                self.assertTrue(self.attempts)
                 self.assertEqual({outcome for _, _, outcome in self.attempts}, {'owner_busy'})
-                self.assertTrue(attempts)
 
 
 class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
@@ -983,13 +983,13 @@ class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
     made with (`newer_state_kept`); the next change moves it on."""
 
     def login_from(self, release, pin):
-        """What a first login run by `release` leaves for `work`: its root, enrollment and policy pinning `pin`, and that
-        release's exact broker definition written and loaded (its connect job idle)."""
+        """What a first login run by `release` leaves for `work`: its root, enrollment and policy pinning `pin`, and
+        that release's exact broker definition written and loaded (its connect job idle)."""
         for path in (self.jobs.root, self.jobs.root / 'run'):
             path.mkdir(mode=0o700, exist_ok=True)
-        for name, data in (('enrollment.json', b'{"synthetic": "alias enrollment"}\n'),
-                           ('runtime.toml', ('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_'
-                                             'version = 1\nenabled_capabilities = ["read", "artifacts"]\n' % pin).encode())):
+        policy = ('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
+                  'enabled_capabilities = ["read", "artifacts"]\n' % pin).encode()
+        for name, data in (('enrollment.json', b'{"synthetic": "alias enrollment"}\n'), ('runtime.toml', policy)):
             (self.jobs.root / name).write_bytes(data)
             (self.jobs.root / name).chmod(0o600)
         payload = bundle_install._service_payload(release, self.jobs.broker_label, self.ALIAS)
@@ -1045,9 +1045,10 @@ class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
 
 
 class UninstallLoginGapTests(AliasChangeHarness, unittest.TestCase):
-    """Review fix (055d2, medium): uninstall ran an alias's broker step only while its outcome was unrecorded, so a broker
-    a login loaded again between two attempts stayed, crash-looping on the removed release, and the alias could not be
-    repaired. Every attempt now runs each alias's connect job bootout and broker step again until the root retires."""
+    """Review fix (055d2, medium): uninstall ran an alias's broker step only while its outcome was unrecorded, so a
+    broker a login loaded again between two attempts stayed, crash-looping on the removed release, and the alias could
+    not be repaired. Every attempt now runs each alias's connect job bootout and broker step again until the root
+    retires."""
 
     def test_a_login_between_two_attempts_leaves_no_broker_and_the_documented_commands_end_clean(self):
         for stage in ('connect:work', 'service:work'):
@@ -1079,7 +1080,8 @@ class UninstallLoginGapTests(AliasChangeHarness, unittest.TestCase):
                 self.service(self.release)
                 self.assertEqual(self.account('account_add')['status'], 'account_added')
                 upgraded = self.install(self.newer())
-                self.assertEqual((upgraded['status'], upgraded['accounts']['work']['service']), ('upgraded', 'not_loaded'))
+                self.assertEqual((upgraded['status'], upgraded['accounts']['work']['service']),
+                                 ('upgraded', 'not_loaded'))
                 removed = self.account('account_remove')
                 self.assertEqual((removed['status'], removed['codex'], removed['session']),
                                  ('account_removed', 'removed', 'moved'))

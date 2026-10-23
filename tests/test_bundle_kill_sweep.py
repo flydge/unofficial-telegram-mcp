@@ -738,7 +738,9 @@ def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
     """`account-add` or `account-remove` of `alias` (0.55 spec 3D) with the fakes: the default broker's check answers
     `ready` and an alias broker holds no pending send. The socket budget is widened only for the long disposable
     base (the registry's own tests apply it)."""
-    probe = {'alias_pending': lambda *_: 'none', **({'default_check': lambda *_: 'ready'} if action == 'account_add' else {})}
+    probe = {'alias_pending': lambda *_: 'none'}
+    if action == 'account_add':
+        probe['default_check'] = lambda *_: 'ready'
     with mock.patch.object(account_registry, 'SOCKET_PATH_LIMIT', 4096), \
             mock.patch('telegram_search_mcp.bundle_install.require_platform'):
         return getattr(bundle_install, action)(h.runtime, alias=alias, user_home=h.home,

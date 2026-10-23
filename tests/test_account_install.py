@@ -24,7 +24,8 @@ from telegram_search_mcp import account_registry, bundle_install, config
 
 
 # What an installer transaction leaves at the root of an alias that never logged in: the run directory and the empty
-# connect.lock it held for its run, as a login creates them first (review fix 055d2, `_LoginLocks`); nothing of a session.
+# connect.lock it held for its run, as a login creates them first (review fix 055d2, `_LoginLocks`); nothing of a
+# session.
 LOCK_ONLY = {'run': 'dir', 'run/connect.lock': hashlib.sha256(b'').hexdigest()}
 
 
@@ -437,7 +438,8 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
         result = self.account('account_remove')
         # Review fix 055d2: the transaction held the alias's connect.lock (created as a login creates it first), so the
         # root it moves aside holds only that, never a session.
-        self.assertEqual((result['service'], result['connect_job'], result['session']), ('absent', 'not_loaded', 'moved'))
+        self.assertEqual((result['service'], result['connect_job'], result['session']),
+                         ('absent', 'not_loaded', 'moved'))
         self.assertEqual(tree(Path(result['session_moved_to'])), LOCK_ONLY)
         self.assertFalse(self.jobs.root.exists())
         self.assertEqual(self.alias_probes, [])
