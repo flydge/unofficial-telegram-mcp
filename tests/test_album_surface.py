@@ -202,6 +202,27 @@ class SdkSurfaceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn('x' * 20, result.content[0].text)
         self.assertEqual(service.calls, [])
 
+    async def test_item_and_group_errors_name_the_parameter_and_undeclared_keys_are_only_counted(self):
+        """As docs/reference.md states it: counts, duplicates and any error inside an item name `items`, another
+        group names `group`, and an undeclared top-level key (a selection, a reply, a topic) is only counted."""
+        one, two = {'artifact_id': ART[0]}, {'artifact_id': ART[1]}
+        items, group = 'invalid_arguments: invalid items', 'invalid_arguments: invalid group'
+        counted = 'invalid_arguments: 1 unexpected argument(s)'
+        cases = (({'items': [one]}, items), ({'items': [{'artifact_id': ART[i % 3]} for i in range(11)]}, items),
+                 ({'items': [one, one]}, items), ({'items': [one, two | {'kind': 'photo'}]}, items),
+                 ({'items': [one, two | {'caption': 'x' * 1025}]}, items),
+                 ({'items': [one, two | {'display_name': ''}]}, items),
+                 ({'items': [one, two | {'display_name': 'x' * 256}]}, items), ({'group': 'audio'}, group),
+                 ({'selection_id': 'selection_' + 'a' * 64}, counted), ({'reply_to': {'chat_id': 1, 'message_id': 2}},
+                                                                         counted),
+                 ({'topic': {'kind': 'forum', 'id': 3}}, counted), ({'chat': 7}, counted))
+        async with Client(build_server(service_factory=_Service, policy=ALBUM_POLICY)) as consumer:
+            for change, expected in cases:
+                with self.subTest(change=repr(change)[:60]):
+                    result = await consumer.call_tool('prepare_album_send',
+                                                      {'recipient': 7, 'items': [one, two]} | change)
+                    self.assertEqual(result.content[0].text, f'Error executing tool prepare_album_send: {expected}')
+
     async def test_duplicate_items_name_the_items_parameter(self):
         async with Client(build_server(service_factory=_Service, policy=ALBUM_POLICY)) as consumer:
             result = await consumer.call_tool('prepare_album_send', {'recipient': 7, 'items': [{'artifact_id': ART[0]}] * 2})

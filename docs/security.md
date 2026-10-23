@@ -2543,8 +2543,9 @@ captions, spoilers, secret chats or a resend.
 
 Every item ID is authorized before any other work, and one foreign or unknown item makes the whole request the
 content-free `unavailable`. Items are classified locally (`validate_photo`, the [video probe](#native-video-boundary-f15a-candidate),
-documents with content type detection disabled); the refusal codes `unsupported_item`, `item_too_large` and
-`album_too_large` never name the item. One ordered digest binds every item's position, kind, artifact, bytes,
+documents with content type detection disabled); the refusal codes `unsupported_item`, `item_too_large`,
+`album_too_large` and `display_name_required` never name the item. An item's optional `display_name` has the
+grammar of `prepare_artifact_send`'s; a delivered name that cannot be staged is refused, never replaced. One ordered digest binds every item's position, kind, artifact, bytes,
 name, caption and facts; the preview, the dialog and the receipt carry it, the proxy checks the preview against
 the request, and the dialog checks it against the broker's own arguments. The draft (internal kind `album`) is
 bound to the proxy client and current account and is invisible to the generic draft tools; its handle is one
@@ -2552,11 +2553,12 @@ more kind in the multi-account isolation matrix.
 
 At send time every item is re-hashed and the recipient resolved again. Staging copies each item into its own
 private `draft_<32hex>` directory derived from the album handle, so the one-file-per-directory rule of single
-sends holds. `sendMessageAlbum` is the only added request constructor and the generic TDLib call refuses it;
+sends holds; retirement takes the staging lock, so the sweep never sees a copy gone and its directory left. `sendMessageAlbum` is the only added request constructor and the generic TDLib call refuses it;
 its closed shape has exact keys, `topic_id` and `reply_to` null, the fixed send options with a random
 `sending_id`, and 2–10 per-kind contents with plain captions (voice notes and text excluded). Exactly one
 attempt is made and never retried. Slots bind only from the exact `messages` result and end only by the
-terminal update for their bound temporary ID; `updateNewMessage`, deletion and absence never decide an outcome.
+terminal update for their bound chat and temporary ID (TDLib numbers temporary IDs per chat, so another chat's
+update for the same ID is ignored); `updateNewMessage`, deletion and absence never decide an outcome.
 A mixed outcome is `partial`, unknown stays `outcome_unknown`, and evidence is disclosed only to the same
 owner, policy, provider and attempt. The album has its own status model; the frozen `get_send_status` schema
 is unchanged and reports an album as its content-free unknown shape. Evidence is technical (synthetic provider

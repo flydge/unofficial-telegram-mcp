@@ -3112,24 +3112,31 @@ status = get_album_send_status(draft_id=prepared.album.draft_id)  # after outcom
 | Argument | Meaning |
 | --- | --- |
 | `recipient` | Exact non-zero numeric chat ID, as for the other prepare tools. Secret chats are unavailable; no topic and no reply target can be given. |
-| `items` | 2–10 `{artifact_id, caption}` in send order, with distinct artifact IDs the calling client owns, exactly as for `prepare_artifact_send`. `caption` is optional plain text of at most 1024 characters, normalized as for artifact captions. |
+| `items` | 2–10 `{artifact_id, caption, display_name}` in send order, with distinct artifact IDs the calling client owns, exactly as for `prepare_artifact_send`. `caption` is optional plain text of at most 1024 characters, normalized as for artifact captions. `display_name` is optional, with exactly the grammar of `prepare_artifact_send`'s (a string of 1–255 characters, normalized the same way: NFKC, the last path component, sanitized); when given it is the item's delivered name. |
 | `group` | `media` (default): an item is a photo when its bytes are PNG, JPEG or WebP and pass the photo checks (at most 10,000,000 bytes), otherwise a video when the [video probe](#size-limit-probe-rules-and-refusal-codes) reads it (at most 64 MiB). `documents`: any artifact of at most 64 MiB, sent with content type detection disabled. Items are never moved between groups. |
 
 Every item ID is authorized before any other work: one foreign, unknown or expired item makes the whole
 request `unavailable` (fixed detail, no draft), the same shape as an unknown ID. The closed model refuses
-fewer than 2 or more than 10 items, duplicate IDs, unknown fields, another group and any `selection_id`
-(`invalid_arguments` names the parameter). Local classification refuses the whole album with one
-content-free code that never names the item: `unsupported_item` (in `media`, neither a photo nor a video),
-`item_too_large` (over its kind's limit) or `album_too_large` (more than 256 MiB in total, which leaves
-headroom in the 512 MiB staging pool). The recorded file name is display evidence only (`photo.<ext>`,
-`video.mp4` or `attachment` when none was recorded); the bytes are bound by SHA-256. Duplicate delivered
-names are allowed.
+with the [closed argument text](#runtime-contract-and-compatibility) before any work. Fewer than 2 or more
+than 10 items, duplicate IDs, an unknown field inside an item and a `caption` or `display_name` outside its
+grammar name the parameter (`invalid_arguments: invalid items`), and another group names `group`
+(`invalid_arguments: invalid group`). An undeclared top-level argument (`selection_id`, `reply_to`, `topic` or
+any other key) is only counted, never named: `invalid_arguments: <n> unexpected argument(s)`. Local
+classification refuses the whole album with one content-free code that never names the item:
+`unsupported_item` (in `media`, neither a photo nor a video, or a photo whose delivered name lacks its
+format's extension), `item_too_large` (over its kind's limit), `album_too_large` (more than 256 MiB in total,
+which leaves headroom in the 512 MiB staging pool) or `display_name_required` (an item's delivered name is
+over 240 UTF-8 bytes once normalized, the local staging bound: give that item, or every item, a shorter
+`display_name`). The delivered name is the item's `display_name` when given, else the recorded file name
+(display evidence only), else `photo.<ext>`, `video.mp4` or `attachment`; the bytes are bound by SHA-256. A
+video item is `video/quicktime` when its delivered name ends in `.mov`, otherwise `video/mp4`. Duplicate
+delivered names are allowed.
 
 ### Album preview, drafts and expiry
 
 `prepared.album` is the closed `AlbumDraftPreview`: `draft_id`, `account_id`, `expires_at`,
 `approval_required` (always true), `recipient` (`chat_id`, sanitized `title`), `group`, `items` (each with
-`position`, `kind`, `artifact_id`, `display_name`, `size_bytes`, `sha256`, `caption` or null, and `photo` or
+`position`, `kind`, `artifact_id`, `display_name` (the delivered name), `size_bytes`, `sha256`, `caption` or null, and `photo` or
 `video` facts), `total_size_bytes`, `album_sha256` and `preview_sha256`. Names and captions are marked,
 reversible JSON escapes as in the [video preview](#preview-and-hash); video facts are declared by the file,
 not decoded. `album_sha256` is one ordered digest (domain `telegram-search-mcp.album-items`, version 1) over
@@ -3137,7 +3144,7 @@ every item's position, kind, artifact, bytes, name, caption and facts; the dialo
 carries it. `preview_sha256` (`telegram-search-mcp.album`) also binds the exact closed `sendMessageAlbum`
 request without the `sending_id` and the staged paths. The proxy reports `unavailable` when the returned
 preview fails its digest checks or disagrees with the request's recipient, group, or any item's artifact
-ID or normalized caption, in order.
+ID or normalized caption, in order, or with the normalized `display_name` of an item that gives one.
 
 An album draft is the internal kind `album`, bound to the proxy client and current Telegram account like
 every draft, and expires at the shorter of the draft TTL and every item's own deadline. The generic draft
@@ -3229,9 +3236,12 @@ content-free `none`, and the frozen `get_send_status` schema is unchanged.
 Binding comes only from the exact `messages` result: N pending messages with our `sending_id`, one negative
 `media_album_id` and content types in input order. `updateNewMessage` never binds a slot, and terminal
 updates that overtake the result are applied only after that exact binding. A slot ends only through
-`updateMessageSendSucceeded` or `updateMessageSendFailed` for its bound temporary ID; deletion or absence
-never proves failure, and any mismatch leaves every slot `outcome_unknown`. Observations last 900 seconds;
-staged item files are retired once every slot is terminal, otherwise by the 12-hour staging sweep.
+`updateMessageSendSucceeded` or `updateMessageSendFailed` for its bound chat and temporary ID: the pinned
+TDLib numbers temporary IDs per chat, so another chat's update for the same ID is ignored (never buffered and
+never a conflict). Deletion or absence never proves failure; a mismatched result leaves every slot
+`outcome_unknown`, and a mismatched terminal update in the album's chat leaves its slot `outcome_unknown`.
+Observations last 900 seconds; staged item files are retired once every slot is terminal, otherwise by the
+12-hour staging sweep, and retirement takes the staging lock, so it never fails another send's staging.
 
 ### Album limits
 
