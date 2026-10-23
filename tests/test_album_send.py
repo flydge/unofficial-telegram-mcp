@@ -663,5 +663,137 @@ class ContractTests(Store, unittest.TestCase):
                 AlbumDraftPreview.model_validate(value)
 
 
+OWNER_ACCOUNT = ACCOUNT
+
+
+class RegistryTests(Store, unittest.TestCase):
+    """Work item 2: a dedicated, account-bound album draft kind with one receipt of N slots."""
+
+    def setUp(self):
+        super().setUp()
+        from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
+        self.clock = [1000.0]
+        self.registry = OutgoingDraftRegistry(self.store, attempt_clock=lambda: self.clock[0])
+        self.owner = DraftOwner(CLIENT, ACCOUNT)
+        self.photo, self.video = self.item(PNG, 'a.png'), self.item(MOVIE, caption='Two')
+        self.album = self.spec(self.photo, self.video)
+
+    def prepare(self, album=None, owner=None, recipient=RECIPIENT):
+        return self.registry.prepare_album(owner=owner or self.owner, recipient=recipient,
+                                           recipient_title='Recipient', album=album or self.album)
+
+    def test_prepare_binds_the_ordered_digest_and_total(self):
+        draft = self.prepare()
+        self.assertEqual((draft.kind, draft.sha256, draft.size_bytes, draft.artifact_id, draft.album),
+                         ('album', self.album.sha256, self.album.total_bytes, '', self.album))
+        self.assertEqual(self.registry.peek(draft.draft_id, owner=self.owner), draft)
+        self.assertEqual(self.registry.kind(draft.draft_id, owner=self.owner), 'album')
+
+    def test_generic_draft_tools_never_list_cancel_or_revise_an_album(self):
+        from telegram_search_mcp.outgoing_drafts import DraftError
+        draft = self.prepare()
+        self.assertEqual(self.registry.list_pending(owner=self.owner), ([], False))
+        with self.assertRaises(DraftError):
+            self.registry.cancel(draft.draft_id, owner=self.owner)
+        with self.assertRaises(DraftError):
+            self.registry.revise(draft.draft_id, owner=self.owner, recipient_title='Recipient', caption='x')
+        with self.assertRaises(DraftError):
+            self.prepare(album=object())
+
+    def test_supersede_key_is_owner_recipient_and_ordered_item_ids(self):
+        from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner
+        first = self.prepare()
+        reordered = self.prepare(album=self.spec(self.video, self.photo))
+        other_owner = self.prepare(owner=DraftOwner(FOREIGN, ACCOUNT))
+        other_account = self.prepare(owner=DraftOwner(CLIENT, ACCOUNT + 1))
+        other_recipient = self.prepare(recipient=RECIPIENT + 1)
+        again = self.prepare()
+        with self.assertRaises(DraftError):
+            self.registry.claim(first.draft_id, owner=self.owner, approved=True)
+        for draft, owner in ((reordered, self.owner), (other_owner, DraftOwner(FOREIGN, ACCOUNT)),
+                             (other_account, DraftOwner(CLIENT, ACCOUNT + 1)), (other_recipient, self.owner),
+                             (again, self.owner)):
+            with self.subTest(draft=draft.draft_id):
+                self.assertEqual(self.registry.peek(draft.draft_id, owner=owner), draft)
+        with self.assertRaises(DraftError):  # Account-bound: another account of the same client sees nothing.
+            self.registry.peek(again.draft_id, owner=DraftOwner(CLIENT, ACCOUNT + 1))
+
+    def test_claim_verifies_every_item_and_returns_their_paths_in_order(self):
+        from telegram_search_mcp.outgoing_drafts import DraftError
+        draft = self.prepare()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        self.assertIsNone(claim.path)
+        self.assertEqual(claim.paths, tuple(self.store.lookup(i).path for i in self.album.artifact_ids))
+        with self.assertRaises(DraftError):
+            self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        broken = self.prepare(album=self.spec(self.item(PNG, 'b.png'), self.item(JPEG)))
+        (self.store.cache_dir / broken.album.items[1].artifact_id).write_bytes(b'changed')
+        with self.assertRaises(DraftError):
+            self.registry.claim(broken.draft_id, owner=self.owner, approved=True)
+
+    def test_one_receipt_of_every_slot_and_never_a_single_receipt(self):
+        draft = self.prepare()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        with self.assertRaises(Exception):
+            self.registry.finish(draft.draft_id, owner=self.owner, claim=claim, status='sent', message_id=5)
+        for slots in ((('sent', 5),), (('sent', 5), ('sent', 6), ('sent', 7)), (('sent', None), ('failed', None)),
+                      (('pending', None), ('sent', 6)), (('failed', 3), ('sent', 6)), [('sent', 5), ('sent', 6)]):
+            with self.subTest(slots=slots), self.assertRaises(ValueError):
+                self.registry.finish_album(draft.draft_id, owner=self.owner, claim=claim, slots=slots)
+        receipt = self.registry.finish_album(draft.draft_id, owner=self.owner, claim=claim,
+                                             slots=(('sent', 5), ('outcome_unknown', None)))
+        self.assertEqual((receipt.status, receipt.slots, receipt.message_id, receipt.evidence),
+                         ('partial', (('sent', 5), ('outcome_unknown', None)), None, 'provider'))
+        self.assertIs(self.registry.receipt(draft.draft_id, owner=self.owner), receipt)
+        # A finished receipt never changes by another finish.
+        self.assertIs(self.registry.finish_album(draft.draft_id, owner=self.owner, claim=claim,
+                                                 slots=(('failed', None), ('failed', None))), receipt)
+        self.assertEqual(self.registry.unsettled_attempts(), 1)
+        self.assertEqual(self.registry.attempt_outcome(draft.draft_id, client_id=CLIENT, owner=self.owner,
+                                                       kinds=frozenset({'album'})), 'attempted')
+
+    def test_local_failure_receipt(self):
+        draft = self.prepare()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        receipt = self.registry.finish_album(draft.draft_id, owner=self.owner, claim=claim, slots=None,
+                                             evidence='local_failed')
+        self.assertEqual((receipt.status, receipt.slots, receipt.evidence), ('failed', None, 'local_failed'))
+        self.assertEqual(self.registry.attempt_outcome(draft.draft_id, client_id=CLIENT, owner=None,
+                                                       kinds=frozenset({'album'})), 'local_failed')
+        self.assertEqual(self.registry.unsettled_attempts(), 0)
+
+    def test_reconcile_refines_only_unknown_slots_with_exact_evidence(self):
+        from telegram_search_mcp.outgoing_drafts import DraftError
+        draft = self.prepare(album=self.spec(self.photo, self.video, self.item(JPEG)))
+        provider, epoch = object(), object()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True, provider=provider,
+                                    provider_epoch=epoch)
+        state, receipt, _, attempted_at, _ = self.registry.status_snapshot(draft.draft_id, owner=self.owner)
+        self.assertEqual((state, receipt), ('claimed', None))
+        self.registry.finish_album(draft.draft_id, owner=self.owner, claim=claim,
+                                   slots=(('sent', 5), ('outcome_unknown', None), ('outcome_unknown', None)))
+        with self.assertRaises(Exception):
+            self.registry.reconcile(draft.draft_id, owner=self.owner, provider=provider, provider_epoch=epoch,
+                                    attempted_at=attempted_at, status='sent', message_id=9)
+        for changes in ({'provider': object()}, {'provider_epoch': object()}, {'attempted_at': attempted_at + 1}):
+            with self.subTest(changes=changes), self.assertRaises(DraftError):
+                self.registry.reconcile_album(draft.draft_id, owner=self.owner, **{
+                    'provider': provider, 'provider_epoch': epoch, 'attempted_at': attempted_at, **changes},
+                    outcomes=(('sent', 5), ('sent', 6), ('failed', None)))
+        receipt = self.registry.reconcile_album(draft.draft_id, owner=self.owner, provider=provider,
+            provider_epoch=epoch, attempted_at=attempted_at,
+            outcomes=(('failed', None), ('sent', 6), ('outcome_unknown', None)))
+        self.assertEqual((receipt.status, receipt.slots), ('partial', (('sent', 5), ('sent', 6), ('outcome_unknown', None))))
+        receipt = self.registry.reconcile_album(draft.draft_id, owner=self.owner, provider=provider,
+            provider_epoch=epoch, attempted_at=attempted_at,
+            outcomes=(('sent', 5), ('failed', None), ('failed', None)))
+        self.assertEqual((receipt.status, receipt.slots), ('partial', (('sent', 5), ('sent', 6), ('failed', None))))
+        self.assertEqual(self.registry.unsettled_attempts(), 0)
+        self.clock[0] += 900
+        with self.assertRaises(DraftError):
+            self.registry.reconcile_album(draft.draft_id, owner=self.owner, provider=provider, provider_epoch=epoch,
+                                          attempted_at=attempted_at, outcomes=(('sent', 5),) * 3)
+
+
 if __name__ == '__main__':
     unittest.main()

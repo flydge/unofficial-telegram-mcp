@@ -114,7 +114,8 @@ class OutgoingDraft:
     expires_at: float
     recipient_title: str = ""
     approval_required: bool = True
-    kind: Literal["document", "photo", "voice_note", "text", "forward", "video", "archive", "text_edit"] = "document"
+    kind: Literal["document", "photo", "voice_note", "text", "forward", "video", "archive", "text_edit",
+                  "album"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -132,13 +133,16 @@ class OutgoingDraft:
     video: object | None = None  # video_drafts.VideoSpec; artifact-backed
     archive: object | None = None  # archive_drafts.ArchiveSpec; never artifact-backed
     text_edit: object | None = None  # edit_drafts.TextEditSpec; never artifact-backed
+    album: object | None = None  # album_drafts.AlbumSpec; every item artifact-backed
 
 
 # Provider state changes with a dedicated apply tool; a receipt may be `applied`.
 _CHANGE_KINDS = frozenset({"archive", "text_edit"})
 _UNBACKED_KINDS = frozenset({"text", "forward"}) | _CHANGE_KINDS
 # Kinds with a dedicated send tool; the generic draft tools never list, revise or cancel them.
-_DEDICATED_KINDS = frozenset({"forward", "video"}) | _CHANGE_KINDS
+# The 0.57 draft-kind table has not landed: the album kind sits in this dedicated set (0.56 spec).
+_DEDICATED_KINDS = frozenset({"forward", "video", "album"}) | _CHANGE_KINDS
+_SLOT_OUTCOMES = frozenset({"sent", "failed", "outcome_unknown"})
 
 
 @dataclass(frozen=True)
@@ -148,6 +152,7 @@ class ClaimedDraft:
     claim_token: object | None = None
     provider: object | None = None
     provider_epoch: object | None = None
+    paths: tuple[Path, ...] | None = None  # An album's verified item artifacts, in send order.
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,18 @@ class SendReceipt:
     finished_at: float
     evidence: str = "none"
     observed: object | None = None  # `applied` only: the provider state observed right after the call.
+    # An album only: one (status, final message ID) per item in send order; `status` is their reduction.
+    slots: tuple[tuple[str, int | None], ...] | None = None
+
+
+def _album_slots(slots) -> tuple[tuple[str, int | None], ...]:
+    """Validated internal album slots: 2-10 pairs, each sent with a final ID, or failed/unknown without one."""
+    if (type(slots) is not tuple or not 2 <= len(slots) <= 10 or
+            any(type(slot) is not tuple or len(slot) != 2 or slot[0] not in _SLOT_OUTCOMES or
+                (slot[0] == "sent") != (slot[1] is not None) or
+                (slot[1] is not None and (type(slot[1]) is not int or not 0 < slot[1] < 2**53)) for slot in slots)):
+        raise ValueError("invalid album slots")
+    return slots
 
 
 @dataclass
@@ -452,6 +469,62 @@ class OutgoingDraftRegistry:
             record_selection_draft(draft_id)
             return draft
 
+    def prepare_album(self, *, owner: DraftOwner, recipient: int, recipient_title: str, album: object,
+                      local_admission_guard: Callable[[], None] | None = None,
+                      evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
+        """Record one ordered album bound to the exact bytes of every item.
+
+        The draft's sha256 is the ordered album digest and its size the total. `evidence` builds and validates
+        the public preview of the exact candidate outside the registry lock; if it raises, nothing is inserted
+        and no pending draft is superseded."""
+        from .album_drafts import AlbumSpec
+        self._validate_owner(owner)
+        if type(recipient) is not int or recipient == 0:
+            raise ValueError("recipient must be a nonzero numeric chat ID")
+        if type(album) is not AlbumSpec or type(recipient_title) is not str or not recipient_title:
+            raise DraftError("album draft is unavailable")
+        expires = []
+        for item in album.items:
+            try:
+                artifact = self._store.lookup(item.artifact_id)
+            except ArtifactStoreError as error:
+                raise DraftError("artifact is unavailable") from error
+            if artifact is None or artifact.sha256 != item.sha256 or artifact.size_bytes != item.size_bytes:
+                raise DraftError("artifact is unavailable")
+            expires.append(artifact.expires_at)
+        now = self._clock()
+        expires_at = min(now + self._max_ttl_seconds, *expires)
+        if expires_at <= now:
+            raise DraftError("artifact has expired")
+        draft = OutgoingDraft(
+            draft_id=f"draft_{uuid.uuid4().hex}", artifact_id="", sha256=album.sha256, size_bytes=album.total_bytes,
+            display_name="Album", mime_type="application/json", caption="", recipient=recipient,
+            expires_at=expires_at, recipient_title=recipient_title, kind="album", album=album,
+        )
+        if evidence is not None:
+            evidence(draft)
+        draft_id = draft.draft_id
+        from .selection_broker import record_selection_draft, selected_admission_fence
+        with self._lock, selected_admission_fence():
+            if local_admission_guard is not None:
+                local_admission_guard()
+            self._prune_locked(now)
+            if len(self._entries) >= self._capacity:
+                raise DraftError("draft capacity is exhausted")
+            if draft_id in self._entries:
+                raise DraftError("draft ID collision")
+            # Preparing again supersedes the same owner's pending album for the same recipient and the same
+            # ordered items; it can no longer be claimed.
+            for entry in self._entries.values():
+                old = entry.draft
+                if (entry.owner == owner and entry.state == "pending" and old.kind == "album" and
+                        old.recipient == recipient and old.album.artifact_ids == album.artifact_ids):
+                    entry.state = "superseded"
+            self._entries[draft_id] = _Entry(draft=draft, owner=owner, artifact_expires_at=min(expires),
+                                            artifact_authority=self._authority_stamp())
+            record_selection_draft(draft_id)
+            return draft
+
     def prepare_change(self, *, owner: DraftOwner, chat_id: int, chat_title: str, change: object,
                        evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
         """Record one archive move or own text edit; generic draft tools never expose these kinds.
@@ -602,17 +675,21 @@ class OutgoingDraftRegistry:
             entry.provider = provider
             entry.provider_epoch = provider_epoch
             entry.claim_token = object()
-            return ClaimedDraft(draft=entry.draft, path=path, claim_token=entry.claim_token,
-                                provider=provider, provider_epoch=provider_epoch)
+            paths = path if type(path) is tuple else None
+            return ClaimedDraft(draft=entry.draft, path=None if paths is not None else path,
+                                claim_token=entry.claim_token, provider=provider, provider_epoch=provider_epoch,
+                                paths=paths)
 
     def unsettled_attempts(self) -> int:
-        """Content-free count of attempts get_send_status could still settle: claimed and not finished, or
-        finished `outcome_unknown`, within receipt retention."""
+        """Content-free count of attempts a status read could still settle: claimed and not finished, or
+        finished `outcome_unknown` (for an album, with any slot still unknown), within receipt retention."""
         with self._lock:
             now = self._attempt_clock()
             return sum(1 for entry in self._entries.values()
                        if entry.attempted_at is not None and now < entry.attempted_at + 900
-                       and (entry.receipt is None or entry.receipt.status == "outcome_unknown"))
+                       and (entry.receipt is None or entry.receipt.status == "outcome_unknown" or
+                            (entry.receipt.slots is not None and
+                             any(slot[0] == "outcome_unknown" for slot in entry.receipt.slots))))
 
     def attempt_outcome(self, draft_id: object, *, client_id: str, owner: DraftOwner | None,
                         kinds: frozenset[str]) -> str | None:
@@ -685,6 +762,25 @@ class OutgoingDraftRegistry:
             return (entry.state == 'claimed' and entry.draft.kind == 'video' and
                 entry.draft.video is not None and self._clock() < entry.draft.expires_at and
                 entry.provider is provider and entry.provider_epoch is provider_epoch)
+
+    def album_claim_current(self, draft_id: str, *, owner: DraftOwner,
+                            provider: object, provider_epoch: object) -> bool:
+        """Final local prewire check for the one consumed album claim."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            return (entry.state == 'claimed' and entry.draft.kind == 'album' and
+                entry.draft.album is not None and self._clock() < entry.draft.expires_at and
+                entry.provider is provider and entry.provider_epoch is provider_epoch)
+
+    def album_of(self, draft_id: str, *, owner: DraftOwner):
+        """The owner's album payload in any state within its lifetime or receipt retention; never a claim."""
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            if (entry.draft.kind != 'album' or entry.draft.album is None or
+                    (self._clock() >= entry.draft.expires_at if entry.attempted_at is None
+                     else self._attempt_clock() >= entry.attempted_at + 900)):
+                raise DraftError("draft is unavailable")
+            return entry.draft.album
 
     def change_claim_current(self, draft_id: str, *, owner: DraftOwner, kind: str,
                              provider: object, provider_epoch: object) -> bool:
@@ -788,6 +884,8 @@ class OutgoingDraftRegistry:
             raise ValueError("only an applied change carries observed state")
         with self._lock:
             entry = self._get(draft_id, owner, require_current=False)
+            if entry.draft.kind == "album":
+                raise DraftError("draft is unavailable")  # An album finishes only with every slot (finish_album).
             if (status == "applied") != (entry.draft.kind in _CHANGE_KINDS) and status in {"sent", "applied"}:
                 raise ValueError("receipt status does not match the draft kind")
             if claim is not None:
@@ -814,6 +912,60 @@ class OutgoingDraftRegistry:
             entry.state = "finished"
             return receipt
 
+    def finish_album(self, draft_id: str, *, owner: DraftOwner, claim: ClaimedDraft | None, slots,
+                     evidence: str | None = None) -> SendReceipt:
+        """Finalize the consumed album claim with every slot, independent of public grants.
+
+        `slots` holds one (sent|failed|outcome_unknown, final message ID) per item in send order; the receipt's
+        status is their closed reduction. `evidence='local_failed'` (no provider attempt) takes no slots. A
+        finished receipt is returned unchanged; only `reconcile_album` refines its unknown slots later."""
+        from .album_drafts import album_overall
+        if evidence not in (None, "local_failed") or (evidence == "local_failed") != (slots is None):
+            raise ValueError("invalid album receipt")
+        if slots is not None:
+            slots = _album_slots(slots)
+        with self._lock:
+            entry = self._get(draft_id, owner, require_current=False)
+            if entry.draft.kind != "album" or (slots is not None and len(slots) != len(entry.draft.album.items)):
+                raise ValueError("receipt does not match the album")
+            if claim is not None:
+                if (claim.draft is not entry.draft or claim.claim_token is not entry.claim_token or
+                        entry.claim_token is None or claim.provider is not entry.provider or
+                        claim.provider_epoch is not entry.provider_epoch):
+                    raise DraftError("captured claim is unavailable")
+            elif active_scope(self._store) is not None:
+                raise DraftError("captured claim is unavailable")
+            if entry.receipt is not None:
+                return entry.receipt
+            if entry.state != "claimed":
+                raise DraftError("draft has not been claimed")
+            entry.receipt = SendReceipt(
+                draft_id=draft_id, status="failed" if slots is None else album_overall(slot[0] for slot in slots),
+                message_id=None, finished_at=self._clock(), evidence=evidence or "provider", slots=slots)
+            entry.state = "finished"
+            return entry.receipt
+
+    def reconcile_album(self, draft_id: str, *, owner: DraftOwner, provider: object, provider_epoch: object,
+                        attempted_at: float, outcomes) -> SendReceipt:
+        """Only exact terminal evidence refines an unknown slot; a terminal slot never changes and no send is
+        claimed. `outcomes` is the provider's per-slot view; anything but sent or failed refines nothing."""
+        from .album_drafts import album_overall
+        outcomes = _album_slots(outcomes)
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            if (entry.draft.kind != "album" or entry.provider is not provider or
+                    entry.provider_epoch is not provider_epoch or entry.attempted_at != attempted_at or
+                    self._attempt_clock() >= attempted_at + 900):
+                raise DraftError("draft is unavailable")
+            receipt = entry.receipt
+            if receipt is None or receipt.slots is None or len(outcomes) != len(receipt.slots):
+                raise DraftError("draft is unavailable")
+            slots = tuple(observed if current[0] == "outcome_unknown" and observed[0] in ("sent", "failed")
+                          else current for current, observed in zip(receipt.slots, outcomes))
+            if slots != receipt.slots:
+                entry.receipt = replace(receipt, slots=slots, status=album_overall(slot[0] for slot in slots))
+            return entry.receipt
+
     def status_snapshot(self, draft_id: str, *, owner: DraftOwner):
         """Return content-free state without keeping a mutex during provider reads."""
         with self._lock:
@@ -835,8 +987,9 @@ class OutgoingDraftRegistry:
             raise ValueError("invalid terminal observation")
         with self._lock:
             entry = self._get(draft_id, owner)
-            if entry.draft.kind in _CHANGE_KINDS:
-                raise DraftError("draft is unavailable")  # A change never reconciles from a send observation.
+            if entry.draft.kind in _CHANGE_KINDS or entry.draft.kind == "album":
+                # A change never reconciles from a send observation; an album only per slot (reconcile_album).
+                raise DraftError("draft is unavailable")
             if (entry.provider is not provider or entry.provider_epoch is not provider_epoch or entry.attempted_at != attempted_at or
                     self._attempt_clock() >= attempted_at + 900):
                 raise DraftError("draft is unavailable")
@@ -862,27 +1015,48 @@ class OutgoingDraftRegistry:
         if entry.artifact_authority is None:
             raise DraftError('draft is unavailable')
         owner, epoch = entry.artifact_authority
+        # An album holds one grant per item; every one of them must still authorize.
+        artifact_ids = (entry.draft.album.artifact_ids if entry.draft.kind == "album" else (entry.draft.artifact_id,))
         try:
             scope.authority.live(scope)
             if owner != scope.owner or (epoch is not None and epoch is not scope.account_epoch):
                 raise ArtifactUnavailable('artifact is unavailable')
-            if not scope.authority.authorize_local(scope, entry.draft.artifact_id):
+            if not all(scope.authority.authorize_local(scope, artifact_id) for artifact_id in artifact_ids):
                 raise ArtifactUnavailable('artifact is unavailable')
         except ArtifactUnavailable:
             raise DraftError('draft is unavailable') from None
 
-    def _pending_locked(self, entry: _Entry, *, verify_artifact: bool = True) -> Path | None:
+    def _pending_locked(self, entry: _Entry, *, verify_artifact: bool = True) -> Path | tuple[Path, ...] | None:
+        """The verified artifact path (an album: every item's, in send order), or None when unbacked."""
         self._require_artifact_authority(entry)
         if entry.state != "pending" or self._clock() >= entry.draft.expires_at:
             raise DraftError("draft is unavailable")
         if entry.draft.kind in _UNBACKED_KINDS or not verify_artifact:
             return None
+        if entry.draft.kind == "album":
+            paths = tuple(self._item_locked(entry, item).path for item in entry.draft.album.items)
+            if self._clock() >= entry.draft.expires_at:
+                raise DraftError("draft is unavailable")
+            return paths
         artifact = self._artifact_locked(entry)
         if self._clock() >= entry.draft.expires_at:
             raise DraftError("draft is unavailable")
         return artifact.path
 
+    def _item_locked(self, entry: _Entry, item):
+        """One album item re-hashed against its own sha256 and size."""
+        try:
+            artifact = self._store.lookup(item.artifact_id)
+        except (ArtifactStoreError, OSError, ValueError):
+            artifact = None
+        if artifact is None or artifact.sha256 != item.sha256 or artifact.size_bytes != item.size_bytes:
+            entry.state = "invalid"
+            raise DraftError("draft is unavailable")
+        return artifact
+
     def _artifact_locked(self, entry: _Entry):
+        if entry.draft.kind == "album":
+            raise DraftError("draft is unavailable")  # An album has no single artifact.
         try:
             artifact = self._store.lookup(entry.draft.artifact_id)
         except (ArtifactStoreError, OSError, ValueError):
