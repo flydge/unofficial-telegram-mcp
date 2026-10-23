@@ -54,6 +54,7 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "getFile",
         "cancelDownloadFile",
         "sendMessage",
+        "sendMessageAlbum",
         "forwardMessages",
         "addChatToList",
         "editMessageText",
@@ -62,8 +63,8 @@ _ALLOWED_REQUEST_TYPES = frozenset(
 
 # State changes travel only through the dedicated one-attempt transport, never `_call`.
 _CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText"})
-# Only the dedicated forward transport may send a forward; `_call` refuses it in any shape.
-_CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages"}
+# Only the dedicated forward and album transports may send a forward or an album; `_call` refuses them in any shape.
+_CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages", "sendMessageAlbum"}
 
 _AUTHORIZATION_CONTROL_TYPES = frozenset(
     {"getAuthorizationState", "setTdlibParameters", "checkDatabaseEncryptionKey"}
@@ -225,6 +226,104 @@ def _exact_edit_text(value: str) -> bool:
     return not edge_whitespace(value) and not rewritten_text(value)
 
 
+# Closed per-kind media contents, shared by sendMessage and sendMessageAlbum.
+def _plain_caption(caption: object) -> bool:
+    return (
+        isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
+        and caption.get("@type") == "formattedText"
+        and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
+        and _normalized_caption(caption["text"])
+        and caption.get("entities") == []
+    )
+
+
+def _valid_document_content(content: object, staging: Path) -> bool:
+    document = content.get("document") if isinstance(content, dict) else None
+    return (
+        isinstance(content, dict) and set(content) == {"@type", "document", "caption"}
+        and content.get("@type") == "inputMessageDocument"
+        and isinstance(document, dict)
+        and set(document) == {"@type", "document", "thumbnail", "disable_content_type_detection"}
+        and document.get("@type") == "inputDocument"
+        and document.get("thumbnail") is None
+        and document.get("disable_content_type_detection") is True
+        and _valid_staged_input_file(document.get("document"), staging)
+        and _plain_caption(content.get("caption"))
+    )
+
+
+def _valid_photo_content(content: object, staging: Path) -> bool:
+    photo = content.get("photo") if isinstance(content, dict) else None
+    return (
+        isinstance(content, dict)
+        and set(content) == {"@type", "photo", "caption", "show_caption_above_media", "self_destruct_type", "has_spoiler"}
+        and content.get("@type") == "inputMessagePhoto"
+        and isinstance(photo, dict)
+        and set(photo) == {"@type", "photo", "thumbnail", "video", "added_sticker_file_ids", "width", "height"}
+        and photo.get("@type") == "inputPhoto"
+        and _valid_staged_input_file(photo.get("photo"), staging)
+        and photo.get("thumbnail") is None and photo.get("video") is None
+        and photo.get("added_sticker_file_ids") == []
+        and photo.get("width") == 0 and photo.get("height") == 0
+        and content.get("show_caption_above_media") is False
+        and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
+        and _plain_caption(content.get("caption"))
+    )
+
+
+def _valid_voice_content(content: object, staging: Path) -> bool:
+    voice = content.get("voice_note") if isinstance(content, dict) else None
+    return (
+        isinstance(content, dict)
+        and set(content) == {"@type", "voice_note", "caption", "self_destruct_type"}
+        and content.get("@type") == "inputMessageVoiceNote"
+        and isinstance(voice, dict) and set(voice) == {"@type", "voice_note", "duration", "waveform"}
+        and voice.get("@type") == "inputVoiceNote"
+        and _valid_staged_input_file(voice.get("voice_note"), staging)
+        and type(voice.get("duration")) is int and 1 <= voice["duration"] <= 600
+        and _valid_voice_waveform(voice.get("waveform"))
+        and content.get("self_destruct_type") is None
+        and _plain_caption(content.get("caption"))
+    )
+
+
+def _valid_video_content(content: object, staging: Path) -> bool:
+    video = content.get("video") if isinstance(content, dict) else None
+    sides = (video.get("width"), video.get("height")) if isinstance(video, dict) else (None, None)
+    return (
+        isinstance(content, dict)
+        and set(content) == {"@type", "video", "caption", "show_caption_above_media", "self_destruct_type", "has_spoiler"}
+        and content.get("@type") == "inputMessageVideo"
+        and isinstance(video, dict)
+        and set(video) == {"@type", "video", "thumbnail", "cover", "start_timestamp", "added_sticker_file_ids",
+                           "duration", "width", "height", "supports_streaming"}
+        and video.get("@type") == "inputVideo"
+        and _valid_staged_input_file(video.get("video"), staging)
+        and video.get("thumbnail") is None and video.get("cover") is None
+        and type(video.get("start_timestamp")) is int and video["start_timestamp"] == 0
+        and type(video.get("added_sticker_file_ids")) is list and video["added_sticker_file_ids"] == []
+        and _is_integer_in_range(video.get("duration"), 1, 3 * 3600)
+        and all(_is_integer_in_range(side, 16, 8192) for side in sides)
+        and max(sides) <= 20 * min(sides)
+        and type(video.get("supports_streaming")) is bool
+        and content.get("show_caption_above_media") is False
+        and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
+        and _plain_caption(content.get("caption"))
+    )
+
+
+def _album_item_kind(content: object, staging: Path) -> str | None:
+    """The kind of one album item from the shared per-kind shapes; voice notes and text are never album items."""
+    if _valid_document_content(content, staging):
+        return "document"
+    if (_valid_photo_content(content, staging) and type(content["photo"]["width"]) is int
+            and type(content["photo"]["height"]) is int):
+        return "photo"
+    if _valid_video_content(content, staging):
+        return "video"
+    return None
+
+
 def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None = None) -> None:
     """`staging_root` None is the default alias's STAGING_ROOT, read at call time."""
     staging = STAGING_ROOT if staging_root is None else staging_root
@@ -271,8 +370,6 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
         raise ForbiddenTDLibRequest("TDLib message properties request shape is not allowed")
     if request_type == "sendMessage":
         content = payload.get("input_message_content")
-        document = content.get("document") if isinstance(content, dict) else None
-        caption = content.get("caption") if isinstance(content, dict) else None
         options = payload.get("options")
         sending_id = options.get("sending_id") if isinstance(options, dict) else None
         expected_options = {
@@ -306,86 +403,13 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             and strict_shape(reply_to,{"@type":"inputMessageReplyToMessage",
                 "message_id":reply_to.get("message_id"),"quote":None,"checklist_task_id":0,"poll_option_id":""})
             and _is_integer_in_range(reply_to.get("message_id"),1,2**53-1)))
-        valid_document = (
-            isinstance(content, dict) and set(content) == {"@type", "document", "caption"}
-            and content.get("@type") == "inputMessageDocument"
-            and isinstance(document, dict)
-            and set(document) == {"@type", "document", "thumbnail", "disable_content_type_detection"}
-            and document.get("@type") == "inputDocument"
-            and document.get("thumbnail") is None
-            and document.get("disable_content_type_detection") is True
-            and _valid_staged_input_file(document.get("document"), staging)
-            and isinstance(caption, dict) and caption.get("@type") == "formattedText"
-            and set(caption) == {"@type", "text", "entities"}
-            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
-            and _normalized_caption(caption["text"])
-            and caption.get("entities") == []
-        )
+        valid_document = _valid_document_content(content, staging)
         photo = content.get("photo") if isinstance(content, dict) else None
-        valid_photo = (
-            isinstance(content, dict)
-            and set(content) == {"@type", "photo", "caption", "show_caption_above_media", "self_destruct_type", "has_spoiler"}
-            and content.get("@type") == "inputMessagePhoto"
-            and isinstance(photo, dict)
-            and set(photo) == {"@type", "photo", "thumbnail", "video", "added_sticker_file_ids", "width", "height"}
-            and photo.get("@type") == "inputPhoto"
-            and _valid_staged_input_file(photo.get("photo"), staging)
-            and photo.get("thumbnail") is None and photo.get("video") is None
-            and photo.get("added_sticker_file_ids") == []
-            and photo.get("width") == 0 and photo.get("height") == 0
-            and content.get("show_caption_above_media") is False
-            and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
-            and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
-            and caption.get("@type") == "formattedText"
-            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
-            and _normalized_caption(caption["text"])
-            and caption.get("entities") == []
-        )
-        voice = content.get("voice_note") if isinstance(content, dict) else None
-        valid_voice = (
-            isinstance(content, dict)
-            and set(content) == {"@type", "voice_note", "caption", "self_destruct_type"}
-            and content.get("@type") == "inputMessageVoiceNote"
-            and isinstance(voice, dict) and set(voice) == {"@type", "voice_note", "duration", "waveform"}
-            and voice.get("@type") == "inputVoiceNote"
-            and _valid_staged_input_file(voice.get("voice_note"), staging)
-            and type(voice.get("duration")) is int and 1 <= voice["duration"] <= 600
-            and _valid_voice_waveform(voice.get("waveform"))
-            and content.get("self_destruct_type") is None
-            and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
-            and caption.get("@type") == "formattedText"
-            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
-            and _normalized_caption(caption["text"])
-            and caption.get("entities") == []
-        )
+        valid_photo = _valid_photo_content(content, staging)
+        valid_voice = _valid_voice_content(content, staging)
         if reply_to is not None and valid_photo and (type(photo.get('width')) is not int or type(photo.get('height')) is not int):
             valid_photo=False
-        video = content.get("video") if isinstance(content, dict) else None
-        sides = (video.get("width"), video.get("height")) if isinstance(video, dict) else (None, None)
-        valid_video = (
-            isinstance(content, dict) and reply_to is None
-            and set(content) == {"@type", "video", "caption", "show_caption_above_media", "self_destruct_type", "has_spoiler"}
-            and content.get("@type") == "inputMessageVideo"
-            and isinstance(video, dict)
-            and set(video) == {"@type", "video", "thumbnail", "cover", "start_timestamp", "added_sticker_file_ids",
-                               "duration", "width", "height", "supports_streaming"}
-            and video.get("@type") == "inputVideo"
-            and _valid_staged_input_file(video.get("video"), staging)
-            and video.get("thumbnail") is None and video.get("cover") is None
-            and type(video.get("start_timestamp")) is int and video["start_timestamp"] == 0
-            and type(video.get("added_sticker_file_ids")) is list and video["added_sticker_file_ids"] == []
-            and _is_integer_in_range(video.get("duration"), 1, 3 * 3600)
-            and all(_is_integer_in_range(side, 16, 8192) for side in sides)
-            and max(sides) <= 20 * min(sides)
-            and type(video.get("supports_streaming")) is bool
-            and content.get("show_caption_above_media") is False
-            and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
-            and isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
-            and caption.get("@type") == "formattedText"
-            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
-            and _normalized_caption(caption["text"])
-            and caption.get("entities") == []
-        )
+        valid_video = reply_to is None and _valid_video_content(content, staging)
         if (
             set(payload) != {"@type", "chat_id", "topic_id", "reply_to", "options", "reply_markup", "input_message_content"}
             or not _is_strict_nonzero_integer(payload.get("chat_id"))
@@ -405,6 +429,27 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             or not (valid_text or valid_document or valid_photo or valid_voice or valid_video)
         ):
             raise ForbiddenTDLibRequest("TDLib send request shape is not allowed")
+    if request_type == "sendMessageAlbum":
+        # 2-10 items from the shared per-kind shapes: photos and videos, or documents only; each item in its own
+        # staged directory; no topic, reply or option beyond the fixed ones plus the correlation sending_id.
+        options = payload.get("options")
+        sending_id = options.get("sending_id") if isinstance(options, dict) else None
+        contents = payload.get("input_message_contents")
+        kinds = [_album_item_kind(content, staging) for content in contents] if (
+            type(contents) is list and 2 <= len(contents) <= 10) else [None]
+        directories = {Path(content[kind][kind]["path"]).parent
+                       for content, kind in zip(contents, kinds) if kind is not None} if None not in kinds else set()
+        if (
+            set(payload) != {"@type", "chat_id", "topic_id", "reply_to", "options", "input_message_contents"}
+            or not _is_forum_chat_id(payload.get("chat_id"))
+            or payload.get("topic_id") is not None or payload.get("reply_to") is not None
+            or type(sending_id) is not int or not 0 < sending_id <= (1 << 31) - 1
+            or not strict_shape(options, {**SEND_OPTIONS, "sending_id": sending_id})
+            or None in kinds
+            or not (set(kinds) == {"document"} or set(kinds) <= {"photo", "video"})
+            or len(directories) != len(kinds)
+        ):
+            raise ForbiddenTDLibRequest("TDLib album request shape is not allowed")
     if request_type == "forwardMessages":
         options = payload.get("options")
         sending_id = options.get("sending_id") if isinstance(options, dict) else None
