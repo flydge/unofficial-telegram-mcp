@@ -12,7 +12,11 @@ approves; anything else is `declined`, `timeout` or `dialog_unavailable`, and ne
 
 Once an alias registry exists (0.55 spec 3C) the broker names its account alias: the heading says which alias
 asks, and the summary's account line carries the alias and a masked account (the last two digits of the user
-id) instead of the user id. Without one, every argument and byte is 0.54's.
+id) instead of the user id, so the user id never reaches the dialog: the owner's own chat (Saved Messages, whose
+chat id is the user id) is named "Saved Messages", the owner as a message sender or a topic's creator is "you".
+Without one, every argument and byte is 0.54's but for two substitutions that hold in both modes: wherever a chat
+is named (recipient, forward source, reply anchor, archived or edited chat) the own chat is "Saved Messages", and
+the owner as a forwarded message's sender is "you"; 0.54 printed the user id in both places.
 """
 
 from __future__ import annotations
@@ -254,6 +258,17 @@ def _account_line(account_id: int, alias: str | None) -> str:
     return f'Account: {alias} (Telegram account ••{str(account_id)[-2:]})'
 
 
+def _chat(chat_id: int, account_id: int) -> str:
+    """A chat as the dialog names it: the owner's own chat (Saved Messages) has the user id as its chat id, so it is
+    named, never numbered; every other chat keeps its id (a private chat's id is the other user's)."""
+    return 'Saved Messages' if chat_id == account_id else f'chat {chat_id}'
+
+
+def _sender(kind: str, sender_id: int, account_id: int) -> str:
+    """A message's sender or a topic's creator: the owner is `you`, never the user id."""
+    return 'you' if kind == 'user' and sender_id == account_id else f'{kind} {sender_id}'
+
+
 def _head(action: str, account_id: int, expires_at, alias: str | None) -> list[str]:
     return [action, _account_line(account_id, alias), f'Expires: {expires_at.isoformat()}']
 
@@ -275,13 +290,16 @@ def _styles(draft) -> list[str]:
         for offset, length, kind, covered in outgoing_entity_facts(draft.text, frozen)]
 
 
-def _topic_lines(topic) -> tuple[list[str], list[str]]:
-    """(summary line, technical lines) for a bound forum topic."""
+def _topic_lines(topic, account_id, alias) -> tuple[list[str], list[str]]:
+    """(summary line, technical lines) for a bound forum topic. With a registry a topic the owner created names its
+    creator `you`; without one the line is 0.54's (its account line prints the user id anyway)."""
     if topic is None:
         return [], []
+    creator = (f'{topic.creator_kind} {topic.creator_id}' if alias is None
+               else _sender(topic.creator_kind, topic.creator_id, account_id))
     return ([f'Topic {_MARK}: {_span(_evidence(topic.name))} (topic {topic.forum_topic_id})'],
             [f'Topic type: {topic.chat_type}; peer: {topic.peer_id}',
-             f'Topic created: {topic.creation_date}; creator: {topic.creator_kind} {topic.creator_id}',
+             f'Topic created: {topic.creation_date}; creator: {creator}',
              f'Topic general: {topic.is_general}; outgoing: {topic.is_outgoing}; closed: {topic.is_closed}; '
              f'hidden: {topic.is_hidden}',
              f'Topic SHA-256: {topic.source_sha256}'])
@@ -295,7 +313,7 @@ def _entity_rows(heading: str, rows) -> list[str]:
 
 def _plain_document(draft, alias) -> str:
     """Ordinary text or file send without a topic, styles or reply."""
-    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
+    where = f'{_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})'
     if draft.kind == 'text':
         return _document(
             _head(f'Send text to {where}', draft.account_id, draft.expires_at, alias),
@@ -315,8 +333,8 @@ def _plain_document(draft, alias) -> str:
 
 def _topic_document(draft, alias) -> str:
     """Text into a forum topic, formatted text, or both (one outer preview digest)."""
-    where = f'{_span(draft.recipient_title)} (chat {draft.recipient})'
-    topic, topic_technical = _topic_lines(draft.topic)
+    where = f'{_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})'
+    topic, topic_technical = _topic_lines(draft.topic, draft.account_id, alias)
     if draft.outgoing_entities:
         action = f'Send formatted text to {where}'
         rule = 'Normal notifications; no reply, link preview, schedule or draft clearing.'
@@ -334,14 +352,14 @@ def _topic_document(draft, alias) -> str:
         closing)
 
 
-def _reply_target(target) -> tuple[list, list[str]]:
+def _reply_target(target, account_id) -> tuple[list, list[str]]:
     """(payload lines, technical lines) for the message replied to; its text is untrusted evidence. The
     evidence is always the bound rendering (render_content / sanitize_telegram_text; styled and media
     targets are JSON renderings even when nothing was cleaned), so the block is labelled a rendering, a
     sanitized one also "cleaned, not exact", and its sanitized flag stays directly under it."""
     anchor = target.anchor
     label = ' (rendering, cleaned, not exact)' if target.sanitized else ' (rendering)'
-    return ([f'In reply to message {anchor.message_id} in chat {anchor.chat_id} {_MARK}{label}:',
+    return ([f'In reply to message {anchor.message_id} in {_chat(anchor.chat_id, account_id)} {_MARK}{label}:',
              _Payload(_evidence(target.text)),
              f'Target sanitized: {target.sanitized}; truncated: {target.truncated}'],
             [f'Target source SHA-256: {target.source_sha256}'])
@@ -349,11 +367,11 @@ def _reply_target(target) -> tuple[list, list[str]]:
 
 def _reply_document(validated, alias) -> str:
     draft = validated.draft
-    topic, topic_technical = _topic_lines(draft.topic)
-    target, target_technical = _reply_target(validated.reply_target)
+    topic, topic_technical = _topic_lines(draft.topic, draft.account_id, alias)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
     return _document(
-        [*_head(f'Send a reply to {_span(draft.recipient_title)} (chat {draft.recipient})', draft.account_id,
-                draft.expires_at, alias), *topic],
+        [*_head(f'Send a reply to {_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})',
+                draft.account_id, draft.expires_at, alias), *topic],
         [*target, '', 'Reply text (exact):', _Payload(draft.text), *_styles(draft)],
         [f'Draft: {draft.draft_id}', *topic_technical, f'Bytes: {draft.size_bytes}', f'Text SHA-256: {draft.sha256}',
          *target_technical, f'Preview SHA-256: {validated.preview_sha256}'],
@@ -362,14 +380,14 @@ def _reply_document(validated, alias) -> str:
 
 def _reply_artifact_document(validated, alias) -> str:
     draft = validated.draft
-    target, target_technical = _reply_target(validated.reply_target)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
     voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
               f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
     voice_technical = ([f'Source SHA-256: {draft.source_sha256}', f'Waveform (base64): {draft.waveform_base64}']
                        if draft.kind == 'voice_note' else [])
     return _document(
-        _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} (chat {draft.recipient})',
-              draft.account_id, draft.expires_at, alias),
+        _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} '
+              f'({_chat(draft.recipient, draft.account_id)})', draft.account_id, draft.expires_at, alias),
         [*target, '', f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}',
          f'Bytes: {draft.size_bytes}', *voice,
          *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
@@ -424,10 +442,11 @@ def _forward_document(validated, alias) -> str:
                    ([f'Via bot {_MARK}: user {source.via_bot_user_id}'] if source.via_bot_user_id is not None else []) +
                    (['Source is itself a forward: the copy carries no original attribution'] if source.is_forward else []))
     return _document(
-        [f'Forward a message to {_span(recipient.title)} (chat {recipient.chat_id})', mode,
+        [f'Forward a message to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})', mode,
          _account_line(validated.account_id, alias), f'Expires: {validated.expires_at.isoformat()}'],
-        [f'Source chat: {_span(source.chat.title)} (chat {source.chat.chat_id})', f'Message ID: {source.message_id}',
-         f'Sender {_MARK}: {source.sender.kind} {source.sender.id}', *attribution,
+        [f'Source chat: {_span(source.chat.title)} ({_chat(source.chat.chat_id, validated.account_id)})',
+         f'Message ID: {source.message_id}',
+         f'Sender {_MARK}: {_sender(source.sender.kind, source.sender.id, validated.account_id)}', *attribution,
          f'Date: {source.date.isoformat()}', f'Content: {source.content_kind}', *content, *link, *media],
         [f'Draft: {validated.draft_id}', f'Source SHA-256: {source.source_sha256}',
          f'Preview SHA-256: {validated.preview_sha256}'],
@@ -441,7 +460,7 @@ def _video_document(validated, alias) -> str:
     caption = (['Caption [untrusted] (exact):', _Payload(validated.raw_caption)] if validated.caption is not None
                else ['Caption: (none)'])
     return _document(
-        _head(f'Send a native video to {_span(recipient.title)} (chat {recipient.chat_id})',
+        _head(f'Send a native video to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})',
               validated.account_id, validated.expires_at, alias),
         [f'File name [untrusted] (exact): {_span(validated.raw_display_name)}', f'Bytes: {validated.size_bytes}',
          'Declared by the file (not decoded):', f'Duration: {validated.duration_seconds} seconds',
@@ -466,7 +485,8 @@ def _archive_document(validated, alias) -> str:
     if validated.note is not None:
         notes.append(f'Note: {validated.note} (Telegram behaviour).')
     return _document(
-        _head(f'Move chat {_span(chat.title)} (chat {chat.chat_id}, {chat.kind}) from {current} to {target}',
+        _head(f'Move chat {_span(chat.title)} ({_chat(chat.chat_id, validated.account_id)}, {chat.kind}) '
+              f'from {current} to {target}',
               validated.account_id, validated.expires_at, alias),
         [f'Current list: {current}', f'Target list: {target}', *notes],
         [f'Draft: {validated.draft_id}', f'Preview SHA-256: {validated.preview_sha256}'],
@@ -488,8 +508,8 @@ def _text_edit_document(validated, alias) -> str:
               if validated.current_edit_date else 'never')
     return _document(
         [*_head(f'Edit your message {validated.message_id} in {_span(chat.title)} '
-                f'(chat {chat.chat_id}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id, validated.expires_at,
-                alias),
+                f'({_chat(chat.chat_id, validated.account_id)}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id,
+                validated.expires_at, alias),
          f'Last edited: {edited}'],
         [f'Current text {_MARK} (exact):', _Payload(validated.raw_current_text), *formatting,
          'New text (exact):', _Payload(validated.raw_new_text), '',
