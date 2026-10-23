@@ -206,6 +206,67 @@ class BrokerAgentTests(Home):
         install.assert_not_called()
 
 
+class AliasStatusTests(Home):
+    """`status --account <alias>`: loaded and authorized for that alias's own broker, never the account."""
+
+    def status(self, args, *, broker='not_running', check=None, loaded=False):
+        client = mock.Mock()
+        client.check.side_effect = check if isinstance(check, Exception) else None
+        client.check.return_value = check
+        with mock.patch.object(setup_cli, 'existing_broker_status', return_value=broker), \
+                mock.patch.object(setup_cli, '_client', return_value=client) as made, \
+                mock.patch.object(setup_cli, 'launch_agent_status', return_value=loaded) as agent:
+            code, out, err = run(setup_cli.main, args)
+        return code, json.loads(out), made, agent
+
+    def test_a_named_alias_reports_loaded_and_authorized(self):
+        code, value, made, agent = self.status(['status', '--account', 'work'])
+        self.assertEqual(code, 0)
+        self.assertEqual(value, {'state': 'new', 'broker': 'not_running', 'alias': 'work', 'loaded': False,
+                                 'authorized': None})
+        agent.assert_called_once_with(account=self.work)
+        made.assert_not_called()  # No broker: nothing is asked.
+        for check, authorized in (('ready', True), ('blocked', False), (TimeoutError(), None), ('other', None)):
+            with self.subTest(check=check):
+                _, value, made, _ = self.status(['status', '--account', 'work'], broker='compatible_running',
+                                                check=check, loaded=True)
+                self.assertEqual((value['loaded'], value['authorized']), (True, authorized))
+                self.assertEqual(made.call_args.args[0], SetupPaths.from_account(self.work))
+                made.return_value.close.assert_called_once_with()
+
+    def test_the_default_status_keeps_its_054_keys(self):
+        code, value, made, agent = self.status(['status'], broker='compatible_running', check='ready')
+        self.assertEqual((code, set(value)), (0, {'state', 'broker'}))
+        agent.assert_not_called()
+        made.assert_not_called()
+
+    def test_a_launchd_failure_reports_unknown(self):
+        with mock.patch.object(setup_cli, 'existing_broker_status', return_value='not_running'), \
+                mock.patch.object(setup_cli, 'launch_agent_status', side_effect=OSError('SYNTHETIC')):
+            code, out, err = run(setup_cli.main, ['status', '--account', 'work'])
+        self.assertEqual((code, json.loads(out)['loaded']), (0, None))
+        self.assertNotIn('SYNTHETIC', out + err)
+
+    def test_the_loaded_fact_is_the_aliases_own_label(self):
+        launchd = FakeLaunchd()
+        launch_agent.start_enrolled_broker(python_executable=self.python, runner=launchd, uid=UID, account=self.play)
+        self.assertFalse(launch_agent.launch_agent_status(runner=launchd, account=self.work, uid=UID))
+        self.assertTrue(launch_agent.launch_agent_status(runner=launchd, account=self.play, uid=UID))
+        self.assertEqual(launchd.calls[-2:], [[launch_agent.LAUNCHCTL, 'print', f'gui/{UID}/{self.work.broker_label}'],
+                                              [launch_agent.LAUNCHCTL, 'print', f'gui/{UID}/{self.play.broker_label}']])
+
+    def test_the_launcher_reports_no_default_clients_for_an_alias(self):
+        spec = importlib.util.spec_from_file_location('launcher_alias_status', LAUNCHER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with mock.patch.object(setup_cli, 'main', side_effect=lambda args: print('{"state": "new"}') or 0), \
+                mock.patch('telegram_search_mcp.bundle_install.client_status', return_value={'claude_desktop': 'ok'}):
+            named = run(lambda _: module.status(Path('/r/releases/x'), 'work'), None)
+            default = run(lambda _: module.status(Path('/r/releases/x')), None)
+        self.assertEqual(json.loads(named[1]), {'state': 'new'})
+        self.assertEqual(json.loads(default[1]), {'state': 'new', 'clients': {'claude_desktop': 'ok'}})
+
+
 class Selection:
     def arguments(self, kind):
         return ['/fixture/bundle/python3', '-I', '-S', '-B', '/fixture/bundle/launcher.py', kind]

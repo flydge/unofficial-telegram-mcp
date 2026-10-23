@@ -75,9 +75,12 @@ class SetupGrammarTests(Home):
         seen = []
         with mock.patch.object(setup_cli, 'setup_status', side_effect=lambda paths: seen.append(paths) or
                                {'state': 'not_enrolled'}), \
-                mock.patch.object(setup_cli, 'existing_broker_status', return_value='not_running'):
+                mock.patch.object(setup_cli, 'existing_broker_status', return_value='not_running'), \
+                mock.patch.object(setup_cli, 'launch_agent_status', return_value=False) as loaded:
             code, out, _ = run(setup_cli.main, ['status', '--account', 'work'])
-        self.assertEqual((code, json.loads(out)), (0, {'state': 'not_enrolled', 'broker': 'not_running'}))
+        self.assertEqual((code, json.loads(out)), (0, {'state': 'not_enrolled', 'broker': 'not_running',
+                                                       'alias': 'work', 'loaded': False, 'authorized': None}))
+        loaded.assert_called_once_with(account=self.work)
         self.assertEqual(seen, [SetupPaths.from_account(self.work)])
         for command in ('connect', 'wait', 'cancel', 'api-credentials'):
             with self.subTest(command=command), \

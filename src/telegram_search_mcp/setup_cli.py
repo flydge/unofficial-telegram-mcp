@@ -9,7 +9,8 @@ from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavail
 from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPaths, ConfigurationError, load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
-from .launch_agent import account_options, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
+from .launch_agent import (account_options, launch_agent_status, start_enrolled_broker, validate_enrolled_broker,
+                           LaunchAgentError)
 from .secure_terminal import NativeTerminal
 from .session_owner import SessionOwnerLease, OwnerLeaseError
 from .setup_wizard import run_setup, setup_status
@@ -29,6 +30,9 @@ api-credentials stores your own Telegram API ID and hash (add-only) before the
 first connect; without it an installed bundle supplies its own application identity.
 status reads enrollment metadata and an existing broker handshake only;
 it does not initialize TDLib, read Keychain, start services or prove Ready.
+status --account <alias> also reports whether that alias's broker LaunchAgent
+is loaded and whether its running broker's session is authorized, never the
+Telegram account.
 connect-helper is internal: connect starts it as a transient launchd job.
 Every command takes a trailing --account <alias> for a registered account
 alias; without it the command serves the default account.
@@ -80,6 +84,35 @@ def existing_broker_status(paths):
         return 'unavailable'
     finally:
         if client is not None: client.close()
+
+
+# The broker's closed check answers as a named alias's `authorized` (0.55 spec 3C); anything else is unknown (None).
+_AUTHORIZED = {'ready': True, 'blocked': False}
+
+
+def account_status(paths, broker):
+    """A named alias's service facts: its alias, whether its own broker LaunchAgent is loaded and whether its
+    running broker's session is authorized (the check answers ready or blocked; None when unknown).
+
+    Only that alias's label and socket are asked; the Telegram account is never read or reported. An account
+    refused by the pin answers blocked, so it reads as not authorized.
+    """
+    try:
+        loaded = launch_agent_status(account=paths.account)
+    except Exception:
+        loaded = None
+    authorized, client = None, None
+    if broker == 'compatible_running':
+        try:
+            client = _client(paths, 10)
+            client.handshake()
+            authorized = _AUTHORIZED.get(client.check())
+        except Exception:
+            authorized = None
+        finally:
+            if client is not None:
+                client.close()
+    return {'alias': paths.account.alias, 'loaded': loaded, 'authorized': authorized}
 
 
 def handoff_broker(*, paths=None, timeout=30, sleeper=time.sleep):
@@ -184,6 +217,8 @@ def main(argv=None) -> int:
     if args == ['status']:
         status = setup_status(paths)
         status['broker'] = existing_broker_status(paths)
+        if alias is not None:  # The default's status keeps its 0.54 keys.
+            status.update(account_status(paths, status['broker']))
         print(json.dumps(status, sort_keys=True))
         return 0 if status['state'] != 'inconsistent' else 2
     if args[0] in ('connect', 'wait', 'cancel', 'api-credentials', 'connect-helper'):

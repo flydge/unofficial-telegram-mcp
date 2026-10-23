@@ -197,7 +197,8 @@ def dispatch_mcp(alias=None):
 
 
 def status(root, alias=None):
-    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`."""
+    """setup_cli's status plus a read-only Claude Desktop drift report under `clients`. A named alias's status is
+    its own (loaded, authorized); the default's client entries are not its, so it has no `clients`."""
     import contextlib, io
     from telegram_search_mcp.setup_cli import main as dispatch
     from telegram_search_mcp.bundle_install import client_status
@@ -206,7 +207,7 @@ def status(root, alias=None):
     text=captured.getvalue()
     try: value=_json(text)
     except (ValueError,AdmissionError): value=None
-    if type(value) is dict:
+    if type(value) is dict and alias is None:
         value['clients']=client_status(root.parent.parent,Path.home())
         text=json.dumps(value,sort_keys=True)+'\n'
     sys.stdout.write(text)
