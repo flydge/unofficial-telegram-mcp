@@ -403,7 +403,11 @@ class RuntimeSweepTests(unittest.TestCase):
             '@functools.lru_cache\ndef g(p=_helper()): pass': {('g', 'p')},
             '@functools.lru_cache(maxsize=4)\ndef g(*, p=_helper()): pass': {('g', 'p')},
             '@functools.cache\ndef g(p=_helper()): pass': {('g', 'p')},
-            '@functools.cache\n@functools.lru_cache\ndef g(p=_helper()): pass': {('g', 'p')},
+            '''
+            @functools.cache
+            @functools.lru_cache
+            def g(p=_helper()): pass
+            ''': {('g', 'p')},
             'class K:\n    @functools.lru_cache\n    def m(self, p=_helper()): pass': {('K.m', 'p')},
             'class K:\n    @staticmethod\n    @functools.cache\n    def s(p=_helper()): pass': {('K.s', 'p')},
             'def g(): pass\ng.root = _helper()': {('g', 'root')},
