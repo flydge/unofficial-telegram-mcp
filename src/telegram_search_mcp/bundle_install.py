@@ -1141,12 +1141,13 @@ class _Service:
                  clear=tuple(self.k(n) for n in _CYCLE_WRITES))
         j.checkpoint(self.k('restored:service'))
 
-    def restart(self, j):
+    def restart(self, j, appeared=None):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
         while the plist is the target's (the stop made it so before the commit); a plist removed since (by hand
         or a cleanup) is written again first, as the stop writes it; any other definition refuses. The definition
         the stop replaced, loaded again between its bootout and the rewrite (`_previous_loaded`), is gated and
-        booted out first, also when no broker ran before, so it never runs on the target's plist and pin."""
+        booted out first, also when no broker ran before, so it never runs on the target's plist and pin. A named
+        alias's plist absent at the observation is verified again (`_appeared`)."""
         observed=j.recorded(self.k('service'))
         if observed is None:return 'not_loaded'
         if not observed['loaded']:
@@ -1154,6 +1155,7 @@ class _Service:
                 try:on_disk=self.kind()[0]
                 except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Not read before: as before.
                 if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
+            elif self.alias is not None:self._appeared(j,appeared)
             return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded(self.k('service_restarted')) is None:
@@ -1169,6 +1171,29 @@ class _Service:
             if live is None:_bootstrap(self.runner,self.plist)
             j.update(single=(self.k('service_restarted'),{'attempt':1}));j.checkpoint(self.k('restarted'))
         return 'restarted'
+
+
+    def _appeared(self, j, appeared):
+        """After the commit, for a named alias whose plist was absent at the observation: a first login that finished
+        during the change wrote and loaded its broker from the release that served it, which current.json no longer
+        names. Lead decision (review fix 055d, owner review pending): rewritten to the target, not refused, since a
+        refusal after the commit would leave the change pending for good. Its version line first (`appeared`, the
+        alias's runtime.toml from the current to the target version, journaled), then a loaded definition that is not
+        the target's gated and booted out, then the plist rewritten to the target's exact definition. As `stop` does
+        for a login in a change that found none running, none is started: the next start runs the target. A
+        definition that is neither the target's nor a known one refuses `service_conflict` and is never overwritten;
+        a plist still absent stays absent. Idempotent by state: a repeat finds the target's plist and nothing loaded."""
+        kind,data,_=self.kind()
+        if kind!='absent' and appeared is not None:appeared()
+        live=_live(self.runner,self.label)
+        if live is not None and not _matches_live(live,self.plist,self.target):
+            previous=self._previous_payload(j,live)
+            if previous is None:raise InstallError('service_conflict')
+            self.gate(previous);_bootout(self.runner,self.label)
+        if kind not in ('absent','to'):
+            j.discard(self.k('plist'),self.plist)
+            j.write(self.k('plist'),self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
+            if self.kind()[0]!='to':raise InstallError('service_conflict')
 
 
 _PIN = re.compile(rb'expected_package_version = "([0-9A-Za-z.+-]{1,64})"')
@@ -1966,11 +1991,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     another kit or a rollback names it (`transaction_pending`).
 
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists goes the default's way in the same
-    transaction, each under its own journal keys (`_key`): its broker observed, gated (`alias_pending`, through its
-    own socket; any answer but `none` refuses the whole change) and stopped after the default's, its plist rewritten
+    transaction, each under its own journal keys (`_key`): a login of it still running refuses before the transaction
+    (`login_in_progress`), its broker observed, gated (`alias_pending`, through its own socket; any answer but `none`
+    refuses the whole change) and stopped after the default's, its plist rewritten
     to the target release before the commit, its runtime.toml version line, and, with its accounts.json record, its
     Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its record republished beside
-    receipt.json. A late refusal restores every stopped broker, the default's first. A rollback checks each alias's
+    receipt.json. A plist absent at its observation is verified again after the commit: one a login wrote meanwhile
+    is moved to the target's (`_Service._appeared`). A late refusal restores every stopped broker, the default's first. A rollback checks each alias's
     session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any alias
     exists; with none left it retires the registry and the default's readiness record after its commit and restart.
     """
@@ -2132,6 +2159,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                         home,_alias_commands(owned,alias) if owned else None,*to_entry,name=server)
                     if observed=='different':raise InstallError('claude_desktop_registration_conflict')
                     if observed=='unsupported':raise InstallError('claude_desktop_config_unsupported')
+                # A login of the alias still running would write and load its broker from the release it runs, beside
+                # or after this change: refused first, until it is over (review fix 055d).
+                if _alias_login(launchctl,jobs):raise InstallError('login_in_progress')
                 _alias_broker(alias,home,to_root,from_root,launchctl,alias_probe).check()
                 if os.path.lexists(jobs.root):
                     data,exists=_read_file(jobs.policy,MAX_POLICY_BYTES)
@@ -2489,7 +2519,11 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             raise
         j.advance('complete');checkpoint('complete')
         restarted=service.restart(j)
-        alias_restarted={alias:broker.restart(j) for alias,broker in brokers}
+        # An alias whose plist was absent at the observation is verified again (`_Service._appeared`): a login that
+        # finished during the change has its version line and definition moved to the target's.
+        alias_restarted={alias:broker.restart(j,lambda alias=alias:_policy_step(
+            j,alias_jobs(alias,home).root,current['package_version'],to_manifest['package_version'],alias))
+            for alias,broker in brokers}
         # A rollback below 0.55 with no alias left: the registry and the default's readiness record retire once the
         # older broker serves again (it reads neither, so a refusal here never keeps it stopped; the retry resumes).
         retired=_retire_accounts(j,home,session_root) if retire is not None else None
@@ -3697,6 +3731,21 @@ def _alias_held(jobs, name):
         return True
     finally:
         os.close(descriptor)
+
+
+def _alias_login(runner, jobs):
+    """Whether a login of the alias is running: its connect job loaded in any state but an explicit idle one, or a
+    process holding its connect.lock (an inline `setup --account`). Lead decision (review fix 055d, owner review
+    pending): an idle job is no login. A finished helper's job stays registered, idle, until the next `connect`
+    boots it out (connect_cli's own rule, launch_agent._IDLE_JOB_STATES), so refusing every loaded job would block
+    every upgrade after a login."""
+    from .launch_agent import _IDLE_JOB_STATES
+    live = _live(runner, jobs.connect_label)
+    if live is not None:
+        state = next((line.strip() for line in live.splitlines() if line.strip().startswith('state = ')), None)
+        if state not in _IDLE_JOB_STATES:
+            return True
+    return _alias_held(jobs, 'connect.lock')
 
 
 def _alias_gate(pending, home, jobs, installed):

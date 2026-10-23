@@ -768,7 +768,8 @@ def _newer(h, **kwargs):
 
 
 def _alias_logged_in(h):
-    """What a login leaves for `work`: its root and session, its exact broker plist loaded, its connect job loaded."""
+    """What a finished login leaves for `work`: its root and session, its exact broker plist loaded, its connect job
+    still registered but idle (its helper exited)."""
     jobs = config.alias_jobs(ALIAS, h.home)
     for path in (jobs.root, jobs.root / 'tdlib', jobs.root / 'run'):
         path.mkdir(mode=0o700)
@@ -782,6 +783,7 @@ def _alias_logged_in(h):
     connect.write_bytes(plistlib.dumps({'Label': jobs.connect_label, 'ProgramArguments': [str(release), 'connect']}))
     connect.chmod(0o600)
     h.launchctl.load(jobs.connect_label)
+    h.launchctl.idle(jobs.connect_label)
 
 
 def _account_add_check(h, result):

@@ -129,7 +129,7 @@ class AccountChangeGrammarTests(unittest.TestCase):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
         self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
-                              'accounts_present', 'release_not_current'},
+                              'accounts_present', 'release_not_current', 'login_in_progress'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
 

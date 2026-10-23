@@ -30,8 +30,10 @@ class FakeLaunchctl:
     """`launchctl print|bootout|bootstrap` over one label; the loaded job is the plist read at bootstrap.
 
     `others` maps further labels (a named alias's broker and connect jobs, 0.55 spec 3D) to their plists: a call
-    naming one of them acts on that job alone; every other label is the default's, as before. Like launchd, its
-    state outlives a killed (forked) installer process: it is kept in a file.
+    naming one of them acts on that job alone; every other label is the default's, as before. Such a job prints no
+    state line (running, as launchd may show a job) until `idle` marks it `state = not running` (a helper that
+    exited, its job still registered); loading or booting it out clears that. Like launchd, its state outlives a
+    killed (forked) installer process: it is kept in a file.
     """
 
     def __init__(self, plist, state, others=None):
@@ -65,7 +67,15 @@ class FakeLaunchctl:
 
     def set_job(self, label, value):
         state = self._value()
-        self._write({**state, 'jobs': {**state['jobs'], label: value}})
+        idle = [name for name in state.get('idle', []) if name != label]
+        self._write({**{k: v for k, v in state.items() if k != 'idle'}, 'jobs': {**state['jobs'], label: value},
+                     **({'idle': idle} if idle else {})})
+
+    def idle(self, label):
+        """The loaded job `label` explicitly idle: its process exited, launchd keeps it registered."""
+        state = self._value()
+        assert state['jobs'][label] is not None, label
+        self._write({**state, 'idle': sorted({*state.get('idle', []), label})})
 
     def load(self, label=None):
         if label is None:
@@ -92,7 +102,8 @@ class FakeLaunchctl:
         if verb == 'print':
             if loaded is None:
                 return subprocess.CompletedProcess(argv, 113, '', '')
-            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % plist, '\tprogram = %s' % loaded[0],
+            idle = ['\tstate = not running'] if label is not None and label in self._value().get('idle', []) else []
+            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % plist, *idle, '\tprogram = %s' % loaded[0],
                               '\targuments = {', *('\t\t' + a for a in loaded), '\t}', '}'])
             return subprocess.CompletedProcess(argv, 0, text, '')
         if verb == 'bootout':

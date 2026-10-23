@@ -41,11 +41,13 @@ class AliasChangeHarness(AccountHarness):
         return super().change(action, **kwargs)
 
     def alias_session(self, alias=None, pin=None):
-        """What a login leaves for `alias`: its root, session and policy pinning the installed release (unless told),
-        its exact broker plist loaded and its connect job loaded (the `work` alias is the one the fake launchd knows)."""
+        """What a finished login leaves for `alias`: its root, session and policy pinning the installed release (unless
+        told), its exact broker plist loaded, and its connect job still registered but idle, its helper exited (the
+        `work` alias is the one the fake launchd knows)."""
         assert alias in (None, self.ALIAS)
         pin = self.receipt()['package_version'] if pin is None else pin
         super().alias_session()
+        self.launchctl.idle(self.jobs.connect_label)
         policy = self.jobs.root / 'runtime.toml'
         policy.write_bytes(('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
                             'enabled_capabilities = ["read", "artifacts"]\n' % pin).encode())
@@ -683,6 +685,119 @@ class AccountReleaseTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual(self.change_snapshot(), before)
         self.assertEqual(self.account('account_add', release_root=a)['status'], 'account_added')
         self.assertEqual(self.account('account_remove', release_root=a)['status'], 'account_removed')
+
+
+class LoginDuringChangeTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d, medium): an upgrade or rollback never starts beside an alias's running login, and a login
+    that finished during one never leaves its alias on a release current.json no longer names."""
+
+    def test_a_running_login_refuses_the_change_before_the_transaction(self):
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        for case in ('connect job running', 'connect lock held'):
+            for action in ('upgrade', 'rollback'):
+                with self.subTest(case=case, action=action):
+                    self.setUp()
+                    self.added()
+                    self.alias_session()
+                    new = self.newer()
+                    if action == 'rollback':
+                        self.install(new)
+                    held = None
+                    if case == 'connect job running':
+                        self.launchctl.load(self.jobs.connect_label)
+                    else:  # An inline `setup --account` in the owner's Terminal: no launchd job, its lock held.
+                        self.launchctl.set_job(self.jobs.connect_label, None)
+                        held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
+                    try:
+                        before, calls = self.change_snapshot(), len(self.launchctl.calls)
+                        with self.assertRaises(bundle_install.InstallError) as caught:
+                            self.install(new) if action == 'upgrade' else self.change('rollback')
+                        self.assertEqual(str(caught.exception), 'login_in_progress')
+                        self.assertEqual(self.change_snapshot(), before)
+                        self.assertNotIn('bootout', [c[0] for c in self.launchctl.calls[calls:]])
+                    finally:
+                        if held is not None:
+                            os.close(held)
+                    # Once the login is over (its job idle, or no lock held), the change proceeds.
+                    if case == 'connect job running':
+                        self.launchctl.idle(self.jobs.connect_label)
+                    result = self.install(new) if action == 'upgrade' else self.change('rollback')
+                    self.assertIn(result['status'], ('upgraded', 'rolled_back'))
+
+    def first_login(self, release, pin):
+        """What a first login run by `release` leaves for `work`: its root, policy pinning `pin`, and that release's
+        exact broker definition written and loaded."""
+        for path in (self.jobs.root, self.jobs.root / 'run'):
+            path.mkdir(mode=0o700, exist_ok=True)
+        policy = self.jobs.root / 'runtime.toml'
+        policy.write_bytes(('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
+                            'enabled_capabilities = ["read", "artifacts"]\n' % pin).encode())
+        policy.chmod(0o600)
+        payload = bundle_install._service_payload(release, self.jobs.broker_label, self.ALIAS)
+        self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        self.jobs.broker_plist.chmod(0o600)
+        self.launchctl.load(self.jobs.broker_label)
+
+    def test_a_login_that_finished_during_the_change_leaves_its_alias_on_the_target(self):
+        for stage in ('service', 'complete'):  # After the broker stops; after the commit, before the restart.
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.added()  # Never logged in: no root, no plist at the observation.
+                old, new = self.release, self.newer()
+
+                def login(value, stage=stage):
+                    if value == stage and not self.jobs.broker_plist.exists():
+                        self.first_login(old, OLD_VERSION)
+                result = self.install(new, checkpoint=login)
+                new_root = self.release_root(new)
+                self.assertEqual((result['status'], result['accounts']['work']['service']), ('upgraded', 'not_loaded'))
+                # Its definition and version line are the target's; the old broker is stopped, none started (none ran
+                # when the change began): the next start runs the target.
+                self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                                 bundle_install._service_payload(new_root, self.jobs.broker_label, 'work'))
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
+                              (self.jobs.root / 'runtime.toml').read_bytes())
+                self.assertEqual(self.pointer()['release_root'], str(new_root))
+
+    def test_a_kill_while_the_definition_that_appeared_is_moved_resumes_to_the_same_state(self):
+        for stage in ('recorded:plist:work', 'published:plist:work'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.added()
+                old, new = self.release, self.newer()
+
+                def login(value, stage=stage):
+                    if value == 'complete' and not self.jobs.broker_plist.exists():
+                        self.first_login(old, OLD_VERSION)
+                    if value == stage:
+                        raise KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    self.install(new, checkpoint=login)
+                self.assertEqual(self.install(new)['accounts']['work']['service'], 'not_loaded')
+                self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                                 bundle_install._service_payload(self.release_root(new), self.jobs.broker_label, 'work'))
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir()
+                                  if p.name != self.plist.name], [self.jobs.broker_plist.name])  # No temporary left.
+
+    def test_a_foreign_definition_that_appeared_is_never_overwritten(self):
+        self.added()
+        new = self.newer()
+        foreign = plistlib.dumps({'Label': self.jobs.broker_label, 'ProgramArguments': ['/foreign/python', 'x']})
+
+        def written(value):
+            if value == 'complete' and not self.jobs.broker_plist.exists():
+                self.jobs.broker_plist.write_bytes(foreign)
+                self.jobs.broker_plist.chmod(0o600)
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.install(new, checkpoint=written)
+        self.assertEqual(str(caught.exception), 'service_conflict')
+        self.assertEqual(self.jobs.broker_plist.read_bytes(), foreign)
+        self.assertEqual(self.pointer()['release_root'], str(self.release_root(new)))  # Committed: the retry finishes.
+        self.jobs.broker_plist.unlink()
+        self.assertEqual(self.install(new)['accounts']['work']['service'], 'not_loaded')
+        self.assertFalse(self.jobs.broker_plist.exists())
 
 
 if __name__ == '__main__':
