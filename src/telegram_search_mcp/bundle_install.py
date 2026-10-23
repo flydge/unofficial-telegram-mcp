@@ -1176,19 +1176,22 @@ class _Service:
         """After the commit, for a named alias whose plist was absent at the observation: a first login that finished
         during the change wrote and loaded its broker from the release that served it, which current.json no longer
         names. Lead decision (review fix 055d, owner review pending): rewritten to the target, not refused, since a
-        refusal after the commit would leave the change pending for good. Its version line first (`appeared`, the
-        alias's runtime.toml from the current to the target version, journaled), then a loaded definition that is not
-        the target's gated and booted out, then the plist rewritten to the target's exact definition. As `stop` does
-        for a login in a change that found none running, none is started: the next start runs the target. A
-        definition that is neither the target's nor a known one refuses `service_conflict` and is never overwritten;
-        a plist still absent stays absent. Idempotent by state: a repeat finds the target's plist and nothing loaded."""
+        refusal after the commit would leave the change pending for good. A loaded definition that is not the
+        target's is gated first, before anything changes; then the version line (`appeared`, the alias's runtime.toml
+        from the current to the target version, journaled), that broker's bootout, and the plist rewritten to the
+        target's exact definition. As `stop` does for a login in a change that found none running, none is started:
+        the next start runs the target. A definition that is neither the target's nor a known one refuses
+        `service_conflict` and is never overwritten; a plist still absent stays absent. Idempotent by state: a repeat
+        finds the target's plist and nothing loaded."""
         kind,data,_=self.kind()
-        if kind!='absent' and appeared is not None:appeared()
         live=_live(self.runner,self.label)
-        if live is not None and not _matches_live(live,self.plist,self.target):
+        stale=live is not None and not _matches_live(live,self.plist,self.target)
+        if stale:
             previous=self._previous_payload(j,live)
             if previous is None:raise InstallError('service_conflict')
-            self.gate(previous);_bootout(self.runner,self.label)
+            self.gate(previous)
+        if kind!='absent' and appeared is not None:appeared()
+        if stale:_bootout(self.runner,self.label)
         if kind not in ('absent','to'):
             j.discard(self.k('plist'),self.plist)
             j.write(self.k('plist'),self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)

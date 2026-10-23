@@ -796,6 +796,29 @@ class LoginDuringChangeTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir()
                                   if p.name != self.plist.name], [self.jobs.broker_plist.name])  # No temporary left.
 
+    def test_a_pending_send_on_a_broker_that_appeared_refuses_before_anything_changes(self):
+        self.added()
+        old, new = self.release, self.newer()
+
+        def login(value):
+            if value == 'complete' and not self.jobs.broker_plist.exists():
+                self.first_login(old, OLD_VERSION)
+                self.alias_answers.append('pending')
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.install(new, checkpoint=login)
+        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                         bundle_install._service_payload(old, self.jobs.broker_label, 'work'))
+        self.assertEqual(self.launchctl.job(self.jobs.broker_label)[4], str(old / 'launcher.py'))
+        self.assertIn(('expected_package_version = "%s"' % OLD_VERSION).encode(),
+                      (self.jobs.root / 'runtime.toml').read_bytes())
+        self.assertEqual(self.install(new)['accounts']['work']['service'], 'not_loaded')  # Once the send settled.
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                         bundle_install._service_payload(self.release_root(new), self.jobs.broker_label, 'work'))
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+        self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
+                      (self.jobs.root / 'runtime.toml').read_bytes())
+
     def test_a_foreign_definition_that_appeared_is_never_overwritten(self):
         self.added()
         new = self.newer()
