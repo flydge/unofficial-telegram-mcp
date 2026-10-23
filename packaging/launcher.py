@@ -42,7 +42,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
 # A `transaction_pending` refusal also names the unfinished action to retry, from this closed set only.
 PENDING_ACTIONS=('install','upgrade','rollback','uninstall')
 # The owner's capability profiles (telegram_search_mcp.config.CAPABILITY_PROFILES), spelled here for the grammar.
-PROFILES=('readers','send','replies','forward','video','archive_edit')
+PROFILES=('readers','send','replies','forward','video','archive_edit','albums')
 
 
 def _acl(fd):

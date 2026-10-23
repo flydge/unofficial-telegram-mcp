@@ -1,0 +1,12 @@
+{
+  "structure": {
+    "get_reply_artifact_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "get_reply_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "prepare_reply_artifact_send": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "prepare_reply_text_send": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "refresh_reply_artifact_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "refresh_reply_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "update_reply_artifact_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)",
+    "update_reply_draft": "output: the closed missing_capabilities enum gains album_send (one more item allowed)"
+  }
+}

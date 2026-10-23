@@ -44,7 +44,7 @@ OPERATION_CAPABILITIES = {
 }
 # Default-off capabilities that change Telegram state; each also requires `send`.
 SEND_DEPENDENT_CAPABILITIES = frozenset({"reply_text_send", "reply_artifact_send", "forward_send", "video_send",
-                                         "archive_chats", "edit_own_text"})
+                                         "archive_chats", "edit_own_text", "album_send"})
 # Their prepare step reveals content (an own message's text, a chat's title and list); owner decision 20.10.2026.
 READ_DEPENDENT_CAPABILITIES = frozenset({"archive_chats", "edit_own_text"})
 
