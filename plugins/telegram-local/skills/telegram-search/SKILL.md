@@ -225,8 +225,9 @@ never copied. After a topic refusal, never fall back to General, another topic o
 the original sender) or copy (a new message from the owner); Archive or Main; the complete new text of one own
 plain-text message (old formatting is lost and recipients see it marked edited). Show the entire preview;
 video facts are declared by the file, not decoded. An album is 2–10 own files in order (a video item also needs
-`video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend. A `refused` result names a closed `refusal` code: report
-it, and never work around it by re-sending a download, re-encoding, retyping or using the Telegram app.
+`video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend.
+A `refused` result names a closed `refusal` code: report it, and never work around it by re-sending a download,
+re-encoding, retyping or using the Telegram app.
 Telegram may move an archived chat back to Main when a new message arrives. After `outcome_unknown` on an
 archive move or edit, check the chat or message (`list_chats`, `read_messages`) and ask; never apply again.
 
