@@ -14,6 +14,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import secrets
 import stat
 import time
@@ -36,6 +37,9 @@ SOCKET_PATH_LIMIT = 103
 TOOL_NAME_LIMIT = 64
 USER_ID_BOUND = 2**53
 LEASE_ATTEMPTS, LEASE_INTERVAL = 100, 0.02
+# The accounts directory's bounded listing: the registry, its lease, the alias roots and the roots removal moved aside.
+MAX_LISTING = 4096
+_TEMPORARY = re.compile(r"\.registry\.json\.[0-9a-f]{32}\.tmp\Z")
 CODES = frozenset({
     "registry_invalid",     # the file is not the closed schema
     "registry_unsafe",      # the file or its directory is not owner-only, regular and unlinked
@@ -308,12 +312,33 @@ def _write_at(directory: int, registry: Registry) -> None:
                 pass
 
 
+def _sweep_temporaries(directory: int) -> None:
+    """Under the lease no writer holds a temporary, so each one a killed write left is removed: only our exclusive
+    random name (`_write_at`), as an owner-only single-link regular file. A bounded listing."""
+    try:
+        names = os.listdir(directory)
+        if len(names) > MAX_LISTING:
+            raise RegistryError("registry_unsafe")
+        for name in names:
+            if _TEMPORARY.fullmatch(name) is None:
+                continue
+            metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and metadata.st_nlink == 1
+                    and not stat.S_IMODE(metadata.st_mode) & 0o077):
+                os.unlink(name, dir_fd=directory)
+                os.fsync(directory)
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+
+
 def _change(root: Path, change: Callable[[Registry | None], Registry | None], *, create: bool,
             sleeper: Callable[[float], None]) -> None:
-    """Read, decide and write under one lease; `change` returning None writes nothing."""
+    """Read, decide and write under one lease, after removing what killed writes left; `change` returning None
+    writes nothing."""
     directory = _open_root(root, create=create)
     try:
         with _lease(directory, sleeper):
+            _sweep_temporaries(directory)
             updated = change(_load_at(directory))
             if updated is not None:
                 _write_at(directory, updated)

@@ -1,18 +1,21 @@
-"""Behavioural stand-in for `claude mcp add-json|remove --scope user` over one MCP server name.
+"""Behavioural stand-in for `claude mcp add-json|remove --scope user` over our MCP server names.
 
 Never the real CLI: tests hand an instance to the installer as its runner and point the
 fixed-location lookup at a harmless executable file. Like the real CLI it keeps user-scope
 servers in the top-level `mcpServers` object of `<home>/.claude.json` (mode 0600, replaced
 atomically, neighbouring keys preserved); an entry added without env is exactly
 `{"type": "stdio", "command": ..., "args": [...]}`. Reads never start a process, so a `get`
-(or any other verb) fails the test.
+(or any other verb) fails the test. The default's name is `telegram_search`; a named alias's
+`telegram_search_<alias>` (0.55 spec 3D) is accepted too and read through `entry_of`.
 """
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 NAME = 'telegram_search'
+NAMES = re.compile(r'telegram_search(?:_[a-z][a-z0-9]{0,11})?\Z')
 
 
 def entry(command=None, args=(), *, type='stdio', env=None, url=None):
@@ -54,17 +57,23 @@ class FakeClaude:
 
     @property
     def entry(self):
-        document = self.document()
-        return None if document is None else document.get('mcpServers', {}).get(NAME)
+        return self.entry_of(NAME)
 
     @entry.setter
     def entry(self, value):
+        self.set_entry(NAME, value)
+
+    def entry_of(self, name):
+        document = self.document()
+        return None if document is None else document.get('mcpServers', {}).get(name)
+
+    def set_entry(self, name, value):
         document = self.document() or {'numStartups': 3, 'projects': {}}
         servers = dict(document.get('mcpServers', {}))
         if value is None:
-            servers.pop(NAME, None)
+            servers.pop(name, None)
         else:
-            servers[NAME] = value
+            servers[name] = value
         self.write_document({**document, 'mcpServers': servers})
 
     def verbs(self):
@@ -85,18 +94,18 @@ class FakeClaude:
         if verb in self.fail:
             return subprocess.CompletedProcess(argv, self.returncode)
         if verb == 'add-json':
-            assert argv[3:5] == ['--scope', 'user'] and argv[5] == NAME and len(argv) == 7, argv
-            if self.entry is not None:
+            assert argv[3:5] == ['--scope', 'user'] and NAMES.fullmatch(argv[5]) and len(argv) == 7, argv
+            if self.entry_of(argv[5]) is not None:
                 return subprocess.CompletedProcess(argv, 1)
             value = json.loads(argv[6])
             assert list(value) == ['type', 'command', 'args'] and value['type'] == 'stdio', value
             if not self.lose_add:
-                self.entry = entry(value['command'], value['args'])
+                self.set_entry(argv[5], entry(value['command'], value['args']))
             if self.mutate_after_add is not None:
                 self.mutate_after_add(self)
             return subprocess.CompletedProcess(argv, 0)
-        assert argv[3:] == ['--scope', 'user', NAME], argv
-        if self.entry is None:
+        assert argv[3:5] == ['--scope', 'user'] and len(argv) == 6 and NAMES.fullmatch(argv[5]), argv
+        if self.entry_of(argv[5]) is None:
             return subprocess.CompletedProcess(argv, 1)
-        self.entry = None
+        self.set_entry(argv[5], None)
         return subprocess.CompletedProcess(argv, 0)

@@ -180,11 +180,16 @@ class AccountPaths:
 
     @classmethod
     def _home_layout(cls, alias: str, home: Path, root: tuple[str, ...], job_suffix: str) -> AccountPaths:
+        return cls._layout(alias, *cls._home_names(home, root, job_suffix))
+
+    @staticmethod
+    def _home_names(home: Path, root: tuple[str, ...], job_suffix: str) -> tuple[Path, str, str, Path, str]:
+        """(root, Keychain service, broker label, broker plist, connect label) of a home layout."""
         service = f"com.{home.name}.telegram-search-mcp"
         job = service + job_suffix
         broker_label = f"{job}.broker"
-        return cls._layout(alias, home.joinpath("Library", "Application Support", *root), service, broker_label,
-                           home / "Library" / "LaunchAgents" / f"{broker_label}.plist", f"{job}.connect")
+        return (home.joinpath("Library", "Application Support", *root), service, broker_label,
+                home / "Library" / "LaunchAgents" / f"{broker_label}.plist", f"{job}.connect")
 
     def relocated(self, root: Path) -> AccountPaths:
         """The same names with every location under `root`: the inert test boundary of SetupPaths(root)."""
@@ -215,6 +220,42 @@ class AccountPaths:
                     policy=root / "runtime.toml", enrollment_record=root / "enrollment.json",
                     keychain_service=keychain_service, broker_label=broker_label, broker_plist=broker_plist,
                     connect_label=connect_label)
+
+
+@dataclass(frozen=True)
+class AliasJobs:
+    """What retiring a named alias touches (0.55 spec 3D, `account-remove`): its root, broker socket and policy, and
+    its two launchd jobs, exactly as its AccountPaths names them.
+
+    Built without the registry's admission, so an alias the registry no longer lists can still be retired; it is
+    never an AccountPaths (nothing that opens, creates or serves a session accepts it) and is built only by
+    `alias_jobs`.
+    """
+    alias: str
+    root: Path
+    socket: Path
+    policy: Path
+    broker_label: str
+    broker_plist: Path
+    connect_label: str
+
+    def __post_init__(self) -> None:
+        if not _BUILDING.get() or not named_alias(self.alias):
+            raise AccountPathsError()
+
+
+def alias_jobs(alias: str, home: Path) -> AliasJobs:
+    """A named alias's AliasJobs under `home` by its AccountPaths layout; reads and creates nothing."""
+    if not named_alias(alias):
+        raise AccountPathsError()
+    root, service, broker_label, broker_plist, connect_label = AccountPaths._home_names(
+        Path(home), (ACCOUNTS_DIRECTORY, alias), f".a.{alias}")
+    fields = AccountPaths._fields(alias, root, service, broker_label, broker_plist, connect_label)
+    token = _BUILDING.set(True)
+    try:
+        return AliasJobs(alias, root, fields["socket"], fields["policy"], broker_label, broker_plist, connect_label)
+    finally:
+        _BUILDING.reset(token)
 
 
 def _owner_paths(home: Path) -> tuple[Path, str, str, Path]:

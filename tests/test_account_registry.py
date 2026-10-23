@@ -286,6 +286,23 @@ class MutationTests(Fixture):
         self.assertEqual(sorted(entry.name for entry in self.root.iterdir()),
                          sorted([registry.LEASE_NAME, registry.REGISTRY_NAME]))
 
+    def test_a_temporary_a_killed_write_left_is_removed_by_the_next_write_and_a_lookalike_stays(self):
+        """0.55 phase D (account-add and account-remove resume after a kill anywhere): under the lease no writer holds
+        a temporary, so the next write removes our exact random name; anything else in the directory stays."""
+        registry.add_alias('work', self.home, longest_tool='t')
+        left = self.root / ('.registry.json.' + 'a' * 32 + '.tmp')
+        left.write_bytes(b'{"version": 1}')
+        left.chmod(0o600)
+        lookalikes = {'.registry.json.short.tmp': 0o600, '.registry.json.' + 'b' * 32 + '.tmp.keep': 0o600,
+                      '.registry.json.' + 'c' * 32 + '.tmp': 0o644}
+        for name, mode in lookalikes.items():
+            (self.root / name).write_bytes(b'x')
+            (self.root / name).chmod(mode)
+        registry.add_alias('home', self.home, longest_tool='t')
+        self.assertFalse(left.exists())
+        self.assertEqual(sorted(entry.name for entry in self.root.iterdir()),
+                         sorted([registry.LEASE_NAME, registry.REGISTRY_NAME, *lookalikes]))
+
     def test_an_unsafe_registry_is_never_overwritten(self):
         self.write(encoded(document({'work': {'user_id': None}})), mode=0o644)
         self.refused('registry_unsafe', lambda: registry.add_alias('home', self.home, longest_tool='t'))

@@ -38,19 +38,20 @@ import unittest
 from unittest import mock
 
 from test_adopt_legacy import AdoptionHarness
-from test_bundle_upgrade import NEIGHBOUR_CODEX
-from telegram_search_mcp import bundle_install
+from test_bundle_upgrade import FakeLaunchctl, NEIGHBOUR_CODEX
+from telegram_search_mcp import account_registry, bundle_install, config
 
 FOREIGN_CODEX = NEIGHBOUR_CODEX + b'\n[mcp_servers.telegram_search]\ncommand = "/legacy/051"\n'
 WORKERS = max(2, min(4, (os.cpu_count() or 2) // 2))  # More workers only contend for the same ancestor directories.
 # What a killed run may leave but its resume must remove. `.runtime-adopted-*` (kept backups) is not one of them.
-ORPHAN = re.compile(r'\A(?:\.telegram-search-|\.change_[0-9]+-staging-|\.swap-|\.claude\.json\.tmp'
-                    r'|\..*-(?:initial|removed)-|\..*-intent-.*\.tmp\Z)')
+ORPHAN = re.compile(r'\A(?:\.telegram-search-|\.(?:change|account)_[0-9]+-staging-|\.swap-|\.claude\.json\.tmp'
+                    r'|\..*-(?:initial|removed)-|\..*-intent-.*\.tmp\Z|\.registry\.json\..*\.tmp\Z)')
 PACKET = re.compile(r'(?:failed-release|skill-packet-[a-z][a-z-]*|metadata-packet-[a-z][a-z_]*)-[0-9]+\Z')
 RANDOM = [(re.compile(pattern), replacement) for pattern, replacement in (
     (r'-adopted-[0-9a-f]{24}', '-adopted-*'), (r'-initial-[a-z0-9_]{8}', '-initial-*'),
     (r'-removed-[0-9a-f]{32}', '-removed-*'), (r'-staging-[a-z0-9_]{8}', '-staging-*'),
-    (r'\.telegram-search-[0-9a-f]{32}\.tmp', '.telegram-search-*.tmp'))]
+    (r'\.telegram-search-[0-9a-f]{32}\.tmp', '.telegram-search-*.tmp'),
+    (r'\bremoved-([a-z][a-z0-9]{0,11})-[0-9a-f]{32}', r'removed-\1-*'))]
 WRITE_AHEAD = {'claude_remove': 'remove', 'claude_add': 'add-json'}
 CLAUDE_DOCUMENT = 'user/.claude.json'
 
@@ -147,7 +148,8 @@ def normal(value, prefix, inodes):
 def content(path, prefix, inodes):
     data = path.read_bytes()
     if path.name == 'launchd-state.json':
-        return normal(json.loads(data)['loaded'], prefix, inodes)  # The call log differs by design; the job does not.
+        value = json.loads(data)  # The call log differs by design; the jobs do not.
+        return normal([value['loaded'], value.get('jobs')], prefix, inodes)
     if path.name == 'journal.json':
         # Attempt counts and temporary names differ after a kill; the identity, stage and record names do not.
         value = json.loads(data)
@@ -712,6 +714,80 @@ def _put_back_prepare(h):
     skill.chmod(mode)
 
 
+ALIAS = 'work'
+
+
+def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
+    """`account-add` or `account-remove` of `alias` (0.55 spec 3D) with the fakes: the default broker's check answers
+    `ready` and an alias broker holds no pending send. The socket budget is widened only for the long disposable
+    base (the registry's own tests apply it)."""
+    probe = {'default_check': lambda *_: 'ready'} if action == 'account_add' else {'alias_pending': lambda *_: 'none'}
+    with mock.patch.object(account_registry, 'SOCKET_PATH_LIMIT', 4096), \
+            mock.patch('telegram_search_mcp.bundle_install.require_platform'):
+        return getattr(bundle_install, action)(h.runtime, alias=alias, user_home=h.home,
+                                               claude_candidates=(h.claude_cli,), claude_runner=cl or h.claude(),
+                                               launchctl=lc or h.launchctl, **probe, **kwargs)
+
+
+def _accounts_prepare(h, *aliases):
+    """The installed release with every client, a session and its loaded broker, launchd knowing `work`'s two jobs,
+    and `aliases` added first."""
+    h.claude()
+    jobs = config.alias_jobs(ALIAS, h.home)
+    h.launchctl = FakeLaunchctl(h.plist, h.base / 'launchd-state.json', others={
+        jobs.broker_label: jobs.broker_plist, jobs.connect_label: jobs.root / 'run' / (jobs.connect_label + '.plist')})
+    h.full()
+    for alias in aliases:
+        _account(h, 'account_add', alias=alias)
+
+
+def _alias_logged_in(h):
+    """What a login leaves for `work`: its root and session, its exact broker plist loaded, its connect job loaded."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    for path in (jobs.root, jobs.root / 'tdlib', jobs.root / 'run'):
+        path.mkdir(mode=0o700)
+    (jobs.root / 'tdlib' / 'td.binlog').write_bytes(b'alias session bytes')
+    release = Path(h.pointer()['release_root'])
+    payload = bundle_install._service_payload(release, jobs.broker_label, ALIAS)
+    jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+    jobs.broker_plist.chmod(0o600)
+    h.launchctl.load(jobs.broker_label)
+    connect = jobs.root / 'run' / (jobs.connect_label + '.plist')
+    connect.write_bytes(plistlib.dumps({'Label': jobs.connect_label, 'ProgramArguments': [str(release), 'connect']}))
+    connect.chmod(0o600)
+    h.launchctl.load(jobs.connect_label)
+
+
+def _account_add_check(h, result):
+    h.assertEqual((result['status'], result['codex'], result['claude_code'], result['claude_desktop']),
+                  ('account_added', 'registered', 'registered', 'registered'))
+    h.assertIn(ALIAS, json.loads((h.runtime / 'accounts.json').read_text())['accounts'])
+    h.assertIn(ALIAS, account_registry.load(config.accounts_root(h.home)).aliases)
+
+
+def _account_remove_check(h, result):
+    h.assertEqual((result['status'], result['service'], result['connect_job'], result['codex'], result['claude_code'],
+                   result['claude_desktop'], result['session']),
+                  ('account_removed', 'removed', 'stopped', 'removed', 'removed', 'removed', 'moved'))
+    h.assertEqual((Path(result['session_moved_to']) / 'tdlib' / 'td.binlog').read_bytes(), b'alias session bytes')
+    h.assertNotIn(ALIAS, account_registry.load(config.accounts_root(h.home)).aliases)
+
+
+def _account_left(h):
+    """After an account-remove: nothing of `work` but its moved-aside root (and the default untouched)."""
+    jobs = config.alias_jobs(ALIAS, h.home)
+    side = h.runtime / 'accounts.json'
+    left = {'root': jobs.root.exists(), 'plist': jobs.broker_plist.exists(),
+            'broker': h.launchctl.job(jobs.broker_label) is not None,
+            'connect job': h.launchctl.job(jobs.connect_label) is not None,
+            'codex entry': b'telegram_search_work' in (h.codex / 'config.toml').read_bytes(),
+            'claude code entry': h.claude().entry_of('telegram_search_work') is not None,
+            'desktop entry': 'telegram_search_work' in json.loads(h.desktop_config.read_text())['mcpServers'],
+            'sidecar record': side.exists() and ALIAS in json.loads(side.read_text())['accounts'],
+            'default broker': h.launchctl.loaded is None}
+    return ['%s left' % k for k, bad in left.items() if bad]
+
+
 def _stopped_on_target(h):
     """current.json, the pin and the plist name `h.target`, and no broker runs (none did when the change began)."""
     out = [p for p in _one_release(h) if not p.startswith('loaded broker')]
@@ -785,6 +861,19 @@ SCENARIOS = {
     'repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back': Scenario(
         _put_back_prepare, lambda h, lc, cl: h.install(h.new, launchctl=lc, claude_runner=cl), _upgrade_check,
         write_ahead=False, final=_one_release),
+    # 0.55 phase D: every step of account-add (the registry, the default's check, the three client entries, the
+    # sidecar created or replaced) and of account-remove (the broker and connect job, the entries, the registry, the
+    # root moved aside, the sidecar replaced or retired).
+    'account_add': Scenario(lambda h: _accounts_prepare(h), lambda h, lc, cl: _account(h, 'account_add', lc, cl),
+                            _account_add_check),
+    'account_add_beside_another': Scenario(lambda h: _accounts_prepare(h, 'play'),
+                                           lambda h, lc, cl: _account(h, 'account_add', lc, cl), _account_add_check),
+    'account_remove': Scenario(lambda h: (_accounts_prepare(h, ALIAS), _alias_logged_in(h)),
+                               lambda h, lc, cl: _account(h, 'account_remove', lc, cl), _account_remove_check,
+                               write_ahead=False, final=_account_left),
+    'account_remove_beside_another': Scenario(lambda h: (_accounts_prepare(h, ALIAS, 'play'), _alias_logged_in(h)),
+                                              lambda h, lc, cl: _account(h, 'account_remove', lc, cl),
+                                              _account_remove_check, write_ahead=False, final=_account_left),
 }
 
 
@@ -903,6 +992,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                 for name, entry in state.items():
                     if name.endswith('/receipt.json') and entry[0] == 'file' and type(entry[2]) is dict:
                         entry[2].pop('claude_code', None)
+                    if name.endswith('/accounts.json') and entry[0] == 'file' and type(entry[2]) is dict:
+                        for record in entry[2].get('accounts', {}).values():
+                            record.pop('claude_code', None)
                     if name.endswith('/journal.json'):  # A `claude_add` after a killed remove is never attempted.
                         entry[2]['publications'] = [n for n in entry[2]['publications'] if n not in WRITE_AHEAD]
             if window == '<absent>':
@@ -1069,6 +1161,18 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
     def test_repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back(self):
         self.sweep('repeat_replaces_a_skill_copy_the_change_published_and_the_user_put_back')
 
+    def test_account_add(self):
+        self.sweep('account_add')
+
+    def test_account_add_beside_another_alias(self):
+        self.sweep('account_add_beside_another')
+
+    def test_account_remove(self):
+        self.sweep('account_remove')
+
+    def test_account_remove_beside_another_alias(self):
+        self.sweep('account_remove_beside_another')
+
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""
         cases = [('upgrade', 'create', '/.change_1-staging-'),                 # an opening change transaction
@@ -1076,7 +1180,10 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
                  ('rollback', 'create', '/metadata-packet-receipt-'),          # a receipt packet
                  ('adopt_first_install', 'mkdir', '/.runtime-initial-'),       # a first-install staged root
                  ('adopt_first_install', 'replace', '/install-intent.json'),   # its intent, before publication
-                 ('adopt_first_install', 'create', '/metadata-packet-adopted_sidecar-')]  # the adopted.json packet
+                 ('adopt_first_install', 'create', '/metadata-packet-adopted_sidecar-'),  # the adopted.json packet
+                 ('account_add', 'create', '/.account_1-staging-'),                   # an opening account transaction
+                 ('account_remove', 'create', '/.account_2-staging-'),
+                 ('account_add_beside_another', 'create', '/metadata-packet-accounts_sidecar-')]  # the accounts.json packet
         references = {}
         with self.fixed_base():
             for name, effect, fragment in cases:

@@ -29,19 +29,28 @@ WRITE_AHEAD = {'recorded:claude_remove': 'claude', 'recorded:claude_add': 'claud
 class FakeLaunchctl:
     """`launchctl print|bootout|bootstrap` over one label; the loaded job is the plist read at bootstrap.
 
-    Like launchd, its state outlives a killed (forked) installer process: it is kept in a file.
+    `others` maps further labels (a named alias's broker and connect jobs, 0.55 spec 3D) to their plists: a call
+    naming one of them acts on that job alone; every other label is the default's, as before. Like launchd, its
+    state outlives a killed (forked) installer process: it is kept in a file.
     """
 
-    def __init__(self, plist, state):
+    def __init__(self, plist, state, others=None):
         self.plist, self.state, self.fail = plist, state, set()
-        self._save(None, [])
+        self.others = {label: Path(path) for label, path in (others or {}).items()}
+        self._write({'loaded': None, 'calls': [], **({'jobs': dict.fromkeys(self.others)} if self.others else {})})
+
+    def _value(self):
+        return json.loads(self.state.read_text())
+
+    def _write(self, value):
+        self.state.write_text(json.dumps(value))
 
     def _save(self, loaded, calls):
-        self.state.write_text(json.dumps({'loaded': loaded, 'calls': calls}))
+        self._write({**self._value(), 'loaded': loaded, 'calls': calls})
 
     @property
     def loaded(self):
-        return json.loads(self.state.read_text())['loaded']
+        return self._value()['loaded']
 
     @loaded.setter
     def loaded(self, value):
@@ -49,10 +58,20 @@ class FakeLaunchctl:
 
     @property
     def calls(self):
-        return json.loads(self.state.read_text())['calls']
+        return self._value()['calls']
 
-    def load(self):
-        self.loaded = plistlib.loads(self.plist.read_bytes())['ProgramArguments']
+    def job(self, label):
+        return self._value()['jobs'][label]
+
+    def set_job(self, label, value):
+        state = self._value()
+        self._write({**state, 'jobs': {**state['jobs'], label: value}})
+
+    def load(self, label=None):
+        if label is None:
+            self.loaded = plistlib.loads(self.plist.read_bytes())['ProgramArguments']
+        else:
+            self.set_job(label, plistlib.loads(self.others[label].read_bytes())['ProgramArguments'])
 
     def verbs(self):
         return [call[0] for call in self.calls]
@@ -63,19 +82,30 @@ class FakeLaunchctl:
         self._save(self.loaded, self.calls + [argv[1:]])
         if verb in self.fail:
             return subprocess.CompletedProcess(argv, 5, '', '')
+        label = argv[2].rpartition('/')[2] if verb in ('print', 'bootout') else None
+        if label in self.others:
+            loaded, plist = self.job(label), self.others[label]
+        elif self.others and label is not None and label != self.plist.stem:
+            return subprocess.CompletedProcess(argv, 113 if verb == 'print' else 3, '', '')  # Another alias's label.
+        else:
+            loaded, plist, label = self.loaded, self.plist, None
         if verb == 'print':
-            if self.loaded is None:
+            if loaded is None:
                 return subprocess.CompletedProcess(argv, 113, '', '')
-            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % self.plist, '\tprogram = %s' % self.loaded[0],
-                              '\targuments = {', *('\t\t' + a for a in self.loaded), '\t}', '}'])
+            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % plist, '\tprogram = %s' % loaded[0],
+                              '\targuments = {', *('\t\t' + a for a in loaded), '\t}', '}'])
             return subprocess.CompletedProcess(argv, 0, text, '')
         if verb == 'bootout':
-            if self.loaded is None:
+            if loaded is None:
                 return subprocess.CompletedProcess(argv, 3, '', '')
-            self.loaded = None
+            if label is None:
+                self.loaded = None
+            else:
+                self.set_job(label, None)
             return subprocess.CompletedProcess(argv, 0, '', '')
-        assert verb == 'bootstrap' and argv[3] == str(self.plist), argv
-        self.load()
+        named = next((other for other, path in self.others.items() if argv[3:4] == [str(path)]), None)
+        assert verb == 'bootstrap' and (argv[3] == str(self.plist) or named), argv
+        self.load(named)
         return subprocess.CompletedProcess(argv, 0, '', '')
 
 
