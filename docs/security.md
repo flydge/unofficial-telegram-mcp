@@ -2228,8 +2228,10 @@ With `--account <alias>` the switch edits that alias's own `runtime.toml` behind
 ## Accounts boundary (0.55 candidate)
 
 The owner can add Telegram accounts under local aliases ([installation](install.md#accounts-055-candidate),
-[reference](reference.md#account-aliases-055-candidate)). Without an alias registry every path, name,
-file and behaviour is 0.54's.
+[reference](reference.md#account-aliases-055-candidate)). Without an alias registry every path, name and
+file is 0.54's, and so is every behaviour but the dialog's two substitutions below (Saved Messages and
+"you"). Removing the last alias keeps the registry with the default account's pin until a rollback below
+0.55 or an uninstall with no alias left moves it aside.
 
 **Same-UID trust.** Aliases separate Telegram sessions, not users. Every alias runs as the same macOS
 user, and owner-only modes do not separate one alias's files from another's: any process of that user can
@@ -2271,7 +2273,7 @@ either: the approval dialog names the alias in its heading and shows the account
 alias and the user id's last two digits (`Account: work (Telegram account ••42)`), so a wrong session
 shows without revealing the id. Without a registry the default account reads no user for the pin and its
 dialog keeps 0.54's account line with the user id; in both modes a chat whose ID is the account's own
-reads "Saved Messages".
+reads "Saved Messages" and a forwarded own message's sender reads "you".
 
 **Keychain.** One Keychain service holds the application identity (`api_id`, `api_hash`), shared by every
 alias, as is the bundled `app-identity.json`: it identifies the application, not the account. Each

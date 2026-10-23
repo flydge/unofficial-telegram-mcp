@@ -41,8 +41,9 @@ The owner rows (two really authorized accounts, one approved action each) wait f
   (`login_in_progress`). A rollback below 0.55 refuses while an alias exists (`accounts_present`).
   Uninstall keeps alias sessions and the registry; a later install repairs each alias with its
   `account-add`.
-- **The default account unchanged.** Without an alias every path, launchd label and plist, client entry,
-  receipt, `runtime.toml` and the schema fingerprint equal 0.54.0rc1's.
+- **The default account unchanged.** Its paths and names never change, and until the first `account-add`
+  every path, launchd label and plist, client entry, receipt, `runtime.toml` and the schema fingerprint
+  equal 0.54.0rc1's.
 
 Package version 0.55.0rc1, public contract version 1. Tool schemas and the schema fingerprint are
 unchanged from 0.54.0rc1. New installer refusal codes are listed in the
@@ -86,6 +87,9 @@ together.
 - With the default broker not loaded at `account-add` (`default_check: not_loaded`), the default account is
   pinned only at its broker's next check; an alias logged into the default's own account first blocks the
   default with `account_duplicate` until that alias is removed.
+- Removing the last alias keeps the registry with the default account's pin (`status` keeps `accounts`, the
+  dialog keeps naming `default`) until a rollback below 0.55 or an uninstall with no alias left moves it
+  aside.
 - Everything listed under Known limits in the [0.54.0rc1 notes](release-notes-0.54.0rc1.md) still applies.
 
 ## License and public identifiers

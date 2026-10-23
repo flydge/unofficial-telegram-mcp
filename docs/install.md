@@ -990,9 +990,10 @@ backups are kept, never restored automatically.
 
 One installation can serve more than one Telegram account of the same macOS user. The account connected
 first stays the **default** account, in the same paths and under the same names as before; every further
-account gets a short local **alias**. An installation without aliases is byte-identical to 0.54: paths,
-launchd labels and plists, client entries, receipts, `runtime.toml` and the schema fingerprint. The
-evidence is unit and synthetic tests only; two really authorized accounts are an owner-session row.
+account gets a short local **alias**. Until the first `account-add` an installation is byte-identical to
+0.54: paths, launchd labels and plists, client entries, receipts, `runtime.toml` and the schema
+fingerprint, and the default account's paths and names never change. The evidence is unit and synthetic
+tests only; two really authorized accounts are an owner-session row.
 
 ### Adding an account
 
@@ -1121,7 +1122,9 @@ still present after its removal attempts; repeat the command.
 
 Renaming is a remove plus an add, then a new `connect --account <new alias>` login: the enrollment binds
 absolute paths, so a session never moves to another name. Adding a removed name again starts a new empty
-session; the moved folder is never reused.
+session; the moved folder is never reused. Removing the last alias keeps the registry with the default
+account's pin, so `status` keeps reporting `accounts` and the dialog keeps naming `default`; only a
+rollback below 0.55 or an uninstall with no alias left moves the registry aside.
 
 Both actions are journaled transactions like an upgrade: a repeat after an interruption resumes, and a
 repeat after one finished returns its result. While one is unfinished, every other installer action
