@@ -2781,7 +2781,8 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
 
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists (and a parked change's) goes the
     default's way, under its own journal keys: its exact broker definition booted out by its own label (pending-send
-    gate first, through `alias_pending`; any answer but `none` refuses) and removed, its connect job booted out, and
+    gate first, through `alias_pending`, before the transaction and again right before its bootout; any answer but
+    `none` refuses) and removed, its connect job booted out, and
     the Codex, Claude Code and Claude Desktop entries its record owns removed. Its root, session and policy, and the
     registry, are never touched, as the default's session is not: a later install re-registers an alias with its
     `account-add`, keeping its session. With no alias left the registry (only the default's pin, which no release
@@ -2848,7 +2849,6 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
             aliases=sorted(accounts)
             brokers={alias:_alias_broker(alias,home,installed,installed,launchctl,alias_probe) for alias in aliases}
             alias_owners={alias:_alias_codex_owners(root,alias,accounts[alias],parked) for alias in aliases}
-            alias_observed={}
             observed=None
             if journal is None or journal.get('kind')!='uninstall':
                 # Every refusal before the transaction exists: a refused uninstall leaves nothing that blocks a
@@ -2860,7 +2860,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 observed=_uninstall_service(service)
                 for alias in aliases:
                     _codex_removal(config,alias_owners[alias],alias_server_name(alias))
-                    alias_observed[alias]=_uninstall_service(brokers[alias])  # Its pending-send gate included.
+                    _uninstall_service(brokers[alias])  # Its pending-send gate included (again before its bootout).
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
                 opened={**identity,'stage':'prepared','publications':{}}
@@ -2915,9 +2915,11 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 return j.recorded(_key(step,alias))['status']
             for alias in aliases:
                 broker,jobs=brokers[alias],alias_jobs(alias,home)
-                # Its broker: only the exact definition, booted out by its own label, as the default's.
+                # Its broker: only the exact definition, booted out by its own label, as the default's; observed and
+                # gated again right before its bootout, on the first run too (review fix 055d): the gate before the
+                # transaction came before the default's and the earlier aliases' bootouts.
                 if j.recorded(_key('service',alias)) is None:
-                    kind,loaded=alias_observed.get(alias) or _uninstall_service(broker)
+                    kind,loaded=_uninstall_service(broker)
                     owned_key=_key('service_owned',alias)
                     if kind=='to':
                         if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'to'}))

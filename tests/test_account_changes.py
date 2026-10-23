@@ -462,6 +462,21 @@ class UninstallOverAliasesTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual(str(caught.exception), 'pending_send_unresolved')
                 self.assertEqual(self.change_snapshot(), before)
 
+    def test_each_alias_broker_is_gated_again_right_before_its_bootout(self):
+        """Review fix (055d, low): on the first run too, not only by the cached observation before the transaction."""
+        self.added()
+        self.alias_session()
+        self.alias_answers = ['none', 'pending']  # Before the transaction; right before its bootout.
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.change('uninstall')
+        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertEqual(self.launchctl.job(self.jobs.broker_label)[-2:], ['--account', 'work'])
+        self.assertTrue(self.jobs.broker_plist.exists())
+        self.assertEqual(len(self.alias_probes), 2)
+        result = self.change('uninstall')  # Once the send settled, the retry finishes.
+        self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+
     def test_an_entry_no_record_owns_and_a_foreign_broker_definition_are_kept(self):
         self.full()
         account_registry.add_alias('work', self.home, longest_tool='t')
