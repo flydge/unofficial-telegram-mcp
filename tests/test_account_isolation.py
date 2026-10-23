@@ -2,8 +2,8 @@
 
 Two real brokers serve on real sockets under one short synthetic home: the default alias and `work`, listed in
 one alias registry, each with its own runtime policy, caches and fake TDLib session authorized as a different
-user. Every handle kind is minted on one broker (A) through its socket and presented to the other (B) through
-B's socket, by the same client id: B answers exactly what it answers for an unknown handle of that kind (the
+user. Every handle kind (the 0.56 album draft id included) is minted on one broker (A) through its socket and presented
+to the other (B) through B's socket, by the same client id: B answers exactly what it answers for an unknown handle of that kind (the
 whole wire response, the handle masked), shows no dialog and makes no provider change, and A still honours its
 own handle afterwards. Each matrix runs in both directions (default to work, work to default).
 
@@ -31,6 +31,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import test_album_send as album_fixture
 import test_archive_edit as archive_fixture
 import test_artifact_replies as artifact_reply_fixture
 import test_forward_send as forward_fixture
@@ -64,7 +65,7 @@ from telegram_search_mcp.tdjson import TDLibClient
 CLIENT = 'client_' + 'i' * 24
 HELPER = 'client_' + 'h' * 24  # the transfer helper's own client (upload authority redemption)
 LONGEST = account_registry.longest_tool_name()
-MUTATING = frozenset({'sendMessage', 'forwardMessages', 'addChatToList', 'editMessageText'})
+MUTATING = frozenset({'sendMessage', 'forwardMessages', 'addChatToList', 'editMessageText', 'sendMessageAlbum'})
 POLICY_TOML = ('config_version = 1\nenabled_capabilities = [' +
                ', '.join(f'"{name}"' for name in sorted(KNOWN_CAPABILITIES)) + ']\n')
 
@@ -212,7 +213,10 @@ DRAFT_OPERATIONS = (
     ('send_prepared_video', lambda d: {'draft_id': d, 'approved': True}),
     ('apply_prepared_archive', lambda d: {'draft_id': d, 'approved': True}),
     ('apply_prepared_text_edit', lambda d: {'draft_id': d, 'approved': True}),
+    ('send_prepared_album', lambda d: {'draft_id': d, 'approved': True}),
+    ('get_album_send_status', lambda d: {'draft_id': d}),
     ('send_prepared_text', lambda d: {'draft_id': d, 'approved': False}),
+    ('send_prepared_album', lambda d: {'draft_id': d, 'approved': False}),
     ('cancel_draft', lambda d: {'draft_id': d}),
 )
 
@@ -239,6 +243,7 @@ class DraftMatrix:
     RAW = None    # the kind's synthetic TDLib transport (the production TDLibClient reduces it)
     SEND = None   # the operation that sends or applies this kind
     SENT = None   # A's status for it
+    STATUS = 'get_send_status'  # the operation that reports its send status
 
     def client(self, user_id, account):
         raw = self.RAW()
@@ -268,7 +273,7 @@ class DraftMatrix:
         a, b = self.serve(self.client(None, self.accounts[self.MINTER]),
                           self.client(OTHER, self.accounts[self.presenter]))
         draft_id = self.prepare(a)
-        pending = a.result('get_send_status', {'draft_id': draft_id})
+        pending = a.result(self.STATUS, {'draft_id': draft_id})
         self.assertEqual(pending['status'], 'pending', pending)  # A knows its own handle.
         self.present_every_draft_operation(b, draft_id)
         self.assertEqual(b.result('list_drafts', {})['drafts'], [])
@@ -280,11 +285,11 @@ class DraftMatrix:
         self.assertEqual(receipt['status'], self.SENT, receipt)
         unknown = forged(draft_id)
         self.assertNotEqual(a.result(self.SEND, {'draft_id': unknown, 'approved': True})['status'], self.SENT)
-        status = a.result('get_send_status', {'draft_id': draft_id})
+        status = a.result(self.STATUS, {'draft_id': draft_id})
         self.present_every_draft_operation(b, draft_id)  # The receipt (send status) is A's alone too.
         self.assert_untouched(b)
         self.assertEqual(a.result(self.SEND, {'draft_id': draft_id, 'approved': True}), receipt)
-        self.assertEqual(a.result('get_send_status', {'draft_id': draft_id}), status)
+        self.assertEqual(a.result(self.STATUS, {'draft_id': draft_id}), status)
         self.assertEqual(len(a.approvals), 1)
         self.assertLessEqual(len(a.provider_changes()), 1)
         self.assertEqual(self.pins()[self.presenter], OTHER)
@@ -371,6 +376,59 @@ class TextEditDraftTests(DraftMatrix, Pair):
                                                        'message_id': archive_fixture.MID, 'new_text': 'Hello there'}))
 
 
+class AlbumDraftTests(DraftMatrix, Pair):
+    """0.56 criterion 8: the album draft id is one more handle kind. Its item artifacts are account-bound like every
+    artifact id, and its items are staged under the minting alias's own staging root."""
+    RAW, SEND, SENT, STATUS = album_fixture.Raw, 'send_prepared_album', 'sent', 'get_album_send_status'
+
+    def items(self, side, *names):
+        data = {'one.png': album_fixture.PNG, 'two.jpg': album_fixture.JPEG, 'three.png': album_fixture.image('PNG', (30, 20))}
+        return [self.local_artifact(side, name, data[name]) for name in names]
+
+    def prepare(self, a):
+        photo, jpeg = self.items(a, 'one.png', 'two.jpg')
+        return draft_of(a.result('prepare_album_send', {'recipient': album_fixture.RECIPIENT, 'items': [
+            {'artifact_id': photo, 'caption': 'PRIVATE CAPTION'}, {'artifact_id': jpeg}]}))
+
+    def test_item_artifacts_of_one_account_are_refused_like_unknown_ones(self):
+        a, b = self.serve(self.client(None, self.accounts[self.MINTER]),
+                          self.client(OTHER, self.accounts[self.presenter]))
+        foreign = self.items(a, 'one.png', 'two.jpg')
+        own, other = self.items(b, 'one.png', 'three.png')  # B's own cache holds artifacts of the same kind.
+        for position in (0, 1):
+            for artifact_id in foreign:
+                def payload(token, position=position):
+                    items = [{'artifact_id': own}, {'artifact_id': token}]
+                    return {'recipient': album_fixture.RECIPIENT, 'items': items if position else items[::-1]}
+                with self.subTest(position=position, artifact=foreign.index(artifact_id)):
+                    refused = self.assert_refused_like_unknown(b, 'prepare_album_send', payload, artifact_id)
+                    self.assertEqual(refused['result']['status'], 'unavailable', refused)
+        self.assert_untouched(b)
+        self.assertEqual(b.result('list_drafts', {})['drafts'], [])
+        # The refusal is the foreign item's: B prepares from its own two, and A still honours its own.
+        own_album = b.result('prepare_album_send', {'recipient': album_fixture.RECIPIENT, 'items': [
+            {'artifact_id': own}, {'artifact_id': other}]})
+        self.assertEqual(own_album['status'], 'prepared', own_album)
+        mine = a.result('prepare_album_send', {'recipient': album_fixture.RECIPIENT, 'items': [
+            {'artifact_id': artifact_id} for artifact_id in foreign]})
+        self.assertEqual(mine['status'], 'prepared', mine)
+        self.assertEqual((a.approvals, b.approvals), ([], []))
+
+    def test_an_album_staged_for_one_account_is_refused_by_the_others_transport(self):
+        a, b = self.serve(self.client(None, self.accounts[self.MINTER]),
+                          self.client(OTHER, self.accounts[self.presenter]))
+        draft_id = self.prepare(a)
+        self.assertEqual(a.result(self.SEND, {'draft_id': draft_id, 'approved': True})['status'], 'sent')
+        [request] = [value for value in a.client._raw.sent if value['@type'] == 'sendMessageAlbum']
+        payload = {key: value for key, value in request.items() if key != '@extra'}
+        staged = [Path(content['photo']['photo']['path']) for content in payload['input_message_contents']]
+        self.assertEqual({path.parent.parent for path in staged}, {a.paths.staging})
+        self.assertEqual(len({path.parent for path in staged}), 2)  # One private directory per item.
+        tdjson._validate_bounded_request(copy.deepcopy(payload), a.paths.staging)  # A's own transport admits it.
+        with self.assertRaises(tdjson.ForbiddenTDLibRequest):
+            tdjson._validate_bounded_request(copy.deepcopy(payload), b.paths.staging)
+
+
 class TextDraftReverseTests(TextDraftTests):
     MINTER = 'work'
 
@@ -400,6 +458,10 @@ class ArchiveDraftReverseTests(ArchiveDraftTests):
 
 
 class TextEditDraftReverseTests(TextEditDraftTests):
+    MINTER = 'work'
+
+
+class AlbumDraftReverseTests(AlbumDraftTests):
     MINTER = 'work'
 
 
