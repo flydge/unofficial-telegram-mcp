@@ -1094,6 +1094,93 @@ class PendingTransactionLoginTests(AliasChangeHarness, unittest.TestCase):
                 # Source mode (no installation this process runs from): unchanged.
                 self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('play', self.home)))
 
+    def reports(self, alias):
+        """(name, the whole JSON the owner or agent sees) of each login entry point of `alias`: `connect` (the agent's
+        and inline), `wait` reporting the connect helper's status, `setup` and `resume`."""
+        from test_onboarding import MemoryStore, Terminal
+        from telegram_search_mcp import connect_cli
+        from telegram_search_mcp.enrollment import SetupPaths
+        from telegram_search_mcp.setup_wizard import run_setup
+        paths = SetupPaths.from_account(config.AccountPaths.for_alias(alias, self.home))
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('nothing may run')
+
+        class Agent:
+            def require_secure(self):
+                raise RuntimeError('captured')
+
+        def connect(terminal):
+            return connect_cli.connect(paths, client_factory=never, terminal=terminal, inline=never,
+                                       runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)[0]
+
+        def wait():
+            lock = paths.account.connect_lock
+            if not lock.exists():
+                lock.touch(mode=0o600)
+            connect_cli.connect_helper(paths, store=None, provider_factory=None, handoff=never, run=never,
+                                       ui_factory=never, server_factory=never, opener=never,
+                                       sleeper=lambda _: None, restore_broker=lambda: None)
+            try:
+                return connect_cli.wait(paths, runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)[0]
+            finally:
+                paths.account.connect_status.unlink()
+
+        def setup(resume):
+            return run_setup(paths, Terminal(), MemoryStore(), never, handoff=never, resume=resume,
+                             bundled_loader=lambda: None).to_dict()
+        return [('connect', lambda: connect(Agent())), ('connect inline', lambda: connect(Terminal())),
+                ('wait', wait), ('setup', lambda: setup(False)), ('resume', lambda: setup(True))]
+
+    def test_every_refusal_names_the_unfinished_action_as_the_installer_does(self):
+        """Review fix (055d4, low): a login refused `transaction_pending` did not say which installer action was
+        unfinished, while the setup skill said it did. It now carries `pending_action` (from the closed
+        PENDING_ACTIONS) and, for an account action, `pending_account` (the alias, a closed token), read from the
+        newest journal as the launcher's installer refusal reports them; `wait` adds them to the helper's status."""
+        from telegram_search_mcp import bundle_runtime
+        expected = {'upgrade': ('upgrade', None), 'rollback': ('rollback', None), 'uninstall': ('uninstall', None),
+                    'account-add': ('account-add', 'play'), 'account-remove': ('account-remove', 'work')}
+        for kind, pending in expected.items():
+            with self.subTest(kind=kind):
+                self.setUp()
+                aliases = self.pending(kind)
+                fields = {'pending_action': pending[0], **({'pending_account': pending[1]} if pending[1] else {})}
+                with self.installed():
+                    self.assertEqual(bundle_runtime.installer_pending(), pending)
+                    for alias in aliases:
+                        for name, report in self.reports(alias):
+                            with self.subTest(alias=alias, login=name):
+                                value = report()
+                                self.assertEqual((value['code'], value['next_action']),
+                                                 ('transaction_pending', 'finish_pending_installer_action_then_retry'))
+                                self.assertEqual({k: v for k, v in value.items() if k.startswith('pending_')}, fields)
+
+    def test_a_journal_naming_no_closed_action_or_alias_still_refuses_unnamed(self):
+        from telegram_search_mcp import bundle_runtime
+        self.pending('account-add')
+        journal = sorted(self.runtime.glob('transactions/account_*/journal.json'))[-1]
+        saved = json.loads(journal.read_bytes())
+        for edit, pending in ((lambda j: {**j, 'alias': 'Not An Alias'}, ('account-add', None)),
+                              (lambda j: {**j, 'alias': 'default'}, ('account-add', None)),
+                              (lambda j: {**j, 'kind': 'account-rename'}, (None, None)),
+                              (lambda j: {k: v for k, v in j.items() if k != 'kind'}, (None, None))):
+            journal.write_bytes(json.dumps(edit(saved)).encode())
+            journal.chmod(0o600)
+            with self.subTest(pending=pending), self.installed():
+                self.assertEqual(bundle_runtime.installer_pending(), pending)
+                for name, report in self.reports('work'):
+                    with self.subTest(login=name):
+                        value = report()
+                        self.assertEqual(value['code'], 'transaction_pending')
+                        self.assertEqual({k: v for k, v in value.items() if k.startswith('pending_')},
+                                         {'pending_action': pending[0]} if pending[0] else {})
+        journal.chmod(0o200)  # Unreadable: still pending (fail closed), naming nothing.
+        try:
+            with self.installed():
+                self.assertEqual(bundle_runtime.installer_pending(), (None, None))
+        finally:
+            journal.chmod(0o600)
+
     def test_a_login_is_admitted_again_once_the_transaction_finished(self):
         from telegram_search_mcp import account_registry
         for kind in ('upgrade', 'account-add', 'account-remove'):

@@ -31,7 +31,7 @@ from .bundle_runtime import (validate_tree, require_platform, read, unique_json,
                              CLAUDE_CODE_MODES, CLAUDE_MODE_STATUSES, CLAUDE_SKILLS_STATUSES, CLAUDE_DESKTOP_STATUSES,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
                              transaction_name, ADOPTED_NAME, MAX_ADOPTED, check_adopted, CLAUDE_USER_STATUSES,
-                             desktop_ownership)
+                             desktop_ownership, PENDING_ACTIONS, ACCOUNT_ACTIONS)
 from .session_owner import SessionOwnerLease, OwnerLeaseError, acquire_owner_lock, open_private_directory
 from . import account_registry, claude_desktop_registration, claude_registration
 from .config import alias_jobs, alias_server_name, accounts_root, named_alias
@@ -41,9 +41,8 @@ from .codex_registration import (Registration, Receipt, ConfigConflict, read_con
 
 
 # The closed set of unfinished actions a `transaction_pending` refusal names: an unfinished first install, an
-# unfinished change, or an unfinished account transaction (0.55 spec 3D).
-PENDING_ACTIONS = ('install', 'upgrade', 'rollback', 'uninstall', 'account-add', 'account-remove')
-ACCOUNT_ACTIONS = ('account-add', 'account-remove')
+# unfinished change, or an unfinished account transaction (0.55 spec 3D). PENDING_ACTIONS and ACCOUNT_ACTIONS come
+# from bundle_runtime, whose `installer_pending` names them to a refused alias login too (review fix 055d4).
 
 
 class InstallError(ValueError):

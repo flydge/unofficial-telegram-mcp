@@ -590,3 +590,18 @@ def login_admission(account) -> str | None:
     except ConfigurationError:
         return None  # The login's own read of its policy refuses it (`policy_unsafe`).
     return "newer_state_kept" if pinned is not None and pinned != __version__ else None
+
+
+def pending_fields() -> dict:
+    """What a `transaction_pending` login refusal adds, as the launcher's installer refusal does (review fix 055d4):
+    `pending_action`, the unfinished installer action from the closed PENDING_ACTIONS, and for an account action
+    `pending_account`, its alias (a closed token), read from the newest journal when the refusal is reported
+    (`bundle_runtime.installer_pending`). Empty when nothing is pending any more, outside an installed release, or
+    when the journal names none of the closed set (the refusal itself stands)."""
+    from . import bundle_runtime
+    pending = bundle_runtime.installer_pending()
+    if type(pending) is not tuple or len(pending) != 2 or pending[0] not in bundle_runtime.PENDING_ACTIONS:
+        return {}
+    action, alias = pending
+    named = action in bundle_runtime.ACCOUNT_ACTIONS and _named(alias)
+    return {"pending_action": action, **({"pending_account": alias} if named else {})}

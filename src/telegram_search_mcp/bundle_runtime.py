@@ -373,16 +373,33 @@ def installed():
 
 _PENDING_KINDS = (('change_', 'finished'), ('account_', 'finished'))
 MAX_TRANSACTIONS = 4 * 999
+# The closed set of unfinished actions a `transaction_pending` refusal names (the installer's and the launcher's, in
+# sync), and the account actions whose refusal also names the alias (0.55 spec 3D).
+PENDING_ACTIONS = ('install', 'upgrade', 'rollback', 'uninstall', 'account-add', 'account-remove')
+ACCOUNT_ACTIONS = ('account-add', 'account-remove')
+_UNNAMED = (None, None)
+
+
+def _pending(journal):
+    """(action, alias) an unfinished change's or account transaction's journal names, each from its closed set only."""
+    from .config import named_alias
+    kind = journal.get('kind')
+    action = kind if type(kind) is str and kind in PENDING_ACTIONS and kind != 'install' else None
+    alias = journal.get('alias')
+    return action, alias if action in ACCOUNT_ACTIONS and named_alias(alias) else None
 
 
 def installer_pending():
-    """Whether the installation this process runs from has an unfinished installer transaction: the newest upgrade,
-    rollback or uninstall (`change_<n>`) or account-add or account-remove (`account_<n>`) short of `finished`, or its
-    first install (`install_<24 hex>`) short of `complete`. A login of a named alias refuses while one is pending
-    (review fix 055d3): between two runs of a parked transaction no lock is held. False outside an installed
-    release. Read-only; a listing or journal it cannot read counts as pending (fail closed)."""
+    """None, or (action, alias) of the unfinished installer transaction of the installation this process runs from:
+    the newest upgrade, rollback or uninstall (`change_<n>`) or account-add or account-remove (`account_<n>`) short of
+    `finished`, or its first install (`install_<24 hex>`) short of `complete`. A login of a named alias refuses while
+    one is pending (review fix 055d3): between two runs of a parked transaction no lock is held. `action` is the one
+    its journal names, from PENDING_ACTIONS (`install` for a first install), and `alias` an account action's named
+    alias, so the login refusal names them as the installer's own does (review fix 055d4); either is None when the
+    journal names none of its closed set. None outside an installed release. Read-only; a listing or journal it
+    cannot read counts as pending, naming nothing (fail closed)."""
     if _SELECTION is None:
-        return False
+        return None
     transactions = _SELECTION.root.parent.parent / 'transactions'
     try:
         with open_owned_directory(transactions, private=True):
@@ -390,20 +407,24 @@ def installer_pending():
         names = []
         for count, path in enumerate(transactions.iterdir()):
             if count > MAX_TRANSACTIONS:
-                return True
+                return _UNNAMED
             names.append(path.name)
         for prefix, done in _PENDING_KINDS:
             numbers = [int(name[len(prefix):]) for name in names if name.startswith(prefix)
                        and name[len(prefix):].isascii() and name[len(prefix):].isdigit()
                        and 1 <= len(name) - len(prefix) <= 3 and name[len(prefix)] != '0']
-            if numbers and unique_json(read(transactions / ('%s%d' % (prefix, max(numbers))) / 'journal.json',
-                                            mode=0o600)).get('stage') != done:
-                return True
+            if numbers:
+                journal = unique_json(read(transactions / ('%s%d' % (prefix, max(numbers))) / 'journal.json',
+                                           mode=0o600))
+                if journal.get('stage') != done:
+                    return _pending(journal)
         installs = [name for name in names if name.startswith('install_') and transaction_name(name)]
-        return len(installs) == 1 and unique_json(read(transactions / installs[0] / 'journal.json',
-                                                       mode=0o600)).get('stage') != 'complete'
+        if len(installs) == 1 and unique_json(read(transactions / installs[0] / 'journal.json',
+                                                   mode=0o600)).get('stage') != 'complete':
+            return ('install', None)
+        return None
     except (BundleError, OSError, RuntimePathError, ValueError, TypeError):
-        return True
+        return _UNNAMED
 
 
 def selected_native():

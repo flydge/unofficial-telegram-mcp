@@ -131,15 +131,23 @@ def _connect_lock_held(paths):
         os.close(parent)
 
 
+def _pending(value):
+    """A `transaction_pending` report names the unfinished installer action (and an account action's alias) as the
+    installer's own refusal does (review fix 055d4, account_registry.pending_fields); any other is unchanged."""
+    if value['code'] == 'transaction_pending':
+        value.update(account_registry.pending_fields())
+    return value
+
+
 def _refused(code, action=None):
-    return {'status': 'refused', 'code': code, 'next_action': action or next_action('failed', code)}, 2
+    return _pending({'status': 'refused', 'code': code, 'next_action': action or next_action('failed', code)}), 2
 
 
 def _report(phase, code, retry_after=None):
     value = {'status': phase, 'code': code, 'next_action': next_action(phase, code)}
     if code == 'flood_wait':
         value['retry_after'] = retry_after  # Seconds Telegram asked to wait; None when it gave none.
-    return value, 0 if phase == 'ready' else 2
+    return _pending(value), 0 if phase == 'ready' else 2
 
 
 # connect -----------------------------------------------------------------------------------

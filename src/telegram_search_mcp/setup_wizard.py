@@ -35,6 +35,9 @@ class SetupResult:
     auth_client_closed: bool = False
     retry_after: int | None = None
     auth_client_destroyed: bool = False
+    # Only with `transaction_pending` (review fix 055d4, account_registry.pending_fields): the unfinished installer
+    # action and an account action's alias, as the installer's own refusal names them.
+    pending: tuple = ()
     @property
     def exit_code(self): return 0 if self.status == 'ready' else 2
     def to_dict(self):
@@ -54,12 +57,13 @@ class SetupResult:
         return dict(status=self.status, code=self.code,
             next_action='none' if self.status == 'ready' else actions.get(self.code, 'resume_in_foreground_native_terminal'),
             auth_client_closed=self.auth_client_closed, auth_client_destroyed=self.auth_client_destroyed,
-            retry_after=self.retry_after)
+            retry_after=self.retry_after, **(dict(self.pending) if self.code == 'transaction_pending' else {}))
 
 
 def _result(code, *, closed=False, destroyed=None, retry_after=None):
     code = code if code in _CODES else 'dependency_unavailable'
-    return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed)
+    pending = tuple(sorted(account_registry.pending_fields().items())) if code == 'transaction_pending' else ()
+    return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed, pending)
 
 
 def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None, expected_fingerprint=None):
@@ -150,8 +154,10 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     longer lists, refuses `alias_unavailable` (review fix 055d3). Run from an
     installed release it then refuses `transaction_pending` while an installer
     transaction is unfinished, and `newer_state_kept` while the alias's state
-    is another release's (account_registry.login_admission). The default's
-    keeps 0.54's behaviour.
+    is another release's (account_registry.login_admission); a
+    `transaction_pending` result names the unfinished installer action
+    (`pending_action`, and `pending_account` for an account action, review
+    fix 055d4). The default's keeps 0.54's behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 3600
