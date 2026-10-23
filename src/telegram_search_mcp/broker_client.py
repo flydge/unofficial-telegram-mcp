@@ -1803,8 +1803,9 @@ class BrokerClient(SelectionClientMixin):
 
     def prepare_album_send(self, request: PrepareAlbumSendRequest) -> PrepareAlbumSendResponse:
         """The broker's preview must state this exact request: recipient, group, and every item's artifact and
-        normalized caption in order (the preview model itself re-derives the album digest and totals)."""
-        from .outgoing_drafts import _safe_caption
+        normalized caption in order, and the normalized display_name of every item that gives one (the preview
+        model itself re-derives the album digest and totals)."""
+        from .outgoing_drafts import _safe_caption, _safe_display_name
         try:
             response = PrepareAlbumSendResponse.model_validate(
                 self._request("prepare_album_send", request.model_dump(mode="json")))
@@ -1812,7 +1813,10 @@ class BrokerClient(SelectionClientMixin):
                 preview = response.album
                 if (preview.recipient.chat_id != request.recipient or preview.group != request.group or
                         [(item.artifact_id, item.raw_caption) for item in preview.items] !=
-                        [(item.artifact_id, _safe_caption(item.caption)) for item in request.items]):
+                        [(item.artifact_id, _safe_caption(item.caption)) for item in request.items] or
+                        any(asked.display_name is not None and
+                            shown.raw_display_name != _safe_display_name(asked.display_name)
+                            for shown, asked in zip(preview.items, request.items))):
                     raise BrokerUnavailable("album preview does not match the request")
             return response
         except (BrokerUnavailable, ValidationError, ValueError):

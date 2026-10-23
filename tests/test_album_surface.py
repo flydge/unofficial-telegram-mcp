@@ -119,8 +119,16 @@ class SdkSurfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((items['minItems'], items['maxItems']), (2, 10))
         item = prepare.input_schema['$defs'][items['items']['$ref'].rsplit('/', 1)[1]]
         self.assertEqual((set(item['properties']), item['required'], item['additionalProperties']),
-                         ({'artifact_id', 'caption'}, ['artifact_id'], False))
+                         ({'artifact_id', 'caption', 'display_name'}, ['artifact_id'], False))
         self.assertEqual(item['properties']['caption']['maxLength'], 1024)
+        # An optional display_name with exactly the published grammar of prepare_artifact_send's.
+        grammar = lambda schema: {key: value for key, value in schema.items() if key not in ('title', 'description')}
+        single = tools['prepare_artifact_send'].input_schema['properties']['display_name']
+        branches = item['properties']['display_name']['anyOf']
+        self.assertEqual([grammar(branch) for branch in branches], [grammar(single), {'type': 'null'}])
+        refusals = json.dumps(prepare.output_schema)
+        for code in ('unsupported_item', 'item_too_large', 'album_too_large', 'display_name_required'):
+            self.assertIn(f'"{code}"', refusals)
         self.assertEqual(prepare.input_schema['properties']['group']['enum'], ['media', 'documents'])
         self.assertEqual(set(send.input_schema['properties']), {'draft_id', 'approved'})
         self.assertEqual(set(status.input_schema['properties']), {'draft_id'})
@@ -251,10 +259,16 @@ class ProxyTests(album.Store, unittest.TestCase):
                              restart_callback=lambda: None)
         proxy._request = lambda operation, payload: prepared.model_dump(mode='json')
         self.assertEqual(proxy.prepare_album_send(PrepareAlbumSendRequest(**request)).album, preview)
+        # A given display_name is the delivered name: the preview must state it, normalized as the broker does.
+        for name in ('one.png', 'dir/one.png'):
+            named = {'items': [request['items'][0] | {'display_name': name}, request['items'][1]]}
+            self.assertEqual(proxy.prepare_album_send(PrepareAlbumSendRequest(**(request | named))).album, preview)
         for change in ({'recipient': album.RECIPIENT + 1}, {'group': 'documents'},
                        {'items': request['items'][::-1]},
                        {'items': [{'artifact_id': photo.artifact_id, 'caption': 'Other'}, request['items'][1]]},
-                       {'items': [request['items'][0], {'artifact_id': jpeg.artifact_id, 'caption': 'Added'}]}):
+                       {'items': [request['items'][0], {'artifact_id': jpeg.artifact_id, 'caption': 'Added'}]},
+                       {'items': [request['items'][0] | {'display_name': 'other.png'}, request['items'][1]]},
+                       {'items': [request['items'][0], request['items'][1] | {'display_name': 'я' * 130 + '.jpg'}]}):
             with self.subTest(change=change):
                 refused = proxy.prepare_album_send(PrepareAlbumSendRequest(**(request | change)))
                 self.assertEqual((refused.status, refused.album), ('unavailable', None))

@@ -2585,10 +2585,12 @@ class Broker(SelectionBrokerMixin):
                 if artifact is None:
                     raise DraftError(ALBUM_UNAVAILABLE)
                 metadata = self._attachment_metadata(item.artifact_id)
-                # The recorded name and MIME type are display evidence only; the bytes are bound by sha256.
+                # The recorded name and MIME type are display evidence only; the bytes are bound by sha256. The
+                # caller's display_name, when given, is the delivered name.
                 items.append(album_drafts.album_item(group=request.group, artifact=artifact,
                     recorded_name=metadata[1] if metadata is not None else None,
-                    recorded_mime=metadata[2] if metadata is not None else None, caption=item.caption))
+                    recorded_mime=metadata[2] if metadata is not None else None, caption=item.caption,
+                    display_name=item.display_name))
             if sum(item.size_bytes for item in items) > album_drafts.MAX_ALBUM_BYTES:
                 raise AlbumRefusal('album_too_large')
             kinds = frozenset(item.kind for item in items)

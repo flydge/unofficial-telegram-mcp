@@ -510,8 +510,9 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "Prepare 2–10 owned artifacts as one ordered album: photos and videos (group media) or documents (group "
         "documents).",
         "A video item also needs video_send. Items are checked locally (256 MiB in total); captions are plain text; "
-        "refusal codes never name the item. " + _PREVIEW + " Preparing again for the same items and recipient "
-        "supersedes the earlier one. Album " + _OWN_DRAFTS + ". " + _UNTRUSTED),
+        "refusal codes never name the item (display_name_required: give display_name). " + _PREVIEW + " Preparing "
+        "again for the same items and recipient supersedes the earlier one. Album drafts are not reachable through "
+        "the generic draft tools. " + _UNTRUSTED),
     "send_prepared_album": ("Send a prepared album",
         "Revalidate the account, recipient and item bytes, then make exactly one album send attempt with per-item "
         "outcomes (sent, failed, outcome_unknown; a mix is partial).",
@@ -581,8 +582,8 @@ _FIELD_DOCS = {
     "after_draft_id": "Last draft_id of the previous page.",
     "draft_text": "Replacement text of a text draft.",
     "draft_caption": "Replacement caption of a file draft.",
-    "album_items": "2–10 {artifact_id, caption} in send order; artifact_ids as from get_attachment or "
-                   "create_local_artifact.",
+    "album_items": "2–10 {artifact_id, caption, display_name} in send order; artifact_ids as from get_attachment "
+                   "or create_local_artifact.",
     "album_group": "media: photos and videos (the default); documents: documents only.",
 }
 

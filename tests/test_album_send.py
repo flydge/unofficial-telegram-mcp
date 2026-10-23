@@ -6,6 +6,7 @@ validator, observation reducer and broker are production code. No live TDLib and
 from __future__ import annotations
 
 import copy
+import json
 import re
 import tempfile
 import unittest
@@ -527,6 +528,7 @@ def image(kind='PNG', size=(64, 48), color=(200, 30, 30)):
 
 
 PNG, JPEG = image('PNG'), image('JPEG', (40, 30))
+LONG = 'я' * 130  # With a four-character extension: a 264-byte recorded name, over the 240-byte staging bound.
 PDF = b'%PDF-1.4\n% synthetic\n'
 MOVIE = bmff.movie()
 
@@ -547,10 +549,10 @@ class Store:
         source.write_bytes(data)
         return self.store.store(source, kind='media')
 
-    def item(self, data, name=None, group='media', caption='', mime=None):
+    def item(self, data, name=None, group='media', caption='', mime=None, **given):
         from telegram_search_mcp.album_drafts import album_item
         return album_item(group=group, artifact=self.artifact(data), recorded_name=name, recorded_mime=mime,
-                          caption=caption)
+                          caption=caption, **given)
 
     def spec(self, *items, group='media'):
         from telegram_search_mcp.album_drafts import AlbumSpec
@@ -667,6 +669,54 @@ class ContractTests(Store, unittest.TestCase):
                         {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[1]}], 'x': 1}):
             with self.subTest(payload=repr(payload)[:90]), self.assertRaises(ValidationError):
                 PrepareAlbumSendRequest.model_validate(payload)
+
+    def test_the_item_display_name_has_the_grammar_of_prepare_artifact_send(self):
+        from pydantic import ValidationError
+        from telegram_search_mcp.album_drafts import AlbumItemRequest
+        from telegram_search_mcp.schemas import PrepareArtifactSendRequest
+        artifact = self.artifact(PNG).artifact_id
+        self.assertIsNone(AlbumItemRequest(artifact_id=artifact).display_name)
+        self.assertNotIn('display_name', AlbumItemRequest(artifact_id=artifact).model_dump(mode='json'))
+        for name in ('a', 'x' * 255, LONG + '.pdf', 'dir/shot.png'):
+            self.assertEqual(AlbumItemRequest(artifact_id=artifact, display_name=name).display_name, name)
+        for name in ('', 'x' * 256, 5, b'a.png', ['a.png']):
+            with self.subTest(name=repr(name)[:20]), self.assertRaises(ValidationError):
+                AlbumItemRequest.model_validate({'artifact_id': artifact, 'display_name': name})
+        def grammar(schema):
+            schema = dict(schema)
+            schema.pop('title', None), schema.pop('description', None)
+            return schema
+        album = AlbumItemRequest.model_json_schema()['properties']['display_name']
+        single = PrepareArtifactSendRequest.model_json_schema()['properties']['display_name']
+        self.assertEqual([grammar(branch) for branch in album['anyOf'] if branch != {'type': 'null'}], [grammar(single)])
+
+    def test_an_unusable_recorded_name_needs_a_display_name(self):
+        from telegram_search_mcp.album_drafts import AlbumRefusal
+        cases = ((PNG, LONG + '.png', 'media', 'shot.png', 'photo'), (MOVIE, LONG + '.mov', 'media', 'clip.mov', 'video'),
+                 (PDF, LONG + '.pdf', 'documents', 'report.pdf', 'document'))
+        for data, recorded, group, given, kind in cases:
+            self.assertEqual(len(recorded.encode('utf-8')), 264)
+            with self.subTest(kind=kind):
+                with self.assertRaises(AlbumRefusal) as refused:
+                    self.item(data, recorded, group=group)
+                self.assertEqual(refused.exception.code, 'display_name_required')
+                self.assertEqual(str(refused.exception), 'display_name_required')  # It names no input.
+                item = self.item(data, recorded, group=group, display_name=given)
+                self.assertEqual((item.kind, item.display_name), (kind, given))
+                # A given name is normalized like prepare_artifact_send's and must itself fit the staging bound.
+                self.assertEqual(self.item(data, recorded, group=group, display_name='a/b\\' + given).display_name,
+                                 given)
+                with self.assertRaises(AlbumRefusal) as refused:
+                    self.item(data, None, group=group, display_name='я' * 251 + given[-4:])
+                self.assertEqual(refused.exception.code, 'display_name_required')
+        self.assertEqual(self.item(MOVIE, LONG + '.mov', display_name='clip.mov').mime_type, 'video/quicktime')
+        self.assertEqual(self.item(MOVIE, 'clip.mov', display_name='clip.mp4').mime_type, 'video/mp4')
+        # A given name is the delivered name even when the recorded one is usable; a photo keeps its extension rule.
+        self.assertEqual(self.item(PNG, 'a.png', display_name='b.png').display_name, 'b.png')
+        self.assertEqual(self.item(PNG, display_name='b.png').display_name, 'b.png')
+        with self.assertRaises(AlbumRefusal) as refused:
+            self.item(PNG, 'a.png', display_name='b.jpg')
+        self.assertEqual(refused.exception.code, 'unsupported_item')
 
     def test_items_are_classified_locally_with_per_kind_limits(self):
         from telegram_search_mcp.album_drafts import AlbumRefusal
@@ -1185,8 +1235,9 @@ class BrokerFixture:
     def media(self):
         return (self.upload(PNG, 'one.png'), self.upload(MOVIE, 'two.mp4'), self.upload(JPEG, 'three.jpg'))
 
-    def prepare(self, *artifact_ids, client=CLIENT, **extra):
-        result = self.dispatch('prepare_album_send', self.request(*(artifact_ids or self.media()), **extra), client)
+    def prepare(self, *artifact_ids, client=CLIENT, payload=None, **extra):
+        result = self.dispatch('prepare_album_send', payload or self.request(*(artifact_ids or self.media()), **extra),
+                               client)
         self.assertEqual(result['status'], 'prepared', result)
         return result['album']
 
@@ -1329,6 +1380,42 @@ class PrepareTests(BrokerFixture, unittest.TestCase):
             self.assertEqual(self.dispatch('prepare_album_send', self.request(pdf, png, group='documents'))['refusal'],
                              'album_too_large')
         self.assertEqual(self.broker._drafts.known_ids(), before)
+
+    def recorded(self, artifact_id, name):
+        """The file name get_attachment recorded for a Telegram attachment (any name up to 255 characters)."""
+        with self.broker._state_lock:
+            anchor, _, mime, kind = self.broker._artifact_metadata[artifact_id]
+            self.broker._artifact_metadata[artifact_id] = (anchor, name, mime, kind)
+
+    def test_an_unusable_recorded_name_is_refused_until_the_item_has_a_display_name(self):
+        pdf, other = self.upload(PDF, 'report.pdf'), self.upload(PDF + b'2', 'other.pdf')
+        photo, video = self.upload(PNG, 'one.png'), self.upload(MOVIE, 'two.mp4')
+        self.recorded(pdf, LONG + '.pdf')
+        self.recorded(video, LONG + '.mp4')
+        for ids, group, index, given in (((pdf, other), 'documents', 0, 'Отчёт.pdf'),
+                                         ((photo, video), 'media', 1, 'clip.mp4')):
+            with self.subTest(group=group):
+                before = self.broker._drafts.known_ids()
+                refused = self.dispatch('prepare_album_send', self.request(*ids, group=group))
+                self.assertEqual(refused, {'status': 'refused', 'album': None, 'refusal': 'display_name_required',
+                                           'detail': 'an item is not eligible for this album; no draft was created'})
+                self.assertEqual(self.broker._drafts.known_ids(), before)
+                payload = self.request(*ids, group=group)
+                payload['items'][index]['display_name'] = given
+                album = self.prepare(payload=payload)
+                names = [item['display_name'].removeprefix('[untrusted Telegram evidence] ') for item in album['items']]
+                self.assertEqual(json.loads(names[index]), given)
+        # The delivered name is what the shipped dialog shows.
+        from types import SimpleNamespace
+        from telegram_search_mcp.approval_prompt import decide_approved_send
+        self.broker._approval_prompt = decide_approved_send
+        shown = []
+        def run(argv, **options):
+            shown.append(argv[-1])
+            return SimpleNamespace(returncode=0, stdout=b'DECLINED\n')
+        with patch('telegram_search_mcp.approval_prompt.subprocess.run', side_effect=run):
+            self.assertEqual(self.send(album['draft_id'])['status'], 'declined')
+        self.assertIn('Item 2 of 2: video «clip.mp4»', shown[0])
 
     def test_unreadable_recipient_is_unavailable(self):
         self.raw.chats.pop(RECIPIENT)

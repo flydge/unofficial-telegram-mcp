@@ -64,7 +64,8 @@ _PHOTO_NAMES = {'JPEG': 'photo.jpg', 'PNG': 'photo.png', 'WEBP': 'photo.webp'}
 
 ItemKind = Literal['photo', 'video', 'document']
 Group = Literal['media', 'documents']
-Refusal = Literal['unsupported_item', 'item_too_large', 'album_too_large']
+REFUSALS = ('unsupported_item', 'item_too_large', 'album_too_large', 'display_name_required')
+Refusal = Literal['unsupported_item', 'item_too_large', 'album_too_large', 'display_name_required']
 SlotOutcome = Literal['sent', 'failed', 'outcome_unknown']
 Overall = Literal['sent', 'failed', 'partial', 'outcome_unknown']
 StrictBool = Annotated[bool, Field(strict=True)]
@@ -73,6 +74,8 @@ Position = Annotated[int, Field(strict=True, ge=1, le=MAX_ITEMS)]
 ItemBytes = Annotated[int, Field(strict=True, gt=0, le=max(MAX_ITEM_BYTES.values()))]
 TotalBytes = Annotated[int, Field(strict=True, gt=0, le=MAX_ALBUM_BYTES)]
 MessageId = Annotated[int, Field(strict=True, gt=0, lt=2**53)]
+# prepare_artifact_send's display_name grammar (schemas.PrepareArtifactSendRequest), optional per item.
+DisplayName = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 # One reversible JSON layer: an astral scalar costs 12 characters, plus the two quotes.
 EscapedName = Annotated[str, Field(strict=True, min_length=len(EVIDENCE_MARKER) + 3,
                                    max_length=len(EVIDENCE_MARKER) + 12 * MAX_NAME + 2)]
@@ -84,7 +87,7 @@ class AlbumRefusal(ValueError):
     """A closed, content-free refusal code for an ineligible album; it never names the item."""
 
     def __init__(self, code: str):
-        if code not in ('unsupported_item', 'item_too_large', 'album_too_large'):
+        if code not in REFUSALS:
             raise ValueError('unknown album refusal')
         self.code = code
         super().__init__(code)
@@ -219,18 +222,31 @@ def _photo_format(path: Path) -> str | None:
         return None
 
 
-def album_item(*, group: str, artifact, recorded_name: object, recorded_mime: object, caption: str) -> AlbumItemSpec:
+def _delivered_name(display_name: str | None, recorded: str | None, fixed: str) -> str:
+    """The caller's display_name, else the recorded file name, else the fixed name, normalized as for
+    prepare_artifact_send; a name over the 240-byte staging bound is `display_name_required`, never another name."""
+    from .outgoing_drafts import _safe_display_name
+    try:
+        return _safe_display_name(display_name if display_name is not None else recorded or fixed)
+    except ValueError:
+        raise AlbumRefusal('display_name_required') from None
+
+
+def album_item(*, group: str, artifact, recorded_name: object, recorded_mime: object, caption: str,
+               display_name: str | None = None) -> AlbumItemSpec:
     """Classify one owned artifact for an album, locally and before any provider read.
 
     `media`: a PNG, JPEG or WebP photo that validate_photo accepts, else an MP4/MOV video that probe_video
     reads; anything else is `unsupported_item`. `documents`: any artifact of at most 64 MiB, sent with content
-    type detection disabled. A per-kind size limit refuses with `item_too_large`. The recorded file name is
-    display evidence only (the bytes are bound by sha256); without one a fixed name stands in.
+    type detection disabled. A per-kind size limit refuses with `item_too_large`. The delivered name is the
+    caller's `display_name`, else the recorded file name (display evidence only: the bytes are bound by sha256),
+    else a fixed name; one that cannot be staged is `display_name_required`.
     """
-    from .outgoing_drafts import _safe_caption, _safe_display_name
+    from .outgoing_drafts import _safe_caption
     from .outgoing_media import validate_photo
     from .video_probe import VideoProbeError, probe_video
-    if group not in GROUP_KINDS or type(caption) is not str:
+    if group not in GROUP_KINDS or type(caption) is not str or (display_name is not None and
+                                                                 type(display_name) is not str):
         raise ValueError('invalid album item request')
     size = artifact.size_bytes
     name = recorded_name if type(recorded_name) is str and recorded_name else None
@@ -242,7 +258,7 @@ def album_item(*, group: str, artifact, recorded_name: object, recorded_mime: ob
         mime = (recorded_mime if type(recorded_mime) is str and len(recorded_mime) <= 127 and
                 _MIME.fullmatch(recorded_mime) else 'application/octet-stream')
         return AlbumItemSpec(kind='document', artifact_id=artifact.artifact_id, sha256=artifact.sha256,
-                             size_bytes=size, display_name=_safe_display_name(name or ''), mime_type=mime,
+                             size_bytes=size, display_name=_delivered_name(display_name, name, ''), mime_type=mime,
                              caption=_safe_caption(caption))
     if size > max(MAX_ITEM_BYTES['photo'], MAX_ITEM_BYTES['video']):
         raise AlbumRefusal('item_too_large')
@@ -250,23 +266,23 @@ def album_item(*, group: str, artifact, recorded_name: object, recorded_mime: ob
     if image_format in PHOTO_FORMATS:
         if size > MAX_ITEM_BYTES['photo']:
             raise AlbumRefusal('item_too_large')
-        display_name = _safe_display_name(name or _PHOTO_NAMES[image_format])
+        delivered = _delivered_name(display_name, name, _PHOTO_NAMES[image_format])
         mime = PHOTO_FORMATS[image_format][0]
         try:
-            sides = validate_photo(artifact.path, size_bytes=size, display_name=display_name, mime_type=mime)
+            sides = validate_photo(artifact.path, size_bytes=size, display_name=delivered, mime_type=mime)
         except ValueError:
             raise AlbumRefusal('unsupported_item') from None
         return AlbumItemSpec(kind='photo', artifact_id=artifact.artifact_id, sha256=artifact.sha256,
-                             size_bytes=size, display_name=display_name, mime_type=mime,
+                             size_bytes=size, display_name=delivered, mime_type=mime,
                              caption=_safe_caption(caption), facts=tuple(sides))
     try:
         facts = probe_video(artifact.path, size_bytes=size)
     except VideoProbeError:
         raise AlbumRefusal('unsupported_item') from None
-    display_name = _safe_display_name(name or 'video.mp4')
-    mime = 'video/quicktime' if display_name.casefold().endswith('.mov') else 'video/mp4'
+    delivered = _delivered_name(display_name, name, 'video.mp4')
+    mime = 'video/quicktime' if delivered.casefold().endswith('.mov') else 'video/mp4'
     return AlbumItemSpec(kind='video', artifact_id=artifact.artifact_id, sha256=artifact.sha256, size_bytes=size,
-                         display_name=display_name, mime_type=mime, caption=_safe_caption(caption), facts=facts)
+                         display_name=delivered, mime_type=mime, caption=_safe_caption(caption), facts=facts)
 
 
 # --- public contracts --------------------------------------------------------------------------------------
@@ -438,6 +454,8 @@ class AlbumDraftPreview(_Frozen):
 class AlbumItemRequest(_Closed):
     artifact_id: ArtifactId
     caption: Annotated[str, Field(strict=True, max_length=MAX_CAPTION)] = ''
+    display_name: DisplayName | None = optional_field(description='File name the recipient sees; omit for the '
+                                                                  'recorded file name.')
 
 
 class PrepareAlbumSendRequest(_Closed):
