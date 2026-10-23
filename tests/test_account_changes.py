@@ -7,6 +7,7 @@ because a disposable home's path is long (tests/test_account_install.py).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -671,6 +672,96 @@ class ReinstallOverKeptAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.refused('account_add', 'accounts_inconsistent', 'office')
         self.refused('account_remove', 'accounts_inconsistent', 'work')
         self.assertEqual(self.snapshot(), before)
+
+
+class RepairHarness(AliasChangeHarness):
+    """account-add's repair path: `work` added and logged in, uninstalled (the registry and its session stay,
+    accounts.json leaves with the root), then a first install."""
+
+    def kept(self, packet=None):
+        """Uninstalled, then `packet` (default: the same kit) installed first; returns the alias's tree without its
+        runtime.toml."""
+        same, _ = self.full()
+        self.account('account_add')
+        self.alias_session()
+        self.change('uninstall')
+        self.install(packet or same)
+        self.service(self.release)
+        self.assertEqual((self.registry(), self.sidecar()), (('work',), None))
+        return self.alias_tree()
+
+    def pin(self):
+        import tomllib
+        return tomllib.loads((self.jobs.root / 'runtime.toml').read_text())['expected_package_version']
+
+    def installed(self, version):
+        """This process run from the current release (`version`), as the launcher admits a login."""
+        from telegram_search_mcp import bundle_runtime
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(bundle_runtime, '_SELECTION',
+                                              bundle_runtime.Selection(self.release, 'x' * 64)))
+        stack.enter_context(mock.patch('telegram_search_mcp.__version__', version))
+        return stack
+
+
+class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
+    """Review fix (055d4, low): account-add's repair path kept the alias's runtime.toml version line of the release it
+    was logged in with, so after a reinstall at another version its login refused `newer_state_kept` (a meaning that
+    does not apply) and every upgrade refused `policy_conflict` for the whole installation without naming the alias.
+    Now the repair moves that line onto the current release from any value, journaled (`policy`) as a first install
+    that adopts the default's broker moves the default's, so a later install re-registers the alias with its
+    account-add, keeping its session, at any version."""
+
+    THIRD = '0.55.0.dev2'
+
+    def reinstalled(self):
+        """`kept` at another version: a first install of NEW_VERSION. The default's own version line is not this fix's
+        (a first install never moves it): it is written as the reinstalled release's, so only the alias can block."""
+        session = self.kept(self.newer())
+        self.session(pin=NEW_VERSION)
+        self.assertEqual(self.pin(), OLD_VERSION)
+        return session
+
+    def test_the_repair_moves_the_alias_onto_the_current_release_and_keeps_its_session(self):
+        session = self.reinstalled()
+        self.assertEqual(self.account('account_add')['status'], 'account_added')
+        self.assertEqual(self.pin(), NEW_VERSION)
+        self.assertEqual(self.alias_tree(), session)
+        with self.installed(NEW_VERSION):
+            self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('work', self.home)))
+        upgraded = self.install(self.newer('c', version=self.THIRD))
+        self.assertEqual(upgraded['status'], 'upgraded')
+        self.assertEqual(self.pin(), self.THIRD)
+        self.assertEqual(self.alias_tree(), session)
+
+    def test_a_kill_inside_the_move_resumes_to_the_same_state(self):
+        for stage in ('recorded:policy', 'published:policy'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                session = self.reinstalled()
+
+                def die(value, stage=stage):
+                    if value == stage:
+                        raise KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    self.account('account_add', checkpoint=die)
+                self.assertEqual(self.account('account_add')['status'], 'account_added')
+                self.assertEqual(self.pin(), NEW_VERSION)
+                self.assertEqual(self.alias_tree(), session)  # No temporary left beside runtime.toml.
+
+    def test_a_version_line_it_cannot_move_refuses_before_the_transaction(self):
+        self.reinstalled()
+        policy = self.jobs.root / 'runtime.toml'
+        policy.write_bytes(policy.read_bytes() + ('expected_package_version = "%s"\n' % OLD_VERSION).encode())
+        before, data = self.snapshot(), policy.read_bytes()
+        self.refused('account_add', 'policy_conflict')
+        self.assertEqual((self.snapshot(), policy.read_bytes()), (before, data))
+
+    def test_the_same_release_leaves_the_line_as_it_is(self):
+        self.kept()
+        data = (self.jobs.root / 'runtime.toml').read_bytes()
+        self.assertEqual(self.account('account_add')['status'], 'account_added')
+        self.assertEqual((self.jobs.root / 'runtime.toml').read_bytes(), data)
 
 
 class AccountReleaseTests(AliasChangeHarness, unittest.TestCase):

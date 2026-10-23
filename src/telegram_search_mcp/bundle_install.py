@@ -4143,13 +4143,15 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     alias's server name (Codex `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
     `claude_desktop_registration_conflict` or `claude_desktop_config_unsupported`), a loaded default broker that
     is not the receipt's exact definition (`service_conflict`), an alias broker definition that is not of this
-    installation's own shape (`service_conflict`; on the repair path one of another release is rewritten, below), a
-    running login of another alias (`login_in_progress`: every run holds every other alias's connect.lock,
-    `_LoginLocks`, review fix 055d2), or any unfinished transaction (`transaction_pending`). Then, journaled: the
-    alias's broker definition of another release rewritten to this release's (`service: rewritten`); the registry
-    entry (unpinned); the alias's root, owner-only and empty but for its run directory (an existing one kept), which
-    a login never creates (review fix 055d3); one `check` on the default broker when it is loaded, so its authorized
-    account is pinned before the alias's first login (an unanswered check refuses
+    installation's own shape (`service_conflict`; on the repair path one of another release is rewritten, below), on
+    the repair path a runtime.toml version line it cannot move (`policy_conflict`), a running login of another alias
+    (`login_in_progress`: every run holds every other alias's connect.lock, `_LoginLocks`, review fix 055d2), or any
+    unfinished transaction (`transaction_pending`). Then, journaled: the alias's broker definition of another
+    release rewritten to this release's (`service: rewritten`); on the repair path its runtime.toml version line
+    moved onto this release from any value, its session kept (review fix 055d4); the registry entry (unpinned); the
+    alias's root, owner-only and empty but for its run directory (an existing one kept), which a login never creates
+    (review fix 055d3); one `check` on the default broker when it is loaded, so its authorized account is pinned
+    before the alias's first login (an unanswered check refuses
     `default_check_failed`, and the retry resumes there); the Codex entry (`mcp --account <alias>`, never required);
     the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the install's);
     the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's accounts.json
@@ -4181,6 +4183,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
             if not resuming and _finished_account(journal, 'account-add', alias) and alias in registry \
                     and (records.get(alias) or {}).get('transaction') == name_tx:
                 return _account_added(journal, alias)  # A retry after it finished: its result, no effect.
+            # The repair path (review fix 055d4): the registry already lists the alias without a record (an uninstall
+            # kept it); the journal records which path opened the transaction.
+            repair = journal.get('repair') is True if resuming else alias in registry
             # Every other alias's connect.lock, held until this run ends (review fix 055d2, lead decision A,
             # `_LoginLocks`: each that exists before any check, the others right before the transaction opens). Its own
             # is left out (lead decision): until its registry entry no login of it is admitted, and its login changes
@@ -4213,6 +4218,12 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 _, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if loaded and running != target:
                     _alias_gate(pending, home, jobs, running, installed)
+                # Its runtime.toml version line, moved below onto this release from any value (review fix 055d4): one
+                # it could not move refuses here.
+                if repair and os.path.lexists(jobs.root):
+                    data, exists = _read_file(jobs.policy, MAX_POLICY_BYTES)
+                    if exists:
+                        _policy_candidate(data, None, receipt['package_version'])
                 source, existed = _config(config)
                 try:
                     change = merge_registration(source, registration, name=name)
@@ -4233,7 +4244,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 def files(tx_name):
                     owner = Receipt(installation_id, tx_name, None, change.post_subtree_hash, None)
                     return {'journal.json': encoded({**identity, 'stage': 'prepared', 'config_existed': existed,
-                                                     'publications': {}}),
+                                                     **({'repair': True} if repair else {}), 'publications': {}}),
                             'config.preimage': change.source, 'config.candidate': change.candidate,
                             'registration.json': owner.to_bytes()}
                 logins.complete()
@@ -4272,6 +4283,12 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                             maximum=MAX_PLIST_BYTES)
                     if _alias_service(launchctl, jobs, installed, root)[0] != _plist_bytes(target):
                         raise InstallError('service_conflict')
+            # On the repair path, its runtime.toml version line onto this release from any value (review fix 055d4),
+            # by state on every run and journaled (`policy`), as a first install that adopts the default's broker moves
+            # the default's: a session kept by an uninstall of another release is then this release's, so its login
+            # is admitted (no `newer_state_kept`) and the next upgrade moves it on (no `policy_conflict`).
+            if repair:
+                _policy_step(j, jobs.root, None, receipt['package_version'])
             # The registry first: it admits the alias (spec 3B) and makes every broker pin from its next check on.
             if not j.reached('registry'):
                 if alias not in _registered_aliases(home):
