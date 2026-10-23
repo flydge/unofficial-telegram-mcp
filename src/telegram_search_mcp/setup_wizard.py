@@ -154,10 +154,11 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     longer lists, refuses `alias_unavailable` (review fix 055d3). Run from an
     installed release it then refuses `transaction_pending` while an installer
     transaction is unfinished, and `newer_state_kept` while the alias's state
-    is another release's (account_registry.login_admission); a
-    `transaction_pending` result names the unfinished installer action
-    (`pending_action`, and `pending_account` for an account action, review
-    fix 055d4). The default's keeps 0.54's behaviour.
+    is another release's (account_registry.login_admission), asked again
+    right before the handoff (review fix 055d4); a `transaction_pending`
+    result names the unfinished installer action (`pending_action`, and
+    `pending_account` for an account action). The default's keeps 0.54's
+    behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 3600
@@ -289,6 +290,11 @@ def _run_setup(paths, terminal, store, provider_factory, handoff, timeout, close
     except Exception:
         return _result('dependency_unavailable')
     if result.status == 'authorized' and result.auth_client_closed and result.auth_client_destroyed:
+        # A named alias's admission asked again right before the handoff, as the connect helper does (review fix
+        # 055d4, connect_cli._handoff): a refusal is the run's code and nothing is handed off.
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _result(refused, closed=True)
         try:
             boundary = handoff()
             if boundary != 'ready':

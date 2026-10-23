@@ -764,6 +764,71 @@ class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
         self.assertEqual((self.jobs.root / 'runtime.toml').read_bytes(), data)
 
 
+class RepairLoginLockTests(RepairHarness, unittest.TestCase):
+    """Review fix (055d4, low): account-add's repair path left its own alias out of `_LoginLocks` and its running-job
+    check, although the registry already admits that alias's logins, so an inline `setup`/`resume --account` of it
+    could hand off a broker while the repair was unfinished. Now, when the registry already lists the alias, every run
+    holds its connect.lock too (as account-remove does); a fresh add still holds every other alias's only."""
+
+    def test_a_login_of_the_alias_refuses_the_repair_and_none_starts_during_a_run(self):
+        from telegram_search_mcp.session_owner import OwnerLeaseError, acquire_owner_lock
+        for case in ('inline setup holding connect.lock', 'connect job running'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.kept()
+                lock, held = self.jobs.root / 'run' / 'connect.lock', None
+                if case == 'connect job running':
+                    self.launchctl.set_job(self.jobs.connect_label, [str(self.release / 'python/bin/python3'), 'x'])
+                else:
+                    held = acquire_owner_lock(lock)
+                try:
+                    before, root = self.snapshot(), tree(self.jobs.root)
+                    self.refused('account_add', 'login_in_progress')
+                    self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, root))
+                finally:
+                    if held is not None:
+                        os.close(held)
+                if case == 'connect job running':
+                    self.launchctl.idle(self.jobs.connect_label)
+                attempts = []
+
+                def login(stage):
+                    try:
+                        os.close(acquire_owner_lock(lock))
+                    except OwnerLeaseError as error:
+                        attempts.append(error.code)
+                    else:
+                        attempts.append('taken')
+                self.assertEqual(self.account('account_add', checkpoint=login)['status'], 'account_added')
+                self.assertGreater(len(attempts), 10)
+                self.assertEqual(set(attempts), {'owner_busy'})
+
+    def test_a_resumed_repair_holds_it_too(self):
+        from telegram_search_mcp.session_owner import OwnerLeaseError, acquire_owner_lock
+        self.kept()
+
+        def die(value):
+            if value == 'default_check':
+                raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.account('account_add', checkpoint=die)
+        held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
+        try:
+            self.refused('account_add', 'login_in_progress')
+        finally:
+            os.close(held)
+        attempts = []
+
+        def login(stage):
+            try:
+                os.close(acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock'))
+            except OwnerLeaseError as error:
+                attempts.append(error.code)
+        self.assertEqual(self.account('account_add', checkpoint=login)['status'], 'account_added')
+        self.assertTrue(attempts)
+        self.assertEqual(set(attempts), {'owner_busy'})
+
+
 class AccountReleaseTests(AliasChangeHarness, unittest.TestCase):
     """Review fix (055d, medium): account-add and account-remove run only from the receipt's current release, and only
     while that release knows aliases (0.55 or newer): every other run refuses `release_not_current` before anything,

@@ -7,6 +7,7 @@ Without a registry the default asks no getMe (0.54). The user id never reaches a
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -287,6 +288,43 @@ class RootlessSetupTests(SetupHarness):
                                      ('pending', 'alias_unavailable', 'stop_and_report'))
                     self.assertEqual((self.events, self.raws, self.terminal.prompts, self.handoffs), ([], [], [], 0))
                     self.assertEqual(tree(self.accounts), before)
+
+
+class HandoffAdmissionTests(SetupHarness):
+    """Review fix (055d4, low): `setup`/`resume --account` asked `login_admission` before and once it held the alias's
+    connect.lock, but not again right before its handoff, as the connect helper does (`connect_cli._handoff`). Now a
+    transaction found pending there (the backstop: none can start while the run holds the lock) ends the run
+    `transaction_pending`, naming the action, and nothing is handed off. The default's setup asks nothing."""
+
+    def installation(self, pending):
+        """This process run from an installed release whose installer reads `pending()` from its newest journal."""
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch('telegram_search_mcp.bundle_runtime.installed', return_value=True))
+        stack.enter_context(mock.patch('telegram_search_mcp.bundle_runtime.installer_pending', side_effect=pending))
+        return stack
+
+    def test_a_transaction_found_pending_at_the_handoff_ends_the_run_before_it(self):
+        self.home_with('work')
+        self.use('work')
+        for resume in (False, True):
+            start = len(self.events)
+            # Pending once this run's provider exists: after both earlier questions, before the handoff.
+            with self.subTest(resume=resume), \
+                    self.installation(lambda: ('account-add', 'play') if len(self.events) > start else None):
+                result = self.setup(USER_B, resume=resume, states=['authorizationStateReady'] if resume else None)
+                self.assert_refused(result, 'transaction_pending', 'finish_pending_installer_action_then_retry')
+                self.assertEqual({k: v for k, v in result.to_dict().items() if k.startswith('pending_')},
+                                 {'pending_action': 'account-add', 'pending_account': 'play'})
+        result = self.resume(USER_B)  # Once nothing is pending: handed off.
+        self.assertEqual((result.status, result.code, self.handoffs), ('ready', None, 1))
+
+    def test_the_default_setup_asks_nothing_at_its_handoff(self):
+        self.home_with()
+        self.use('default')
+        with self.installation(lambda: ('upgrade', None)):
+            result = self.setup(USER_A)
+        self.assertEqual((result.status, result.code, self.handoffs), ('ready', None, 1))
+        self.assertNotIn('pending_action', result.to_dict())
 
 
 class CodeTableTests(unittest.TestCase):

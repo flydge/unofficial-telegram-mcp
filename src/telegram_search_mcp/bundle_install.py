@@ -4144,14 +4144,15 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     `claude_desktop_registration_conflict` or `claude_desktop_config_unsupported`), a loaded default broker that
     is not the receipt's exact definition (`service_conflict`), an alias broker definition that is not of this
     installation's own shape (`service_conflict`; on the repair path one of another release is rewritten, below), on
-    the repair path a runtime.toml version line it cannot move (`policy_conflict`), a running login of another alias
-    (`login_in_progress`: every run holds every other alias's connect.lock, `_LoginLocks`, review fix 055d2), or any
-    unfinished transaction (`transaction_pending`). Then, journaled: the alias's broker definition of another
-    release rewritten to this release's (`service: rewritten`); on the repair path its runtime.toml version line
-    moved onto this release from any value, its session kept (review fix 055d4); the registry entry (unpinned); the
-    alias's root, owner-only and empty but for its run directory (an existing one kept), which a login never creates
-    (review fix 055d3); one `check` on the default broker when it is loaded, so its authorized account is pinned
-    before the alias's first login (an unanswered check refuses
+    the repair path a runtime.toml version line it cannot move (`policy_conflict`), a running login of another
+    alias, or on the repair path of this one (`login_in_progress`: every run holds every other alias's connect.lock,
+    `_LoginLocks`, review fix 055d2, and on the repair path its own too, review fix 055d4), or any unfinished
+    transaction (`transaction_pending`). Then, journaled: the alias's broker definition of another release rewritten
+    to this release's (`service: rewritten`); on the repair path its runtime.toml version line moved onto this
+    release from any value, its session kept (review fix 055d4); the registry entry (unpinned); the alias's root,
+    owner-only and empty but for its run directory (an existing one kept), which a login never creates (review fix
+    055d3); one `check` on the default broker when it is loaded, so its authorized account is pinned before the
+    alias's first login (an unanswered check refuses
     `default_check_failed`, and the retry resumes there); the Codex entry (`mcp --account <alias>`, never required);
     the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the install's);
     the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's accounts.json
@@ -4183,15 +4184,14 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
             if not resuming and _finished_account(journal, 'account-add', alias) and alias in registry \
                     and (records.get(alias) or {}).get('transaction') == name_tx:
                 return _account_added(journal, alias)  # A retry after it finished: its result, no effect.
-            # The repair path (review fix 055d4): the registry already lists the alias without a record (an uninstall
-            # kept it); the journal records which path opened the transaction.
-            repair = journal.get('repair') is True if resuming else alias in registry
             # Every other alias's connect.lock, held until this run ends (review fix 055d2, lead decision A,
             # `_LoginLocks`: each that exists before any check, the others right before the transaction opens). Its own
-            # is left out (lead decision): until its registry entry no login of it is admitted, and its login changes
-            # nothing this transaction writes (its entries, the sidecar; the broker definition step below decides by
-            # state on every run).
-            logins = locks.enter_context(_LoginLocks(launchctl, home, {*registry, *records} - {alias}))
+            # is left out of a fresh add (lead decision): until its registry entry no login of it is admitted. On the
+            # repair path the registry already admits its logins, so every run holds its own too, as account-remove's
+            # does (review fix 055d4); the journal records which path opened it.
+            repair = journal.get('repair') is True if resuming else alias in registry
+            aliases = {*registry, *records} if repair else {*registry, *records} - {alias}
+            logins = locks.enter_context(_LoginLocks(launchctl, home, aliases))
             if resuming:
                 logins.complete()
             if not resuming:
