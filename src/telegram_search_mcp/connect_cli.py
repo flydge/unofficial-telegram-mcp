@@ -328,6 +328,9 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
         return {'status': 'already_connected'}, 0  # Repeat use never asks for a new login.
     if probe == 'starting':
         return _starting(state, runner, uid, python_executable, broker_plist, _jobs(paths))
+    refused = account_registry.login_admission(paths.account)  # Asked before the lock too: then nothing is created.
+    if refused is not None:
+        return _refused(refused)
     try:
         lock, response = _enter(paths, runner, uid, sleeper, clock)
     except LaunchAgentError:
@@ -339,6 +342,11 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
     if lock is None:
         return response
     try:  # Released right after the bootstrap; an inline run holds it throughout.
+        # A named alias run from an installed release, with the lock held: no installer transaction may be pending
+        # (review fix 055d3); refused before any stop, job or status change.
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _refused(refused)
         return _locked(paths, state, probe, client_factory=client_factory, terminal=terminal, inline=inline,
                        runner=runner, uid=uid, sleeper=sleeper, python_executable=python_executable,
                        broker_plist=broker_plist)
@@ -648,7 +656,10 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
     (restore_broker never creates one). With handle_sigterm (the launchd job), SIGTERM
     cancels the run through the UI so the auth client is torn down normally, and skips the
     linger. The page stays up briefly after a terminal phase, then the server closes and
-    our own launchd plist is removed.
+    our own launchd plist is removed. A named alias's helper run from an installed release
+    asks account_registry.login_admission once it holds the lock (a refusal, such as
+    `transaction_pending`, is written as its terminal status; no screen, run or restore)
+    and again right before its handoff (review fix 055d3).
     """
     if restore_broker is None:
         restore_broker = functools.partial(restore_enrolled_broker, **_jobs(paths))
@@ -670,6 +681,11 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
                 return ConnectResult('failed', 'owner_unsafe')
             if lock is None:
                 return ConnectResult('failed', 'connect_in_progress')  # The lock holder owns the status.
+            refused = account_registry.login_admission(paths.account)
+            if refused is not None:
+                # A pending installer transaction owns the services (review fix 055d3): only the status is ours.
+                _record_failure(paths, clock, clock() + lifetime, refused)
+                return ConnectResult('failed', refused)
         ran = True
         expires_at = clock() + lifetime  # The one deadline of this run.
         ui = ui_factory()
@@ -684,7 +700,7 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
             pass  # Headless or no browser: the run goes on and `wait` keeps reporting its phase.
         finally:
             url = None
-        result = run(paths, store, provider_factory, ui, handoff=lambda: handoff(paths=paths),
+        result = run(paths, store, provider_factory, ui, handoff=lambda: _handoff(paths, handoff),
                      expires_at=expires_at)
         if result.phase == 'failed' and result.code == 'owner_busy':
             try:  # We hold connect.lock, so this status is ours to write.
@@ -720,6 +736,13 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
                 signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
             if lock is not None:
                 os.close(lock)
+
+
+def _handoff(paths, handoff):
+    """The handoff, after the admission is asked again for a named alias (review fix 055d3): a refusal is the run's
+    code and no broker is started."""
+    refused = account_registry.login_admission(paths.account)
+    return handoff(paths=paths) if refused is None else refused
 
 
 def _restore_quietly(restore_broker):

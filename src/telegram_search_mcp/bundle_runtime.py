@@ -366,6 +366,46 @@ def activate(root, index_sha256):
     _SELECTION = selection
 
 
+def installed():
+    """Whether this process runs from an installed release (the launcher activated it); False in source mode."""
+    return _SELECTION is not None
+
+
+_PENDING_KINDS = (('change_', 'finished'), ('account_', 'finished'))
+MAX_TRANSACTIONS = 4 * 999
+
+
+def installer_pending():
+    """Whether the installation this process runs from has an unfinished installer transaction: the newest upgrade,
+    rollback or uninstall (`change_<n>`) or account-add or account-remove (`account_<n>`) short of `finished`, or its
+    first install (`install_<24 hex>`) short of `complete`. A login of a named alias refuses while one is pending
+    (review fix 055d3): between two runs of a parked transaction no lock is held. False outside an installed
+    release. Read-only; a listing or journal it cannot read counts as pending (fail closed)."""
+    if _SELECTION is None:
+        return False
+    transactions = _SELECTION.root.parent.parent / 'transactions'
+    try:
+        with open_owned_directory(transactions, private=True):
+            pass
+        names = []
+        for count, path in enumerate(transactions.iterdir()):
+            if count > MAX_TRANSACTIONS:
+                return True
+            names.append(path.name)
+        for prefix, done in _PENDING_KINDS:
+            numbers = [int(name[len(prefix):]) for name in names if name.startswith(prefix)
+                       and name[len(prefix):].isascii() and name[len(prefix):].isdigit()
+                       and 1 <= len(name) - len(prefix) <= 3 and name[len(prefix)] != '0']
+            if numbers and unique_json(read(transactions / ('%s%d' % (prefix, max(numbers))) / 'journal.json',
+                                            mode=0o600)).get('stage') != done:
+                return True
+        installs = [name for name in names if name.startswith('install_') and transaction_name(name)]
+        return len(installs) == 1 and unique_json(read(transactions / installs[0] / 'journal.json',
+                                                       mode=0o600)).get('stage') != 'complete'
+    except (BundleError, OSError, RuntimePathError, ValueError, TypeError):
+        return True
+
+
 def selected_native():
     if _SELECTION is None: return None
     _SELECTION.check()

@@ -563,3 +563,20 @@ def login_lock(account) -> int:
         raise
     return descriptor
 
+
+# The codes `login_admission` refuses with, each in the connect and setup code tables with its next action.
+ADMISSION_CODES = ("transaction_pending",)
+
+
+def login_admission(account) -> str | None:
+    """None, or the fixed code a named alias's login refuses with once it holds the alias's connect.lock, changing
+    nothing (review fix 055d3). Only run from an installed release: `transaction_pending` while the installation has
+    an unfinished installer transaction (upgrade, rollback, uninstall, account-add or account-remove: between two runs
+    of a parked transaction no lock is held, so a login could otherwise hand a broker off under it). Source mode (no
+    installation) and the default alias read nothing: 0.54's behaviour."""
+    if not _named(account.alias):
+        return None
+    from . import bundle_runtime
+    if not bundle_runtime.installed():
+        return None
+    return "transaction_pending" if bundle_runtime.installer_pending() else None

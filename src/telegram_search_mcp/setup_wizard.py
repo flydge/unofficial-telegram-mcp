@@ -23,7 +23,9 @@ _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'l
     'auth_close_failed', 'auth_destroy_failed', 'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
     'policy_unsafe', 'app_identity_missing', 'app_identity_invalid', 'identity_changed',
     # The account pin at login, as connect reports it (0.55 spec 3C): never a user id, only these fixed codes.
-    'account_mismatch', 'account_duplicate', 'alias_unavailable'})
+    'account_mismatch', 'account_duplicate', 'alias_unavailable',
+    # A named alias's login run from an installed release (review fix 055d3, account_registry.login_admission).
+    'transaction_pending'})
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class SetupResult:
             'account_mismatch': 'review_enrollment_binding_without_resetting',
             'account_duplicate': 'review_enrollment_binding_without_resetting',
             'alias_unavailable': 'stop_and_report',
+            'transaction_pending': 'finish_pending_installer_action_then_retry',
             'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
             'auth_destroy_failed': 'exit_setup_process_then_resume_in_foreground_native_terminal',
             'unsupported_auth_state': 'complete_supported_auth_with_official_telegram_guidance',
@@ -143,7 +146,9 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     an installer transaction over the aliases, it refuses `owner_busy` before
     anything else. The lock is taken only inside the alias's existing root,
     which a login never creates: a missing root, or an alias the registry no
-    longer lists, refuses `alias_unavailable` (review fix 055d3). The default's
+    longer lists, refuses `alias_unavailable` (review fix 055d3). Run from an
+    installed release it then refuses `transaction_pending` while an installer
+    transaction is unfinished (account_registry.login_admission). The default's
     keeps 0.54's behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)
@@ -157,6 +162,9 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
         return _result('secure_terminal_required')
     login = None
     if paths.account.alias != DEFAULT_ALIAS:
+        refused = account_registry.login_admission(paths.account)  # Asked before the lock too: nothing created.
+        if refused is not None:
+            return _result(refused)
         try:
             login = account_registry.login_lock(paths.account)
         except AccountPathsError:
@@ -164,6 +172,9 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
         except OwnerLeaseError as error:
             return _result(error.code)
     try:
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _result(refused)
         return _run_setup(paths, terminal, store, provider_factory, handoff, timeout, close_timeout, bundled_loader)
     finally:
         if login is not None:

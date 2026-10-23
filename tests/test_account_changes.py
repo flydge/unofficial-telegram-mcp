@@ -62,7 +62,8 @@ class AliasChangeHarness(AccountHarness):
                      plist=self.plist.read_bytes() if self.plist.exists() else None,
                      alias_plist=self.jobs.broker_plist.read_bytes() if self.jobs.broker_plist.exists() else None,
                      transactions=sorted(os.listdir(self.runtime / 'transactions')),
-                     alias_policy=(self.jobs.root / 'runtime.toml').read_bytes() if self.jobs.root.exists() else None)
+                     alias_policy=(self.jobs.root / 'runtime.toml').read_bytes()
+                     if (self.jobs.root / 'runtime.toml').exists() else None)
         return state
 
     def alias_tree(self):
@@ -974,6 +975,168 @@ class LoginLockTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
                 self.assertTrue(self.attempts)
                 self.assertEqual({outcome for _, _, outcome in self.attempts}, {'owner_busy'})
+
+
+class PendingTransactionLoginTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d3, R2): between two runs of a parked transaction no lock is held, so a login could hand a broker
+    off under it. Every alias login entry point run from an installed release (`connect`, the agent's and inline, the
+    connect helper before anything and again before its handoff, `setup`, `resume`) now refuses `transaction_pending`
+    once it holds the alias's connect.lock, while an upgrade, rollback, uninstall, account-add or account-remove is
+    unfinished, and changes nothing (the helper writes only its own terminal status, so `wait` reports the code). The
+    default's login and source mode (no installation) keep 0.54's behaviour."""
+
+    def logins(self, alias):
+        """(name, run) of each login entry point of `alias`, admitted as the launcher admits it."""
+        from test_onboarding import MemoryStore, Terminal
+        from telegram_search_mcp import connect_cli
+        from telegram_search_mcp.enrollment import SetupPaths
+        from telegram_search_mcp.setup_wizard import run_setup
+        paths = SetupPaths.from_account(config.AccountPaths.for_alias(alias, self.home))
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('nothing may run')
+
+        class Agent:
+            def require_secure(self):
+                raise RuntimeError('captured')
+
+        def connect(terminal):
+            value, code = connect_cli.connect(paths, client_factory=never, terminal=terminal, inline=never,
+                                              runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)
+            return value['code'], value['next_action']
+
+        def helper():
+            log = []
+            result = connect_cli.connect_helper(
+                paths, store=None, provider_factory=None, handoff=never, run=never, ui_factory=never,
+                server_factory=never, opener=never, sleeper=lambda _: None, restore_broker=lambda: log.append(1))
+            self.assertEqual(log, [])  # A pending transaction owns the services: nothing is put back either.
+            self.assertEqual(connect_cli.read_connect_status(paths), ('failed', result.code))
+            paths.account.connect_status.unlink()  # Its own terminal status, for `wait`: the one thing it writes.
+            return result.code, result.to_dict()['next_action']
+
+        def setup(resume):
+            terminal = Terminal()
+            result = run_setup(paths, terminal, MemoryStore(), never, handoff=never, resume=resume,
+                               bundled_loader=lambda: None)
+            self.assertEqual(terminal.prompts, [])
+            return result.code, result.to_dict()['next_action']
+        return [('connect', lambda: connect(Agent())), ('connect inline', lambda: connect(Terminal())),
+                ('connect helper', helper), ('setup', lambda: setup(False)), ('resume', lambda: setup(True))]
+
+    def installed(self):
+        from telegram_search_mcp import bundle_runtime
+        return mock.patch.object(bundle_runtime, '_SELECTION', bundle_runtime.Selection(self.release, 'x' * 64))
+
+    def pending(self, kind):
+        """`work` and `play` added (never logged in: their roots as account-add leaves them), then `kind` left
+        unfinished; returns the aliases whose logins are admitted."""
+        self.added()
+        if kind == 'account-add':
+            def die(stage):
+                if stage == 'default_check':  # After its registry entry and root: `play` is admitted.
+                    raise KeyboardInterrupt
+            with self.assertRaises(KeyboardInterrupt):
+                self.account('account_add', 'play', checkpoint=die)
+            return ('play', 'work')
+        self.account('account_add', 'play')
+        if kind in ('upgrade', 'rollback'):
+            new = self.kit = self.newer()
+            if kind == 'rollback':
+                self.install(new)
+            policy = self.session_root / 'runtime.toml'
+            saved, version = policy.read_bytes(), self.receipt()['package_version'].encode()
+
+            def park(stage):
+                if stage == 'claude_desktop':  # A late refusal: every broker restored, the change parked.
+                    policy.write_bytes(saved.replace(version, b'9.9.9'))
+            with self.assertRaises(bundle_install.InstallError):
+                self.install(new, checkpoint=park) if kind == 'upgrade' else self.change('rollback', checkpoint=park)
+            policy.write_bytes(saved)
+            return ('play', 'work')
+        stage, action = {'uninstall': ('connect:work', lambda **kw: self.change('uninstall', **kw)),
+                         'account-remove': ('claude_code', lambda **kw: self.account('account_remove', **kw))}[kind]
+
+        def die(value):
+            if value == stage:
+                raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            action(checkpoint=die)
+        return ('play', 'work')
+
+    def test_every_alias_login_refuses_while_an_installer_transaction_is_pending(self):
+        from telegram_search_mcp import account_registry, bundle_runtime
+        refused = ('transaction_pending', 'finish_pending_installer_action_then_retry')
+        for kind in ('upgrade', 'rollback', 'uninstall', 'account-add', 'account-remove'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                aliases = self.pending(kind)
+                with self.installed():
+                    for alias in aliases:
+                        for name, login in self.logins(alias):
+                            with self.subTest(alias=alias, login=name):
+                                # The helper takes the lock before it asks (it reports through the status file
+                                # only its lock holder writes), creating the empty connect.lock when absent.
+                                lock = config.alias_jobs(alias, self.home).root / 'run' / 'connect.lock'
+                                if name == 'connect helper' and not lock.exists():
+                                    lock.touch(mode=0o600)
+                                before, calls = self.change_snapshot(), len(self.launchctl.calls)
+                                roots = {a: tree(config.alias_jobs(a, self.home).root) for a in aliases}
+                                self.assertEqual(login(), refused)
+                                self.assertEqual(self.change_snapshot(), before)
+                                self.assertEqual({a: tree(config.alias_jobs(a, self.home).root) for a in aliases},
+                                                 roots)
+                                self.assertLessEqual({c[0] for c in self.launchctl.calls[calls:]}, {'print'})
+                    self.assertTrue(bundle_runtime.installer_pending())
+                    # The default's login keeps 0.54's behaviour (lead decision): it reads no installer state.
+                    default = config.AccountPaths.for_alias('default', self.home)
+                    self.assertIsNone(account_registry.login_admission(default))
+                # Source mode (no installation this process runs from): unchanged.
+                self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('play', self.home)))
+
+    def test_a_login_is_admitted_again_once_the_transaction_finished(self):
+        from telegram_search_mcp import account_registry
+        for kind in ('upgrade', 'account-add', 'account-remove'):
+            with self.subTest(kind=kind):
+                self.setUp()
+                self.pending(kind)
+                if kind == 'upgrade':
+                    self.install(self.kit)
+                else:
+                    self.account(kind.replace('-', '_'), 'play' if kind == 'account-add' else None)
+                with self.installed():
+                    self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('play', self.home)))
+
+    def test_the_helper_asks_again_right_before_its_handoff(self):
+        """A transaction found pending at the handoff (none can start while the helper holds the lock: this is the
+        backstop): the run ends `transaction_pending` and no broker is started."""
+        from telegram_search_mcp import connect_cli
+        from telegram_search_mcp.enrollment import SetupPaths
+        self.added()
+        paths = SetupPaths.from_account(config.AccountPaths.for_alias('work', self.home))
+        handoffs, seen = [], []
+
+        def run(paths, store, provider_factory, ui, *, handoff, expires_at):
+            with self.installed(), mock.patch('telegram_search_mcp.bundle_runtime.installer_pending', return_value=True):
+                seen.append(handoff())
+            from telegram_search_mcp.connect_flow import ConnectResult
+            return ConnectResult('failed', seen[-1], True, True)
+
+        class Server:
+            def __init__(self, ui, expires_at, **options):
+                pass
+
+            def start(self):
+                return 'http://127.0.0.1:1/#t=' + 'x' * 43
+
+            def close(self):
+                pass
+        result = connect_cli.connect_helper(paths, store=None, provider_factory=None,
+                                            handoff=lambda **_: handoffs.append(1) or 'ready', run=run,
+                                            ui_factory=lambda: mock.Mock(), server_factory=Server,
+                                            opener=lambda _: None, sleeper=lambda _: None,
+                                            restore_broker=lambda: None)
+        self.assertEqual((seen, handoffs, result.code), (['transaction_pending'], [], 'transaction_pending'))
 
 
 class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):

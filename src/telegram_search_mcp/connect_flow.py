@@ -35,7 +35,9 @@ _CODES = frozenset({'owner_busy', 'owner_unsafe', 'legacy_unmanaged', 'enrollmen
     'password_submission_uncertain', 'expired', 'cancelled', 'auth_close_failed', 'auth_destroy_failed',
     'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
     # The account pin at login (0.55 spec 3C): never a user id, only these fixed codes.
-    'account_mismatch', 'account_duplicate', 'alias_unavailable'})
+    'account_mismatch', 'account_duplicate', 'alias_unavailable',
+    # A named alias's login run from an installed release (review fix 055d3, account_registry.login_admission).
+    'transaction_pending'})
 STATUS_CODES = _CODES  # Public: the fixed codes a UI may display.
 MAX_RETRY_AFTER = 86400  # Seconds; a flood_wait retry time outside 1..this is never written.
 # The one next_action table: ConnectResult.to_dict, connect's inline result and every `wait` and
@@ -48,6 +50,7 @@ NEXT_ACTIONS = {
     'account_mismatch': 'review_enrollment_binding_without_resetting',
     'account_duplicate': 'review_enrollment_binding_without_resetting',
     'alias_unavailable': 'stop_and_report',
+    'transaction_pending': 'finish_pending_installer_action_then_retry',
     'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
     'enrollment_missing': 'stop_and_report', 'app_identity_invalid': 'stop_and_report',
     'policy_unsafe': 'stop_and_report', 'owner_unsafe': 'stop_and_report',
