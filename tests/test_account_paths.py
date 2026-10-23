@@ -197,6 +197,7 @@ class NamedAliasConstructionTests(unittest.TestCase):
             'from .config import _BUILDING': ['_BUILDING'],
             '_REGISTERED.set("work")': ['_REGISTERED'],
             'dataclasses.replace(paths, root=other)': ['replace(paths)'],
+            'paths.relocated(Path("/elsewhere"))': ['relocated()'],
             'from dataclasses import replace\nreplace(account)': ['replace(account)'],
             'from dataclasses import replace as rebuild\nrebuild(account)': ['replace(account)'],
             'import copy\ncopy.replace(account, root=other)': ['replace(account)'],
@@ -211,6 +212,7 @@ class NamedAliasConstructionTests(unittest.TestCase):
 
 # Every dataclasses.replace in src rebuilds another dataclass; a new one fails the check until it is listed here.
 REPLACE_ALLOWED = {
+    'enrollment.py:relocated()': 'SetupPaths(root): the inert test boundary that keeps the names, never in src paths',
     'send_observations.py:replace(old)': 'rebuilds a send observation entry',
     'outgoing_drafts.py:replace(old)': 'rebuilds an outgoing draft on revision',
     'outgoing_voice.py:replace(source)': 'rebuilds a voice note source with its snapshot path',
@@ -249,6 +251,8 @@ def construction_names(source):
                 target = func.value
             if target is not None:
                 found.append(f'replace({ast.unparse(target)})')
+            if isinstance(func, ast.Attribute) and func.attr == 'relocated':
+                found.append('relocated()')
     return found
 
 

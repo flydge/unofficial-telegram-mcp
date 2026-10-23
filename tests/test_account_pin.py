@@ -21,6 +21,7 @@ from telegram_search_mcp import account_registry
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import ACCOUNT_CHECK_EXEMPT, AccountBlocked, Broker
 from telegram_search_mcp.broker_client import BrokerClient
+from telegram_search_mcp.tdjson import TDLibError
 from telegram_search_mcp.config import KNOWN_CAPABILITIES, AccountPaths, RuntimePolicy, accounts_root
 from telegram_search_mcp.contract import OPERATION_CAPABILITIES
 from telegram_search_mcp.local_upload_models import UPLOAD_MODELS
@@ -198,6 +199,34 @@ class AliasPinTests(Fixture):
         self.assertEqual(self.pins(), ({'work': OTHER}, None))
         later = self.broker(Account(THIRD), 'work')
         self.blocked('account_mismatch', later._artifact_account)
+
+    def test_a_transient_failure_reading_the_account_fails_closed(self):
+        class Flaky(Account):
+            def __init__(self, user_id):
+                super().__init__(user_id)
+                self.calls = 0
+
+            def ensure_ready(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise TDLibError('request timed out')
+                super().ensure_ready()
+        account_registry.pin_account(self.root, 'work', USER)
+        client = Flaky(USER)  # the default logged into work's account; the first read times out
+        broker = self.broker(client)
+        self.blocked('account_unverified', lambda: self.resolve(broker))
+        self.assertEqual(client.identity_reads, 0)  # nothing ran unchecked
+        self.blocked('account_duplicate', lambda: self.resolve(broker))
+
+    def test_a_named_broker_refuses_once_its_registry_is_gone(self):
+        account_registry.pin_account(self.root, 'work', OTHER)
+        broker = self.broker(Account(OTHER), 'work')
+        self.assertEqual(self.request(broker, 'check'), {'status': 'ready'})
+        (self.root / account_registry.REGISTRY_NAME).unlink()
+        self.blocked('alias_unavailable', lambda: self.resolve(broker))
+        with self.assertRaises(account_registry.RegistryError) as caught:
+            account_registry.pin_account(self.root, 'work', OTHER)
+        self.assertEqual(caught.exception.code, 'alias_unavailable')
 
     def test_an_unidentifiable_session_is_never_admitted_once_a_registry_exists(self):
         client = SerializedFakeTDLib()  # No get_account_id at all.

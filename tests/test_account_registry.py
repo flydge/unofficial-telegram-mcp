@@ -299,7 +299,9 @@ class PinTests(Fixture):
 
     def test_without_a_registry_nothing_is_pinned_or_created(self):
         registry.pin_account(self.root, 'default', USER)
-        registry.pin_account(self.root, 'work', USER)
+        with self.assertRaises(registry.RegistryError) as caught:  # a named alias exists only in the registry
+            registry.pin_account(self.root, 'work', USER)
+        self.assertEqual(caught.exception.code, 'alias_unavailable')
         self.assertEqual(self.snapshot(), [])
 
     def test_the_first_authorized_user_is_pinned_and_then_required(self):

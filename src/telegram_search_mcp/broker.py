@@ -102,7 +102,8 @@ SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'se
 
 
 # Operations exempt from the account pin check (spec 2): lifecycle (`check` runs the pin itself), and local
-# bytes that no Telegram read sourced. Every other operation, any added later included, is checked first.
+# bytes that no Telegram read sourced. The upload-authority operations (UPLOAD_MODELS) are routed before this
+# check for the same reason: owner-local bytes. Every other operation, any added later included, is checked.
 ACCOUNT_CHECK_EXEMPT = frozenset({'health', 'release_client', 'check', 'create_local_artifact',
                                   'begin_local_upload', 'append_local_upload', 'finish_local_upload'})
 
@@ -459,6 +460,9 @@ class Broker(SelectionBrokerMixin):
         """
         if not account_registry.present(self._accounts_root):
             self._account_session = None
+            if self._alias != account_registry.DEFAULT_ALIAS:  # a named alias exists only in the registry
+                self._artifact_authority.invalidate_account()
+                raise AccountBlocked('alias_unavailable')
             return
         if client is None:
             client = self._shared_client()
@@ -474,8 +478,12 @@ class Broker(SelectionBrokerMixin):
                     raise AccountBlocked('account_mismatch')
                 try:
                     client.ensure_ready()
+                except AuthorizationBlocked:
+                    return  # not authorized: the operation itself reports it blocked and grants nothing
                 except TDLibError:
-                    return
+                    # Any other failure fails closed: the session's account could not be read, so nothing runs.
+                    self._artifact_authority.invalidate_account()
+                    raise AccountBlocked('account_unverified') from None
                 user_id = getter()
         if type(user_id) is not int or not 0 < user_id < 2**53:
             self._artifact_authority.invalidate_account()

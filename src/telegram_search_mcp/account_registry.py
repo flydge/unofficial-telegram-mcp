@@ -48,6 +48,7 @@ CODES = frozenset({
     "alias_name_too_long",  # an alias tool name exceeds TOOL_NAME_LIMIT
     "alias_unavailable",    # a pin for an alias the registry no longer lists
     "account_mismatch",     # the authorized user is not the alias's pinned user
+    "account_unverified",   # the session's account could not be read (a transient TDLib failure): fail closed
     "account_duplicate",    # the authorized user is pinned under another alias, the default included
 })
 _KEYS = frozenset({"version", "aliases", "default_user_id"})
@@ -399,6 +400,8 @@ def pin_account(root: Path, alias: str, user_id: int, *, sleeper: Callable[[floa
     if type(user_id) is not int or not 0 < user_id < USER_ID_BOUND:
         raise RegistryError("account_mismatch")
     registry = load(root)
+    if registry is None and alias != DEFAULT_ALIAS:
+        raise RegistryError("alias_unavailable")  # a named alias exists only in the registry
     if registry is None or not registry.needs_pin(alias, user_id):
         return
 
