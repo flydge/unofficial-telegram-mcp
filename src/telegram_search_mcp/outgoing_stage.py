@@ -32,36 +32,46 @@ def _safe_name(name: object) -> bool:
 
 
 def _sweep_locked(root: Path) -> int:
-    """Retire expired copies under the staging lock; return the bytes still occupied (quarantine included)."""
+    """Retire expired copies under the staging lock; return the bytes still occupied (quarantine included).
+
+    Retirement takes the same lock, so a copy and its directory leave together. An entry that vanishes while the
+    sweep reads it (another process) has nothing left to count or refuse and is skipped; anything still present
+    and unsafe is refused, a fresh empty directory included."""
     ensure_private_directory(root)
     quarantine = root.with_name(root.name + "-quarantine")
     ensure_private_directory(quarantine)
     occupied = 0
     now = time.time()
     for item in quarantine.iterdir():
-        info = item.lstat()
+        try:
+            info = item.lstat()
+        except FileNotFoundError:
+            continue
         if (not item.name.startswith("quarantine_") or not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.geteuid() or info.st_nlink != 1):
             raise ValueError("unsafe outgoing quarantine entry")
         if info.st_mtime + 12 * 3600 <= now:
-            item.unlink()
+            item.unlink(missing_ok=True)
         else:
             occupied += info.st_size
     for entry in root.iterdir():
-        info = entry.lstat()
-        if not _DRAFT_NAME.fullmatch(entry.name) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-            raise ValueError("unsafe outgoing staging entry")
-        files = list(entry.iterdir())
-        if not files and info.st_mtime + 15 * 60 <= now:
-            entry.rmdir()
+        try:
+            info = entry.lstat()
+            if not _DRAFT_NAME.fullmatch(entry.name) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                raise ValueError("unsafe outgoing staging entry")
+            files = list(entry.iterdir())
+            if not files and info.st_mtime + 15 * 60 <= now:
+                entry.rmdir()
+                continue
+            if len(files) != 1:
+                raise ValueError("unsafe outgoing staging contents")
+            file_info = files[0].lstat()
+        except FileNotFoundError:
             continue
-        if len(files) != 1:
-            raise ValueError("unsafe outgoing staging contents")
-        file_info = files[0].lstat()
         if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid != os.geteuid() or file_info.st_nlink != 1:
             raise ValueError("unsafe outgoing staging file")
         if info.st_mtime + 12 * 3600 <= now:
-            retire_staged_document(files[0], root=root)
+            _retire_locked(files[0], root)
             if file_info.st_size > LARGE_FILE_THRESHOLD:
                 occupied += file_info.st_size
         else:
@@ -182,20 +192,31 @@ def stage_approved_album(claim: ClaimedDraft, *, root: Path | None = None) -> tu
 
 
 def retire_staged_album(paths, *, root: Path | None = None) -> None:
-    """Retire every item of one album; the caller does so only once every slot is terminal."""
+    """Retire every item of one album under the staging lock; the caller does so only once every slot is
+    terminal."""
+    root = STAGING_ROOT if root is None else root
     failure = None
-    for path in paths:
-        try:
-            retire_staged_document(path, root=root)
-        except (OSError, ValueError) as error:
-            failure = failure or error
+    with _LOCK:
+        for path in paths:
+            try:
+                _retire_locked(path, root)
+            except (OSError, ValueError) as error:
+                failure = failure or error
     if failure is not None:
         raise failure
 
 
 def retire_staged_document(path: Path, *, root: Path | None = None) -> None:
-    """Retire a finished copy, quarantining large files outside the worktree."""
+    """Retire a finished copy, quarantining large files outside the worktree.
+
+    Under the staging lock: a concurrent sweep never sees the copy gone and its directory still present."""
     root = STAGING_ROOT if root is None else root
+    with _LOCK:
+        _retire_locked(path, root)
+
+
+def _retire_locked(path: Path, root: Path) -> None:
+    """Retire one copy and its directory; the caller holds `_LOCK`."""
     if path.parent.parent != root or not _DRAFT_NAME.fullmatch(path.parent.name):
         return
     try:
