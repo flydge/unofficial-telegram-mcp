@@ -3352,6 +3352,24 @@ def _check_account_identity(j, identity):
         raise InstallError('transaction_conflict')
 
 
+def _account_release(receipt, release_root):
+    """account-add and account-remove run only from the receipt's current release, and only while it knows aliases
+    (0.55 or newer); anything else refuses `release_not_current` before anything (review fix 055d).
+
+    `release_root` is the release whose launcher runs the action (the launcher passes its own tree; None is an
+    in-process call). A rollback below 0.55 with no alias left keeps the 0.55 tree in releases/: run from there, an
+    account-add would write alias entries naming the older launcher, which has no `--account` grammar, and an
+    accounts.json the older release refuses (`runtime_conflict`). Lead decision (owner review pending): one code
+    for both, and account-remove refused alike, since leftover state is retired from the current release (an alias
+    the registry lists alone included)."""
+    try:
+        older = _version_key(receipt['package_version']) < _version_key(_ACCOUNTS_FIRST)
+    except InstallError:
+        older = True
+    if older or release_root is not None and str(release_root) != receipt['release_root']:
+        raise InstallError('release_not_current')
+
+
 def _alias_commands(installed, alias):
     """The alias's MCP entry: the release's launcher `mcp --account <alias>` (spec 3B)."""
     command, arguments = _commands(installed)
@@ -3724,11 +3742,12 @@ def _account_added(journal, alias):
 
 
 def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: None, claude_candidates=None,
-                claude_runner=subprocess.run, launchctl=subprocess.run, default_check=None):
+                claude_runner=subprocess.run, launchctl=subprocess.run, default_check=None, release_root=None):
     """`launcher.py account-add <alias>`: register a named alias and write its client entries (0.55 spec 3D).
 
     Every refusal comes before the transaction exists: the alias grammar and budgets (account_registry, before any
-    directory exists), an alias the registry and sidecar already list, another alias's record the registry does not
+    directory exists), a run from anything but the receipt's current release or a current release older than 0.55
+    (`release_not_current`), an alias the registry and sidecar already list, another alias's record the registry does not
     list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the alias's
     server name (Codex
     `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
@@ -3754,6 +3773,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
             receipt, _ = _installation(root)
             if str(home) != receipt['user_home']:
                 raise InstallError('upgrade_conflict')
+            _account_release(receipt, release_root)
             installed, mode = Path(receipt['release_root']), receipt['claude_code_mode']
             codex = Path(receipt['codex_home'])
             config, name, jobs = codex/'config.toml', alias_server_name(alias), alias_jobs(alias, home)
@@ -3959,10 +3979,11 @@ def _account_removed(journal, alias):
 
 
 def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: None, claude_candidates=None,
-                   claude_runner=subprocess.run, launchctl=subprocess.run, alias_pending=None):
+                   claude_runner=subprocess.run, launchctl=subprocess.run, alias_pending=None, release_root=None):
     """`launcher.py account-remove <alias>`: retire a named alias (0.55 spec 3D). Rename is a remove plus an add.
 
-    Every refusal comes before the transaction exists: an alias neither list knows (`alias_unknown`),
+    Every refusal comes before the transaction exists: a run from anything but the receipt's current release or a
+    current release older than 0.55 (`release_not_current`), an alias neither list knows (`alias_unknown`),
     another alias's record the registry does not list (`accounts_inconsistent`), any unfinished transaction
     (`transaction_pending`), an entry under the alias's server name that is not exactly the one its record owns
     (`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`: refused,
@@ -3987,6 +4008,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
             receipt, _ = _installation(root)
             if str(home) != receipt['user_home']:
                 raise InstallError('upgrade_conflict')
+            _account_release(receipt, release_root)
             installed, mode = Path(receipt['release_root']), receipt['claude_code_mode']
             config, name, jobs = Path(receipt['codex_home'])/'config.toml', alias_server_name(alias), alias_jobs(alias, home)
             identity = _account_identity('account-remove', alias, root, home, receipt)

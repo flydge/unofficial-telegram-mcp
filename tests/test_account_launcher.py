@@ -88,7 +88,7 @@ class AccountChangeGrammarTests(unittest.TestCase):
                 self.assertEqual((code, json.loads(out), err), (0, {'status': 'ok'}, ''))
                 admit.assert_called_once_with(self.release, self.release / 'bundle-index.json', 'b' * 64, True)
                 self.assertEqual(seen, {'action': action.replace('-', '_'), 'root': self.release.parent.parent,
-                                        'alias': 'work', 'user_home': Path.home()})
+                                        'alias': 'work', 'user_home': Path.home(), 'release_root': self.release})
         self.assertEqual(self.module.ACCOUNT_CHANGES, ('account-add', 'account-remove'))
 
     def test_the_grammar_is_closed_and_refuses_before_admission_without_echo(self):
@@ -129,7 +129,7 @@ class AccountChangeGrammarTests(unittest.TestCase):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
         self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
-                              'accounts_present'},
+                              'accounts_present', 'release_not_current'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
 

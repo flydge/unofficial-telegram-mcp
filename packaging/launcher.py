@@ -40,6 +40,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
     'service_restart_failed','downgrade_refused','uninstall_incomplete',
     'accounts_inconsistent','default_check_failed','account_remove_incomplete','accounts_present',
+    'release_not_current',
     'alias_invalid','alias_exists','alias_unknown','alias_path_too_long','alias_name_too_long','registry_full',
     'registry_invalid','registry_unsafe','registry_busy'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
@@ -295,8 +296,9 @@ def main(argv=None):
             from telegram_search_mcp import bundle_install
             try:
                 if account_change:
+                    # The running release names itself: an account action runs only from the current one.
                     result=getattr(bundle_install,args[0].replace('-','_'))(root.parent.parent,alias=args[1],
-                                                                             user_home=Path.home())
+                                                                             user_home=Path.home(),release_root=root)
                 else:result=getattr(bundle_install,args[0])(root.parent.parent,user_home=Path.home())
             except bundle_install.InstallError as error:
                 named=error.args[0] if len(error.args)==1 else None

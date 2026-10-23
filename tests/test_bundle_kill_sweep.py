@@ -729,6 +729,9 @@ def _put_back_prepare(h):
 
 
 ALIAS = 'work'
+# The release the account scenarios start from: one that knows aliases, since account-add and account-remove run only
+# from such a current release (review fix 055d); the upgrades over aliases go to a newer 0.55 kit.
+ACCOUNTS_BASE, ACCOUNTS_NEWER = '0.55.0.dev0', '0.55.0.dev1'
 
 
 def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
@@ -744,15 +747,24 @@ def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
 
 
 def _accounts_prepare(h, *aliases):
-    """The installed release with every client, a session and its loaded broker, launchd knowing `work`'s two jobs,
-    and `aliases` added first."""
+    """The installed release (ACCOUNTS_BASE) with every client, a session pinning it and its loaded broker, launchd
+    knowing `work`'s two jobs, and `aliases` added first."""
     h.claude()
-    jobs = config.alias_jobs(ALIAS, h.home)
-    h.launchctl = FakeLaunchctl(h.plist, h.base / 'launchd-state.json', others={
-        jobs.broker_label: jobs.broker_plist, jobs.connect_label: jobs.root / 'run' / (jobs.connect_label + '.plist')})
-    h.full()
+    _alias_launchd(h)
+    h.codex_present()
+    h.desktop_present()
+    (h.home / '.claude').mkdir(mode=0o755, exist_ok=True)
+    h.session(pin=ACCOUNTS_BASE)
+    h.install(h.build('a', version=ACCOUNTS_BASE))
+    h.service(Path(h.pointer()['release_root']))
     for alias in aliases:
         _account(h, 'account_add', alias=alias)
+
+
+def _newer(h, **kwargs):
+    """The upgrade to `h.new` (built as ACCOUNTS_NEWER), installed as its own package version."""
+    with mock.patch('telegram_search_mcp.__version__', ACCOUNTS_NEWER):
+        return h.install(h.new, **kwargs)
 
 
 def _alias_logged_in(h):
@@ -820,12 +832,12 @@ def _alias_launchd(h):
 
 
 def _aliases_upgrade_prepare(h):
-    """0.52.9 installed with `work` (logged in, its broker loaded, its version line pinned) and `play` (never logged
-    in) added, and the 0.55 kit to upgrade to."""
+    """ACCOUNTS_BASE installed with `work` (logged in, its broker loaded, its version line pinned) and `play` (never
+    logged in) added, and the newer 0.55 kit to upgrade to."""
     _accounts_prepare(h, ALIAS, 'play')
     _alias_logged_in(h)
-    _alias_pinned(h, '0.52.9')
-    h.new = h.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+    _alias_pinned(h, ACCOUNTS_BASE)
+    h.new = h.build('b', launcher=b'# second release\n', search=b'search-skill-2', version=ACCOUNTS_NEWER)
     h.target = h.runtime / 'releases' / h.new[3]
 
 
@@ -891,7 +903,7 @@ def _aliases_rollback_prepare(h):
 def _aliases_uninstall_prepare(h):
     _accounts_prepare(h, ALIAS, 'play')
     _alias_logged_in(h)
-    _alias_pinned(h, '0.52.9')
+    _alias_pinned(h, ACCOUNTS_BASE)
 
 
 def _aliases_uninstall_check(h, result):
@@ -957,7 +969,7 @@ def _late_aliases_check(h, result):
     h.assertEqual((result['refused'], result['pending_action']), ('metadata_conflict', None))
     (h.runtime / 'receipt.json').write_bytes(h.receipt_bytes)
     h.target = h.runtime / 'releases' / h.new[3]
-    result = h.install(h.new, alias_pending=lambda *_: 'none')
+    result = _newer(h, alias_pending=lambda *_: 'none')
     _aliases_check(h, result, 'upgraded', 'restarted')
     h.assertEqual(_aliases_on_one_release(h), [])
 
@@ -1056,8 +1068,8 @@ SCENARIOS = {
     # 0.55 phase D part 2: an upgrade, a rollback and an uninstall over the default and two aliases (every broker
     # stop and plist, version line, entry and accounts.json record of each), a late refusal that restores every
     # broker, and the rollback below 0.55 that retires the registry and the default's readiness record.
-    'upgrade_with_aliases': Scenario(_aliases_upgrade_prepare, lambda h, lc, cl: h.install(
-        h.new, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
+    'upgrade_with_aliases': Scenario(_aliases_upgrade_prepare, lambda h, lc, cl: _newer(
+        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
         lambda h, result: _aliases_check(h, result, 'upgraded', 'restarted'), final=_aliases_on_one_release),
     'rollback_with_aliases': Scenario(_aliases_rollback_prepare, lambda h, lc, cl: h.change(
         'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'),
@@ -1065,8 +1077,8 @@ SCENARIOS = {
     'uninstall_with_aliases': Scenario(_aliases_uninstall_prepare, lambda h, lc, cl: h.change(
         'uninstall', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _aliases_uninstall_check,
         write_ahead=False, final=_aliases_left),
-    'late_refusal_with_aliases': Scenario(_late_aliases_prepare, lambda h, lc, cl: _refusal(h, lambda: h.install(
-        h.new, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none', checkpoint=_receipt_changed(h))),
+    'late_refusal_with_aliases': Scenario(_late_aliases_prepare, lambda h, lc, cl: _refusal(h, lambda: _newer(
+        h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none', checkpoint=_receipt_changed(h))),
         _late_aliases_check, final=_late_aliases_final),
     'rollback_below_055_retires_the_registry': Scenario(_retire_prepare, lambda h, lc, cl: h.change(
         'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_: 'none'), _retire_check, final=_retired),

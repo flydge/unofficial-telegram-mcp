@@ -15,10 +15,13 @@ import unittest
 from unittest import mock
 
 from test_account_install import AccountHarness, tree
-from test_bundle_upgrade import NEIGHBOUR_CODEX, OLD_VERSION
+from test_bundle_upgrade import NEIGHBOUR_CODEX, OLD_VERSION as LEGACY_VERSION
 from telegram_search_mcp import account_registry, bundle_install, config
 
-NEW_VERSION = '0.55.0.dev0'
+# The installed release the alias tests start from (one that knows aliases: account-add runs only from such a current
+# release), the kit an upgrade goes to, and the 0.52.9 release a rollback below 0.55 goes back to.
+OLD_VERSION = AccountHarness.BASE_VERSION
+NEW_VERSION = '0.55.0.dev1'
 
 
 class AliasChangeHarness(AccountHarness):
@@ -26,17 +29,22 @@ class AliasChangeHarness(AccountHarness):
     runtime.toml pins the installed release's version (as the setup wizard writes it)."""
 
     def install(self, packet, **kwargs):
+        """The kit installed as its own package version (a synthetic release names it; the installer admits a tree of
+        its own version only)."""
         kwargs.setdefault('alias_pending', self.alias_pending)
-        return super().install(packet, **kwargs)
+        version = json.loads((packet[1] / 'manifest' / 'release.json').read_bytes())['package_version']
+        with mock.patch('telegram_search_mcp.__version__', version):
+            return super().install(packet, **kwargs)
 
     def change(self, action, **kwargs):
         kwargs.setdefault('alias_pending', self.alias_pending)
         return super().change(action, **kwargs)
 
-    def alias_session(self, alias=None, pin=OLD_VERSION):
-        """What a login leaves for `alias`: its root, session and pinned policy, its exact broker plist loaded and its
-        connect job loaded (the `work` alias is the one the fake launchd knows)."""
+    def alias_session(self, alias=None, pin=None):
+        """What a login leaves for `alias`: its root, session and policy pinning the installed release (unless told),
+        its exact broker plist loaded and its connect job loaded (the `work` alias is the one the fake launchd knows)."""
         assert alias in (None, self.ALIAS)
+        pin = self.receipt()['package_version'] if pin is None else pin
         super().alias_session()
         policy = self.jobs.root / 'runtime.toml'
         policy.write_bytes(('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
@@ -271,7 +279,8 @@ ROOT_NAMES_054 = frozenset({'transactions', 'releases', '.install.lock', 'receip
 
 class RollbackOverAliasesTests(AliasChangeHarness, unittest.TestCase):
     def upgraded_then(self, *aliases):
-        """0.52.9 installed, then upgraded to 0.55.0.dev0, then `aliases` added on it (`work` logged in)."""
+        """0.52.9 installed, then upgraded to 0.55.0.dev1, then `aliases` added on it (`work` logged in)."""
+        self.BASE_VERSION = LEGACY_VERSION
         self.full()
         old = self.release
         self.install(self.newer())
@@ -347,6 +356,7 @@ class RollbackOverAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.assertFalse((config.accounts_root(self.home) / 'registry.json').exists())
 
     def test_a_rollback_below_055_without_a_registry_retires_nothing(self):
+        self.BASE_VERSION = LEGACY_VERSION
         self.full()
         self.install(self.newer())
         result = self.change('rollback')
@@ -357,7 +367,7 @@ class RollbackOverAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.assertNotIn('accounts', journal)
 
     def releases_that_know_aliases(self):
-        """Release a at 0.55.0.dev0 with `work` added and logged in, then upgraded to b at the same version."""
+        """Release a at 0.55.0.dev1 with `work` added and logged in, then upgraded to b at the same version."""
         self.codex_present()
         self.desktop_present()
         (self.home / '.claude').mkdir(mode=0o755)
@@ -626,6 +636,53 @@ class ReinstallOverKeptAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.refused('account_add', 'accounts_inconsistent', 'office')
         self.refused('account_remove', 'accounts_inconsistent', 'work')
         self.assertEqual(self.snapshot(), before)
+
+
+class AccountReleaseTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d, medium): account-add and account-remove run only from the receipt's current release, and only
+    while that release knows aliases (0.55 or newer): every other run refuses `release_not_current` before anything,
+    so no alias entry ever names a launcher without the `--account` grammar and no accounts.json appears beside a
+    release that refuses it."""
+
+    def installed(self, version):
+        """`version` installed with every client present, a session pinning it and its broker loaded."""
+        self.codex_present()
+        self.desktop_present()
+        (self.home / '.claude').mkdir(mode=0o755, exist_ok=True)
+        self.session(pin=version)
+        with mock.patch('telegram_search_mcp.__version__', version):
+            self.install(self.build('a', version=version))
+        self.service(self.release)
+        self.claude()
+        return self.release
+
+    def test_after_a_rollback_to_a_release_that_knows_no_aliases_the_account_actions_refuse(self):
+        old = self.installed('0.54.0')
+        self.install(self.newer())
+        new = self.release
+        self.assertEqual(self.change('rollback')['release_root'], str(old))
+        before = self.change_snapshot()
+        for action in ('account_add', 'account_remove'):
+            # The 0.55 tree still in releases/ (the launcher passes its own), the current one, an in-process call.
+            for release in ('new', 'old', None):
+                with self.subTest(action=action, release=release):
+                    self.refused(action, 'release_not_current', release_root={'new': new, 'old': old, None: None}[release])
+                    self.assertEqual(self.change_snapshot(), before)
+        self.assertEqual((self.registry(), self.sidecar()), (None, None))
+        self.assertFalse(config.accounts_root(self.home).exists())
+
+    def test_the_account_actions_run_only_from_the_current_release(self):
+        a = self.installed(NEW_VERSION)
+        self.install(self.newer())
+        b = self.release
+        self.change('rollback')
+        before = self.change_snapshot()
+        for action in ('account_add', 'account_remove'):
+            with self.subTest(action=action):
+                self.refused(action, 'release_not_current', release_root=b)
+                self.assertEqual(self.change_snapshot(), before)
+        self.assertEqual(self.account('account_add', release_root=a)['status'], 'account_added')
+        self.assertEqual(self.account('account_remove', release_root=a)['status'], 'account_removed')
 
 
 if __name__ == '__main__':

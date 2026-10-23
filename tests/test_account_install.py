@@ -37,9 +37,13 @@ def tree(path):
 
 class AccountHarness(ChangeHarness):
     """An installed release with every client present, a session and a loaded default broker, plus a `work` alias's
-    broker and connect jobs in the same fake launchd domain."""
+    broker and connect jobs in the same fake launchd domain.
+
+    The installed release is one that knows aliases (`BASE_VERSION`), since account-add and account-remove run only
+    from a current release of 0.55 or newer (review fix 055d); a test that needs an older one sets its own."""
 
     ALIAS = 'work'
+    BASE_VERSION = '0.55.0.dev0'
 
     def setUp(self):
         super().setUp()
@@ -53,6 +57,16 @@ class AccountHarness(ChangeHarness):
                                                self.jobs.connect_label: self.connect_plist})
         self.checks, self.check_answers = [], []
         self.alias_probes, self.alias_answers = [], []
+
+    def old(self):
+        """The installed release, built and installed as `BASE_VERSION`."""
+        with mock.patch('telegram_search_mcp.__version__', self.BASE_VERSION):
+            packet = self.build('a', version=self.BASE_VERSION)
+            return packet, self.install(packet)
+
+    def session(self, pin=None, capabilities='["read", "artifacts", "send"]'):
+        """The default's session, its runtime.toml pinning the installed release (`BASE_VERSION`) unless told."""
+        return super().session(self.BASE_VERSION if pin is None else pin, capabilities)
 
     def default_check(self, home, python, app):
         self.checks.append((python, app))
@@ -70,8 +84,18 @@ class AccountHarness(ChangeHarness):
         kwargs.setdefault('launchctl', self.launchctl)
         kwargs.setdefault('default_check' if action == 'account_add' else 'alias_pending',
                           self.default_check if action == 'account_add' else self.alias_pending)
+        if 'release_root' not in kwargs:
+            kwargs['release_root'] = self.running_release()
         with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
             return getattr(module, action)(self.runtime, alias=alias or self.ALIAS, user_home=self.home, **kwargs)
+
+    def running_release(self):
+        """The release an account action runs from, as the launcher names it: the current one (None, an in-process
+        call, while current.json cannot be read)."""
+        try:
+            return Path(json.loads((self.runtime / 'current.json').read_bytes())['release_root'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
     def refused(self, action, code, alias=None, **kwargs):
         with self.assertRaises(bundle_install.InstallError) as caught:
@@ -216,8 +240,8 @@ class AccountAddTests(AccountHarness, unittest.TestCase):
                 self.desktop_present()
                 (self.home / '.claude').mkdir(mode=0o755)
                 self.session()
-                with mock.patch('telegram_search_mcp.__version__', '0.52.9'):
-                    self.install(self.build('a', version='0.52.9'), claude_code=mode)
+                with mock.patch('telegram_search_mcp.__version__', self.BASE_VERSION):
+                    self.install(self.build('a', version=self.BASE_VERSION), claude_code=mode)
                 result = self.account('account_add')
                 entry = self.claude().entry_of('telegram_search_work')
                 self.assertIsNone(self.claude().entry)  # The plugin stays the default's; no default user entry.
