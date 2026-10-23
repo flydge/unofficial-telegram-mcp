@@ -1105,7 +1105,8 @@ class PendingTransactionLoginTests(AliasChangeHarness, unittest.TestCase):
                 else:
                     self.account(kind.replace('-', '_'), 'play' if kind == 'account-add' else None)
                 with self.installed():
-                    self.assertIsNone(account_registry.login_admission(config.AccountPaths.for_alias('play', self.home)))
+                    play = config.AccountPaths.for_alias('play', self.home)
+                    self.assertIsNone(account_registry.login_admission(play))
 
     def test_the_helper_asks_again_right_before_its_handoff(self):
         """A transaction found pending at the handoff (none can start while the helper holds the lock: this is the
@@ -1117,7 +1118,8 @@ class PendingTransactionLoginTests(AliasChangeHarness, unittest.TestCase):
         handoffs, seen = [], []
 
         def run(paths, store, provider_factory, ui, *, handoff, expires_at):
-            with self.installed(), mock.patch('telegram_search_mcp.bundle_runtime.installer_pending', return_value=True):
+            with self.installed(), \
+                    mock.patch('telegram_search_mcp.bundle_runtime.installer_pending', return_value=True):
                 seen.append(handoff())
             from telegram_search_mcp.connect_flow import ConnectResult
             return ConnectResult('failed', seen[-1], True, True)

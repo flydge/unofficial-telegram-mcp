@@ -1087,7 +1087,8 @@ SCENARIOS = {
         h, launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none', checkpoint=_receipt_changed(h))),
         _late_aliases_check, final=_late_aliases_final),
     'rollback_below_055_retires_the_registry': Scenario(_retire_prepare, lambda h, lc, cl: h.change(
-        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'), _retire_check, final=_retired),
+        'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'), _retire_check,
+        final=_retired),
 }
 
 

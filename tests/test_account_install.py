@@ -609,8 +609,8 @@ class LoginRootTests(AccountHarness, unittest.TestCase):
     account-add creates the root (owner-only, empty but for run/) right after its registry step."""
 
     def logged_in_new(self):
-        """A logged-in alias's root, broker and connect job (`alias_session`) with an empty session directory, so a login
-        of it is admitted (`setup_status`: new) and reaches the connect.lock."""
+        """A logged-in alias's root, broker and connect job (`alias_session`) with an empty session directory, so a
+        login of it is admitted (`setup_status`: new) and reaches the connect.lock."""
         self.added()
         self.alias_session()
         (self.jobs.root / 'tdlib' / 'td.binlog').unlink()

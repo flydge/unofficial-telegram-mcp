@@ -133,7 +133,8 @@ class AccountChangeGrammarTests(unittest.TestCase):
         label = config.alias_jobs('work', Path.home()).broker_label
         for action in ('account-add', 'account-remove'):
             with self.subTest(action=action):
-                refusal = json.loads(self.dispatch([action, 'play'], error('alias_broker_unreadable', account='work'))[2])
+                raised = error('alias_broker_unreadable', account='work')
+                refusal = json.loads(self.dispatch([action, 'play'], raised)[2])
                 self.assertEqual(refusal, {'status': 'refused', 'code': 'alias_broker_unreadable', 'account': 'work',
                                            'next_action': 'boot_out_alias_broker_then_retry',
                                            'bootout_command': ['launchctl', 'bootout',

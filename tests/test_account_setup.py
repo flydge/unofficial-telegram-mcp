@@ -266,9 +266,10 @@ class ConnectLockTests(SetupHarness):
 
 
 class RootlessSetupTests(SetupHarness):
-    """Review fix (055d3, medium, R1): `setup --account` and `resume --account` take the alias's connect.lock only inside
-    its existing root, which account-add creates and a login never does: a missing root, or an alias the registry no
-    longer lists, refuses `alias_unavailable` before any provider, prompt or enrollment, with nothing created."""
+    """Review fix (055d3, medium, R1): `setup --account` and `resume --account` take the alias's connect.lock only
+    inside its existing root, which account-add creates and a login never does: a missing root, or an alias the
+    registry no longer lists, refuses `alias_unavailable` before any provider, prompt or enrollment, with nothing
+    created."""
 
     def test_a_missing_root_or_an_alias_no_longer_listed_refuses_and_creates_nothing(self):
         self.home_with('work')

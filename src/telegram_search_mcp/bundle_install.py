@@ -1234,7 +1234,6 @@ class _Service:
             if self.kind()[0]!='to':raise InstallError('service_conflict')
         return 'not_loaded'
 
-
     def _set_aside(self, j):
         """A rollback's `newer_state_kept` alias (review fix 055d3): its broker definition, naming the newer release,
         leaves launchd's reach. A broker loaded from it is gated and booted out first; its exact bytes are kept in the
@@ -3951,8 +3950,8 @@ def _alias_root(jobs):
     """account-add's root step (review fix 055d3): the alias's root, owner-only and empty but for its run directory,
     created right after its registry entry admits it, since a login never creates it (account_registry.login_lock).
     An existing one (a session an uninstall kept, or an earlier attempt's) is kept as it is, its run directory added
-    when absent; one that is not an owner-only directory refuses `runtime_conflict` and the retry resumes here. Idempotent
-    by state: a kill between the two directories resumes with the second."""
+    when absent; one that is not an owner-only directory refuses `runtime_conflict` and the retry resumes here.
+    Idempotent by state: a kill between the two directories resumes with the second."""
     try:
         directory = open_private_directory(jobs.root.parent)
     except OwnerLeaseError:
@@ -4283,9 +4282,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                         raise InstallError(error.code) from None
                 j.advance('registry')
             checkpoint('registry')
-            # Its root, right after the registry admits it (review fix 055d3): a login takes its connect.lock only inside
-            # an existing root and never creates one, so no login waiting through an account-remove recreates a root
-            # that remove moved aside. Until this transaction finishes, every login of it refuses
+            # Its root, right after the registry admits it (review fix 055d3): a login takes its connect.lock only
+            # inside an existing root and never creates one, so no login waiting through an account-remove recreates a
+            # root that remove moved aside. Until this transaction finishes, every login of it refuses
             # `transaction_pending` (account_registry.login_admission).
             if not j.reached('root'):
                 _alias_root(jobs)

@@ -545,8 +545,8 @@ def login_lock(account) -> int:
     must still list the alias, so a login that waited through an account-remove (which drops the registry entry, then
     moves the root aside, holding this lock itself) never takes a lock in the moved tree or creates the root again. A
     missing root or an alias no longer listed refuses `alias_unavailable` (AccountPathsError) with nothing created and
-    the lock released; a held lock raises OwnerLeaseError('owner_busy'), anything unsafe OwnerLeaseError('owner_unsafe').
-    The default alias's callers keep 0.54's lock."""
+    the lock released; a held lock raises OwnerLeaseError('owner_busy'), anything unsafe
+    OwnerLeaseError('owner_unsafe'). The default alias's callers keep 0.54's lock."""
     if not _named(account.alias) or not _listed(account):
         raise AccountPathsError()
     try:
