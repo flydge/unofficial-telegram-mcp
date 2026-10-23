@@ -23,8 +23,9 @@ import subprocess
 import sys
 import threading
 import time
+from . import account_registry
 from .broker_client import BrokerCompatibilityError, BrokerUnavailable
-from .config import DEFAULT_ALIAS
+from .config import DEFAULT_ALIAS, AccountPathsError
 from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, next_action,
                            run_connect, valid_retry_after, write_connect_status)
 from .credentials import CredentialStoreError
@@ -55,7 +56,7 @@ _IN_PROGRESS = {'status': 'connect_in_progress', 'next_action': 'wait'}
 _AGAIN = 'run_api_credentials_in_native_terminal'
 # api-credentials keeps these codes' table actions; any other refusal there means "run it again".
 _API_KEPT = frozenset({'secure_terminal_required', 'enrollment_exists', 'legacy_unmanaged',
-                       'enrollment_inconsistent', 'owner_busy', 'credential_invalid_record'})
+                       'enrollment_inconsistent', 'owner_busy', 'credential_invalid_record', 'alias_unavailable'})
 _STORE_CODES = frozenset({'denied', 'locked', 'unavailable', 'invalid_record', 'conflict'})
 # The OS refused a write (an agent sandbox, a read-only parent): not unsafe metadata.
 _DENIED = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
@@ -88,8 +89,15 @@ def _denied(error):
 
 
 def _take_connect_lock(paths):
-    """Descriptor holding connect.lock, or None while another process holds it; unsafe raises."""
+    """Descriptor holding connect.lock, or None while another process holds it; unsafe raises.
+
+    A named alias's is taken only inside its existing root, and only while the registry still lists it
+    (account_registry.login_lock, review fix 055d3): a login never creates the alias root; a missing root or an
+    alias no longer listed raises AccountPathsError (`alias_unavailable`), nothing created. The default's is 0.54's.
+    """
     try:
+        if paths.account.alias != DEFAULT_ALIAS:
+            return account_registry.login_lock(paths.account)
         return acquire_owner_lock(connect_lock_path(paths))
     except OwnerLeaseError as error:
         if error.code == 'owner_busy':
@@ -324,6 +332,8 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
         lock, response = _enter(paths, runner, uid, sleeper, clock)
     except LaunchAgentError:
         return _refused('connect_launch_failed')
+    except AccountPathsError:  # A named alias's root is gone, or the registry no longer lists it: nothing created.
+        return _refused('alias_unavailable')
     except OwnerLeaseError as error:
         return _refused(_write_denied(terminal) if _denied(error) else 'owner_unsafe')
     if lock is None:
@@ -653,6 +663,8 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
         if not lock_held:
             try:
                 lock = _await_connect_lock(paths, sleeper)
+            except AccountPathsError:  # A named alias's root is gone or no longer listed: nothing to own or put back.
+                return ConnectResult('failed', 'alias_unavailable')
             except OwnerLeaseError:
                 ran = True  # Nobody else can own this run: restore below.
                 return ConnectResult('failed', 'owner_unsafe')
@@ -749,13 +761,18 @@ def api_credentials(paths, *, terminal, store_factory, timeout=120):
         if left <= 0:
             raise TimeoutError()
         return left
+    login = None
     try:
+        if paths.account.alias != DEFAULT_ALIAS:  # Inside the alias's existing root only (review fix 055d3).
+            login = account_registry.login_lock(paths.account)
         with SessionOwnerLease(paths.lock):  # No connect run may create an enrollment meanwhile.
             state = setup_status(paths)['state']
             if state != 'new':
                 return refuse('enrollment_exists' if state == 'managed' else 'enrollment_inconsistent')
             store = _WriteCounter(store_factory())
             _api_credentials(terminal, store, remaining)
+    except AccountPathsError:
+        return refuse('alias_unavailable')
     except OwnerLeaseError as error:
         return refuse(error.code)
     except CredentialStoreError as error:
@@ -768,4 +785,7 @@ def api_credentials(paths, *, terminal, store_factory, timeout=120):
         return refuse('timeout')
     except Exception:
         return refuse('dependency_unavailable')
+    finally:
+        if login is not None:
+            os.close(login)
     return ({'status': 'stored'} if store.writes else {'status': 'already_present'}), 0

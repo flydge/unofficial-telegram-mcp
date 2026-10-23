@@ -14,6 +14,8 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -23,9 +25,11 @@ from test_bundle_upgrade import ChangeHarness, FakeLaunchctl, NEIGHBOUR_CODEX
 from telegram_search_mcp import account_registry, bundle_install, config
 
 
-# What an installer transaction leaves at the root of an alias that never logged in: the run directory and the empty
-# connect.lock it held for its run, as a login creates them first (review fix 055d2, `_LoginLocks`); nothing of a
-# session.
+# What account-add leaves at a new alias's place: its root, owner-only and empty but for its run directory (review fix
+# 055d3: a login takes its connect.lock only inside an existing root and never creates one).
+ADDED_ROOT = {'run': 'dir'}
+# What a later installer transaction leaves at the root of an alias that never logged in: also the empty connect.lock it
+# held for its run, as a login creates it first (review fix 055d2, `_LoginLocks`); nothing of a session.
 LOCK_ONLY = {'run': 'dir', 'run/connect.lock': hashlib.sha256(b'').hexdigest()}
 
 
@@ -216,7 +220,10 @@ class AccountAddTests(AccountHarness, unittest.TestCase):
         self.assertEqual(self.desktop_servers()['telegram_search_work'], {'command': command, 'args': arguments})
         self.assertTrue((self.codex / 'config.toml').read_bytes().startswith(NEIGHBOUR_CODEX))
         self.assertEqual(self.installer_files(), before)  # receipt.json, current.json and the default's entries.
-        self.assertFalse(self.jobs.root.exists() or self.jobs.broker_plist.exists())  # No login, no directory.
+        # No login: its root as account-add creates it (review fix 055d3), owner-only, and no broker definition.
+        self.assertEqual(tree(self.jobs.root), ADDED_ROOT)
+        self.assertEqual(oct(self.jobs.root.stat().st_mode & 0o777), '0o700')
+        self.assertFalse(self.jobs.broker_plist.exists())
         self.assertEqual(self.checks, [(self.release / 'python/bin/python3', self.release / 'app')])
         side = self.sidecar()
         self.assertEqual(set(side), {'schema_version', 'accounts'})
@@ -412,7 +419,7 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
         # A retry after it finished returns its result; a later add of the same alias starts afresh.
         self.assertEqual({k: v for k, v in self.account('account_remove').items() if k != 'session_moved_to'}, result)
         self.assertEqual(self.account('account_add')['status'], 'account_added')
-        self.assertFalse(self.jobs.root.exists())
+        self.assertEqual(tree(self.jobs.root), ADDED_ROOT)  # A new, empty root; the moved session stays as it was.
         self.assertEqual(tree(moved), session)
 
     def test_rename_is_a_remove_and_an_add(self):
@@ -589,6 +596,144 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
                 if reference is None:
                     reference = state
                 self.assertEqual(state, reference)
+
+
+class LoginRootTests(AccountHarness, unittest.TestCase):
+    """Review fix (055d3, medium, R1): a login polling for the alias's connect.lock while account-remove held it (an
+    earlier helper's terminal status in place, so `connect` waits out its linger) took it right after the move by
+    creating `TelegramSearchMCP-accounts/<alias>/run/connect.lock` again (`acquire_owner_lock` created every missing
+    parent), so account-add then refused `runtime_conflict` for good. A login now takes the lock only inside an existing
+    root, reads the registry before and once it holds the lock, and refuses `alias_unavailable` with nothing created;
+    account-add creates the root (owner-only, empty but for run/) right after its registry step."""
+
+    def logged_in_new(self):
+        """A logged-in alias's root, broker and connect job (`alias_session`) with an empty session directory, so a login
+        of it is admitted (`setup_status`: new) and reaches the connect.lock."""
+        self.added()
+        self.alias_session()
+        (self.jobs.root / 'tdlib' / 'td.binlog').unlink()
+
+    def stages_before_registry(self):
+        """Every checkpoint account-remove passes before its registry step, traced from one run."""
+        self.logged_in_new()
+        seen = []
+        self.account('account_remove', checkpoint=seen.append)
+        self.assertIn('stopped:service', seen)
+        return seen[:seen.index('registry')]
+
+    def login_paths(self):
+        from telegram_search_mcp.enrollment import SetupPaths
+        return SetupPaths.from_account(config.AccountPaths.for_alias(self.ALIAS, self.home))
+
+    def polling_connect(self):
+        """`connect --account` (the agent's), admitted now, while account-remove holds the alias's connect.lock: an
+        earlier helper's terminal status makes `_enter` poll through the linger. Its sleeper blocks until `finish()`, so
+        the transaction runs to its end between two polls; `finish()` returns connect's (value, code)."""
+        from telegram_search_mcp import connect_cli
+        from telegram_search_mcp.connect_flow import write_connect_status
+        paths, now = self.login_paths(), time.time()
+        write_connect_status(paths, 'failed', 'cancelled', updated_at=now, expires_at=now + 600)
+        polling, released, out = threading.Event(), threading.Event(), []
+
+        def sleeper(_):
+            polling.set()
+            released.wait(30)
+
+        class Agent:  # A captured agent shell, not native Terminal: connect would start the launchd helper.
+            def require_secure(self):
+                raise RuntimeError('captured')
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('no broker probe and no inline run')
+        thread = threading.Thread(target=lambda: out.append(connect_cli.connect(
+            paths, client_factory=never, terminal=Agent(), inline=never, runner=self.launchctl, uid=os.getuid(),
+            sleeper=sleeper)))
+        thread.start()
+        self.assertTrue(polling.wait(10))  # Waiting for the lock the transaction holds.
+
+        def finish():
+            released.set()
+            thread.join(30)
+            self.assertFalse(thread.is_alive())
+            return out[0]
+        return finish
+
+    def test_a_login_polling_through_account_remove_never_creates_its_root_again(self):
+        for stage in self.stages_before_registry():
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.logged_in_new()
+                finish = []
+
+                def start(value, stage=stage):
+                    if value == stage and not finish:
+                        finish.append(self.polling_connect())
+                self.assertEqual(self.account('account_remove', checkpoint=start)['session'], 'moved')
+                self.assertEqual(finish[0](), ({'status': 'refused', 'code': 'alias_unavailable',
+                                                'next_action': 'stop_and_report'}, 2))
+                self.assertFalse(self.jobs.root.exists())
+                self.assertIsNone(self.launchctl.job(self.jobs.connect_label))
+                # The alias name can be added again: a new, empty root.
+                self.assertEqual(self.account('account_add')['status'], 'account_added')
+                self.assertEqual(tree(self.jobs.root), ADDED_ROOT)
+
+    def test_setup_admitted_during_account_remove_never_creates_its_root_again(self):
+        """The inline variant: `setup --account` in the owner's Terminal, admitted (the launcher's registry check) at a
+        checkpoint before the registry step, reaching the connect.lock only after the move."""
+        from test_onboarding import MemoryStore, Terminal
+        from telegram_search_mcp.setup_wizard import run_setup
+        for stage in self.stages_before_registry():
+            for resume in (False, True):
+                with self.subTest(stage=stage, resume=resume):
+                    self.setUp()
+                    self.logged_in_new()
+                    admitted = []
+
+                    def admit(value, stage=stage):
+                        if value == stage and not admitted:
+                            admitted.append(self.login_paths())
+                    self.assertEqual(self.account('account_remove', checkpoint=admit)['session'], 'moved')
+
+                    def never(*_args, **_kwargs):
+                        raise AssertionError('no provider and no handoff')
+                    terminal = Terminal()
+                    result = run_setup(admitted[0], terminal, MemoryStore(), never, handoff=never, resume=resume,
+                                       bundled_loader=lambda: None)
+                    self.assertEqual((result.status, result.code, result.to_dict()['next_action'], terminal.prompts),
+                                     ('pending', 'alias_unavailable', 'stop_and_report', []))
+                    self.assertFalse(self.jobs.root.exists())
+                    self.assertEqual(self.account('account_add')['status'], 'account_added')
+                    self.assertEqual(tree(self.jobs.root), ADDED_ROOT)
+
+    def test_account_add_creates_the_root_right_after_its_registry_step_and_a_kill_resumes(self):
+        for stage in ('registry', 'root'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.full()
+                self.claude()
+
+                def die(value, stage=stage):
+                    if value == stage:
+                        raise KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    self.account('account_add', checkpoint=die)
+                self.assertEqual(self.registry(), ('work',))
+                self.assertEqual(self.jobs.root.exists(), stage == 'root')
+                self.assertEqual(self.account('account_add')['status'], 'account_added')
+                self.assertEqual(tree(self.jobs.root), ADDED_ROOT)
+
+    def test_installer_locks_never_create_a_missing_root(self):
+        """An alias the registry admits whose root is absent (moved by hand): no transaction creates it to hold its
+        lock (`_LoginLocks`), since no login of it can start without it either."""
+        self.added()
+        os.rename(self.jobs.root, self.jobs.root.with_name('moved-by-hand'))
+        locks = bundle_install._LoginLocks(self.launchctl, self.home, ['work']).__enter__()
+        try:
+            locks.complete()
+            self.assertEqual(locks.held, set())
+        finally:
+            locks.__exit__()
+        self.assertFalse(self.jobs.root.exists())
 
 
 class LoadedAgainTests(AccountHarness, unittest.TestCase):

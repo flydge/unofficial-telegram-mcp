@@ -3322,7 +3322,7 @@ _ACCOUNT_TRANSACTION = re.compile(r'account_[1-9][0-9]{0,2}\Z')
 _RECORD_TRANSACTION = re.compile(r'(?:account|change)_[1-9][0-9]{0,2}\Z')
 _ACCOUNT_STAGING = re.compile(r'\.account_[1-9][0-9]{0,2}-staging-[a-z0-9_]{8}\Z')
 _ACCOUNT_STAGED_FILES = frozenset({'journal.json', 'config.preimage', 'config.candidate', 'registration.json'})
-_ACCOUNT_ADD_STEPS = ['prepared', 'registry', 'default_check', 'registration_pending', 'registration',
+_ACCOUNT_ADD_STEPS = ['prepared', 'registry', 'root', 'default_check', 'registration_pending', 'registration',
                       'claude_code_pending', 'claude_code', 'claude_desktop_pending', 'claude_desktop',
                       'sidecar_pending', 'sidecar', 'finished']
 _ACCOUNT_REMOVE_STEPS = ['prepared', 'connect', 'service', 'registration', 'claude_code', 'claude_desktop',
@@ -3884,6 +3884,36 @@ def _alias_held(jobs, name):
         os.close(descriptor)
 
 
+def _alias_root(jobs):
+    """account-add's root step (review fix 055d3): the alias's root, owner-only and empty but for its run directory,
+    created right after its registry entry admits it, since a login never creates it (account_registry.login_lock).
+    An existing one (a session an uninstall kept, or an earlier attempt's) is kept as it is, its run directory added
+    when absent; one that is not an owner-only directory refuses `runtime_conflict` and the retry resumes here. Idempotent
+    by state: a kill between the two directories resumes with the second."""
+    try:
+        directory = open_private_directory(jobs.root.parent)
+    except OwnerLeaseError:
+        raise InstallError('runtime_conflict') from None
+    try:
+        for name in (jobs.root.name, 'run'):
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=directory)
+                os.fsync(directory)
+            except FileExistsError:
+                pass
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0),
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+            metadata = os.fstat(directory)
+            if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise InstallError('runtime_conflict')
+    except OSError:
+        raise InstallError('runtime_conflict') from None
+    finally:
+        os.close(directory)
+
+
 def _login_running(runner, jobs):
     """Whether the alias's connect job is loaded in any state but an explicit idle one: a helper running, or started
     and still waiting for the connect.lock. Lead decision (review fix 055d, owner review pending): an idle job is no
@@ -3911,11 +3941,15 @@ class _LoginLocks:
 
     Two phases, so that every refusal before a transaction exists still changes nothing. Entering takes, before any
     check, every lock that exists (the file a login creates first). `complete()` creates and takes the others: for an
-    alias the registry admits, the run directory and empty lock a login would create first (an alias never logged in
-    has no root; nothing of a session is created); an alias the registry does not admit gets none, since no login of
-    it can start (AccountPaths admission). A resumed run completes at once; a fresh one right before its transaction
-    opens, after its read-only checks: a login that took a lock since holds it, so the completion refuses with nothing
-    changed, and every observation a login could change is made again inside the transaction.
+    alias the registry admits, the run directory and empty lock a login would create first; an alias the registry
+    does not admit gets none, since no login of it can start (AccountPaths admission). A resumed run completes at
+    once; a fresh one right before its transaction opens, after its read-only checks: a login that took a lock since
+    holds it, so the completion refuses with nothing changed, and every observation a login could change is made
+    again inside the transaction.
+
+    Every lock is taken only inside the alias's existing root (review fix 055d3), as a login takes it
+    (account_registry.login_lock): an alias whose root is absent (moved aside by account-remove, or never created)
+    gets none, since no login of it can start without its root either, so no transaction creates a root again.
 
     `held` names the aliases whose lock this run holds (a probe of a held lock by the same process reads as held)."""
 
@@ -3928,9 +3962,12 @@ class _LoginLocks:
         return self.jobs[alias].socket.parent/'connect.lock'
 
     def _take(self, alias):
+        root = self.jobs[alias].root
         try:
-            self.descriptors.append(acquire_owner_lock(self._path(alias)))
+            self.descriptors.append(acquire_owner_lock(self._path(alias), within=root))
         except OwnerLeaseError:
+            if not os.path.lexists(root):
+                return  # No root: no login of it can start (review fix 055d3), and none is created here.
             raise InstallError('login_in_progress') from None
         self.held.add(alias)
 
@@ -3958,7 +3995,8 @@ class _LoginLocks:
         except InstallError:
             admitted = set()  # An unreadable registry admits no login either.
         for alias in self.jobs:
-            if alias not in self.held and (alias in admitted or os.path.lexists(self._path(alias))):
+            if (alias not in self.held and os.path.lexists(self.jobs[alias].root)
+                    and (alias in admitted or os.path.lexists(self._path(alias)))):
                 self._take(alias)
         self._no_running_job()
         self.completed = True
@@ -4031,8 +4069,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     running login of another alias (`login_in_progress`: every run holds every other alias's connect.lock,
     `_LoginLocks`, review fix 055d2), or any unfinished transaction (`transaction_pending`). Then, journaled: the
     alias's broker definition of another release rewritten to this release's (`service: rewritten`); the registry
-    entry (unpinned); one `check` on the default broker when it is loaded, so its authorized account is pinned
-    before the alias's first login (an unanswered check refuses
+    entry (unpinned); the alias's root, owner-only and empty but for its run directory (an existing one kept), which
+    a login never creates (review fix 055d3); one `check` on the default broker when it is loaded, so its authorized
+    account is pinned before the alias's first login (an unanswered check refuses
     `default_check_failed`, and the retry resumes there); the Codex entry (`mcp --account <alias>`, never required);
     the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the install's);
     the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's accounts.json
@@ -4164,6 +4203,14 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                         raise InstallError(error.code) from None
                 j.advance('registry')
             checkpoint('registry')
+            # Its root, right after the registry admits it (review fix 055d3): a login takes its connect.lock only inside
+            # an existing root and never creates one, so no login waiting through an account-remove recreates a root
+            # that remove moved aside. Until this transaction finishes, every login of it refuses
+            # `transaction_pending` (account_registry.login_admission).
+            if not j.reached('root'):
+                _alias_root(jobs)
+                j.advance('root')
+            checkpoint('root')
             if j.recorded('default_check') is None:
                 broker = _default_broker(launchctl, home, installed)
                 status = 'not_loaded' if broker is None else check(home, *broker)

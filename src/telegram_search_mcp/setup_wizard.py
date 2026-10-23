@@ -7,13 +7,13 @@ import time
 from . import __version__, account_registry
 from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
-from .config import DEFAULT_ALIAS, ConfigurationError, load_runtime_policy
+from .config import DEFAULT_ALIAS, AccountPathsError, ConfigurationError, load_runtime_policy
 from .credential_identity import CredentialIdentityError, ResolvedIdentity, resolve_enrolled, valid_record
 from .credentials import CredentialStoreError
 from .enrollment import SetupPaths, EnrollmentStore, EnrollmentError, managed_key
 from .keychain import ApiCredentials
 from .secure_terminal import TerminalError
-from .session_owner import SessionOwnerLease, OwnerLeaseError, acquire_owner_lock, open_private_directory
+from .session_owner import SessionOwnerLease, OwnerLeaseError, open_private_directory
 
 _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'legacy_unmanaged',
     'enrollment_missing', 'enrollment_inconsistent', 'managed_key_missing', 'credential_denied',
@@ -141,7 +141,10 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     A named alias's run holds its connect.lock from here through the handoff,
     as the connect helper does (review fix 055d2): held by another login or by
     an installer transaction over the aliases, it refuses `owner_busy` before
-    anything else; the default's keeps 0.54's behaviour.
+    anything else. The lock is taken only inside the alias's existing root,
+    which a login never creates: a missing root, or an alias the registry no
+    longer lists, refuses `alias_unavailable` (review fix 055d3). The default's
+    keeps 0.54's behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 3600
@@ -155,7 +158,9 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     login = None
     if paths.account.alias != DEFAULT_ALIAS:
         try:
-            login = acquire_owner_lock(paths.account.connect_lock)
+            login = account_registry.login_lock(paths.account)
+        except AccountPathsError:
+            return _result('alias_unavailable')
         except OwnerLeaseError as error:
             return _result(error.code)
     try:

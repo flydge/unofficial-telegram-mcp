@@ -57,7 +57,13 @@ class SetupHarness(unittest.TestCase):
         self.store, self.terminal, self.events, self.raws, self.handoffs = MemoryStore(), Terminal(), [], [], 0
 
     def use(self, alias):
-        self.paths = SetupPaths.from_account(AccountPaths.for_alias(alias, self.home))
+        """The alias's SetupPaths; a named alias's root as account-add leaves it (review fix 055d3: owner-only, empty
+        but for its run directory), since a login never creates it."""
+        account = AccountPaths.for_alias(alias, self.home)
+        if alias != 'default':
+            for path in (account.root, account.run):
+                path.mkdir(mode=0o700, exist_ok=True)
+        self.paths = SetupPaths.from_account(account)
 
     def factory(self, user_id, states=None):
         def create():
@@ -143,9 +149,21 @@ class SetupPinTests(SetupHarness):
 
     def test_an_alias_removed_meanwhile_stops_and_an_unreadable_account_never_hands_off(self):
         self.assert_refused(self.setup(None), 'auth_request_failed', 'resume_in_foreground_native_terminal')
-        account_registry.remove_alias('work', self.home)
-        self.assert_refused(self.resume(USER_B), 'alias_unavailable', 'stop_and_report')
+        # Removed while the run holds its connect.lock (here, as the provider is built): the pin refuses it.
+        create = self.factory(USER_B, ['authorizationStateReady'])
+
+        def removed_meanwhile():
+            account_registry.remove_alias('work', self.home)
+            return create()
+        result = run_setup(self.paths, self.terminal, self.store, removed_meanwhile, handoff=self.handoff, resume=True,
+                           bundled_loader=lambda: None)
+        self.assert_refused(result, 'alias_unavailable', 'stop_and_report')
         self.assertEqual(self.pins(), ({}, None))
+        # Removed before: the lock is refused with it (review fix 055d3), before any provider.
+        raws = len(self.raws)
+        result = self.resume(USER_B)
+        self.assertEqual((result.status, result.code, result.to_dict()['next_action'], len(self.raws)),
+                         ('pending', 'alias_unavailable', 'stop_and_report', raws))
 
     def test_a_busy_registry_is_a_retry_and_an_unsafe_one_stops(self):
         with mock.patch.object(account_registry, 'pin_account',
@@ -245,6 +263,29 @@ class ConnectLockTests(SetupHarness):
         result = self.setup(USER_A)
         self.assertEqual((result.status, result.code, seen), ('ready', None, [False]))
         self.assertFalse(self.paths.account.connect_lock.exists())
+
+
+class RootlessSetupTests(SetupHarness):
+    """Review fix (055d3, medium, R1): `setup --account` and `resume --account` take the alias's connect.lock only inside
+    its existing root, which account-add creates and a login never does: a missing root, or an alias the registry no
+    longer lists, refuses `alias_unavailable` before any provider, prompt or enrollment, with nothing created."""
+
+    def test_a_missing_root_or_an_alias_no_longer_listed_refuses_and_creates_nothing(self):
+        self.home_with('work')
+        self.paths = SetupPaths.from_account(AccountPaths.for_alias('work', self.home))  # Admitted; no root.
+        for case in ('missing_root', 'no_longer_listed'):
+            if case == 'no_longer_listed':
+                for path in (self.paths.account.root, self.paths.account.run):
+                    path.mkdir(mode=0o700)
+                account_registry.remove_alias('work', self.home)
+            before = tree(self.accounts)
+            for resume in (False, True):
+                with self.subTest(case=case, resume=resume):
+                    result = self.setup(USER_B, resume=resume)
+                    self.assertEqual((result.status, result.code, result.to_dict()['next_action']),
+                                     ('pending', 'alias_unavailable', 'stop_and_report'))
+                    self.assertEqual((self.events, self.raws, self.terminal.prompts, self.handoffs), ([], [], [], 0))
+                    self.assertEqual(tree(self.accounts), before)
 
 
 class CodeTableTests(unittest.TestCase):

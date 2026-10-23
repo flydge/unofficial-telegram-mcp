@@ -23,9 +23,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import (ALIAS_GRAMMAR, DEFAULT_ALIAS, ConfigurationError, accounts_root, alias_server_name,
-                     alias_socket_path)
-from .session_owner import OwnerLeaseError, open_private_directory
+from .config import (ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPathsError, ConfigurationError, accounts_root,
+                     alias_server_name, alias_socket_path)
+from .session_owner import OwnerLeaseError, acquire_owner_lock, open_private_directory
 
 REGISTRY_NAME = "registry.json"
 LEASE_NAME = "registry.lock"
@@ -510,3 +510,56 @@ def login_refusal(account, read_user_id: Callable[[], int]) -> str | None:
     finally:
         user_id = None
     return None
+
+
+# A named alias's login entry points (review fix 055d3) ---------------------------------------------------------------
+
+def _still_at(path: Path, descriptor: int) -> bool:
+    """Whether the held lock is still the file at `path`, reached from `/` again: its root was not moved since."""
+    try:
+        parent = open_private_directory(path.parent)
+    except OwnerLeaseError:
+        return False
+    try:
+        held, visible = os.fstat(descriptor), os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        return (held.st_dev, held.st_ino) == (visible.st_dev, visible.st_ino)
+    except OSError:
+        return False
+    finally:
+        os.close(parent)
+
+
+def _listed(account) -> bool:
+    try:
+        registry = load(account.accounts_root)
+    except RegistryError:
+        return False  # An unreadable registry admits no login.
+    return registry is not None and account.alias in registry.aliases
+
+
+def login_lock(account) -> int:
+    """The descriptor holding a named alias's connect.lock for a login (`connect`, the connect helper, `setup`,
+    `resume`, `cancel` and `api-credentials --account`), taken only inside the alias's existing root: at most its run
+    directory is created, never the root, which only account-add creates (review fix 055d3). The registry must list
+    the alias before, and once the lock is held the lock must still be the file at the alias's path and the registry
+    must still list the alias, so a login that waited through an account-remove (which drops the registry entry, then
+    moves the root aside, holding this lock itself) never takes a lock in the moved tree or creates the root again. A
+    missing root or an alias no longer listed refuses `alias_unavailable` (AccountPathsError) with nothing created and
+    the lock released; a held lock raises OwnerLeaseError('owner_busy'), anything unsafe OwnerLeaseError('owner_unsafe').
+    The default alias's callers keep 0.54's lock."""
+    if not _named(account.alias) or not _listed(account):
+        raise AccountPathsError()
+    try:
+        descriptor = acquire_owner_lock(account.connect_lock, within=account.root)
+    except OwnerLeaseError as error:
+        if error.code != "owner_busy" and not os.path.lexists(account.root):
+            raise AccountPathsError() from None
+        raise
+    try:
+        if not _still_at(account.connect_lock, descriptor) or not _listed(account):
+            raise AccountPathsError()
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+

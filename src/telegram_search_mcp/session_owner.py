@@ -59,8 +59,46 @@ def open_private_directory(path: Path, *, create=False) -> int:
             os.close(descriptor)
 
 
-def acquire_owner_lock(path: Path) -> int:
-    parent = open_private_directory(path.parent, create=True)
+def _open_within(within: Path, directory: Path) -> int:
+    """`directory` opened as open_private_directory does, creating only its components below `within`, an
+    existing owner-only directory that is never created here."""
+    within, directory = Path(within), Path(directory)
+    try:
+        below = directory.relative_to(within).parts
+    except ValueError:
+        raise OwnerLeaseError() from None
+    if '..' in below:
+        raise OwnerLeaseError()
+    descriptor = open_private_directory(within)
+    try:
+        for name in below:
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0),
+                            dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        metadata = os.fstat(descriptor)
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise OwnerLeaseError()
+        result, descriptor = descriptor, -1
+        return result
+    except OSError:
+        raise OwnerLeaseError() from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def acquire_owner_lock(path: Path, *, within: Path | None = None) -> int:
+    """The nonblocking exclusive lock `path`, created owner-only when absent; its missing parents are created too.
+
+    With `within` (an ancestor of `path`), nothing at or above `within` is created: it must exist, and only the
+    directories between it and the lock are made (an alias login never creates its alias root, review fix 055d3)."""
+    path = Path(path)
+    parent = open_private_directory(path.parent, create=True) if within is None else _open_within(within, path.parent)
     descriptor = -1
     try:
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0)

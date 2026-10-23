@@ -33,6 +33,14 @@ DEFAULT_ASSETS = {'/': '2eb5b38ce52639b2608ad1cc161f6164b10861abe4aec0ef14bdad65
                   '/app.css': 'a818f012bee2f1c121b358e7082ec2233b8a53b159247561e57534c41966c5ea'}
 
 
+def added_root(account):
+    """What account-add leaves at a named alias's place (review fix 055d3): its root, owner-only and empty but for its
+    run directory. A login takes its connect.lock only inside it and never creates it."""
+    for path in (account.root, account.run):
+        path.mkdir(mode=0o700)
+    return account
+
+
 class AccountRaw(QrRaw):
     """QrRaw that answers getMe with one user, like an authorized TDLib session."""
 
@@ -248,6 +256,7 @@ class AliasPageTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         home = Path(temporary.name).resolve()
         account_registry.add_alias('work', home, longest_tool='t')
+        added_root(AccountPaths.for_alias('work', home))
         seen = []
 
         class Server:
@@ -281,7 +290,7 @@ class InstallerTransactionLockTests(unittest.TestCase):
         self.home = Path(temporary.name).resolve()
         os.chmod(self.home, 0o700)
         account_registry.add_alias('work', self.home, longest_tool='t')
-        self.paths = SetupPaths.from_account(AccountPaths.for_alias('work', self.home))
+        self.paths = SetupPaths.from_account(added_root(AccountPaths.for_alias('work', self.home)))
         self.calls = []
 
         def launchctl(argv, **kwargs):  # No job loaded.
@@ -323,6 +332,117 @@ class InstallerTransactionLockTests(unittest.TestCase):
         self.assertEqual(set(self.calls), {'print'})  # Only looked: no bootout, no bootstrap.
         self.assertFalse(self.paths.account.broker_plist.exists())
         self.assertEqual(self.tree(), before)
+
+
+class RootlessLoginTests(unittest.TestCase):
+    """Review fix (055d3, medium, R1): a login never creates a named alias's root. `connect` (the agent's and inline),
+    the connect helper, `cancel` and `api-credentials --account` take its connect.lock only inside an existing root and
+    only while the registry lists the alias (before and once held); a missing root or an alias no longer listed
+    refuses `alias_unavailable` with nothing created: no root, run directory, lock, status, job or broker change."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(dir='/tmp', prefix='r')
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name).resolve()
+        os.chmod(self.home, 0o700)
+        account_registry.add_alias('work', self.home, longest_tool='t')
+        self.account = AccountPaths.for_alias('work', self.home)  # Admitted, as by the launcher; no root yet.
+        self.paths = SetupPaths.from_account(self.account)
+        self.calls = []
+
+        def launchctl(argv, **kwargs):  # No job loaded.
+            self.calls.append(argv[1])
+            return subprocess.CompletedProcess(argv, 113, '', '')
+        self.launchctl = launchctl
+
+    def accounts_tree(self):
+        return sorted(str(p.relative_to(self.account.accounts_root)) for p in self.account.accounts_root.rglob('*'))
+
+    def never(self, *_args, **_kwargs):
+        raise AssertionError('nothing may run')
+
+    def connect(self, terminal=None):
+        return connect_cli.connect(self.paths, client_factory=self.never, terminal=terminal, inline=self.never,
+                                   runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None,
+                                   broker_plist=self.account.broker_plist)
+
+    def helper(self):
+        log = []
+        result = connect_cli.connect_helper(
+            self.paths, store=None, provider_factory=None, handoff=lambda **_: log.append('handoff'),
+            run=lambda *args, **kwargs: log.append('run'), ui_factory=lambda: log.append('ui'),
+            server_factory=lambda *args, **kwargs: log.append('server'), opener=lambda _: log.append('open'),
+            sleeper=lambda _: None, restore_broker=lambda: log.append('restore'))
+        self.assertEqual(log, [])
+        return result
+
+    def assert_every_entry_refuses(self):
+        from test_onboarding import Terminal
+        before = self.accounts_tree()
+        refused = ({'status': 'refused', 'code': 'alias_unavailable', 'next_action': 'stop_and_report'}, 2)
+        self.assertEqual(self.connect(), refused)
+        self.assertEqual(self.connect(Terminal()), refused)  # Inline in native Terminal.
+        result = self.helper()
+        self.assertEqual((result.phase, result.code), ('failed', 'alias_unavailable'))
+        self.assertEqual(connect_cli.api_credentials(self.paths, terminal=Terminal(), store_factory=self.never),
+                         refused)
+        self.assertLessEqual(set(self.calls), {'print'})  # Nothing booted out or bootstrapped.
+        self.assertEqual(self.accounts_tree(), before)
+
+    def test_a_missing_root_refuses_every_login_and_creates_nothing(self):
+        self.assertFalse(self.account.root.exists())
+        self.assert_every_entry_refuses()
+        self.assertFalse(self.account.root.exists())
+        with self.assertRaises(connect_cli.AccountPathsError):
+            account_registry.login_lock(self.account)
+        self.assertFalse(self.account.root.exists())
+
+    def test_an_alias_no_longer_listed_refuses_with_its_root_in_place(self):
+        added_root(self.account)
+        account_registry.remove_alias('work', self.home)
+        self.assert_every_entry_refuses()
+        self.assertFalse(self.account.connect_lock.exists())
+
+    def test_a_listed_alias_with_its_root_takes_only_its_run_directory_and_lock(self):
+        self.account.root.mkdir(mode=0o700)  # Its run directory missing too: created inside the root.
+        descriptor = account_registry.login_lock(self.account)
+        try:
+            self.assertEqual(sorted(str(p.relative_to(self.account.root)) for p in self.account.root.rglob('*')),
+                             ['run', 'run/connect.lock'])
+            self.assertTrue(connect_cli._connect_lock_held(self.paths))
+            with self.assertRaises(connect_cli.OwnerLeaseError) as caught:
+                account_registry.login_lock(self.account)
+            self.assertEqual(caught.exception.code, 'owner_busy')
+        finally:
+            os.close(descriptor)
+
+    def test_a_lock_taken_while_the_root_moved_is_refused_and_released(self):
+        added_root(self.account)
+        moved = self.account.root.with_name('removed-work-' + '0' * 32)
+        real = connect_cli.account_registry.acquire_owner_lock
+
+        def move_after(path, **kwargs):  # account-remove's move, right after the lock was taken in the old tree.
+            descriptor = real(path, **kwargs)
+            os.rename(self.account.root, moved)
+            return descriptor
+        with mock.patch.object(account_registry, 'acquire_owner_lock', side_effect=move_after):
+            with self.assertRaises(connect_cli.AccountPathsError):
+                account_registry.login_lock(self.account)
+        self.assertFalse(self.account.root.exists())
+        os.close(real(moved / 'run' / 'connect.lock'))  # Released: free again.
+
+    def test_cancel_never_creates_the_root(self):
+        jobs = []
+
+        def busy(argv, **kwargs):  # A busy connect job of the alias, booted out by cancel.
+            jobs.append(argv[1])
+            loaded = argv[1] == 'print' and 'bootout' not in jobs
+            return subprocess.CompletedProcess(argv, 0 if loaded or argv[1] == 'bootout' else 113,
+                                               '\tstate = running\n' if loaded else '', '')
+        value, code = connect_cli.cancel(self.paths, runner=busy, uid=os.getuid(), sleeper=lambda _: None,
+                                         restore_broker=self.never)
+        self.assertEqual((value, code), ({'status': 'cancelled'}, 0))
+        self.assertFalse(self.account.root.exists())
 
 
 if __name__ == '__main__':
