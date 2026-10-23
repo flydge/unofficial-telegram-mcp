@@ -25,7 +25,8 @@ from .local_upload_models import LocalUploadManifest, UploadAuthorityEnvelope, U
 from .broker_client import BrokerClient, BrokerUnavailable
 from .artifact_store import MEDIA_LIMIT, TTL_SECONDS
 # With account None the default alias's cache and socket are these module names, read at call time.
-from .config import BROKER_SOCKET_PATH, CACHE_DIRECTORY, AccountPaths, ConfigurationError, load_runtime_policy
+from .config import (ALIAS_GRAMMAR, BROKER_SOCKET_PATH, CACHE_DIRECTORY, DEFAULT_ALIAS, AccountPaths,
+                     ConfigurationError, load_runtime_policy)
 from .contract import CompatibilityError, contract_descriptor, require_compatible, require_current
 from .local_upload import MAX_CHUNK_BYTES, _LIMITS, _NAME
 from .schemas import (
@@ -54,6 +55,7 @@ _DETAILS = {
     "download_failed": "Download failed before publication; no destination was published. Generated private partials are retained; start again from byte zero.",
     "download_interrupted": "Download interrupted before publication; no destination was published. Generated private partials are retained; start again from byte zero.",
     "download_uncertain": "Download completion is uncertain; inspect the selected destination and generated partials before starting again from byte zero.",
+    "alias_unavailable": "The --account alias is not a registered account alias; nothing was dispatched.",
 }
 
 
@@ -611,6 +613,21 @@ class _Parser(argparse.ArgumentParser):
         raise TransferError("invalid_arguments")
 
 
+def _alias_argument(value: str) -> str:
+    """A closed alias token; `default` is never spelled (omit --account for the default account)."""
+    if type(value) is not str or value == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("invalid alias")
+    return value
+
+
+def _account(alias: str) -> AccountPaths:
+    """A registered alias's paths, checked against the registry before anything is created or dispatched."""
+    try:
+        return AccountPaths.for_alias(alias, Path.home())
+    except ConfigurationError:
+        raise TransferError("alias_unavailable") from None
+
+
 class _UploadBrokerClient(BrokerClient):
     """Keep the proxy's handshake, with strict and bounded wire upload receipts."""
     def _upload_call(self, operation, request, response_type):
@@ -686,6 +703,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     upload.add_argument("--file-name", metavar="SAFE_BASENAME")
     upload.add_argument('--upload-authority-stdin', action='store_true',
         help='Private stdin to EOF: closed JSON {"upload_authority":secret,"manifest":{"file_name":name,"kind":kind,"size_bytes":size,"sha256":hash}}, max 2048 bytes. Rehash before redemption; no fallback/retry. Original MCP owner consumes result_ref.')
+    upload.add_argument("--account", type=_alias_argument, metavar="ALIAS",
+                        help="Use a registered account alias's broker instead of the default account's")
     manifest = commands.add_parser('manifest', help='Print exact name/kind/size/SHA-256 only; no broker or policy', allow_abbrev=False)
     manifest.add_argument('--source', required=True, metavar='ABSOLUTE_PATH')
     manifest.add_argument('--kind', required=True, choices=tuple(_LIMITS))
@@ -693,6 +712,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     download = commands.add_parser("download", help="Verify and export one selected cached artifact", allow_abbrev=False)
     download.add_argument("--artifact-id", required=True, metavar="ISSUED_ID")
     download.add_argument("--destination", required=True, metavar="ABSOLUTE_PATH")
+    download.add_argument("--account", type=_alias_argument, metavar="ALIAS",
+                          help="Use a registered account alias's broker and cache instead of the default account's")
     publication = _DownloadPublication()
     command = None
     try:
@@ -700,15 +721,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             args = parser.parse_args(argv)
             command = args.command
+            alias = getattr(args, "account", None)
+            account = None if alias is None else _account(alias)
             if command == "download":
-                receipt = download_artifact(artifact_id=args.artifact_id, destination=args.destination,
-                                            client=_make_client(), _publication=publication)
+                if account is None:
+                    receipt = download_artifact(artifact_id=args.artifact_id, destination=args.destination,
+                                                client=_make_client(), _publication=publication)
+                else:
+                    receipt = download_artifact(artifact_id=args.artifact_id, destination=args.destination,
+                                                client=_make_client(account), _publication=publication,
+                                                account=account)
             elif command == 'manifest':
                 receipt = manifest_source(source=args.source, kind=args.kind, file_name=args.file_name)
             else:
                 envelope = _authority_stdin() if args.upload_authority_stdin else None
                 receipt = upload_source(source=args.source, kind=args.kind, file_name=args.file_name,
-                                        client=None, authority_envelope=envelope)
+                                        client=None, authority_envelope=envelope,
+                                        **({} if account is None else {"account": account}))
             try:
                 print(json.dumps(receipt, separators=(",", ":")), flush=command == "download")
             except BaseException:

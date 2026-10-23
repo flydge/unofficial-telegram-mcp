@@ -343,11 +343,13 @@ class LaunchdThreadingTests(Fixture):
             launch_agent.validate_enrolled_broker(runner=launchctl(calls), uid=501, account=self.work)
         self.assertEqual(calls, [])
 
-    def test_no_job_is_written_for_a_named_account_before_its_argv_exists(self):
+    def test_no_job_is_written_for_a_named_account_before_phase_c(self):
         python = Path(sys.executable)
         self.work.broker_plist.parent.mkdir(parents=True, mode=0o700)
-        for build in (lambda: launch_agent.launch_agent_payload(python_executable=python, account=self.work),
-                      lambda: launch_agent.connect_job_payload(python_executable=python, account=self.work),
+        # Phase B: the broker argv names the alias; writing and starting its jobs stay phase C's.
+        self.assertEqual(launch_agent.launch_agent_payload(python_executable=python, account=self.work)
+                         ['ProgramArguments'][-2:], ['--account', 'work'])
+        for build in (lambda: launch_agent.connect_job_payload(python_executable=python, account=self.work),
                       lambda: launch_agent.start_enrolled_broker(python_executable=python, account=self.work,
                                                                  runner=launchctl([])),
                       lambda: launch_agent.write_connect_job(plist_path=self.work.connect_plist, account=self.work)):

@@ -21,6 +21,7 @@ from .config import (
     BROKER_SOCKET_PATH,
     # Transient QR connect helper: same per-user derivation as the broker label.
     CONNECT_JOB_LABEL,
+    ALIAS_GRAMMAR,
     DEFAULT_ALIAS,
     LAUNCH_AGENT_LABEL,
     LAUNCH_AGENT_PLIST,
@@ -53,10 +54,19 @@ def _connect_label(account: AccountPaths | None) -> str:
     return CONNECT_JOB_LABEL if account is None else account.connect_label
 
 
-def _require_default_program(account: AccountPaths | None) -> None:
-    """A job for a named alias needs that alias in its argv (0.55 phase B); until then none is written."""
+def _account_arguments(account: AccountPaths | None) -> list[str]:
+    """The trailing argv naming a named alias (spec 3B); none for the default alias, so its 0.54 argv stays."""
+    return [] if account is None or account.alias == DEFAULT_ALIAS else ["--account", account.alias]
+
+
+def _require_default_job(account: AccountPaths | None) -> None:
+    """Writing or starting a named alias's broker job, and its connect helper's argv, are phase C's (spec 3C).
+
+    Until then a named alias's broker payload exists (its argv ends with `--account <alias>`) and is recognised,
+    but no job is written or bootstrapped for it.
+    """
     if account is not None and account.alias != DEFAULT_ALIAS:
-        raise LaunchAgentError("account job arguments are unavailable")
+        raise LaunchAgentError("account jobs are unavailable")
 
 
 def _default_preflight(account: AccountPaths | None = None) -> None:
@@ -70,7 +80,7 @@ def _default_preflight(account: AccountPaths | None = None) -> None:
 
 
 def launch_agent_payload(*, python_executable: Path, account: AccountPaths | None = None) -> dict[str, Any]:
-    _require_default_program(account)
+    """The broker's launchd definition; a named alias's argv ends with `--account <alias>` (spec 3B)."""
     from .bundle_runtime import broker_arguments
     bundled = broker_arguments()
     executable = python_executable.absolute()
@@ -79,12 +89,12 @@ def launch_agent_payload(*, python_executable: Path, account: AccountPaths | Non
         raise LaunchAgentError("Python executable is invalid")
     return {
         "Label": _broker_job(account)[0],
-        "ProgramArguments": bundled or [
+        "ProgramArguments": (bundled or [
             str(executable),
             "-m",
             "telegram_search_mcp.launch_agent",
             "run",
-        ],
+        ]) + _account_arguments(account),
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
@@ -117,10 +127,11 @@ def _managed_payload(value: object, account: AccountPaths | None = None) -> bool
         bundled = broker_arguments()
     except BundleError:
         return False
-    legacy = (isinstance(arguments, list) and len(arguments) == 4
+    named = _account_arguments(account)
+    legacy = (isinstance(arguments, list) and len(arguments) == 4 + len(named)
               and isinstance(arguments[0], str) and Path(arguments[0]).is_absolute()
-              and arguments[1:] == ["-m", "telegram_search_mcp.launch_agent", "run"])
-    selected = bundled is not None and arguments == bundled
+              and arguments[1:] == ["-m", "telegram_search_mcp.launch_agent", "run", *named])
+    selected = bundled is not None and arguments == bundled + named
     return (
         set(value) == expected_keys
         and value.get("Label") == _broker_job(account)[0]
@@ -195,6 +206,7 @@ def _read_launch_agent(directory_descriptor: int, name: str) -> object | None:
 
 def write_launch_agent(*, plist_path: Path, python_executable: Path, account: AccountPaths | None = None) -> None:
     """Atomically write the fixed, credential-free LaunchAgent definition."""
+    _require_default_job(account)
     directory_descriptor = _open_launch_agent_directory(plist_path)
     temporary_name = f".{plist_path.name}.{secrets.token_hex(16)}.tmp"
     temporary_exists = False
@@ -276,6 +288,7 @@ def install_launch_agent(
     uid: int | None = None,
     account: AccountPaths | None = None,
 ) -> None:
+    _require_default_job(account)
     label, default_plist = _broker_job(account)
     plist_path = default_plist if plist_path is None else plist_path
     if preflight is None:
@@ -397,6 +410,7 @@ def start_enrolled_broker(
     Ready is checked separately through the compatible IPC boundary. With
     create=False nothing is ever written: a missing definition refuses.
     """
+    _require_default_job(account)
     label, default_plist = _broker_job(account)
     plist_path = default_plist if plist_path is None else plist_path
     if plist_path.parent.absolute() != plist_path.parent.resolve(strict=False):
@@ -519,7 +533,7 @@ def connect_job_arguments(*, python_executable: Path = Path(sys.executable)) -> 
 
 def connect_job_payload(*, python_executable: Path = Path(sys.executable),
                         account: AccountPaths | None = None) -> dict[str, Any]:
-    _require_default_program(account)
+    _require_default_job(account)
     return {
         'Label': _connect_label(account),
         'ProgramArguments': connect_job_arguments(python_executable=python_executable),
@@ -739,11 +753,25 @@ def run_broker(account: AccountPaths | None = None) -> int:
     return 0
 
 
+def _alias_argument(value: str) -> str:
+    """A closed alias token; the refusal never echoes it, and `default` is spelled by omitting the flag."""
+    if type(value) is not str or value == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected a registered account alias")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="telegram-search-broker")
     parser.add_argument("command", choices=("run", "install", "status", "uninstall"))
+    # `run --account <alias>` is a named alias's broker argv (spec 3B); its install and lifecycle are phase C's.
+    parser.add_argument("--account", type=_alias_argument, metavar="ALIAS", help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
     try:
+        if arguments.account is not None:
+            if arguments.command != "run":
+                raise LaunchAgentError("account lifecycle is unavailable")
+            # The registry admits the alias before the broker creates any directory.
+            return run_broker(AccountPaths.for_alias(arguments.account, Path.home()))
         if arguments.command == "run":
             return run_broker()
         if arguments.command == "install":
