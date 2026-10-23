@@ -565,5 +565,68 @@ class AccountsDirectoryWithoutRegistryTests(AliasChangeHarness, unittest.TestCas
                 self.assertEqual(self.change_snapshot(), before)
 
 
+class ReinstallOverKeptAliasesTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d, high): an uninstall keeps the registry while accounts.json leaves with the retired root, so
+    after a reinstall every alias the registry lists has no record. That is repairable, not inconsistent: each one's
+    own account-add registers its entries again (its registry entry, pin and session kept) and its account-remove
+    retires it, beside any other alias still in that state."""
+
+    USER = 4_000_000_041  # A synthetic user id: never printed.
+
+    def reinstalled(self, *aliases):
+        packet, _ = self.full()
+        for alias in aliases:
+            self.account('account_add', alias)
+        self.alias_session()
+        account_registry.pin_account(config.accounts_root(self.home), 'work', self.USER)
+        session = tree(self.jobs.root)
+        self.change('uninstall')
+        self.assertEqual((self.registry(), self.sidecar()), (tuple(sorted(aliases)), None))
+        version = json.loads((packet[1] / 'manifest' / 'release.json').read_bytes())['package_version']
+        with mock.patch('telegram_search_mcp.__version__', version):
+            self.install(packet)
+        self.service(self.release)
+        return session
+
+    def test_each_alias_an_uninstall_kept_is_added_and_removed_again_after_a_reinstall(self):
+        for aliases in (('work',), ('play', 'work')):
+            with self.subTest(aliases=aliases):
+                self.setUp()
+                session = self.reinstalled(*aliases)
+                for alias in aliases:
+                    self.assertEqual(self.account('account_add', alias)['status'], 'account_added')
+                    self.assertEqual(self.entries(alias, self.release), {'codex': True, 'claude': True, 'desktop': True})
+                self.assertEqual(self.registry(), tuple(sorted(aliases)))
+                self.assertEqual(sorted(self.sidecar()['accounts']), sorted(aliases))
+                registry = account_registry.load(config.accounts_root(self.home))
+                self.assertEqual(dict(registry.entries)['work'], self.USER)  # Never added again: its pin stays.
+                self.assertEqual(tree(self.jobs.root), session)
+                for alias in aliases:
+                    removed = self.account('account_remove', alias)
+                    self.assertEqual((removed['status'], removed['codex']), ('account_removed', 'removed'))
+                self.assertEqual((self.registry(), self.sidecar()), ((), None))
+                self.assertFalse(self.jobs.root.exists())
+
+    def test_a_kept_alias_is_removed_without_being_added_again_beside_another(self):
+        self.reinstalled('play', 'work')
+        self.account('account_add', 'work')
+        removed = self.account('account_remove', 'play')  # The registry alone lists it.
+        self.assertEqual((removed['status'], removed['codex'], removed['session']), ('account_removed', 'absent', 'absent'))
+        self.assertEqual((self.registry(), sorted(self.sidecar()['accounts'])), (('work',), ['work']))
+        removed = self.account('account_remove', 'work')
+        self.assertEqual((removed['codex'], removed['session']), ('removed', 'moved'))
+        self.assertEqual((self.registry(), self.sidecar()), ((), None))
+
+    def test_a_record_without_a_registry_entry_still_refuses(self):
+        self.full()
+        self.account('account_add', 'work')
+        self.account('account_add', 'play')
+        account_registry.remove_alias('play', self.home)  # Its record stays: that is not ours to repair.
+        before = self.snapshot()
+        self.refused('account_add', 'accounts_inconsistent', 'office')
+        self.refused('account_remove', 'accounts_inconsistent', 'work')
+        self.assertEqual(self.snapshot(), before)
+
+
 if __name__ == '__main__':
     unittest.main()

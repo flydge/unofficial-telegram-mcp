@@ -543,13 +543,13 @@ class AliasJobsTests(unittest.TestCase):
 
 
 class ConsistencyTests(AccountHarness, unittest.TestCase):
-    def test_a_disagreement_on_another_alias_refuses_and_the_disagreeing_aliases_own_action_repairs_it(self):
+    def test_a_record_the_registry_does_not_list_refuses_and_each_aliases_own_action_repairs_it(self):
         self.added()
         account_registry.add_alias('play', self.home, longest_tool='t')  # Registered outside account-add.
-        before = self.snapshot()
-        self.refused('account_add', 'accounts_inconsistent', 'office')
-        self.refused('account_remove', 'accounts_inconsistent', 'work')
-        self.assertEqual(self.snapshot(), before)
+        # Review fix (055d, high): an alias the registry lists alone (as an uninstall leaves them) is repairable, not
+        # inconsistent: another alias's actions proceed beside it.
+        self.assertEqual(self.account('account_add', 'office')['status'], 'account_added')
+        self.assertEqual(self.account('account_remove', 'office')['status'], 'account_removed')
         # account-add of the registry-only alias registers its entries; its registry entry stays as it was.
         result = self.account('account_add', 'play')
         self.assertEqual(result['status'], 'account_added')
@@ -557,10 +557,14 @@ class ConsistencyTests(AccountHarness, unittest.TestCase):
         account_registry.add_alias('gone', self.home, longest_tool='t')
         self.assertEqual(self.account('account_remove', 'gone')['codex'], 'absent')
         self.assertEqual(self.registry(), ('play', 'work'))
-        # A sidecar record whose registry entry was dropped by hand: account-remove retires the rest of it.
+        # A sidecar record whose registry entry was dropped by hand refuses every other action, nothing changed;
+        # its own account-remove retires the rest of it.
         account_registry.remove_alias('play', self.home)
+        before = self.snapshot()
         self.refused('account_add', 'accounts_inconsistent', 'office')
+        self.refused('account_remove', 'accounts_inconsistent', 'work')
         self.refused('account_add', 'accounts_inconsistent', 'play')
+        self.assertEqual(self.snapshot(), before)
         result = self.account('account_remove', 'play')
         self.assertEqual((result['codex'], result['claude_code'], result['claude_desktop']),
                          ('removed', 'removed', 'removed'))

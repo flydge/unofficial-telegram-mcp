@@ -3148,10 +3148,12 @@ def client_status(installation_root, user_home):
 # config.accounts_root) says which aliases exist, for every broker and launcher action; accounts.json says which
 # client entries the installation owns for each. account-add writes the registry before any client entry and the
 # sidecar after the last; account-remove removes the client entries, then the registry entry, then the sidecar
-# record, each step journaled. So outside an unfinished account transaction both list the same aliases. Any other disagreement
-# refuses `accounts_inconsistent`, except that the account action of the one alias that disagrees completes it:
-# account-add of an alias the registry lists without a record registers its entries (its session stays),
-# account-remove of an alias in either list retires what is left of it.
+# record, each step journaled. So outside an unfinished account transaction both list the same aliases, but for the
+# aliases an uninstall leaves in the registry alone (accounts.json leaves with the retired root): those are repairable,
+# each by its own action, in any order (review fix 055d): account-add of an alias the registry lists without a record
+# registers its entries (its registry entry, pin and session stay), account-remove of an alias in either list retires
+# what is left of it. A record the registry does not list refuses `accounts_inconsistent`, but for the action of its
+# own alias.
 
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _ACCOUNT_TRANSACTION = re.compile(r'account_[1-9][0-9]{0,2}\Z')
@@ -3243,9 +3245,12 @@ def accounts_state(installation_root, user_home):
 
 
 def accounts_consistent(registry, records, alias=None):
-    """Whether the registry and the sidecar list the same aliases, but for `alias` (the one an account transaction of
-    its own completes)."""
-    return set(registry) - {alias} == set(records) - {alias}
+    """Whether every alias with a sidecar record is one the registry lists, but for `alias` (the one an account
+    transaction of its own completes). An alias the registry lists without a record is repairable, not inconsistent:
+    an uninstall keeps the registry while accounts.json leaves with the retired root, and a later install registers
+    each such alias again with its own account-add (or retires it with its account-remove), in any order. A record
+    the registry does not list is not ours to repair: it refuses."""
+    return set(records) - {alias} <= set(registry) - {alias}
 
 
 def _account_numbers(root):
@@ -3723,8 +3728,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     """`launcher.py account-add <alias>`: register a named alias and write its client entries (0.55 spec 3D).
 
     Every refusal comes before the transaction exists: the alias grammar and budgets (account_registry, before any
-    directory exists), an alias the registry and sidecar already list, a registry and sidecar that disagree on
-    another alias (`accounts_inconsistent`), an existing entry under the alias's server name (Codex
+    directory exists), an alias the registry and sidecar already list, another alias's record the registry does not
+    list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the alias's
+    server name (Codex
     `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
     `claude_desktop_registration_conflict` or `claude_desktop_config_unsupported`), a loaded default broker that
     is not the receipt's exact definition (`service_conflict`), or any unfinished transaction
@@ -3956,8 +3962,8 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                    claude_runner=subprocess.run, launchctl=subprocess.run, alias_pending=None):
     """`launcher.py account-remove <alias>`: retire a named alias (0.55 spec 3D). Rename is a remove plus an add.
 
-    Every refusal comes before the transaction exists: an alias neither list knows (`alias_unknown`), a registry
-    and sidecar that disagree on another alias (`accounts_inconsistent`), any unfinished transaction
+    Every refusal comes before the transaction exists: an alias neither list knows (`alias_unknown`),
+    another alias's record the registry does not list (`accounts_inconsistent`), any unfinished transaction
     (`transaction_pending`), an entry under the alias's server name that is not exactly the one its record owns
     (`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`: refused,
     never overwritten), an alias broker definition that is not the receipt release's own (`service_conflict`),
