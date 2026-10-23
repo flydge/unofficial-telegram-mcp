@@ -151,6 +151,21 @@ Telegram tools unused for about five minutes) and run the same command again; st
   kit refuse with `transaction_pending` until the same command or `uninstall` has run. An adopting first
   install ends only with its own repeat.
 
+## A second account
+
+Only when the owner asks. The owner picks an alias: a lowercase letter, then at most 11 lowercase letters
+or digits, never `default`. Run the installed launcher (`RELEASE` as for rollback above) with
+`account-add <alias>`: it registers the alias and its client entries, never logs in, and prints
+`account_added` with an `activation_command` ending in `connect --account <alias>`. Then do steps 2 to 4
+with `--account <alias>` after `connect`, `wait` and `cancel`; the user scans with the phone of the
+account being added, and the page names the alias. It becomes its own server `telegram_search_<alias>`
+(the plugin serves only the default account). `account_duplicate` or `account_mismatch` from `wait`
+(table above) means that phone holds an account already connected, or not this alias's own; stop and
+report. `alias_exists`, `registry_full`, `alias_path_too_long`, `alias_name_too_long`,
+`release_not_current`, `login_in_progress` or `default_check_failed`: stop and report the code.
+`account-remove <alias>` (renaming is remove, then add) runs only when the owner asks; it moves the
+session aside, never deleting it.
+
 ## Terminal fallback
 
 The same launcher accepts `setup` (phone, code and 2FA through hidden prompts), `resume`,
@@ -173,8 +188,8 @@ to 300 s after the last Telegram call). Tell the owner to settle pending sends, 
 client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
 `policy_unsupported` change nothing: stop and report the code. `status: changed` with
 `broker: restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the
-policy yourself. There is no account
-alias or profile registry, cloud auth or model provisioning route. Source and redistribution
+policy yourself. There is no cloud auth or
+model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
 download missing runtime, source, media tools or models without authority. The plugin's pinned
 `bin/install` is the one download this skill runs, only for a user who chose the plugin, and it
