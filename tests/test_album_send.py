@@ -663,12 +663,7 @@ class ContractTests(Store, unittest.TestCase):
                 AlbumDraftPreview.model_validate(value)
 
 
-OWNER_ACCOUNT = ACCOUNT
-
-
-class RegistryTests(Store, unittest.TestCase):
-    """Work item 2: a dedicated, account-bound album draft kind with one receipt of N slots."""
-
+class Drafts(Store):
     def setUp(self):
         super().setUp()
         from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
@@ -681,6 +676,10 @@ class RegistryTests(Store, unittest.TestCase):
     def prepare(self, album=None, owner=None, recipient=RECIPIENT):
         return self.registry.prepare_album(owner=owner or self.owner, recipient=recipient,
                                            recipient_title='Recipient', album=album or self.album)
+
+
+class RegistryTests(Drafts, unittest.TestCase):
+    """Work item 2: a dedicated, account-bound album draft kind with one receipt of N slots."""
 
     def test_prepare_binds_the_ordered_digest_and_total(self):
         draft = self.prepare()
@@ -793,6 +792,112 @@ class RegistryTests(Store, unittest.TestCase):
         with self.assertRaises(DraftError):
             self.registry.reconcile_album(draft.draft_id, owner=self.owner, provider=provider, provider_epoch=epoch,
                                           attempted_at=attempted_at, outcomes=(('sent', 5),) * 3)
+
+
+class StagingTests(Drafts, unittest.TestCase):
+    """Criterion 3: one draft_<32hex> directory per item; single sends unaffected; whole-album retirement."""
+
+    def setUp(self):
+        super().setUp()
+        self.stage = self.root / 'outgoing'
+
+    def staged(self, album=None):
+        from telegram_search_mcp.outgoing_stage import stage_approved_album
+        draft = self.prepare(album=album)
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        return draft, claim, stage_approved_album(claim, root=self.stage)
+
+    def single(self, data=b'single document'):
+        from telegram_search_mcp.outgoing_stage import stage_approved_document
+        artifact = self.artifact(data)
+        draft = self.registry.prepare(owner=self.owner, artifact_id=artifact.artifact_id, recipient=RECIPIENT,
+                                      display_name='single.pdf', mime_type='application/pdf', caption='')
+        return stage_approved_document(self.registry.claim(draft.draft_id, owner=self.owner, approved=True),
+                                       root=self.stage)
+
+    def test_one_private_directory_per_item_derived_from_the_album_handle(self):
+        import re
+        from telegram_search_mcp.outgoing_stage import album_item_directory, album_staged_paths
+        from telegram_search_mcp.tdjson import _valid_staged_input_file
+        draft, claim, paths = self.staged()
+        self.assertEqual(len(paths), 2)
+        self.assertEqual(album_staged_paths(draft, root=self.stage), paths)
+        for index, (path, item, source) in enumerate(zip(paths, self.album.items, claim.paths)):
+            with self.subTest(index=index):
+                self.assertEqual(path.parent.parent, self.stage)
+                self.assertEqual(path.parent.name, album_item_directory(draft.draft_id, index))
+                self.assertRegex(path.parent.name, re.compile(r'draft_[0-9a-f]{32}\Z'))
+                self.assertNotEqual(path.parent.name, draft.draft_id)
+                self.assertEqual(path.name, item.display_name)
+                self.assertEqual(list(path.parent.iterdir()), [path])
+                self.assertEqual(path.read_bytes(), source.read_bytes())
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                self.assertTrue(_valid_staged_input_file({'@type': 'inputFileLocal', 'path': str(path)}, self.stage))
+        self.assertEqual(len({path.parent.stat().st_mtime for path in paths}), 1)  # They expire together.
+
+    def test_duplicate_delivered_names_are_allowed(self):
+        album = self.spec(self.item(PNG, 'same.png'), self.item(image('PNG', (30, 20)), 'same.png'))
+        _, _, paths = self.staged(album)
+        self.assertEqual([path.name for path in paths], ['same.png', 'same.png'])
+        self.assertNotEqual(paths[0].parent, paths[1].parent)
+
+    def test_single_sends_are_unaffected_while_an_album_is_staged(self):
+        from telegram_search_mcp.outgoing_stage import retire_staged_document
+        _, _, paths = self.staged()
+        single = self.single()
+        self.assertEqual(single.read_bytes(), b'single document')
+        retire_staged_document(single, root=self.stage)
+        self.assertFalse(single.exists())
+        self.assertTrue(all(path.exists() for path in paths))
+        self.assertEqual(self.single(b'another').read_bytes(), b'another')
+
+    def test_capacity_counts_the_whole_album_before_copying(self):
+        from telegram_search_mcp.outgoing_stage import stage_approved_album
+        draft = self.prepare()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        with patch('telegram_search_mcp.outgoing_stage.MAX_STAGING_BYTES', self.album.total_bytes - 1), \
+                self.assertRaises(ValueError):
+            stage_approved_album(claim, root=self.stage)
+        self.assertEqual(list(self.stage.iterdir()), [])
+
+    def test_a_failure_mid_way_leaves_no_item_staged(self):
+        from telegram_search_mcp.outgoing_stage import stage_approved_album
+        draft = self.prepare()
+        claim = self.registry.claim(draft.draft_id, owner=self.owner, approved=True)
+        data = bytearray(claim.paths[1].read_bytes()); data[-1] ^= 1
+        claim.paths[1].write_bytes(bytes(data))  # Same size, other bytes: the second copy fails its hash.
+        with self.assertRaises(ValueError):
+            stage_approved_album(claim, root=self.stage)
+        self.assertEqual(list(self.stage.iterdir()), [])
+        with self.assertRaises(ValueError):  # Never a claim of another kind.
+            stage_approved_album(self.registry.claim(
+                self.registry.prepare(owner=self.owner, artifact_id=self.artifact(b'x').artifact_id,
+                                      recipient=RECIPIENT, display_name='x.pdf', mime_type='application/pdf',
+                                      caption='').draft_id, owner=self.owner, approved=True), root=self.stage)
+
+    def test_an_album_is_staged_at_most_once(self):
+        from telegram_search_mcp.outgoing_stage import stage_approved_album
+        _, claim, paths = self.staged()
+        with self.assertRaises(OSError):
+            stage_approved_album(claim, root=self.stage)
+        self.assertTrue(all(path.exists() for path in paths))
+
+    def test_retirement_takes_every_item(self):
+        from telegram_search_mcp.outgoing_stage import retire_staged_album
+        _, _, paths = self.staged()
+        retire_staged_album(paths, root=self.stage)
+        self.assertEqual(list(self.stage.iterdir()), [])
+        retire_staged_album(paths, root=self.stage)  # Idempotent.
+
+    def test_expired_items_are_swept_together_by_a_later_single_send(self):
+        import os
+        import time
+        _, _, paths = self.staged()
+        old = time.time() - 13 * 3600
+        for path in paths:
+            os.utime(path.parent, (old, old))
+        single = self.single()
+        self.assertEqual(sorted(entry.name for entry in self.stage.iterdir()), [single.parent.name])
 
 
 if __name__ == '__main__':
