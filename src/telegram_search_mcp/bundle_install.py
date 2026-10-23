@@ -37,7 +37,7 @@ from . import account_registry, claude_desktop_registration, claude_registration
 from .config import alias_jobs, alias_server_name, accounts_root, named_alias
 from .codex_registration import (Registration, Receipt, ConfigConflict, read_config,
     merge_registration, rollback_registration, adopt_registration, owned_subtree, discard_temporary,
-    commit_transaction, new_temporary, is_temporary, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
+    new_temporary, is_temporary, _atomic_write, _open_parent, _read_at, MAX_CONFIG_BYTES)
 
 
 # The closed set of unfinished actions a `transaction_pending` refusal names: an unfinished first install, an
