@@ -434,6 +434,35 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
                 self.assertEqual(tree(self.jobs.root), session)
                 self.assertEqual(self.launchctl.job(self.jobs.broker_label)[-2:], ['--account', 'work'])
 
+    def test_a_broker_or_login_holding_the_aliases_locks_outside_launchd_is_never_moved_under(self):
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        for name, loaded in (('broker.lock', self.jobs.broker_label), ('connect.lock', self.jobs.connect_label)):
+            with self.subTest(lock=name):
+                self.setUp()
+                self.added()
+                self.alias_session()
+                self.launchctl.set_job(loaded, None)  # Not a launchd job: a process the owner started by hand.
+                held = acquire_owner_lock(self.jobs.root / 'run' / name)
+                try:
+                    before, session = self.snapshot(), tree(self.jobs.root)
+                    self.refused('account_remove', 'service_conflict')
+                    self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
+                    # Started after the precheck: the move refuses, the transaction stays for the retry.
+                    os.close(held)
+                    held = None
+
+                    def start(stage, name=name):
+                        nonlocal held
+                        if stage == 'registry':
+                            held = acquire_owner_lock(self.jobs.root / 'run' / name)
+                    self.refused('account_remove', 'service_conflict', checkpoint=start)
+                    self.assertTrue(self.jobs.root.exists())
+                    self.assertEqual(self.registry(), ())
+                finally:
+                    if held is not None:
+                        os.close(held)
+                self.assertEqual(self.account('account_remove')['session'], 'moved')
+
     def test_a_late_pending_send_refuses_before_the_bootout_and_the_retry_resumes(self):
         self.added()
         self.alias_session()

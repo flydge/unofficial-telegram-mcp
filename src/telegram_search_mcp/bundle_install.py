@@ -32,7 +32,7 @@ from .bundle_runtime import (validate_tree, require_platform, read, unique_json,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
                              transaction_name, ADOPTED_NAME, MAX_ADOPTED, check_adopted, CLAUDE_USER_STATUSES,
                              desktop_ownership)
-from .session_owner import SessionOwnerLease, OwnerLeaseError
+from .session_owner import SessionOwnerLease, OwnerLeaseError, open_private_directory
 from . import account_registry, claude_desktop_registration, claude_registration
 from .config import alias_jobs, alias_server_name, accounts_root, named_alias
 from .codex_registration import (Registration, Receipt, ConfigConflict, read_config,
@@ -2743,11 +2743,11 @@ def client_status(installation_root, user_home):
 # change. They never log in, never read the Telegram account and never delete a session: removal moves the alias
 # root aside.
 #
-# Registry and sidecar (lead decision, owner review pending): the alias registry (TelegramSearchMCP-accounts/
-# registry.json) says which aliases exist, for every broker and launcher action; accounts.json says which client
-# entries the installation owns for each. account-add writes the registry before any client entry and the sidecar
-# after the last; account-remove removes the client entries, then the registry entry, then the sidecar record, each
-# step journaled. So outside an unfinished account transaction both list the same aliases. Any other disagreement
+# Registry and sidecar (lead decision, owner review pending): the alias registry (registry.json in
+# config.accounts_root) says which aliases exist, for every broker and launcher action; accounts.json says which
+# client entries the installation owns for each. account-add writes the registry before any client entry and the
+# sidecar after the last; account-remove removes the client entries, then the registry entry, then the sidecar
+# record, each step journaled. So outside an unfinished account transaction both list the same aliases. Any other disagreement
 # refuses `accounts_inconsistent`, except that the account action of the one alias that disagrees completes it:
 # account-add of an alias the registry lists without a record registers its entries (its session stays),
 # account-remove of an alias in either list retires what is left of it.
@@ -3051,6 +3051,33 @@ def _alias_service(runner, jobs, installed):
     if live is not None and not _matches_live(live, jobs.broker_plist, payload):
         raise InstallError('service_conflict')
     return data, live is not None
+
+
+def _alias_held(jobs, name):
+    """Whether a process holds the alias's `broker.lock` or `connect.lock` (a broker or a login still running), probed
+    without creating anything; an unsafe run directory or lock counts as held."""
+    try:
+        directory = open_private_directory(jobs.socket.parent)
+    except OwnerLeaseError:
+        return os.path.lexists(jobs.socket.parent)
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0),
+                             dir_fd=directory)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(directory)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False  # Closing the descriptor releases the probe at once.
+    except OSError:
+        return True
+    finally:
+        os.close(descriptor)
 
 
 def _alias_gate(pending, home, jobs, installed):
@@ -3387,6 +3414,10 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                 _, loaded = _alias_service(launchctl, jobs, installed)
                 if loaded:
                     _alias_gate(pending, home, jobs, installed)
+                # A broker or a login holding the alias's locks outside its launchd jobs is not ours to stop.
+                if (not loaded and _alias_held(jobs, 'broker.lock')
+                        or _live(launchctl, jobs.connect_label) is None and _alias_held(jobs, 'connect.lock')):
+                    raise InstallError('service_conflict')
                 aside = 'removed-%s-%s' % (alias, uuid.uuid4().hex)
                 identity_files = {**identity, 'aside': aside, 'record': record, 'stage': 'prepared', 'publications': {}}
                 name_tx = _open_account(root, lambda _: {'journal.json': encoded(identity_files)})
@@ -3532,12 +3563,15 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                         raise InstallError(error.code) from None
                 j.advance('registry')
             checkpoint('registry')
-            # The session: the whole alias root moved aside (no-replace) under the journaled unique name.
+            # The session: the whole alias root moved aside (no-replace) under the journaled unique name, only while no
+            # process holds its broker or connect lock (both jobs are booted out by now; nothing admits the alias).
             if j.recorded('session') is None:
                 moved = jobs.root.parent/aside
                 if os.path.lexists(moved):
                     status = 'moved'
                 elif os.path.lexists(jobs.root):
+                    if _alias_held(jobs, 'broker.lock') or _alias_held(jobs, 'connect.lock'):
+                        raise InstallError('service_conflict')
                     _rename(jobs.root, moved)
                     checkpoint('published:session')
                     status = 'moved'
