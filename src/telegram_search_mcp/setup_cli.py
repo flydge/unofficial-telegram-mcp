@@ -4,8 +4,9 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from .broker_client import BrokerClient, BrokerCompatibilityError, BrokerUnavailable
-from .config import load_runtime_policy
+from .config import ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPaths, ConfigurationError, load_runtime_policy
 from .credentials import MacOSSecretStore
 from .enrollment import SetupPaths
 from .launch_agent import account_options, start_enrolled_broker, validate_enrolled_broker, LaunchAgentError
@@ -29,9 +30,34 @@ first connect; without it an installed bundle supplies its own application ident
 status reads enrollment metadata and an existing broker handshake only;
 it does not initialize TDLib, read Keychain, start services or prove Ready.
 connect-helper is internal: connect starts it as a transient launchd job.
+Every other command takes a trailing --account <alias> for a registered account
+alias; without it the command serves the default account.
 Pinned TDLib and an installed matching Python package remain prerequisites.
 '''
 COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials', 'connect-helper')
+# The commands that take a trailing `--account <alias>` (0.55 spec 3B); connect-helper's job becomes per alias in
+# phase C. Without the flag a command's argv and behaviour are the default alias's, byte for byte.
+ACCOUNT_COMMANDS = ('setup', 'resume', 'status', 'connect', 'wait', 'cancel', 'api-credentials')
+# The closed refusal codes of an --account the registry does not admit; anything else is alias_unavailable.
+ACCOUNT_CODES = frozenset({'alias_unavailable', 'alias_path_too_long', 'registry_invalid', 'registry_unsafe'})
+
+
+def account_argument(args):
+    """(command argv, alias or None) for the closed grammar `<command> [--account <alias>]`; None outside it.
+
+    The alias matches the grammar and is never `default`: the default account is spelled by omitting the flag.
+    """
+    if args in [[command] for command in COMMANDS]:
+        return args, None
+    if (len(args) == 3 and args[0] in ACCOUNT_COMMANDS and args[1] == '--account' and type(args[2]) is str
+            and args[2] != DEFAULT_ALIAS and ALIAS_GRAMMAR.fullmatch(args[2]) is not None):
+        return args[:1], args[2]
+    return None
+
+
+def account_paths(alias):
+    """A registered alias's SetupPaths, checked against the registry before any directory is created."""
+    return SetupPaths.from_account(AccountPaths.for_alias(alias, Path.home()))
 
 
 def _client(paths, timeout):
@@ -139,12 +165,22 @@ def main(argv=None) -> int:
     if args in ([], ['--help'], ['-h']):
         print(_HELP, end='')
         return 0
-    if args not in [[command] for command in COMMANDS]:
+    parsed = account_argument(args)
+    if parsed is None:
         print(json.dumps({'status': 'refused', 'code': 'invalid_arguments',
                           'detail': 'Use connect, wait, cancel, setup, resume, status, api-credentials or --help; '
                                     'never pass secrets.'}))
         return 2
-    paths = SetupPaths()
+    args, alias = parsed
+    if alias is None:
+        paths = SetupPaths()
+    else:
+        try:
+            paths = account_paths(alias)
+        except ConfigurationError as error:
+            code = getattr(error, 'code', None)
+            print(json.dumps({'status': 'refused', 'code': code if code in ACCOUNT_CODES else 'alias_unavailable'}))
+            return 2
     if args == ['status']:
         status = setup_status(paths)
         status['broker'] = existing_broker_status(paths)

@@ -1484,6 +1484,9 @@ class LauncherGrammarTests(unittest.TestCase):
         # Behavioural: a copy laid out as an installed release, admission stubbed, dispatch recorded.
         import shutil
         from telegram_search_mcp import launch_agent as agent
+        # status imports bundle_install after the launcher narrowed sys.path to the release; import it first so
+        # the test does not depend on an earlier test having done so.
+        from telegram_search_mcp import bundle_install  # noqa: F401
         pin = 'a' * 64
         with tempfile.TemporaryDirectory() as temporary:
             release = Path(temporary).resolve() / 'releases' / pin

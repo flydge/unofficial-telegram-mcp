@@ -40,6 +40,7 @@ from .broker_protocol import (
     send_frame,
 )
 from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths, ensure_private_directory, RuntimePolicy, load_runtime_policy
+from . import account_registry
 from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
                        require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
@@ -100,8 +101,26 @@ SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'se
                              'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit'})
 
 
+# Operations exempt from the account pin check (spec 2): lifecycle (`check` runs the pin itself), and local
+# bytes that no Telegram read sourced. The upload-authority operations (UPLOAD_MODELS) are routed before this
+# check for the same reason: owner-local bytes. Every other operation, any added later included, is checked.
+ACCOUNT_CHECK_EXEMPT = frozenset({'health', 'release_client', 'check', 'create_local_artifact',
+                                  'begin_local_upload', 'append_local_upload', 'finish_local_upload'})
+
+
 class BrokerStartupError(RuntimeError):
     """Raised when exclusive, private broker startup cannot be established."""
+
+
+class AccountBlocked(AuthorizationBlocked):
+    """The account pin refused this session: a fixed registry code, never the user id.
+
+    An AuthorizationBlocked, so every path that reports a session that is not ready reports this one blocked.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in account_registry.CODES else 'account_mismatch'
+        super().__init__(self.code)
 
 
 ClientFactory = Callable[[], ReadOnlyTelegramClient]
@@ -240,6 +259,12 @@ class Broker(SelectionBrokerMixin):
                                       else (DEFAULT_ACCOUNT_PATHS if account is None else account).files)
         # Staging keeps the module's own root for the default alias (its 0.54 call).
         self._staging = {} if account is None else {"root": account.staging}
+        # The account pin (spec 2): the alias and the registry beside its root; inert until a registry exists.
+        account_paths = DEFAULT_ACCOUNT_PATHS if account is None else account
+        self._alias = account_paths.alias
+        self._accounts_root = account_paths.accounts_root
+        # (client, authorization epoch, user id) of the last session the pin admitted; never leaves the broker.
+        self._account_session: tuple[object, object, int] | None = None
         self._verify_peer_uid = verify_peer_uid
         self._peer_uid_loader = peer_uid_loader
         self._max_clients = max_clients
@@ -409,6 +434,8 @@ class Broker(SelectionBrokerMixin):
         client = self._shared_client()
         getter = getattr(client, 'get_account_id', None)
         if getter is None:
+            if account_registry.present(self._accounts_root):
+                self._account_check()  # Refuses: with a registry, an unidentified session is never admitted.
             return None
         try:
             client.ensure_ready()
@@ -419,7 +446,55 @@ class Broker(SelectionBrokerMixin):
         if type(account) is not int or not 0 < account < 2**53:
             self._artifact_authority.invalidate_account()
             raise ArtifactUnavailable('artifact is unavailable')
+        self._account_check(client=client, user_id=account)
         return account
+
+    def _account_check(self, *, client=None, user_id=None) -> None:
+        """The account pin, at authorization and before every Telegram-sourced grant (spec 2).
+
+        Without a registry it reads nothing but the registry's absence: 0.54. With one, the authorized
+        session's user id is pinned for this alias at the first check (the default alias's in
+        `default_user_id`); a different user later blocks with `account_mismatch`, and a user pinned under
+        another alias, the default included, with `account_duplicate`. A session that is not authorized is
+        left to the operation, which reports it blocked and grants nothing. The user id never leaves.
+        """
+        if not account_registry.present(self._accounts_root):
+            self._account_session = None
+            if self._alias != account_registry.DEFAULT_ALIAS:  # a named alias exists only in the registry
+                self._artifact_authority.invalidate_account()
+                raise AccountBlocked('alias_unavailable')
+            return
+        if client is None:
+            client = self._shared_client()
+        epoch = getattr(client, 'send_observation_epoch', None)
+        if user_id is None:
+            remembered = self._account_session
+            if remembered is not None and remembered[0] is client and epoch is not None and remembered[1] is epoch:
+                user_id = remembered[2]
+            else:
+                getter = getattr(client, 'get_account_id', None)
+                if getter is None:
+                    self._artifact_authority.invalidate_account()
+                    raise AccountBlocked('account_mismatch')
+                try:
+                    client.ensure_ready()
+                except AuthorizationBlocked:
+                    return  # not authorized: the operation itself reports it blocked and grants nothing
+                except TDLibError:
+                    # Any other failure fails closed: the session's account could not be read, so nothing runs.
+                    self._artifact_authority.invalidate_account()
+                    raise AccountBlocked('account_unverified') from None
+                user_id = getter()
+        if type(user_id) is not int or not 0 < user_id < 2**53:
+            self._artifact_authority.invalidate_account()
+            raise AccountBlocked('account_mismatch')
+        try:
+            account_registry.pin_account(self._accounts_root, self._alias, user_id)
+        except account_registry.RegistryError as error:
+            self._account_session = None
+            self._artifact_authority.invalidate_account()
+            raise AccountBlocked(error.code) from None
+        self._account_session = (client, epoch, user_id) if epoch is not None else None
 
     def _attempted_send(self, operation, draft_id, client_id):
         """A consumed claim never reads as expired. After lost authority (release, account
@@ -512,6 +587,8 @@ class Broker(SelectionBrokerMixin):
             if publish is not None:
                 publish(result)
             return result
+        if operation not in ACCOUNT_CHECK_EXEMPT:
+            self._account_check()  # Before any Telegram-sourced handle or provider action.
         if operation == 'release_client':
             # Revoke even clients that never allocated a provider/reader context.
             self._require_empty(request['payload'])
@@ -870,6 +947,7 @@ class Broker(SelectionBrokerMixin):
             self._require_empty(payload)
             try:
                 self._shared_client().ensure_ready()
+                self._account_check()  # At authorization: the first authorized check pins the account.
             except AuthorizationBlocked:
                 return {"status": "blocked"}
             except TDLibError:

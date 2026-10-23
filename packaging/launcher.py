@@ -20,6 +20,11 @@ class AdmissionError(ValueError): pass
 
 # Closed grammar. connect-helper is internal: only the transient launchd job runs it.
 ACTIONS=('mcp','broker','setup','resume','status','connect','wait','cancel','api-credentials','connect-helper')
+# The actions that take a trailing `--account <alias>` for a registered alias (0.55 spec 3B). The alias is a closed
+# token, never `default` (the default account is spelled by omitting the flag), and is checked against the registry
+# before any directory is created. Without the flag an action's argv and behaviour are unchanged.
+ACCOUNT_ACTIONS=('mcp','broker','setup','resume','connect','wait','cancel','api-credentials','status')
+ALIAS_CHARACTERS=frozenset('abcdefghijklmnopqrstuvwxyz0123456789')
 # Installation changes run by an installed release: admitted by its own pinned tree, not by the
 # receipt, so an interrupted change stays resumable while receipt and pointer disagree.
 CHANGES=('rollback','uninstall')
@@ -175,19 +180,28 @@ def admit(root,index_path,pin,installed):
     if found!=set(names)|({'bundle-index.json'} if installed else set()): raise AdmissionError()
 
 
-def dispatch_mcp():
+def account_action(args):
+    """(action argv, alias or None) for `<account action> --account <alias>`; anything else is returned unchanged."""
+    if (len(args)==3 and args[0] in ACCOUNT_ACTIONS and args[1]=='--account' and type(args[2]) is str
+            and 1<=len(args[2])<=12 and args[2][0] in ALIAS_CHARACTERS and not args[2][0].isdigit()
+            and set(args[2])<=ALIAS_CHARACTERS and args[2]!='default'):
+        return args[:1],args[2]
+    return args,None
+
+
+def dispatch_mcp(alias=None):
     from telegram_search_mcp.server import main as dispatch
-    sys.argv = [sys.argv[0]]
+    sys.argv = [sys.argv[0]] if alias is None else [sys.argv[0],'--account',alias]
     return dispatch()
 
 
-def status(root):
+def status(root, alias=None):
     """setup_cli's status plus a read-only Claude Desktop drift report under `clients`."""
     import contextlib, io
     from telegram_search_mcp.setup_cli import main as dispatch
     from telegram_search_mcp.bundle_install import client_status
     captured=io.StringIO()
-    with contextlib.redirect_stdout(captured): result=dispatch(['status'])
+    with contextlib.redirect_stdout(captured): result=dispatch(['status'] if alias is None else ['status','--account',alias])
     text=captured.getvalue()
     try: value=_json(text)
     except (ValueError,AdmissionError): value=None
@@ -223,7 +237,9 @@ def main(argv=None):
     if args==['--help']:
         print('0.54.0.dev0: mcp | broker | setup | resume | status | connect | wait | cancel | '
               'api-credentials | capabilities show|enable|disable <profile> | rollback | uninstall. setup, resume '
-              'and api-credentials require native Apple Terminal; connect, wait and cancel take no credentials.')
+              'and api-credentials require native Apple Terminal; connect, wait and cancel take no credentials. '
+              'mcp, broker, setup, resume, status, connect, wait, cancel and api-credentials take a trailing '
+              '--account <alias> for a registered account alias.')
         return 0
     # Fixed refusal codes only: an installer refusal from its closed set, otherwise generic.
     code='bundle_admission_or_install_failed' if args and args[0] in ('bootstrap-install',*CHANGES) else 'bundle_admission_failed'
@@ -275,6 +291,8 @@ def main(argv=None):
         # the profile name is checked again against the closed table).
         profile_change=(args[:1]==['capabilities'] and (args[1:]==['show'] or (len(args)==3 and args[1] in ('enable','disable')
                         and args[2] in PROFILES)))
+        if not profile_change: args,alias=account_action(args)
+        else: alias=None
         if args not in [[v] for v in ACTIONS] and not profile_change: raise AdmissionError()
         receipt=_json(_read(root.parent.parent/'receipt.json',mode=0o600)); pin=receipt.get('index_sha256')
         if receipt.get('release_root')!=str(root) or root!=root.parent.parent/'releases'/str(pin): raise AdmissionError()
@@ -284,17 +302,24 @@ def main(argv=None):
                      +[p for p in sys.path if Path(p).is_relative_to(root/'python')])
         from telegram_search_mcp.bundle_runtime import activate
         activate(root,pin)
+        account=None
+        if alias is not None:
+            # The registry admits the alias before any directory is created; a refusal is its own fixed code.
+            code='alias_unavailable'
+            from telegram_search_mcp.config import AccountPaths
+            account=AccountPaths.for_alias(alias,Path.home())
+            code='bundle_admission_failed'
         if args==['status']:
-            return status(root)
+            return status(root) if alias is None else status(root,alias)
         if profile_change:
             return capabilities(root,args[1:])
         if args==['mcp']:
-            return dispatch_mcp()
+            return dispatch_mcp() if alias is None else dispatch_mcp(alias)
         if args==['broker']:
             from telegram_search_mcp.launch_agent import run_broker
-            return run_broker()
+            return run_broker() if account is None else run_broker(account)
         from telegram_search_mcp.setup_cli import main as dispatch
-        return dispatch(args)
+        return dispatch(args if alias is None else [*args,'--account',alias])
     except (Exception,KeyboardInterrupt):
         refusal={'status':'refused','code':code}
         if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS: refusal['pending_action']=pending

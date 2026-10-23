@@ -161,7 +161,6 @@ class NamedAliasConstructionTests(unittest.TestCase):
 
     def test_the_default_alias_and_an_admitted_account_stay_usable_outside_the_hook(self):
         default = AccountPaths.for_alias(DEFAULT_ALIAS, HOME)
-        self.assertEqual(dataclasses.replace(default), default)
         self.assertEqual(default.relocated(Path('/synthetic/root')).root, Path('/synthetic/root'))
         with named_aliases_for_tests():
             work = AccountPaths._derive('work', HOME)
@@ -170,26 +169,128 @@ class NamedAliasConstructionTests(unittest.TestCase):
     def test_nothing_outside_config_builds_an_account_or_enters_the_hook(self):
         root = Path(__file__).resolve().parents[1]
         package = root / 'src' / 'telegram_search_mcp'
-        closed = {'AccountPaths._derive', 'AccountPaths._home_layout', 'AccountPaths._layout',
-                  'named_aliases_for_tests', '_NAMED_ALIASES_ADMITTED', 'AccountPaths()'}
         sources = sorted([*package.glob('*.py'), *(root / 'packaging').glob('*.py')])
         self.assertGreater(len(sources), 80)
         found = []
         for path in sources:
             if path == package / 'config.py':
                 continue
-            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
-                names = []
-                if isinstance(node, ast.Attribute):
-                    names += [node.attr, f'AccountPaths.{node.attr}']
-                elif isinstance(node, ast.Name):
-                    names.append(node.id)
-                elif isinstance(node, ast.alias):
-                    names.append(node.asname or node.name)
-                if isinstance(node, ast.Call) and ast.unparse(node.func).split('.')[-1] == 'AccountPaths':
-                    names.append('AccountPaths()')
-                found += [f'{path.name}:{name}' for name in names if name in closed]
-        self.assertEqual(found, [])
+            found += [f'{path.name}:{name}' for name in construction_names(path.read_text(encoding='utf-8'))]
+        self.assertEqual(sorted(set(found) - set(REPLACE_ALLOWED)), [])
+
+    def test_every_replace_allowance_is_still_needed_and_names_another_type(self):
+        package = Path(__file__).resolve().parents[1] / 'src' / 'telegram_search_mcp'
+        for entry, reason in REPLACE_ALLOWED.items():
+            module, name = entry.split(':', 1)
+            with self.subTest(entry=entry):
+                self.assertIn(name, construction_names((package / module).read_text(encoding='utf-8')))
+                self.assertNotIn('AccountPaths', reason)
+
+    def test_the_construction_check_flags_each_way_to_build_or_rebuild(self):
+        cases = {
+            'AccountPaths(alias="x")': ['AccountPaths()'],
+            'config.AccountPaths(**fields)': ['AccountPaths()'],
+            'AccountPaths._derive("work", home)': ['AccountPaths._derive'],
+            'x = paths._layout': ['AccountPaths._layout'],
+            'AccountPaths._fields("w", root, "", "", p, "")': ['AccountPaths._fields'],
+            'with named_aliases_for_tests(): pass': ['named_aliases_for_tests'],
+            'from .config import _BUILDING': ['_BUILDING'],
+            '_REGISTERED.set("work")': ['_REGISTERED'],
+            'dataclasses.replace(paths, root=other)': ['replace(paths)'],
+            'paths.relocated(Path("/elsewhere"))': ['relocated()'],
+            'from dataclasses import replace\nreplace(account)': ['replace(account)'],
+            'from dataclasses import replace as rebuild\nrebuild(account)': ['replace(account)'],
+            'import copy\ncopy.replace(account, root=other)': ['replace(account)'],
+            'account.__replace__(root=other)': ['replace(account)'],
+            'text.replace("a", "b")': [],
+            'AccountPaths.for_alias("default", home)': [],
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(construction_names(source), expected)
+
+
+# Every dataclasses.replace in src rebuilds another dataclass; a new one fails the check until it is listed here.
+REPLACE_ALLOWED = {
+    'enrollment.py:relocated()': 'SetupPaths(root): the inert test boundary that keeps the names, never in src paths',
+    'send_observations.py:replace(old)': 'rebuilds a send observation entry',
+    'outgoing_drafts.py:replace(old)': 'rebuilds an outgoing draft on revision',
+    'outgoing_voice.py:replace(source)': 'rebuilds a voice note source with its snapshot path',
+}
+_CLOSED = frozenset({'AccountPaths._derive', 'AccountPaths._home_layout', 'AccountPaths._layout', 'AccountPaths._fields',
+                     'named_aliases_for_tests', '_NAMED_ALIASES_ADMITTED', '_REGISTERED', '_BUILDING'})
+
+
+def construction_names(source):
+    """Each way a module outside config could build an AccountPaths, enter its admission or rebuild one: the
+    private layout and hooks, the constructor, and every dataclasses/copy replace (`replace(<first argument>)`)."""
+    tree = ast.parse(source)
+    replacers = {alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                 and node.module in {'dataclasses', 'copy'} for alias in node.names if alias.name == 'replace'}
+    found = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Attribute):
+            names += [node.attr, f'AccountPaths.{node.attr}']
+        elif isinstance(node, ast.Name):
+            names.append(node.id)
+        elif isinstance(node, ast.alias):
+            names.append(node.asname or node.name)
+        found += [name for name in names if name in _CLOSED]
+        if isinstance(node, ast.Call):
+            func = node.func
+            if ast.unparse(func).split('.')[-1] == 'AccountPaths':
+                found.append('AccountPaths()')
+            target = None
+            if isinstance(func, ast.Name) and func.id in replacers and node.args:
+                target = node.args[0]
+            elif (isinstance(func, ast.Attribute) and func.attr == 'replace' and isinstance(func.value, ast.Name)
+                  and func.value.id in {'dataclasses', 'copy'} and node.args):
+                target = node.args[0]
+            elif isinstance(func, ast.Attribute) and func.attr == '__replace__':
+                target = func.value
+            if target is not None:
+                found.append(f'replace({ast.unparse(target)})')
+            if isinstance(func, ast.Attribute) and func.attr == 'relocated':
+                found.append('relocated()')
+    return found
+
+
+class ConstructionTests(unittest.TestCase):
+    """for_alias is the only constructor: the generated __init__ and replace refuse, subclasses do not exist."""
+
+    def test_the_public_constructor_refuses_even_the_default_layout(self):
+        default = AccountPaths.for_alias(DEFAULT_ALIAS, HOME)
+        for fields in (as_dict(default), {**as_dict(default), 'root': Path('/elsewhere')},
+                       {**as_dict(default), 'socket': Path('/tmp/other.sock'), 'policy': Path('/tmp/runtime.toml')}):
+            with self.assertRaises(AccountPathsError) as caught:
+                AccountPaths(**fields)
+            self.assertEqual(caught.exception.code, 'alias_unavailable')
+
+    def test_replace_cannot_rebuild_the_default_with_other_paths(self):
+        import copy
+        default = AccountPaths.for_alias(DEFAULT_ALIAS, HOME)
+        builds = [lambda: dataclasses.replace(default), lambda: dataclasses.replace(default, root=Path('/elsewhere')),
+                  lambda: dataclasses.replace(default, socket=Path('/tmp/other.sock'))]
+        if hasattr(copy, 'replace'):
+            builds.append(lambda: copy.replace(default, policy=Path('/tmp/runtime.toml')))
+        for build in builds:
+            with self.assertRaises(AccountPathsError):
+                build()
+
+    def test_subclasses_are_refused(self):
+        with self.assertRaises(TypeError) as caught:
+            class Imitation(AccountPaths):
+                pass
+        self.assertEqual(str(caught.exception), 'account paths are final')
+        with self.assertRaises(TypeError):
+            type('Imitation', (AccountPaths,), {})
+
+    def test_for_alias_and_relocated_still_build(self):
+        default = AccountPaths.for_alias(DEFAULT_ALIAS, HOME)
+        self.assertIs(type(default), AccountPaths)
+        self.assertEqual(default.relocated(Path(_ROOT)), default)
+        self.assertEqual(config._BUILDING.get(), False)  # The construction token never outlives the build.
 
 
 class AliasLayoutTests(unittest.TestCase):

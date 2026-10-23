@@ -169,6 +169,14 @@ def binds_account(value, depth=0, seen=None):
     return any(binds_account(item, depth + 1, seen) for item in items)
 
 
+def wrapped_function(value, depth=0):
+    """A plain function, or a cache wrapper (functools.lru_cache, functools.cache) around one, at any depth."""
+    if isinstance(value, types.FunctionType):
+        return True
+    return (depth < 8 and callable(value) and not isinstance(value, type) and hasattr(value, 'cache_info')
+            and wrapped_function(getattr(value, '__wrapped__', None), depth + 1))
+
+
 def package_modules():
     """Every module of the package but config, imported."""
     import telegram_search_mcp
@@ -189,11 +197,22 @@ def runtime_violations(module):
         if id(held) not in shared and binds_account(held):
             found.append((owner, name))
 
+    def attributes(owner, held):
+        """A function's or wrapper's own attributes (`f.root = ...`); the dunder metadata wraps() copies is not."""
+        for name, value in (getattr(held, '__dict__', None) or {}).items():
+            if not (name.startswith('__') and name.endswith('__')) and binds_account(value):
+                found.append((owner, name))
+
     def defaults(function):
-        """Defaults, keyword defaults and closure cells (a decorator factory's argument) of a function and of
-        every function it wraps."""
+        """Defaults, keyword defaults, closure cells (a decorator factory's argument) and attributes of a function,
+        of every function it wraps and of every cache wrapper (functools.lru_cache, functools.cache) between."""
         while function is not None and id(function) not in visited:
             visited.add(id(function))
+            if not isinstance(function, types.FunctionType):  # A cache or other wrapper: read it, then unwrap.
+                if getattr(function, '__module__', None) != CONFIG_MODULE:
+                    attributes(getattr(function, '__qualname__', type(function).__qualname__), function)
+                function = getattr(function, '__wrapped__', None)
+                continue
             if function.__module__ != CONFIG_MODULE:
                 code = function.__code__
                 given = function.__defaults__ or ()
@@ -207,13 +226,14 @@ def runtime_violations(module):
                 for name, held in [*zip(positional, given), *(function.__kwdefaults__ or {}).items(), *cells]:
                     if binds_account(held):
                         found.append((function.__qualname__, name))
-                pending.extend(held for _, held in cells if isinstance(held, types.FunctionType))
+                attributes(function.__qualname__, function)
+                pending.extend(held for _, held in cells if wrapped_function(held))
             function = getattr(function, '__wrapped__', None)
 
     def member(owner, name, held):
         if isinstance(held, (staticmethod, classmethod)):
             held = held.__func__
-        if isinstance(held, types.FunctionType):
+        if wrapped_function(held):
             defaults(held)
         elif isinstance(held, property):
             for accessor in (held.fget, held.fset, held.fdel):
@@ -231,7 +251,7 @@ def runtime_violations(module):
         member('<module>', name, held)
     while pending:
         cls = pending.pop()
-        if isinstance(cls, types.FunctionType):  # A function a closure holds: the one a decorator wrapped.
+        if wrapped_function(cls):  # A function a closure holds: the one a decorator wrapped.
             defaults(cls)
             continue
         if id(cls) in visited:
@@ -379,7 +399,34 @@ class RuntimeSweepTests(unittest.TestCase):
             @at(_helper())
             def g(root): pass
             ''': {('at.<locals>.deco.<locals>.wrapper', 'root')},
+            # Cache wrappers hide the function they wrap from a FunctionType check; attributes hide from defaults.
+            '@functools.lru_cache\ndef g(p=_helper()): pass': {('g', 'p')},
+            '@functools.lru_cache(maxsize=4)\ndef g(*, p=_helper()): pass': {('g', 'p')},
+            '@functools.cache\ndef g(p=_helper()): pass': {('g', 'p')},
+            '''
+            @functools.cache
+            @functools.lru_cache
+            def g(p=_helper()): pass
+            ''': {('g', 'p')},
+            'class K:\n    @functools.lru_cache\n    def m(self, p=_helper()): pass': {('K.m', 'p')},
+            'class K:\n    @staticmethod\n    @functools.cache\n    def s(p=_helper()): pass': {('K.s', 'p')},
+            'def g(): pass\ng.root = _helper()': {('g', 'root')},
+            'def g(): pass\ng.labels = {"broker": config.LAUNCH_AGENT_LABEL}': {('g', 'labels')},
+            '@functools.cache\ndef g(): pass\ng.root = _helper()': {('g', 'root')},
+            '''
+            def at(root):
+                def deco(function):
+                    @functools.lru_cache
+                    def wrapper(*args):
+                        return function(root, *args)
+                    return wrapper
+                return deco
+            @at(_helper())
+            def g(root): pass
+            ''': {('at.<locals>.deco.<locals>.wrapper', 'root')},
             # Allowed: call-time use, unrelated paths, a named alias's server name and a re-exported config object.
+            '@functools.cache\ndef g(p=None):\n    return p or CACHE_DIRECTORY': set(),
+            'def g(): pass\ng.name = "telegram_search_work"\ng.__doc__ = "unrelated"': set(),
             'def f(p=None, home=Path.home(), other=Path("/elsewhere"), name="telegram_search_work"):\n'
             '    return p or CACHE_DIRECTORY': set(),
             'from telegram_search_mcp.artifact_store import CACHE_DIRECTORY as C': set(),

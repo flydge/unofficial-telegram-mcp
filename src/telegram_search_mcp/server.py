@@ -30,8 +30,9 @@ from .retained_selection_models import RetainSelectionRequest, RetainSelectionSo
 from . import __version__, product_identity as identity
 from .bundle_runtime import runtime_pin as bundled_runtime_pin
 from .broker_client import BrokerClient, BrokerUnavailable, BrokerCompatibilityError
-from .config import (BROKER_SOCKET_PATH, CACHE_DIRECTORY, CAPABILITY_PROFILES, PROFILE_DEPENDENCIES, AccountPaths,
-                     RuntimePolicy, load_runtime_policy, ConfigurationError, homebrew_openssl_keg, unlocking_profiles)
+from .config import (ALIAS_GRAMMAR, BROKER_SOCKET_PATH, CACHE_DIRECTORY, CAPABILITY_PROFILES, DEFAULT_ALIAS,
+                     PROFILE_DEPENDENCIES, AccountPaths, RuntimePolicy, load_runtime_policy, ConfigurationError,
+                     homebrew_openssl_keg, unlocking_profiles)
 from .contract import (contract_descriptor, schema_fingerprint, CONTRACT_VERSION, OPERATION_CAPABILITIES,
                        TOOL_OPERATIONS, CompatibilityError, require_current, COMPATIBILITY_CODES,
                        missing_capabilities, required_capabilities)
@@ -934,14 +935,17 @@ def build_server(
         artifact_root = CACHE_DIRECTORY if account is None else account.artifacts
     runtime_policy = policy if policy is not None else (
         load_runtime_policy() if account is None else load_runtime_policy(account.policy))
+    # A named alias reaches the model in serverInfo.name and one instructions line, neither of which enters
+    # the schema fingerprint (spec 2); the default alias keeps both exactly.
+    named = account is not None and account.alias != DEFAULT_ALIAS
     server = _PolicyServer(
-        name="telegram-search-mcp",
+        name="telegram-search-mcp" + (f"-{account.alias}" if named else ""),
         title=identity.DISPLAY_NAME,
         description=(
             "Bounded account-wide Telegram discovery, exact-chat search and reading, attachment "
             "transfer, and sends or changes the owner approves on this Mac."
         ),
-        instructions=_INSTRUCTIONS,
+        instructions=_INSTRUCTIONS + (f"\nThis server serves the account alias «{account.alias}»." if named else ""),
         version=__version__,
         log_level="CRITICAL",
     )
@@ -1925,15 +1929,35 @@ def main() -> int:
         action="store_true",
         help="verify the pinned TDLib runtime and authorization state without searching messages",
     )
+    parser.add_argument(
+        "--account",
+        type=_alias_argument,
+        metavar="ALIAS",
+        help="serve a registered account alias instead of the default account",
+    )
     args = parser.parse_args()
+    account = None
+    if args.account is not None:
+        try:  # The registry admits the alias before any directory is created.
+            account = AccountPaths.for_alias(args.account, Path.home())
+        except ConfigurationError:
+            print("ACCOUNT_ALIAS_UNAVAILABLE", file=sys.stderr)
+            return 1
     if args.check:
-        return _run_check()
+        return _run_check() if account is None else _run_check(account)
     try:
-        build_server().run(transport="stdio")
+        (build_server() if account is None else build_server(account=account)).run(transport="stdio")
     except (ConfigurationError, CompatibilityError):
         print("RUNTIME_CONFIGURATION_INVALID", file=sys.stderr)
         return 1
     return 0
+
+
+def _alias_argument(value: str) -> str:
+    """A closed alias token for --account; the refusal never echoes the value and `default` is never spelled."""
+    if type(value) is not str or value == DEFAULT_ALIAS or ALIAS_GRAMMAR.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected a registered account alias")
+    return value
 
 
 if __name__ == "__main__":
