@@ -14,7 +14,7 @@ import plistlib
 import unittest
 from unittest import mock
 
-from test_account_install import AccountHarness, tree
+from test_account_install import LOCK_ONLY, AccountHarness, tree
 from test_bundle_upgrade import NEIGHBOUR_CODEX, OLD_VERSION as LEGACY_VERSION
 from telegram_search_mcp import account_registry, bundle_install, config
 
@@ -47,7 +47,6 @@ class AliasChangeHarness(AccountHarness):
         assert alias in (None, self.ALIAS)
         pin = self.receipt()['package_version'] if pin is None else pin
         super().alias_session()
-        self.launchctl.idle(self.jobs.connect_label)
         policy = self.jobs.root / 'runtime.toml'
         policy.write_bytes(('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
                             'enabled_capabilities = ["read", "artifacts"]\n' % pin).encode())
@@ -119,7 +118,8 @@ class UpgradeOverAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
                       (self.jobs.root / 'runtime.toml').read_bytes())
         self.assertEqual(self.alias_tree(), session)
-        self.assertFalse(config.alias_jobs('play', self.home).root.exists())
+        # Never logged in: its root holds only the run directory and connect.lock the upgrade held (review fix 055d2).
+        self.assertEqual(tree(config.alias_jobs('play', self.home).root), LOCK_ONLY)
         side = self.sidecar()['accounts']
         for alias in ('work', 'play'):
             self.assertEqual((side[alias]['transaction'], side[alias]['release_root'], side[alias]['claude_code'],
@@ -462,20 +462,34 @@ class UninstallOverAliasesTests(AliasChangeHarness, unittest.TestCase):
                 self.assertEqual(str(caught.exception), 'pending_send_unresolved')
                 self.assertEqual(self.change_snapshot(), before)
 
-    def test_each_alias_broker_is_gated_again_right_before_its_bootout(self):
-        """Review fix (055d, low): on the first run too, not only by the cached observation before the transaction."""
+    def test_every_broker_is_gated_again_in_one_pass_before_any_bootout(self):
+        """Review fix (055d2, low; it replaces 055d's gate right before each alias's bootout): inside the transaction,
+        on every attempt, every alias broker (and the default's on a resume) is gated in one pass before any bootout,
+        so a send pending on an alias refuses with every broker loaded and every plist in place, the default's too."""
         self.added()
         self.alias_session()
-        self.alias_answers = ['none', 'pending']  # Before the transaction; right before its bootout.
+        self.alias_answers = ['none', 'pending']  # Before the transaction; the pass inside it.
         with self.assertRaises(bundle_install.InstallError) as caught:
             self.change('uninstall')
         self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertNotIn('bootout', self.launchctl.verbs())
+        self.assertIsNotNone(self.launchctl.loaded)
+        self.assertTrue(self.plist.exists())
         self.assertEqual(self.launchctl.job(self.jobs.broker_label)[-2:], ['--account', 'work'])
         self.assertTrue(self.jobs.broker_plist.exists())
         self.assertEqual(len(self.alias_probes), 2)
+        # Resumed, the default's broker is gated in the same pass: still none booted out while the alias's is pending.
+        self.alias_answers, probes = ['pending'], len(self.probes)
+        with self.assertRaises(bundle_install.InstallError) as caught:
+            self.change('uninstall')
+        self.assertEqual(str(caught.exception), 'pending_send_unresolved')
+        self.assertEqual(len(self.probes), probes + 1)
+        self.assertNotIn('bootout', self.launchctl.verbs())
         result = self.change('uninstall')  # Once the send settled, the retry finishes.
-        self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
+        self.assertEqual((result['status'], result['service'], result['accounts']['work']['service']),
+                         ('uninstalled', 'removed', 'removed'))
         self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+        self.assertIsNone(self.launchctl.loaded)
 
     def test_an_entry_no_record_owns_and_a_foreign_broker_definition_are_kept(self):
         self.full()
@@ -638,7 +652,9 @@ class ReinstallOverKeptAliasesTests(AliasChangeHarness, unittest.TestCase):
         self.reinstalled('play', 'work')
         self.account('account_add', 'work')
         removed = self.account('account_remove', 'play')  # The registry alone lists it.
-        self.assertEqual((removed['status'], removed['codex'], removed['session']), ('account_removed', 'absent', 'absent'))
+        # Never logged in: the root it moves aside holds only the connect.lock a transaction held (review fix 055d2).
+        self.assertEqual((removed['status'], removed['codex'], removed['session']), ('account_removed', 'absent', 'moved'))
+        self.assertEqual(tree(Path(removed['session_moved_to'])), LOCK_ONLY)
         self.assertEqual((self.registry(), sorted(self.sidecar()['accounts'])), (('work',), ['work']))
         removed = self.account('account_remove', 'work')
         self.assertEqual((removed['codex'], removed['session']), ('removed', 'moved'))
@@ -836,6 +852,365 @@ class LoginDuringChangeTests(AliasChangeHarness, unittest.TestCase):
         self.jobs.broker_plist.unlink()
         self.assertEqual(self.install(new)['accounts']['work']['service'], 'not_loaded')
         self.assertFalse(self.jobs.broker_plist.exists())
+
+
+class LoginLockTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d2, lead decision A): every installer transaction over the aliases holds every alias's connect.lock
+    for each whole run, fresh or resumed, so no login runs during one; a login still holding it, or a connect job still
+    running, refuses `login_in_progress` before anything changes and the transaction stays resumable."""
+
+    def setUp(self):
+        super().setUp()
+        self.attempts = []
+
+    def attempt_logins(self, stage, aliases=('play', 'work')):
+        """At `stage`, the first thing a login of each alias does: take its connect.lock (never created here)."""
+        from telegram_search_mcp.session_owner import OwnerLeaseError, acquire_owner_lock
+        for alias in aliases:
+            lock = config.alias_jobs(alias, self.home).root / 'run' / 'connect.lock'
+            if not lock.exists():
+                self.attempts.append((stage, alias, 'absent'))
+                continue
+            try:
+                os.close(acquire_owner_lock(lock))
+            except OwnerLeaseError as error:
+                self.attempts.append((stage, alias, error.code))
+            else:
+                self.attempts.append((stage, alias, 'taken'))
+
+    def test_a_parked_change_repeated_holds_every_alias_lock_at_every_checkpoint(self):
+        """Review fix (055d2, medium): the login check ran on a fresh run only, so a repeated parked change let a login
+        finish beside it and leave its alias on the old release."""
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        for action in ('upgrade', 'rollback'):
+            with self.subTest(action=action):
+                self.setUp()
+                self.added()
+                self.account('account_add', 'play')  # Never logged in: its lock is created as a login would.
+                self.alias_session()
+                new = self.newer()
+                target = self.release_root(new) if action == 'upgrade' else self.release
+                if action == 'rollback':
+                    self.install(new)
+
+                def run(**kwargs):
+                    return self.install(new, **kwargs) if action == 'upgrade' else self.change('rollback', **kwargs)
+                policy = self.session_root / 'runtime.toml'
+                saved, version = policy.read_bytes(), self.receipt()['package_version'].encode()
+
+                def park(stage):
+                    self.attempt_logins(stage)
+                    if stage == 'claude_desktop':  # A late refusal: every broker is restored, the change parks.
+                        policy.write_bytes(saved.replace(version, b'9.9.9'))
+                with self.assertRaises(bundle_install.InstallError) as caught:
+                    run(checkpoint=park)
+                self.assertEqual(str(caught.exception), 'policy_conflict')
+                policy.write_bytes(saved)
+                name = sorted(self.runtime.glob('transactions/change_*'), key=lambda p: int(p.name[7:]))[-1]
+                self.assertTrue(bundle_install._parked(json.loads((name / 'journal.json').read_bytes())))
+                first = len(self.attempts)
+                # Repeated while a login holds its lock (inline, no job), or while its connect job still runs: refused,
+                # nothing changed, the change still parked.
+                for case in ('lock', 'job'):
+                    held = None
+                    if case == 'lock':
+                        held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
+                    else:
+                        self.launchctl.load(self.jobs.connect_label)
+                    try:
+                        before = self.change_snapshot()
+                        with self.assertRaises(bundle_install.InstallError) as caught:
+                            run()
+                        self.assertEqual(str(caught.exception), 'login_in_progress')
+                        self.assertEqual(self.change_snapshot(), before)
+                    finally:
+                        if held is not None:
+                            os.close(held)
+                    if case == 'job':
+                        self.launchctl.idle(self.jobs.connect_label)
+                result = run(checkpoint=self.attempt_logins)
+                self.assertEqual(result['status'], 'upgraded' if action == 'upgrade' else 'rolled_back')
+                self.assertGreater(first, 10)
+                self.assertGreater(len(self.attempts), first + 10)
+                self.assertEqual({outcome for _, _, outcome in self.attempts}, {'owner_busy'})
+                # No alias on a mixed release: its definition and version line name the release current.json names.
+                self.assertEqual(self.pointer()['release_root'], str(target))
+                self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                                 bundle_install._service_payload(target, self.jobs.broker_label, 'work'))
+                version = json.loads((target / 'manifest' / 'release.json').read_bytes())['package_version']
+                self.assertIn(('expected_package_version = "%s"' % version).encode(),
+                              (self.jobs.root / 'runtime.toml').read_bytes())
+                self.assertEqual(tree(config.alias_jobs('play', self.home).root), LOCK_ONLY)
+
+    def test_a_running_login_refuses_the_uninstall_before_anything(self):
+        """Review fix (055d2, low): uninstall never checked for a running alias login."""
+        from telegram_search_mcp.session_owner import acquire_owner_lock
+        for case in ('inline setup holding connect.lock', 'connect job running'):
+            with self.subTest(case=case):
+                self.setUp()
+                self.added()
+                self.alias_session()
+                held = None
+                if case == 'connect job running':
+                    self.launchctl.load(self.jobs.connect_label)
+                else:
+                    self.launchctl.set_job(self.jobs.connect_label, None)
+                    held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
+                try:
+                    before, calls = self.change_snapshot(), len(self.launchctl.calls)
+                    with self.assertRaises(bundle_install.InstallError) as caught:
+                        self.change('uninstall')
+                    self.assertEqual(str(caught.exception), 'login_in_progress')
+                    self.assertEqual(self.change_snapshot(), before)
+                    self.assertNotIn('bootout', [c[0] for c in self.launchctl.calls[calls:]])
+                finally:
+                    if held is not None:
+                        os.close(held)
+                if case == 'connect job running':
+                    self.launchctl.idle(self.jobs.connect_label)
+                attempts = []
+                result = self.change('uninstall', checkpoint=lambda stage: attempts.append(stage) or self.attempt_logins(
+                    stage, ('work',)) if self.jobs.root.exists() else None)
+                self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
+                self.assertEqual({outcome for _, _, outcome in self.attempts}, {'owner_busy'})
+                self.assertTrue(attempts)
+
+
+class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d2, low): a login between two runs of a parked rollback gave a never logged in alias a session the
+    older release must not take over; the restart moved its definition onto the older release anyway, skipping the
+    per-alias state check. Now the check runs again first, and the alias stays whole on the release its session was
+    made with (`newer_state_kept`); the next change moves it on."""
+
+    def login_from(self, release, pin):
+        """What a first login run by `release` leaves for `work`: its root, enrollment and policy pinning `pin`, and that
+        release's exact broker definition written and loaded (its connect job idle)."""
+        for path in (self.jobs.root, self.jobs.root / 'run'):
+            path.mkdir(mode=0o700, exist_ok=True)
+        for name, data in (('enrollment.json', b'{"synthetic": "alias enrollment"}\n'),
+                           ('runtime.toml', ('config_version = 1\nexpected_package_version = "%s"\nexpected_contract_'
+                                             'version = 1\nenabled_capabilities = ["read", "artifacts"]\n' % pin).encode())):
+            (self.jobs.root / name).write_bytes(data)
+            (self.jobs.root / name).chmod(0o600)
+        payload = bundle_install._service_payload(release, self.jobs.broker_label, self.ALIAS)
+        self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        self.jobs.broker_plist.chmod(0o600)
+        self.launchctl.load(self.jobs.broker_label)
+
+    def test_an_alias_a_login_gave_a_session_between_the_runs_stays_on_that_release(self):
+        self.added()  # Never logged in: no root, no plist at the upgrade or at the rollback's observation.
+        old = self.release
+        new = self.newer()
+        self.install(new)
+        new_root = self.release
+        policy = self.session_root / 'runtime.toml'
+        saved = policy.read_bytes()
+
+        def park(stage):
+            if stage == 'claude_desktop':
+                policy.write_bytes(saved.replace(NEW_VERSION.encode(), b'9.9.9'))
+        with self.assertRaises(bundle_install.InstallError):
+            self.change('rollback', checkpoint=park)
+        policy.write_bytes(saved)
+        self.login_from(new_root, NEW_VERSION)  # Between the runs: the release current.json still names.
+        kills = []
+
+        def kill_once(stage):
+            if stage == 'recorded:appeared:work' and not kills:
+                kills.append(stage)
+                raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.change('rollback', checkpoint=kill_once)
+        result = self.change('rollback')
+        self.assertEqual((result['status'], result['accounts']['work']['service']), ('rolled_back', 'newer_state_kept'))
+        self.assertEqual(self.pointer()['release_root'], str(old))
+        # Whole on the release its session was made with: that release's definition and version line, no broker of the
+        # older release; the one the login started was stopped by the repeat and none is started.
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                         bundle_install._service_payload(new_root, self.jobs.broker_label, 'work'))
+        self.assertIn(('expected_package_version = "%s"' % NEW_VERSION).encode(),
+                      (self.jobs.root / 'runtime.toml').read_bytes())
+        self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+        self.assertEqual([p.name for p in self.jobs.root.iterdir() if p.name.startswith('.')], [])  # No temporary.
+        # The next upgrade, to a third release, moves it on whole: the definition is of this installation's own shape
+        # and the version line names one of its releases.
+        third = self.newer('c', '0.55.0.dev2')
+        result = self.install(third)
+        third_root = self.release_root(third)
+        self.assertEqual((result['status'], result['accounts']['work']['service']), ('upgraded', 'not_loaded'))
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                         bundle_install._service_payload(third_root, self.jobs.broker_label, 'work'))
+        self.assertIn(b'expected_package_version = "0.55.0.dev2"', (self.jobs.root / 'runtime.toml').read_bytes())
+        self.assertEqual(self.entries('work', third_root), {'codex': True, 'claude': True, 'desktop': True})
+
+
+class UninstallLoginGapTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d2, medium): uninstall ran an alias's broker step only while its outcome was unrecorded, so a broker
+    a login loaded again between two attempts stayed, crash-looping on the removed release, and the alias could not be
+    repaired. Every attempt now runs each alias's connect job bootout and broker step again until the root retires."""
+
+    def test_a_login_between_two_attempts_leaves_no_broker_and_the_documented_commands_end_clean(self):
+        for stage in ('connect:work', 'service:work'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                packet, _ = self.full()
+                self.account('account_add')
+                self.alias_session()
+
+                def die(value, stage=stage):
+                    if value == stage:
+                        raise KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    self.change('uninstall', checkpoint=die)
+                # In the gap, a login run by the release being removed hands its broker off again.
+                payload = bundle_install._service_payload(self.release, self.jobs.broker_label, 'work')
+                self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+                self.jobs.broker_plist.chmod(0o600)
+                self.launchctl.load(self.jobs.broker_label)
+                result = self.change('uninstall')
+                self.assertEqual((result['status'], result['accounts']['work']['service']), ('uninstalled', 'removed'))
+                self.assertFalse(self.jobs.broker_plist.exists())
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertIsNone(self.launchctl.job(self.jobs.connect_label))
+                # A reinstall, then the documented commands only.
+                version = json.loads((packet[1] / 'manifest' / 'release.json').read_bytes())['package_version']
+                with mock.patch('telegram_search_mcp.__version__', version):
+                    self.install(packet)
+                self.service(self.release)
+                self.assertEqual(self.account('account_add')['status'], 'account_added')
+                upgraded = self.install(self.newer())
+                self.assertEqual((upgraded['status'], upgraded['accounts']['work']['service']), ('upgraded', 'not_loaded'))
+                removed = self.account('account_remove')
+                self.assertEqual((removed['status'], removed['codex'], removed['session']),
+                                 ('account_removed', 'removed', 'moved'))
+                self.assertFalse(self.jobs.broker_plist.exists() or self.jobs.root.exists())
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertEqual((self.registry(), self.sidecar()), ((), None))
+                self.assertEqual({n for n in self.codex_servers() if n.startswith('telegram_search_')}, set())
+                self.assertIsNone(self.claude().entry_of('telegram_search_work'))
+                self.assertNotIn('telegram_search_work', self.desktop_servers())
+
+
+class LeftoverDefinitionTests(AliasChangeHarness, unittest.TestCase):
+    """Review fix (055d2, medium): an alias plist exactly of this installation's own shape, naming any release of it
+    (`<installation root>/releases/<id>`, present or not), is the installer's: account-remove and uninstall remove it,
+    an upgrade rewrites it to the target, account-add's repair path rewrites it to the current release; anything else
+    stays foreign, refused `service_conflict` and never removed."""
+
+    GONE = 'e' * 64  # A release id this installation no longer holds.
+
+    def leftover(self, *, loaded=False, release=None):
+        release = self.runtime / 'releases' / (release or self.GONE)
+        payload = bundle_install._service_payload(release, self.jobs.broker_label, self.ALIAS, present=False)
+        self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        self.jobs.broker_plist.chmod(0o600)
+        self.launchctl.set_job(self.jobs.broker_label, payload['ProgramArguments'] if loaded else None)
+        return payload
+
+    def foreign(self):
+        payload = {**self.leftover(), 'KeepAlive': False}
+        self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
+        return self.jobs.broker_plist.read_bytes()
+
+    def test_account_remove_and_uninstall_remove_it(self):
+        for action in ('account_remove', 'uninstall'):
+            for loaded in (False, True):
+                with self.subTest(action=action, loaded=loaded):
+                    self.setUp()
+                    self.added()
+                    self.alias_session()
+                    payload = self.leftover(loaded=loaded)
+                    result = self.account(action) if action == 'account_remove' else self.change('uninstall')
+                    service = result['service'] if action == 'account_remove' else result['accounts']['work']['service']
+                    self.assertEqual(service, 'removed')
+                    self.assertFalse(self.jobs.broker_plist.exists())
+                    self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                    if loaded:  # Gated under the interpreter of the definition it runs.
+                        self.assertIn(Path(payload['ProgramArguments'][0]), [p[0] for p in self.alias_probes])
+
+    def test_an_upgrade_rewrites_it_to_the_target(self):
+        self.added()
+        self.alias_session()
+        self.leftover(loaded=True)
+        new = self.newer()
+        result = self.install(new)
+        target = self.release_root(new)
+        self.assertEqual((result['status'], result['accounts']['work']['service']), ('upgraded', 'restarted'))
+        payload = bundle_install._service_payload(target, self.jobs.broker_label, 'work')
+        self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()), payload)
+        self.assertEqual(self.launchctl.job(self.jobs.broker_label), payload['ProgramArguments'])
+
+    def kept_by_an_uninstall(self):
+        """`work` added and logged in, uninstalled (the registry keeps it, accounts.json leaves) and the same kit
+        installed again: account-add's repair path."""
+        packet, _ = self.full()
+        self.account('account_add')
+        self.alias_session()
+        self.change('uninstall')
+        version = json.loads((packet[1] / 'manifest' / 'release.json').read_bytes())['package_version']
+        with mock.patch('telegram_search_mcp.__version__', version):
+            self.install(packet)
+        self.service(self.release)
+        self.assertEqual((self.registry(), self.sidecar()), (('work',), None))
+
+    def test_account_add_rewrites_it_on_the_repair_path(self):
+        for loaded in (False, True):
+            with self.subTest(loaded=loaded):
+                self.setUp()
+                self.kept_by_an_uninstall()
+                payload = self.leftover(loaded=loaded)
+                probes = len(self.alias_probes)
+                result = self.account('account_add')
+                self.assertEqual((result['status'], result['service']), ('account_added', 'rewritten'))
+                self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                                 bundle_install._service_payload(self.release, self.jobs.broker_label, 'work'))
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))  # None started: its connect starts it.
+                # Gated before the transaction and again right before its bootout.
+                self.assertEqual([p[0] for p in self.alias_probes[probes:]], [Path(payload['ProgramArguments'][0])] * 2
+                                 if loaded else [])
+                # A retry after it finished returns the same result, and the alias is removable as usual.
+                self.assertEqual(self.account('account_add')['service'], 'rewritten')
+                self.assertEqual(self.account('account_remove')['service'], 'removed')
+                self.assertFalse(self.jobs.broker_plist.exists())
+
+    def test_a_kill_inside_the_rewrite_resumes_to_the_same_state(self):
+        for stage in ('recorded:service_rewrite', 'recorded:plist', 'published:plist'):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.kept_by_an_uninstall()
+                self.leftover(loaded=True)
+
+                def die(value, stage=stage):
+                    if value == stage:
+                        raise KeyboardInterrupt
+                with self.assertRaises(KeyboardInterrupt):
+                    self.account('account_add', checkpoint=die)
+                self.assertEqual(self.account('account_add')['service'], 'rewritten')
+                self.assertEqual(plistlib.loads(self.jobs.broker_plist.read_bytes()),
+                                 bundle_install._service_payload(self.release, self.jobs.broker_label, 'work'))
+                self.assertIsNone(self.launchctl.job(self.jobs.broker_label))
+                self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir()
+                                  if p.name != self.plist.name], [self.jobs.broker_plist.name])  # No temporary left.
+
+    def test_a_foreign_definition_is_refused_and_never_removed(self):
+        for action in ('account_remove', 'upgrade', 'account_add', 'uninstall'):
+            with self.subTest(action=action):
+                self.setUp()
+                if action == 'account_add':
+                    self.kept_by_an_uninstall()
+                else:
+                    self.added()
+                    self.alias_session()
+                data = self.foreign()
+                if action == 'uninstall':
+                    self.assertEqual(self.change('uninstall')['accounts']['work']['service'], 'kept')
+                else:
+                    before = self.change_snapshot()
+                    with self.assertRaises(bundle_install.InstallError) as caught:
+                        self.install(self.newer()) if action == 'upgrade' else self.account(action)
+                    self.assertEqual(str(caught.exception), 'service_conflict')
+                    self.assertEqual(self.change_snapshot(), before)
+                self.assertEqual(self.jobs.broker_plist.read_bytes(), data)
 
 
 if __name__ == '__main__':

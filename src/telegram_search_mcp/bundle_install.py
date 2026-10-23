@@ -32,7 +32,7 @@ from .bundle_runtime import (validate_tree, require_platform, read, unique_json,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
                              transaction_name, ADOPTED_NAME, MAX_ADOPTED, check_adopted, CLAUDE_USER_STATUSES,
                              desktop_ownership)
-from .session_owner import SessionOwnerLease, OwnerLeaseError, open_private_directory
+from .session_owner import SessionOwnerLease, OwnerLeaseError, acquire_owner_lock, open_private_directory
 from . import account_registry, claude_desktop_registration, claude_registration
 from .config import alias_jobs, alias_server_name, accounts_root, named_alias
 from .codex_registration import (Registration, Receipt, ConfigConflict, read_config,
@@ -141,11 +141,13 @@ def _copy_release(source, destination, index, index_bytes, pin):
     validate_tree(destination, path, pin, installed=True)
 
 
-def _service_payload(installed, label, alias=None):
+def _service_payload(installed, label, alias=None, *, present=True):
     """The receipt-bound broker definition of `installed`; a named alias's argv ends with `--account <alias>` and its
-    label is its own (0.55 spec 3C), as launch_agent writes it in bundle mode."""
+    label is its own (0.55 spec 3C), as launch_agent writes it in bundle mode. `present` False is a release root that
+    may no longer exist (`_Ours`): every key but its own argv is the same for every release, so the running
+    interpreter stands in for launch_agent's check of its executable."""
     from .launch_agent import launch_agent_payload
-    expected=launch_agent_payload(python_executable=installed/'python/bin/python3')
+    expected=launch_agent_payload(python_executable=installed/'python/bin/python3' if present else Path(sys.executable))
     expected.update(Label=label,ProgramArguments=[str(installed/'python/bin/python3'),'-I','-S','-B',str(installed/'launcher.py'),'broker',
                                                   *(() if alias is None else ('--account',alias))],EnvironmentVariables={})
     return expected
@@ -915,13 +917,16 @@ class _Service:
     with them: a finished restore drops its cycle's write records (`_CYCLE_WRITES`).
 
     `alias` is a named alias's broker (0.55 spec 3D): its own label and plist, and every journal record and
-    checkpoint of it under its own key (`_key`); None is the default's, journaled as before.
+    checkpoint of it under its own key (`_key`); None is the default's, journaled as before. `root` (a named alias's
+    only) is the installation root: a definition exactly of this installation's own shape for the alias, naming any
+    release of it (`_Ours`), is `ours` (review fix 055d2): rewritten to the target like a known one.
     """
 
-    def __init__(self, plist, label, target, *, known=(), adopted=None, runner, pending, home, alias=None):
+    def __init__(self, plist, label, target, *, known=(), adopted=None, runner, pending, home, alias=None, root=None):
         self.plist,self.label,self.target=plist,label,target
         self.known=dict(known);self.adopted=adopted;self.runner=runner;self.pending=pending;self.home=home
         self.alias=alias
+        self.ours=None if root is None or alias is None else _Ours(root,label,alias)
         self.stopping=False  # This run issued a bootout its cycle may not have recorded yet.
 
     def k(self, name):
@@ -932,7 +937,7 @@ class _Service:
         return j.tx/('service.previous' if self.alias is None else 'service-'+self.alias+'.previous')
 
     def kind(self):
-        """('absent'|'to'|<known name>|'adopted', bytes, payload); anything else raises service_conflict."""
+        """('absent'|'to'|<known name>|'ours'|'adopted', bytes, payload); anything else raises service_conflict."""
         validate_owned_path(self.plist,regular=True)
         if not self.plist.exists():return 'absent',b'',None
         try:
@@ -943,16 +948,23 @@ class _Service:
         if payload is not None and self.target is not None and payload==self.target:return 'to',data,payload
         for name,value in self.known.items():
             if payload is not None and payload==value:return name,data,payload
+        if payload is not None and self.ours is not None and self.ours(payload):return 'ours',data,payload
         if data is not None and self.adopted is not None and digest(data)==self.adopted:return 'adopted',data,payload
         raise InstallError('service_conflict')
 
+    def _ours_live(self, live):
+        """The definition of this installation's own shape a registration loaded from our plist path runs, or None."""
+        return None if self.ours is None else self.ours.live(live,self.plist)
+
     def _loaded_payload(self, live, kind, payload):
         """The payload a loaded registration runs when it is ours: started from the definition on disk, or, once that
-        plist was removed (by hand or a cleanup), still loaded from its path running the target's or a known
-        definition. Anything else refuses `service_conflict`."""
+        plist was removed (by hand or a cleanup), still loaded from its path running the target's, a known or (a named
+        alias's) one of this installation's own definitions. Anything else refuses `service_conflict`."""
         if kind=='absent':
             for value in (self.target,*self.known.values()):
                 if value is not None and _matches_live(live,self.plist,value):return value
+            value=self._ours_live(live)
+            if value is not None:return value
             raise InstallError('service_conflict')
         if kind!='adopted' and not _matches_live(live,self.plist,payload):raise InstallError('service_conflict')
         return payload
@@ -972,7 +984,7 @@ class _Service:
     def _observed(self, j):
         observed=j.recorded(self.k('service'))
         if (observed is None or type(observed.get('loaded')) is not bool
-                or observed.get('plist') not in ('absent','to','adopted',*self.known)):
+                or observed.get('plist') not in ('absent','to','adopted',*self.known,*(('ours',) if self.ours else ()))):
             raise InstallError('transaction_conflict')
         return observed
 
@@ -1001,7 +1013,7 @@ class _Service:
 
     def _previous_payload(self, j, live):
         """The definition a live registration from our plist path runs when it is the one the stop replaced (the
-        kept `service.previous` bytes) or a known one; else None."""
+        kept `service.previous` bytes), a known one or (a named alias's) one of this installation's own; else None."""
         candidates=list(self.known.values())
         if j.recorded(self.k('service_previous')) is not None:
             try:candidates.insert(0,plistlib.loads(self._kept(j)))
@@ -1010,7 +1022,8 @@ class _Service:
             if (type(value) is dict and type(value.get('ProgramArguments')) is list and value['ProgramArguments']
                     and _matches_live(live,self.plist,value)):
                 return value
-        return None
+        value=self._ours_live(live)
+        return value if value is not None and value!=self.target else None
 
     def cycle(self, j):
         """(number, state, code) of the journaled stop cycle: (0, None, None) before the first stop; the code only
@@ -1141,13 +1154,14 @@ class _Service:
                  clear=tuple(self.k(n) for n in _CYCLE_WRITES))
         j.checkpoint(self.k('restored:service'))
 
-    def restart(self, j, appeared=None):
+    def restart(self, j, appeared=None, back=None, newer=None):
         """After the commit: bootstrap the rewritten definition only when the stopped broker was loaded, and only
         while the plist is the target's (the stop made it so before the commit); a plist removed since (by hand
         or a cleanup) is written again first, as the stop writes it; any other definition refuses. The definition
         the stop replaced, loaded again between its bootout and the rewrite (`_previous_loaded`), is gated and
         booted out first, also when no broker ran before, so it never runs on the target's plist and pin. A named
-        alias's plist absent at the observation is verified again (`_appeared`)."""
+        alias's plist absent at the observation is verified again (`_appeared`; `back` and `newer` on a rollback),
+        and answers `newer_state_kept` when it stays on the release its newer session was made with."""
         observed=j.recorded(self.k('service'))
         if observed is None:return 'not_loaded'
         if not observed['loaded']:
@@ -1155,7 +1169,7 @@ class _Service:
                 try:on_disk=self.kind()[0]
                 except (InstallError,RuntimePathError,BundleError,OSError):on_disk=None  # Not read before: as before.
                 if on_disk=='to' and self._previous_loaded(j):_bootout(self.runner,self.label)
-            elif self.alias is not None:self._appeared(j,appeared)
+            elif self.alias is not None:return self._appeared(j,appeared,back,newer)
             return 'not_loaded'
         if observed['plist']=='absent':return 'stopped'
         if j.recorded(self.k('service_restarted')) is None:
@@ -1172,18 +1186,32 @@ class _Service:
             j.update(single=(self.k('service_restarted'),{'attempt':1}));j.checkpoint(self.k('restarted'))
         return 'restarted'
 
-    def _appeared(self, j, appeared):
+    def _appeared(self, j, appeared, back=None, newer=None):
         """After the commit, for a named alias whose plist was absent at the observation: a first login that finished
-        during the change wrote and loaded its broker from the release that served it, which current.json no longer
-        names. Lead decision (review fix 055d, owner review pending): rewritten to the target, not refused, since a
-        refusal after the commit would leave the change pending for good. A loaded definition that is not the
-        target's is gated first, before anything changes; then the version line (`appeared`, the alias's runtime.toml
-        from the current to the target version, journaled), that broker's bootout, and the plist rewritten to the
-        target's exact definition. As `stop` does for a login in a change that found none running, none is started:
-        the next start runs the target. A definition that is neither the target's nor a known one refuses
-        `service_conflict` and is never overwritten; a plist still absent stays absent. Idempotent by state: a repeat
-        finds the target's plist and nothing loaded."""
+        between two runs of a parked change (none runs during a run: each holds the alias's connect.lock, review fix
+        055d2) wrote and loaded its broker from the release that served it, which current.json no longer names. Lead
+        decision (review fix 055d, owner review pending): rewritten to the target, not refused, since a refusal after
+        the commit would leave the change pending for good. A loaded definition that is not the target's is gated
+        first, before anything changes; then the version line (`appeared`, the alias's runtime.toml from the current
+        to the target version, journaled), that broker's bootout, and the plist rewritten to the target's exact
+        definition. As `stop` does for a login in a change that found none running, none is started: the next start
+        runs the target. A definition that is neither the target's nor a known one refuses `service_conflict` and is
+        never overwritten; a plist still absent stays absent. Idempotent by state: a repeat finds the target's plist
+        and nothing loaded.
+
+        On a rollback (`newer`, review fix 055d2, low) the alias's state check runs again first: when its session
+        state changed since the upgrade recorded it (that login made it), the older release must not take it over.
+        Lead decision (owner review pending): the alias stays off the target, whole, on the release its session was
+        made with: its plist is left as that release's exact definition, the version line this change moved before
+        its commit goes back (`back`, journaled), no broker is booted out or started, and the outcome is journaled
+        once (`appeared:<alias>`) and answered `newer_state_kept`."""
         kind,data,_=self.kind()
+        if (newer is not None and kind not in ('absent','to')
+                and (j.recorded(self.k('appeared')) is not None or newer())):
+            if j.recorded(self.k('appeared')) is None:
+                j.update(single=(self.k('appeared'),{'status':'newer_state_kept'}));j.checkpoint(self.k('recorded:appeared'))
+            if back is not None:back()
+            return j.recorded(self.k('appeared'))['status']
         live=_live(self.runner,self.label)
         stale=live is not None and not _matches_live(live,self.plist,self.target)
         if stale:
@@ -1196,6 +1224,45 @@ class _Service:
             j.discard(self.k('plist'),self.plist)
             j.write(self.k('plist'),self.plist,_plist_bytes(self.target),data,existed=True,maximum=MAX_PLIST_BYTES)
             if self.kind()[0]!='to':raise InstallError('service_conflict')
+        return 'not_loaded'
+
+
+def _payload_release(payload):
+    """The release root a bundle-form broker definition runs (`<release>/python/bin/python3`), or None."""
+    arguments=payload.get('ProgramArguments') if type(payload) is dict else None
+    if type(arguments) is not list or not arguments or type(arguments[0]) is not str:return None
+    python=Path(arguments[0])
+    return python.parent.parent.parent if python.is_absolute() and '..' not in python.parts else None
+
+
+class _Ours:
+    """Whether a broker definition is exactly this installation's own for a named alias (review fix 055d2): equal to
+    `_service_payload(r, label, alias)` for a release root r = `<root>/releases/<release id>`, whether or not r still
+    exists. Such a plist is the installer's: account-remove and uninstall remove it, upgrade, rollback and account-add
+    rewrite it. Anything else stays foreign (`service_conflict`, never removed)."""
+
+    def __init__(self, root, label, alias):
+        self.releases,self.label,self.alias=Path(root)/'releases',label,alias
+
+    def definition(self, release):
+        """This alias's definition for `release`, a root of this installation's (present or not), else None."""
+        if release is None or release.parent!=self.releases or _HEX64.fullmatch(release.name) is None:return None
+        from .launch_agent import LaunchAgentError
+        try:return _service_payload(release,self.label,self.alias,present=release.exists())
+        except (LaunchAgentError,BundleError,OSError,ValueError):return None
+
+    def __call__(self, payload):
+        value=self.definition(_payload_release(payload))
+        return value is not None and payload==value
+
+    def live(self, text, plist):
+        """The definition of this shape a registration loaded from `plist` runs (its `program` line names the
+        release), or None."""
+        if type(text) is not str or len(text)>65536:return None
+        programs=[line.strip()[len('program = '):] for line in text.splitlines() if line.strip().startswith('program = ')]
+        if len(programs)!=1 or not programs[0].startswith('/'):return None
+        value=self.definition(Path(programs[0]).parent.parent.parent)
+        return value if value is not None and _matches_live(text,plist,value) else None
 
 
 _PIN = re.compile(rb'expected_package_version = "([0-9A-Za-z.+-]{1,64})"')
@@ -1203,7 +1270,8 @@ _VALUE = re.compile(r'[0-9A-Za-z.+-]{1,64}\Z')
 
 
 def _policy_candidate(data, old, new):
-    """runtime.toml with only its expected_package_version line rewritten from `old` (any when None) to `new`.
+    """runtime.toml with only its expected_package_version line rewritten from `old` (any when None; one of them when
+    a frozenset, a named alias's `_release_versions`) to `new`.
 
     None when the file pins no version. Every other byte, capabilities included, stays identical.
     """
@@ -1214,7 +1282,7 @@ def _policy_candidate(data, old, new):
     if match is None:raise InstallError('policy_conflict')
     value=match.group(1).decode()
     if value==new:return data
-    if old is not None and value!=old:raise InstallError('policy_conflict')
+    if old is not None and value not in ((old,) if type(old) is str else old):raise InstallError('policy_conflict')
     lines[hits[0]]=b'expected_package_version = "'+new.encode()+b'"'
     candidate=b'\n'.join(lines)
     try:
@@ -1273,6 +1341,13 @@ def _state(session_root):
             body=without_capabilities(data) if exists else None
             out[_POLICY_BODY]=digest(body) if body is not None else None
     return out
+
+
+def _alias_state(root):
+    """A named alias's `_state` with its closed key set whether or not its root exists: the run directory and lock a
+    transaction creates for an alias never logged in (`_LoginLocks`) never change what a change records, so a run killed
+    while creating them records what the uninterrupted one does (review fix 055d2)."""
+    return {_POLICY_BODY:None,**_state(root)}
 
 
 def _same_policy(back, state):
@@ -1993,21 +2068,24 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
     another kit or a rollback names it (`transaction_pending`).
 
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists goes the default's way in the same
-    transaction, each under its own journal keys (`_key`): a login of it still running refuses before the transaction
-    (`login_in_progress`), its broker observed, gated (`alias_pending`, through its own socket; any answer but `none`
-    refuses the whole change) and stopped after the default's, its plist rewritten to the target release before the
-    commit, its runtime.toml version line, and, with its accounts.json record, its Codex, Claude Code and Claude
-    Desktop entries re-pointed after the default's and its record republished beside receipt.json. A plist absent at
-    its observation is verified again after the commit: one a login wrote meanwhile is moved to the target's
-    (`_Service._appeared`). A late refusal restores every stopped broker, the default's first. A rollback checks each
-    alias's session state like the default's, and to a release older than 0.55 refuses `accounts_present` while any
-    alias exists; with none left it retires the registry and the default's readiness record after its commit and
-    restart.
+    transaction, each under its own journal keys (`_key`). Every run, fresh or resumed, holds every alias's
+    connect.lock until it ends (`_LoginLocks`, review fix 055d2), so no login runs during one; a login still running
+    refuses `login_in_progress` with nothing changed. Its broker observed, gated (`alias_pending`, through its own
+    socket; any answer but `none` refuses the whole change) and stopped after the default's, its plist (the current
+    or the target release's, or another of this installation's: `_Ours`) rewritten to the target release before the
+    commit, its runtime.toml version line (naming any release of this installation's: `_release_versions`), and, with
+    its accounts.json record, its Codex, Claude Code and Claude Desktop entries re-pointed after the default's and its
+    record republished beside receipt.json. A plist absent at its observation is verified again after the commit: one
+    a login wrote between two runs is moved to the target's (`_Service._appeared`), but on a rollback an alias whose
+    session state that login changed stays whole on its release (`newer_state_kept`). A late refusal restores every
+    stopped broker, the default's first. A rollback checks each alias's session state like the default's, and to a
+    release older than 0.55 refuses `accounts_present` while any alias exists; with none left it retires the registry
+    and the default's readiness record after its commit and restart.
     """
     from .config import _owner_paths
     session_root,_,label,plist=_owner_paths(home)
     alias_probe=account_pending_sends if alias_pending is None else alias_pending
-    with SessionOwnerLease(root/'.install.lock') as lease:
+    with SessionOwnerLease(root/'.install.lock') as lease, contextlib.ExitStack() as locks:
         if set(p.name for p in root.iterdir())-_ROOT_NAMES:
             raise InstallError('runtime_conflict')
         _refuse_pending_account(root)  # An unfinished account-add or account-remove is retried first.
@@ -2039,6 +2117,15 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         if not resuming and kind=='rollback' and _finished(current,journal,'rollback'):
             # Repeated after it finished (a retry after a kill past its last journal write): its result, no effect.
             return _rolled_back(current,journal)
+        # Every alias's connect.lock, held until this run ends (review fix 055d2, lead decision A, `_LoginLocks`): those a
+        # resumed change journaled at its opening (all at once), else every one the registry or accounts.json lists
+        # (each that exists before any check, the others right before the transaction opens).
+        if resuming:lock_aliases=_change_accounts(journal,root)
+        else:
+            registry,sidecar=accounts_state(root,home)
+            lock_aliases={*registry,*sidecar}
+        logins=locks.enter_context(_LoginLocks(launchctl,home,lock_aliases))
+        if resuming:logins.complete()
         codex,skills=Path(current['codex_home']),Path(current['skills_root'])
         claude_skills,mode=Path(current['claude_skills_root']),current['claude_code_mode']
         from_root,from_index=Path(current['release_root']),current['index_sha256']
@@ -2059,6 +2146,8 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
             if to_manifest.get('skills')!=target['skills'] or to_manifest.get('package_version')!=target['package_version']:
                 raise InstallError('rollback_refused')
         to_root=root/'releases'/to_index
+        # The version lines a named alias's runtime.toml may hold to be moved: any release of this installation's.
+        alias_versions=_release_versions(root,current['package_version'],to_manifest['package_version'])
         from_command,from_arguments=_commands(from_root)
         to_command,to_arguments=_commands(to_root)
         to_registration=_registration(to_root,to_manifest)
@@ -2133,9 +2222,9 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 data,exists=_read_file(session_root/'runtime.toml',MAX_POLICY_BYTES)
                 if exists:_policy_candidate(data,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
             if len(_adopted_file(root)[1])+len(adopted)>MAX_ADOPTED:raise InstallError('recovery_limit')
-            # Every named alias, before the transaction exists too: its entries owned or absent, its broker the current
-            # or the target release's exact definition and gated, its version line, and on a rollback its state.
-            registry,sidecar=accounts_state(root,home)
+            # Every named alias, before the transaction exists too: its entries owned or absent, its broker a definition
+            # of this installation's own (the current or the target release's, or another release's: `_Ours`) and
+            # gated, its version line, and on a rollback its state. No login of any runs (`_LoginLocks`).
             aliases=sorted(set(registry)|set(sidecar))
             older=kind=='rollback' and _version_key(target['package_version'])<_version_key(_ACCOUNTS_FIRST)
             if aliases and older:raise InstallError('accounts_present')
@@ -2162,16 +2251,13 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                         home,_alias_commands(owned,alias) if owned else None,*to_entry,name=server)
                     if observed=='different':raise InstallError('claude_desktop_registration_conflict')
                     if observed=='unsupported':raise InstallError('claude_desktop_config_unsupported')
-                # A login of the alias still running would write and load its broker from the release it runs, beside
-                # or after this change: refused first, until it is over (review fix 055d).
-                if _alias_login(launchctl,jobs):raise InstallError('login_in_progress')
-                _alias_broker(alias,home,to_root,from_root,launchctl,alias_probe).check()
+                _alias_broker(alias,home,to_root,from_root,launchctl,alias_probe,root).check()
                 if os.path.lexists(jobs.root):
                     data,exists=_read_file(jobs.policy,MAX_POLICY_BYTES)
-                    if exists:_policy_candidate(data,current['package_version'],to_manifest['package_version'])
+                    if exists:_policy_candidate(data,alias_versions,to_manifest['package_version'])
                 if kind=='rollback':
-                    _alias_state_check(alias,home,recorded,current['package_version'],target['package_version'])
-                entries[alias]={'record':record,'state':_state(jobs.root),'codex':planned}
+                    _alias_state_check(alias,home,recorded,alias_versions,target['package_version'])
+                entries[alias]={'record':record,'state':_alias_state(jobs.root),'codex':planned}
             # With none left, a rollback below 0.55 retires the registry and the default's readiness record after its
             # commit, under a name journaled now.
             from .broker_readiness import NAME as readiness
@@ -2194,6 +2280,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 if kind=='upgrade':value['registration.json']=new_owner.to_bytes()
                 else:value['receipt.target']=encoded(target)
                 return value
+            logins.complete()
             name=_open_change(root,files)
             tx=root/'transactions'/name
         j=_Journal(tx,lease,_CHANGE_STEPS,checkpoint)
@@ -2238,7 +2325,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         to_payload=_service_payload(to_root,label)
         service=_Service(plist,label,to_payload,known=payloads,adopted=adopted['service']['sha256'] if 'service' in adopted else None,
                          runner=launchctl,pending=pending_sends,home=home)
-        brokers=[(alias,_alias_broker(alias,home,to_root,from_root,launchctl,alias_probe)) for alias in aliases]
+        brokers=[(alias,_alias_broker(alias,home,to_root,from_root,launchctl,alias_probe,root)) for alias in aliases]
         services=[service,*(broker for _,broker in brokers)]
         def undo():
             _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
@@ -2468,7 +2555,7 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
                 j.advance('policy_pending')
                 _policy_step(j,session_root,None if 'service' in adopted else current['package_version'],to_manifest['package_version'])
                 for alias in aliases:
-                    _policy_step(j,alias_jobs(alias,home).root,current['package_version'],to_manifest['package_version'],alias)
+                    _policy_step(j,alias_jobs(alias,home).root,alias_versions,to_manifest['package_version'],alias)
                 j.advance('policy')
                 _client_temporaries(j.value['publications'],home,config,plist,session_root,aliases)
             checkpoint('policy')
@@ -2523,9 +2610,18 @@ def _change(kind, root, home, *, codex=None, skills=None, claude_code=None, sour
         j.advance('complete');checkpoint('complete')
         restarted=service.restart(j)
         # An alias whose plist was absent at the observation is verified again (`_Service._appeared`): a login that
-        # finished during the change has its version line and definition moved to the target's.
-        alias_restarted={alias:broker.restart(j,lambda alias=alias:_policy_step(
-            j,alias_jobs(alias,home).root,current['package_version'],to_manifest['package_version'],alias))
+        # finished between two runs of a parked change has its version line and definition moved to the target's; on a
+        # rollback only while its session state is still the one the upgrade recorded (review fix 055d2), else it stays
+        # whole on the release that session was made with (`newer_state_kept`).
+        def newer(alias):
+            upgraded_now=unique_json(read(root/'transactions'/current['transaction']/'journal.json',mode=0o600))
+            try:_alias_state_check(alias,home,_change_accounts(upgraded_now,root),alias_versions,to_manifest['package_version'])
+            except InstallError:return True
+            return False
+        alias_restarted={alias:broker.restart(
+            j,lambda alias=alias:_policy_step(j,alias_jobs(alias,home).root,alias_versions,to_manifest['package_version'],alias),
+            lambda alias=alias:_policy_back(j,alias_jobs(alias,home).root,to_manifest['package_version'],alias),
+            (lambda alias=alias:newer(alias)) if kind=='rollback' else None)
             for alias,broker in brokers}
         # A rollback below 0.55 with no alias left: the registry and the default's readiness record retire once the
         # older broker serves again (it reads neither, so a refusal here never keeps it stopped; the retry resumes).
@@ -2783,12 +2879,17 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
     the retired root's own launcher), it finishes the sweep an interruption after that rename left.
 
     Named aliases (0.55 spec 3D): every alias the registry or accounts.json lists (and a parked change's) goes the
-    default's way, under its own journal keys: its exact broker definition booted out by its own label (pending-send
-    gate first, through `alias_pending`, before the transaction and again right before its bootout; any answer but
-    `none` refuses) and removed, its connect job booted out, and the Codex, Claude Code and Claude Desktop entries
-    its record owns removed. Its root, session and policy, and the registry, are never touched, as the default's
-    session is not: a later install re-registers an alias with its `account-add`, keeping its session. With no alias
-    left the registry (only the default's pin, which no release would keep) is moved aside beside itself, never
+    default's way, under its own journal keys. Every run holds every alias's connect.lock until it ends
+    (`_LoginLocks`, review fix 055d2): a login still running refuses `login_in_progress` with nothing changed. Its
+    broker definition, the receipt release's exact one or another release's of this installation (`_Ours`), booted
+    out by its own label and removed (pending-send gate first, through `alias_pending`, before the transaction and
+    again inside it, in one pass over every broker before any bootout; any answer but `none` refuses), its connect
+    job booted out, both again by every attempt until the root retires (a broker a login loaded again between two
+    attempts never outlives the uninstall), and the Codex, Claude Code and Claude Desktop entries its record owns
+    removed; a foreign definition is kept. Its root, session and policy, and the registry, are never touched, as the
+    default's session is not (an alias never logged in keeps the run directory and empty connect.lock a transaction
+    created to hold it): a later install re-registers an alias with its `account-add`, keeping its session. With no
+    alias left the registry (only the default's pin, which no release would keep) is moved aside beside itself, never
     deleted.
     """
     try:
@@ -2807,7 +2908,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
         validate_owned_path(root,private=True)
         from .config import _owner_paths
         session_root,_,label,plist=_owner_paths(home)
-        with SessionOwnerLease(root/'.install.lock') as lease:
+        with SessionOwnerLease(root/'.install.lock') as lease, contextlib.ExitStack() as locks:
             # Before any client removal or the rename: the intent the closing sweep reads (any other shape refuses
             # here), and an unfinished first install only when its staged path is the exact directory it binds.
             intent=_read_intent(root)
@@ -2850,7 +2951,11 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 accounts={alias:sidecar.get(alias) or (parked_accounts.get(alias) or {}).get('record')
                           for alias in sorted(set(registry)|set(sidecar)|set(parked_accounts))}
             aliases=sorted(accounts)
-            brokers={alias:_alias_broker(alias,home,installed,installed,launchctl,alias_probe) for alias in aliases}
+            # Every alias's connect.lock, held until this run ends (review fix 055d2, lead decision A, `_LoginLocks`): no
+            # login of an alias runs during an attempt, so none writes or loads its broker under the uninstall.
+            logins=locks.enter_context(_LoginLocks(launchctl,home,aliases))
+            if journal is not None and journal.get('kind')=='uninstall':logins.complete()
+            brokers={alias:_alias_broker(alias,home,installed,installed,launchctl,alias_probe,root) for alias in aliases}
             alias_owners={alias:_alias_codex_owners(root,alias,accounts[alias],parked) for alias in aliases}
             observed=None
             if journal is None or journal.get('kind')!='uninstall':
@@ -2863,7 +2968,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 observed=_uninstall_service(service)
                 for alias in aliases:
                     _codex_removal(config,alias_owners[alias],alias_server_name(alias))
-                    _uninstall_service(brokers[alias])  # Its pending-send gate included (again before its bootout).
+                    _uninstall_service(brokers[alias])  # Its pending-send gate included (again in every attempt).
                 identity=dict(schema_version=1,kind='uninstall',index_sha256=receipt['index_sha256'],release_root=receipt['release_root'],
                               installation_root=str(root),user_home=str(home))
                 opened={**identity,'stage':'prepared','publications':{}}
@@ -2872,6 +2977,7 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                     # No alias left: the registry, then holding only the default's pin that no release would keep, is
                     # retired before the root is (as by a rollback below 0.55), under a name journaled now.
                     opened['retire']='retired-%s-registry.json'%uuid.uuid4().hex
+                logins.complete()
                 name=_open_change(root,lambda _:{'journal.json':encoded(opened)})
             else:_sweep_staging(root)
             tx=root/'transactions'/name
@@ -2890,10 +2996,16 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 j.advance(step);checkpoint(step)
                 return j.recorded(step)['status']
             out={}
-            # Broker: only our exact definition; a loaded one is booted out by label after the pending-send gate
-            # (just passed above, or again on a resume).
+            # One gate pass before any bootout (review fix 055d2, low): the default's broker while its step is unrecorded
+            # (on a first run its observation before the transaction, as 0.54; on a resume observed again here) and every
+            # alias's on every attempt, each through its own pending-send gate. Only then the bootouts, so a send pending
+            # on any broker refuses with every broker still loaded and every plist in place, the default's included.
+            seen=None
+            if j.recorded('service') is None:seen=observed if observed is not None else _uninstall_service(service)
+            alias_seen={alias:_uninstall_service(brokers[alias]) for alias in aliases}
+            # Broker: only our exact definition; a loaded one is booted out by label after the pending-send gate.
             if j.recorded('service') is None:
-                kind,loaded=observed if observed is not None else _uninstall_service(service)
+                kind,loaded=seen
                 if kind=='to':
                     # Write-ahead, so a resume after the unlink reports our definition removed, not absent.
                     if j.recorded('service_owned') is None:j.update(single=('service_owned',{'plist':'to'}))
@@ -2918,34 +3030,38 @@ def uninstall(installation_root, *, user_home, checkpoint=lambda _: None, claude
                 return j.recorded(_key(step,alias))['status']
             for alias in aliases:
                 broker,jobs=brokers[alias],alias_jobs(alias,home)
-                # Its broker: only the exact definition, booted out by its own label, as the default's; observed and
-                # gated again right before its bootout, on the first run too (review fix 055d): the gate before the
-                # transaction came before the default's and the earlier aliases' bootouts.
-                if j.recorded(_key('service',alias)) is None:
-                    kind,loaded=_uninstall_service(broker)
-                    owned_key=_key('service_owned',alias)
-                    if kind=='to':
-                        if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'to'}))
-                        if loaded and _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
-                        checkpoint(_key('stopped:service',alias))
-                        status='removed' if _unlink_exact(broker.plist,broker.kind()[1]) else 'kept'
-                    elif kind=='absent' and loaded:
-                        if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'absent'}))
-                        if _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
-                        checkpoint(_key('stopped:service',alias))
-                        status='removed'
-                    elif kind=='absent' and j.recorded(owned_key) is not None:status='removed'
-                    else:status='absent' if kind=='absent' else 'kept'
-                else:status=None
-                alias_out[alias]['service']=recorded('service',alias,status)
-                # Its connect job (its plist lives in its run directory, with its session: never touched).
-                if j.recorded(_key('connect',alias)) is None:
-                    if _live(launchctl,jobs.connect_label) is not None:
-                        if j.recorded(_key('connect_loaded',alias)) is None:j.update(single=(_key('connect_loaded',alias),{'attempt':1}))
-                        _bootout(launchctl,jobs.connect_label)
-                    status='stopped' if j.recorded(_key('connect_loaded',alias)) is not None else 'not_loaded'
-                else:status=None
-                alias_out[alias]['connect_job']=recorded('connect',alias,status)
+                # Until the root retires, every attempt runs the alias's connect job bootout and its broker step again
+                # (review fix 055d2, medium), as account-remove does (review fix 055d): a broker a login loaded again
+                # between two attempts (none runs during one, `_LoginLocks`) is stopped and its plist unlinked, so none
+                # outlives the uninstall naming a release it removed. The connect job first (its handoff loads the
+                # broker; its plist lives in the alias's run directory, with its session: never touched). Each outcome
+                # is recorded once; the result reports what any attempt stopped.
+                if _live(launchctl,jobs.connect_label) is not None:
+                    if j.recorded(_key('connect_loaded',alias)) is None:j.update(single=(_key('connect_loaded',alias),{'attempt':1}))
+                    _bootout(launchctl,jobs.connect_label)
+                stopped=j.recorded(_key('connect_loaded',alias)) is not None
+                recorded('connect',alias,'stopped' if stopped else 'not_loaded')
+                alias_out[alias]['connect_job']='stopped' if stopped else 'not_loaded'
+                # Its broker: a definition of this installation's own (the receipt release's exact one, or another
+                # release's: `_Ours`), gated in the pass above, booted out by its own label and its exact plist
+                # unlinked; a foreign one is kept.
+                kind,loaded=alias_seen[alias]
+                owned_key=_key('service_owned',alias)
+                if kind in ('to','ours'):
+                    if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':kind}))
+                    if loaded and _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
+                    checkpoint(_key('stopped:service',alias))
+                    status='removed' if _unlink_exact(broker.plist,broker.kind()[1]) else 'kept'
+                elif kind=='absent' and loaded:
+                    if j.recorded(owned_key) is None:j.update(single=(owned_key,{'plist':'absent'}))
+                    if _live(launchctl,broker.label) is not None:_bootout(launchctl,broker.label)
+                    checkpoint(_key('stopped:service',alias))
+                    status='removed'
+                elif kind=='absent' and j.recorded(owned_key) is not None:status='removed'
+                else:status='absent' if kind=='absent' else 'kept'
+                first=recorded('service',alias,status)
+                alias_out[alias]['service']=('kept' if status=='kept' else 'removed' if j.recorded(owned_key) is not None
+                                             else first)
             # Codex: our subtree removed only while it is exactly what our ownership receipt records.
             if j.recorded('registration') is None:
                 j.discard('codex',config)
@@ -3451,6 +3567,20 @@ def _releases(root):
     return sorted(found)
 
 
+def _release_versions(root, *also):
+    """The package versions of this installation's releases (and `also`): a named alias's version line naming any of
+    them is ours to move (review fix 055d2), as its plist naming any of them is (`_Ours`): a rollback that left the
+    alias on the release its newer session was made with (`newer_state_kept`), or an earlier transaction's leftover,
+    never blocks the next change with `policy_conflict`. Anything else still refuses."""
+    out = set(also)
+    for release in _releases(root):
+        try:
+            out.add(unique_json(read(release/'manifest/release.json')).get('package_version'))
+        except (BundleError, OSError, ValueError):
+            continue
+    return frozenset(v for v in out if type(v) is str and _VALUE.fullmatch(v))
+
+
 def _alias_owned(root, alias, observe):
     """The release whose `mcp --account <alias>` entry `observe(command, arguments)` finds exact, else None.
 
@@ -3475,10 +3605,10 @@ def _desktop_owned(root, home, alias):
                         claude_desktop_registration.state(home, command, arguments, name))
 
 
-def _alias_broker(alias, home, target_root, from_root, runner, pending):
+def _alias_broker(alias, home, target_root, from_root, runner, pending, root):
     """A named alias's broker LaunchAgent as a `_Service`: its own label and plist, the exact definitions of the
-    target and the current release (spec 3C), its pending-send gate through its own socket and policy, and its own
-    journal keys."""
+    target and the current release (spec 3C), any other release of the installation `root` as `ours` (review fix
+    055d2), its pending-send gate through its own socket and policy, and its own journal keys."""
     jobs = alias_jobs(alias, home)
     target = _service_payload(target_root, jobs.broker_label, alias) if target_root.exists() else None
     known = {'from': _service_payload(from_root, jobs.broker_label, alias)} if from_root.exists() else {}
@@ -3486,7 +3616,7 @@ def _alias_broker(alias, home, target_root, from_root, runner, pending):
     def gate(home, python, app):
         return pending(home, python, app, jobs.socket, jobs.policy)
     return _Service(jobs.broker_plist, jobs.broker_label, target, known=known, runner=runner, pending=gate, home=home,
-                    alias=alias)
+                    alias=alias, root=root)
 
 
 def _session_state(value):
@@ -3691,24 +3821,34 @@ def _default_broker(runner, home, installed):
     return installed/'python/bin/python3', installed/'app'
 
 
-def _alias_service(runner, jobs, installed):
-    """(plist bytes or None, loaded) of the alias's broker LaunchAgent: only the exact definition of `installed`
-    (spec 3C), from its own label; any other definition on disk, or a loaded registration that is not it,
-    refuses `service_conflict`."""
+def _alias_service(runner, jobs, installed, root):
+    """(plist bytes or None, loaded, the definition the loaded broker runs or None) of the alias's broker LaunchAgent:
+    the exact definition of `installed` (spec 3C) or of another release of the installation `root` (`_Ours`, review
+    fix 055d2: a plist an earlier change, uninstall or login left naming a release since replaced or removed), from
+    its own label. Any other definition on disk, or a loaded registration that runs neither the one on disk nor (with
+    none on disk) one of those, refuses `service_conflict`."""
     payload = _service_payload(installed, jobs.broker_label, jobs.alias)
+    ours = _Ours(root, jobs.broker_label, jobs.alias)
     validate_owned_path(jobs.broker_plist, regular=True)
-    data = None
+    data = on_disk = None
     if os.path.lexists(jobs.broker_plist):
         try:
             data = read(jobs.broker_plist, MAX_PLIST_BYTES, mode=0o600)
-            if plistlib.loads(data) != payload:
-                raise InstallError('service_conflict')
+            on_disk = plistlib.loads(data)
         except (ValueError, TypeError, plistlib.InvalidFileException, BundleError):
             raise InstallError('service_conflict') from None
+        if on_disk != payload and not ours(on_disk):
+            raise InstallError('service_conflict')
     live = _live(runner, jobs.broker_label)
-    if live is not None and not _matches_live(live, jobs.broker_plist, payload):
-        raise InstallError('service_conflict')
-    return data, live is not None
+    running = None
+    if live is not None:
+        if on_disk is not None:
+            running = on_disk if _matches_live(live, jobs.broker_plist, on_disk) else None
+        else:
+            running = payload if _matches_live(live, jobs.broker_plist, payload) else ours.live(live, jobs.broker_plist)
+        if running is None:
+            raise InstallError('service_conflict')
+    return data, live is not None, running
 
 
 def _alias_held(jobs, name):
@@ -3738,24 +3878,96 @@ def _alias_held(jobs, name):
         os.close(descriptor)
 
 
-def _alias_login(runner, jobs):
-    """Whether a login of the alias is running: its connect job loaded in any state but an explicit idle one, or a
-    process holding its connect.lock (an inline `setup --account`). Lead decision (review fix 055d, owner review
-    pending): an idle job is no login. A finished helper's job stays registered, idle, until the next `connect`
-    boots it out (connect_cli's own rule, launch_agent._IDLE_JOB_STATES), so refusing every loaded job would block
-    every upgrade after a login."""
+def _login_running(runner, jobs):
+    """Whether the alias's connect job is loaded in any state but an explicit idle one: a helper running, or started
+    and still waiting for the connect.lock. Lead decision (review fix 055d, owner review pending): an idle job is no
+    login. A finished helper's job stays registered, idle, until the next `connect` boots it out (connect_cli's own
+    rule, launch_agent._IDLE_JOB_STATES), so refusing every loaded job would block every change after a login."""
     from .launch_agent import _IDLE_JOB_STATES
     live = _live(runner, jobs.connect_label)
-    if live is not None:
-        state = next((line.strip() for line in live.splitlines() if line.strip().startswith('state = ')), None)
-        if state not in _IDLE_JOB_STATES:
-            return True
-    return _alias_held(jobs, 'connect.lock')
+    if live is None:
+        return False
+    state = next((line.strip() for line in live.splitlines() if line.strip().startswith('state = ')), None)
+    return state not in _IDLE_JOB_STATES
 
 
-def _alias_gate(pending, home, jobs, installed):
-    """The pending-send gate of the alias's loaded broker: anything but `none` refuses."""
-    if pending(home, installed/'python/bin/python3', installed/'app', jobs.socket, jobs.policy) != 'none':
+class _LoginLocks:
+    """Every alias's connect.lock held for the whole run (review fix 055d2, lead decision A, owner review pending).
+
+    The owner lock every login of an alias holds for its whole run, handoff included: the connect helper (launchd or
+    inline) and `setup`/`resume --account`. An installer transaction that touches aliases (upgrade, rollback,
+    uninstall, account-add, account-remove) takes it for each of `aliases` in every run, fresh or resumed, and holds
+    it until the run ends (success, refusal or exception; a kill releases it with the process), so no login of an
+    alias runs during any run, and no broker definition or session a login writes appears in the middle of one. A
+    lock it cannot take (held, or unsafe) refuses `login_in_progress` with nothing changed, and the transaction stays
+    resumable; so does a connect job loaded in any state but an explicit idle one (a helper started before, waiting
+    for the lock), checked once the locks are held.
+
+    Two phases, so that every refusal before a transaction exists still changes nothing. Entering takes, before any
+    check, every lock that exists (the file a login creates first). `complete()` creates and takes the others: for an
+    alias the registry admits, the run directory and empty lock a login would create first (an alias never logged in
+    has no root; nothing of a session is created); an alias the registry does not admit gets none, since no login of
+    it can start (AccountPaths admission). A resumed run completes at once; a fresh one right before its transaction
+    opens, after its read-only checks: a login that took a lock since holds it, so the completion refuses with nothing
+    changed, and every observation a login could change is made again inside the transaction.
+
+    `held` names the aliases whose lock this run holds (a probe of a held lock by the same process reads as held)."""
+
+    def __init__(self, runner, home, aliases):
+        self.runner, self.home = runner, home
+        self.jobs = {alias: alias_jobs(alias, home) for alias in sorted(set(aliases))}
+        self.descriptors, self.held, self.completed = [], set(), False
+
+    def _path(self, alias):
+        return self.jobs[alias].socket.parent/'connect.lock'
+
+    def _take(self, alias):
+        try:
+            self.descriptors.append(acquire_owner_lock(self._path(alias)))
+        except OwnerLeaseError:
+            raise InstallError('login_in_progress') from None
+        self.held.add(alias)
+
+    def _no_running_job(self):
+        for each in self.jobs.values():
+            if _login_running(self.runner, each):
+                raise InstallError('login_in_progress')
+
+    def __enter__(self):
+        try:
+            for alias in self.jobs:
+                if os.path.lexists(self._path(alias)):
+                    self._take(alias)
+            self._no_running_job()
+        except BaseException:
+            self.__exit__()
+            raise
+        return self
+
+    def complete(self):
+        if self.completed:
+            return self
+        try:
+            admitted = set(_registered_aliases(self.home))
+        except InstallError:
+            admitted = set()  # An unreadable registry admits no login either.
+        for alias in self.jobs:
+            if alias not in self.held and (alias in admitted or os.path.lexists(self._path(alias))):
+                self._take(alias)
+        self._no_running_job()
+        self.completed = True
+        return self
+
+    def __exit__(self, *_):
+        while self.descriptors:
+            os.close(self.descriptors.pop())
+
+
+def _alias_gate(pending, home, jobs, payload):
+    """The pending-send gate of the alias's loaded broker, asked under the interpreter of the definition it runs
+    (`_probe_python`): anything but `none` refuses."""
+    python, app = _probe_python(payload)
+    if pending(home, python, app, jobs.socket, jobs.policy) != 'none':
         raise InstallError('pending_send_unresolved')
 
 
@@ -3792,11 +4004,14 @@ def _account_added(journal, alias):
               'claude_code': claude_status, 'claude_desktop': desktop_status, 'default_check': check,
               'next_action': 'run_activation_then_wait', 'activation_arguments': activation,
               'activation_command': shlex.join(activation)}
+    if _record(journal, 'service_rewrite') is not None:
+        result['service'] = 'rewritten'  # A broker definition of another release, now this release's (055d2).
     return _result_extras(result, claude_status, desktop_status, command, arguments, name)
 
 
 def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: None, claude_candidates=None,
-                claude_runner=subprocess.run, launchctl=subprocess.run, default_check=None, release_root=None):
+                claude_runner=subprocess.run, launchctl=subprocess.run, default_check=None, release_root=None,
+                alias_pending=None):
     """`launcher.py account-add <alias>`: register a named alias and write its client entries (0.55 spec 3D).
 
     Every refusal comes before the transaction exists: the alias grammar and budgets (account_registry, before any
@@ -3805,8 +4020,12 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     does not list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the
     alias's server name (Codex `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
     `claude_desktop_registration_conflict` or `claude_desktop_config_unsupported`), a loaded default broker that
-    is not the receipt's exact definition (`service_conflict`), or any unfinished transaction
-    (`transaction_pending`). Then, journaled: the registry entry (unpinned); one `check` on the default broker when
+    is not the receipt's exact definition (`service_conflict`), an alias broker definition that is not of this
+    installation's own shape (`service_conflict`; on the repair path one of another release is rewritten, below), a
+    running login of another alias (`login_in_progress`: every run holds every other alias's connect.lock,
+    `_LoginLocks`, review fix 055d2), or any unfinished transaction (`transaction_pending`). Then, journaled: the alias's
+    broker definition of another release rewritten to this release's (`service: rewritten`); the registry entry
+    (unpinned); one `check` on the default broker when
     it is loaded, so its authorized account is pinned before the alias's first login (an unanswered check refuses
     `default_check_failed`, and the retry resumes there); the Codex entry (`mcp --account <alias>`, never required);
     the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the install's);
@@ -3821,7 +4040,8 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
             raise InstallError('alias_invalid')
         validate_owned_path(root, private=True)
         check = default_account_check if default_check is None else default_check
-        with SessionOwnerLease(root/'.install.lock') as lease:
+        pending = account_pending_sends if alias_pending is None else alias_pending
+        with SessionOwnerLease(root/'.install.lock') as lease, contextlib.ExitStack() as locks:
             name_tx, journal, resuming = _account_admission(root, 'account-add', alias)
             receipt, _ = _installation(root)
             if str(home) != receipt['user_home']:
@@ -3833,11 +4053,19 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
             registration, longest = _alias_registration(installed, alias)
             command, arguments = registration.command, list(registration.args)
             identity = _account_identity('account-add', alias, root, home, receipt)
+            target = _service_payload(installed, jobs.broker_label, alias)
+            registry, records = accounts_state(root, home)
+            if not resuming and _finished_account(journal, 'account-add', alias) and alias in registry \
+                    and (records.get(alias) or {}).get('transaction') == name_tx:
+                return _account_added(journal, alias)  # A retry after it finished: its result, no effect.
+            # Every other alias's connect.lock, held until this run ends, before any check (review fix 055d2, lead
+            # decision A). Its own is left out (lead decision): until its registry entry no login of it is admitted,
+            # and its login changes nothing this transaction writes (its entries, the sidecar; the broker definition
+            # step below decides by state on every run).
+            logins = locks.enter_context(_LoginLocks(launchctl, home, {*registry, *records} - {alias}))
+            if resuming:
+                logins.complete()
             if not resuming:
-                registry, records = accounts_state(root, home)
-                if _finished_account(journal, 'account-add', alias) and alias in registry \
-                        and (records.get(alias) or {}).get('transaction') == name_tx:
-                    return _account_added(journal, alias)  # A retry after it finished: its result, no effect.
                 if not accounts_consistent(registry, records, alias):
                     raise InstallError('accounts_inconsistent')
                 if alias in records:
@@ -3854,6 +4082,13 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                         raise InstallError('runtime_conflict')
                     if os.path.lexists(jobs.broker_plist):
                         raise InstallError('service_conflict')
+                # Its broker definition (on the repair path, where the registry lists it without a record and its session
+                # stays, never silently left: review fix 055d2, medium): a foreign one, or a loaded registration that is
+                # not this installation's own, refuses `service_conflict` here and is never removed; a loaded broker of
+                # another release of this installation is gated here, then rewritten by the step below.
+                _, loaded, running = _alias_service(launchctl, jobs, installed, root)
+                if loaded and running != target:
+                    _alias_gate(pending, home, jobs, running)
                 source, existed = _config(config)
                 try:
                     change = merge_registration(source, registration, name=name)
@@ -3877,6 +4112,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                                                      'publications': {}}),
                             'config.preimage': change.source, 'config.candidate': change.candidate,
                             'registration.json': owner.to_bytes()}
+                logins.complete()
                 name_tx = _open_account(root, files)
             tx = root/'transactions'/name_tx
             j = _Journal(tx, lease, _ACCOUNT_ADD_STEPS, checkpoint)
@@ -3889,6 +4125,28 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                     or owned.transaction_id != name_tx or type(j.value.get('config_existed')) is not bool):
                 raise InstallError('transaction_conflict')
             checkpoint('prepared')
+            # The alias's broker definition, by state on every run (review fix 055d2, medium): one of another release of
+            # this installation (`_Ours`: an uninstall of an older build left it naming its removed release, or a
+            # login ran an older launcher) is rewritten to this release's exact definition, a loaded broker of it gated
+            # and booted out first (write-ahead `service_rewrite`); none is started, the next `connect --account`
+            # starts this release's. This release's own stays; any other definition refuses `service_conflict`, never
+            # removed, and the retry resumes once it is gone.
+            data, loaded, running = _alias_service(launchctl, jobs, installed, root)
+            stale_loaded, stale_plist = loaded and running != target, data is not None and data != _plist_bytes(target)
+            if stale_plist and plistlib.loads(data) == target:
+                stale_plist = False  # This release's own definition, written with other bytes: it stays.
+            if stale_loaded or stale_plist:
+                if stale_loaded:
+                    _alias_gate(pending, home, jobs, running)
+                if j.recorded('service_rewrite') is None:
+                    j.update(single=('service_rewrite', {'attempt': 1}))
+                    checkpoint('recorded:service_rewrite')
+                if stale_loaded:
+                    _bootout(launchctl, jobs.broker_label)
+                if stale_plist:
+                    j.write('plist', jobs.broker_plist, _plist_bytes(target), data, existed=True, maximum=MAX_PLIST_BYTES)
+                    if _alias_service(launchctl, jobs, installed, root)[0] != _plist_bytes(target):
+                        raise InstallError('service_conflict')
             # The registry first: it admits the alias (spec 3B) and makes every broker pin from its next check on.
             if not j.reached('registry'):
                 if alias not in _registered_aliases(home):
@@ -4045,11 +4303,13 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
     another alias's record the registry does not list (`accounts_inconsistent`), any unfinished transaction
     (`transaction_pending`), an entry under the alias's server name that is not exactly the one its record owns
     (`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`: refused,
-    never overwritten), an alias broker definition that is not the receipt release's own (`service_conflict`),
-    and the pending-send gate of its loaded broker (`pending_send_unresolved`: sends in flight, open dialogs,
-    unsettled outcomes, client contexts). Then, journaled: its connect job booted out (its handoff loads the
-    broker); its broker gated again and booted out by its own label, its exact plist removed, both again by every
-    attempt until the root moves and once more right before the move; its own Codex, Claude Code and Claude Desktop
+    never overwritten), an alias broker definition that is not of this installation's own shape (`_Ours`: the
+    receipt release's, or another release's an older transaction left; anything else `service_conflict`), and the
+    pending-send gate of its loaded broker (`pending_send_unresolved`: sends in flight, open dialogs, unsettled
+    outcomes, client contexts). Every run holds every alias's connect.lock, its own included (`_LoginLocks`, review
+    fix 055d2): a login still running refuses `login_in_progress` with nothing changed. Then, journaled: its connect
+    job booted out (its handoff loads the broker); its broker gated again and booted out by its own label, its exact
+    plist removed, both again by every attempt until the root moves and once more right before the move; its own Codex, Claude Code and Claude Desktop
     entries removed (neighbours kept); its registry entry and pin dropped; its root moved aside under the accounts
     tree with a unique name (never deleted, never inside the default tree, never a name a later add reuses); its
     accounts.json record dropped. A kill at any point resumes on the retry; a retry after it finished returns its
@@ -4062,7 +4322,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
             raise InstallError('alias_invalid')
         validate_owned_path(root, private=True)
         pending = account_pending_sends if alias_pending is None else alias_pending
-        with SessionOwnerLease(root/'.install.lock') as lease:
+        with SessionOwnerLease(root/'.install.lock') as lease, contextlib.ExitStack() as locks:
             name_tx, journal, resuming = _account_admission(root, 'account-remove', alias)
             receipt, _ = _installation(root)
             if str(home) != receipt['user_home']:
@@ -4071,10 +4331,17 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
             installed, mode = Path(receipt['release_root']), receipt['claude_code_mode']
             config, name, jobs = Path(receipt['codex_home'])/'config.toml', alias_server_name(alias), alias_jobs(alias, home)
             identity = _account_identity('account-remove', alias, root, home, receipt)
+            registry, records = accounts_state(root, home)
+            if not resuming and _finished_account(journal, 'account-remove', alias) and alias not in registry \
+                    and alias not in records:
+                return _account_removed(journal, alias)  # A retry after it finished: its result, no effect.
+            # Every alias's connect.lock, its own included, held until this run ends, before any check (review fix
+            # 055d2, lead decision A): no login of any alias runs during the run, so none hands its broker off under it.
+            logins = locks.enter_context(_LoginLocks(launchctl, home, {*registry, *records, alias}))
+            held = logins.held
+            if resuming:
+                logins.complete()
             if not resuming:
-                registry, records = accounts_state(root, home)
-                if _finished_account(journal, 'account-remove', alias) and alias not in registry and alias not in records:
-                    return _account_removed(journal, alias)  # A retry after it finished: its result, no effect.
                 if not accounts_consistent(registry, records, alias):
                     raise InstallError('accounts_inconsistent')
                 if alias not in registry and alias not in records:
@@ -4095,15 +4362,17 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     raise InstallError('claude_desktop_registration_conflict')
                 if state == 'unsupported':
                     raise InstallError('claude_desktop_config_unsupported')
-                _, loaded = _alias_service(launchctl, jobs, installed)
+                _, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if loaded:
-                    _alias_gate(pending, home, jobs, installed)
-                # A broker or a login holding the alias's locks outside its launchd jobs is not ours to stop.
+                    _alias_gate(pending, home, jobs, running)
+                # A broker holding the alias's lock outside its launchd job is not ours to stop; nor a connect.lock this
+                # run could not hold (an alias the registry no longer admits) that a process holds.
                 if (not loaded and _alias_held(jobs, 'broker.lock')
-                        or _live(launchctl, jobs.connect_label) is None and _alias_held(jobs, 'connect.lock')):
+                        or alias not in held and _alias_held(jobs, 'connect.lock')):
                     raise InstallError('service_conflict')
                 aside = 'removed-%s-%s' % (alias, uuid.uuid4().hex)
                 identity_files = {**identity, 'aside': aside, 'record': record, 'stage': 'prepared', 'publications': {}}
+                logins.complete()
                 name_tx = _open_account(root, lambda _: {'journal.json': encoded(identity_files)})
             tx = root/'transactions'/name_tx
             j = _Journal(tx, lease, _ACCOUNT_REMOVE_STEPS, checkpoint)
@@ -4138,13 +4407,14 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     _bootout(launchctl, jobs.connect_label)
 
             def stop_broker():
-                """The broker: only the release's exact definition (any other refuses `service_conflict` and is never
-                removed), gated again right before its bootout by its own label; then its exact plist unlinked."""
-                data, loaded = _alias_service(launchctl, jobs, installed)
+                """The broker: only a definition of this installation's own (the release's exact one, or another
+                release's: `_Ours`; any other refuses `service_conflict` and is never removed), gated again right
+                before its bootout by its own label; then its exact plist unlinked."""
+                data, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if data is None and not loaded:
                     return
                 if loaded:
-                    _alias_gate(pending, home, jobs, installed)
+                    _alias_gate(pending, home, jobs, running)
                 # Write-ahead, so a resume after the bootout or the unlink reports it removed, not absent.
                 if j.recorded('service_owned') is None:
                     j.update(single=('service_owned', {'attempt': 1}))
@@ -4275,7 +4545,7 @@ def account_remove(installation_root, *, alias, user_home, checkpoint=lambda _: 
                     stop_connect()
                     stop_broker()
                     if os.path.lexists(jobs.root):
-                        if _alias_held(jobs, 'broker.lock') or _alias_held(jobs, 'connect.lock'):
+                        if _alias_held(jobs, 'broker.lock') or alias not in held and _alias_held(jobs, 'connect.lock'):
                             raise InstallError('service_conflict')
                         _rename(jobs.root, moved)
                         checkpoint('published:session')

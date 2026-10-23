@@ -23,6 +23,11 @@ from test_bundle_upgrade import ChangeHarness, FakeLaunchctl, NEIGHBOUR_CODEX
 from telegram_search_mcp import account_registry, bundle_install, config
 
 
+# What an installer transaction leaves at the root of an alias that never logged in: the run directory and the empty
+# connect.lock it held for its run, as a login creates them first (review fix 055d2, `_LoginLocks`); nothing of a session.
+LOCK_ONLY = {'run': 'dir', 'run/connect.lock': hashlib.sha256(b'').hexdigest()}
+
+
 def tree(path):
     """{relative path: sha256 or 'dir'} of everything under `path`."""
     out = {}
@@ -82,8 +87,9 @@ class AccountHarness(ChangeHarness):
         kwargs.setdefault('claude_candidates', (self.claude_cli,))
         kwargs.setdefault('claude_runner', self.claude())
         kwargs.setdefault('launchctl', self.launchctl)
-        kwargs.setdefault('default_check' if action == 'account_add' else 'alias_pending',
-                          self.default_check if action == 'account_add' else self.alias_pending)
+        if action == 'account_add':
+            kwargs.setdefault('default_check', self.default_check)
+        kwargs.setdefault('alias_pending', self.alias_pending)
         if 'release_root' not in kwargs:
             kwargs['release_root'] = self.running_release()
         with mock.patch('telegram_search_mcp.bundle_install.require_platform'):
@@ -153,13 +159,16 @@ class AccountHarness(ChangeHarness):
         return state
 
     def alias_session(self):
-        """What a login leaves for the alias: its root with a session, policy and run directory, its broker plist
-        (the release's exact alias definition) loaded, and its connect job loaded."""
+        """What a finished login leaves for the alias: its root with a session, policy and run directory (with the
+        connect.lock every login holds for its run), its broker plist (the release's exact alias definition) loaded,
+        and its connect job still registered but idle, its helper exited."""
         for path in (self.jobs.root, self.jobs.root / 'tdlib', self.jobs.root / 'run'):
             path.mkdir(mode=0o700, exist_ok=True)
         (self.jobs.root / 'tdlib' / 'td.binlog').write_bytes(b'alias session bytes')
         (self.jobs.root / 'runtime.toml').write_bytes(b'config_version = 1\nenabled_capabilities = ["read"]\n')
-        for path in (self.jobs.root / 'tdlib' / 'td.binlog', self.jobs.root / 'runtime.toml'):
+        (self.jobs.root / 'run' / 'connect.lock').write_bytes(b'')
+        for path in (self.jobs.root / 'tdlib' / 'td.binlog', self.jobs.root / 'runtime.toml',
+                     self.jobs.root / 'run' / 'connect.lock'):
             path.chmod(0o600)
         payload = self.module()._service_payload(self.release, self.jobs.broker_label, self.ALIAS)
         self.jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
@@ -169,6 +178,7 @@ class AccountHarness(ChangeHarness):
                                                        'ProgramArguments': [payload['ProgramArguments'][0], 'connect']}))
         self.connect_plist.chmod(0o600)
         self.launchctl.load(self.jobs.connect_label)
+        self.launchctl.idle(self.jobs.connect_label)
         return tree(self.jobs.root)
 
     def foreign_root(self):
@@ -422,10 +432,14 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
         self.assertIn('telegram_search_play', self.codex_servers())
         self.assertEqual(list(self.desktop_servers()), ['weather', 'telegram_search', 'telegram_search_play'])
 
-    def test_an_alias_never_logged_in_has_nothing_to_stop_or_move(self):
+    def test_an_alias_never_logged_in_has_nothing_to_stop_and_only_its_lock_to_move(self):
         self.added()
         result = self.account('account_remove')
-        self.assertEqual((result['service'], result['connect_job'], result['session']), ('absent', 'not_loaded', 'absent'))
+        # Review fix 055d2: the transaction held the alias's connect.lock (created as a login creates it first), so the
+        # root it moves aside holds only that, never a session.
+        self.assertEqual((result['service'], result['connect_job'], result['session']), ('absent', 'not_loaded', 'moved'))
+        self.assertEqual(tree(Path(result['session_moved_to'])), LOCK_ONLY)
+        self.assertFalse(self.jobs.root.exists())
         self.assertEqual(self.alias_probes, [])
 
     def test_every_refusal_comes_before_anything_changes(self):
@@ -458,34 +472,68 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
                 self.assertEqual(tree(self.jobs.root), session)
                 self.assertEqual(self.launchctl.job(self.jobs.broker_label)[-2:], ['--account', 'work'])
 
-    def test_a_broker_or_login_holding_the_aliases_locks_outside_launchd_is_never_moved_under(self):
+    def test_a_broker_holding_the_aliases_lock_outside_launchd_is_never_moved_under(self):
         from telegram_search_mcp.session_owner import acquire_owner_lock
-        for name, loaded in (('broker.lock', self.jobs.broker_label), ('connect.lock', self.jobs.connect_label)):
-            with self.subTest(lock=name):
-                self.setUp()
-                self.added()
-                self.alias_session()
-                self.launchctl.set_job(loaded, None)  # Not a launchd job: a process the owner started by hand.
-                held = acquire_owner_lock(self.jobs.root / 'run' / name)
-                try:
-                    before, session = self.snapshot(), tree(self.jobs.root)
-                    self.refused('account_remove', 'service_conflict')
-                    self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
-                    # Started after the precheck: the move refuses, the transaction stays for the retry.
-                    os.close(held)
-                    held = None
+        self.added()
+        self.alias_session()
+        self.launchctl.set_job(self.jobs.broker_label, None)  # Not a launchd job: a process the owner started by hand.
+        held = acquire_owner_lock(self.jobs.root / 'run' / 'broker.lock')
+        try:
+            before, session = self.snapshot(), tree(self.jobs.root)
+            self.refused('account_remove', 'service_conflict')
+            self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
+            # Started after the precheck: the move refuses, the transaction stays for the retry.
+            os.close(held)
+            held = None
 
-                    def start(stage, name=name):
-                        nonlocal held
-                        if stage == 'registry':
-                            held = acquire_owner_lock(self.jobs.root / 'run' / name)
-                    self.refused('account_remove', 'service_conflict', checkpoint=start)
-                    self.assertTrue(self.jobs.root.exists())
-                    self.assertEqual(self.registry(), ())
-                finally:
-                    if held is not None:
-                        os.close(held)
-                self.assertEqual(self.account('account_remove')['session'], 'moved')
+            def start(stage):
+                nonlocal held
+                if stage == 'registry':
+                    held = acquire_owner_lock(self.jobs.root / 'run' / 'broker.lock')
+            self.refused('account_remove', 'service_conflict', checkpoint=start)
+            self.assertTrue(self.jobs.root.exists())
+            self.assertEqual(self.registry(), ())
+        finally:
+            if held is not None:
+                os.close(held)
+        self.assertEqual(self.account('account_remove')['session'], 'moved')
+
+    def test_a_login_holding_the_connect_lock_refuses_and_none_starts_during_a_run(self):
+        """Review fix (055d2, lead decision A): a login's connect.lock (an inline `connect` or `setup --account` in the
+        owner's Terminal, no launchd job) refuses `login_in_progress` with nothing changed; during a run the transaction
+        holds it, so a login started then cannot take it, at any checkpoint, fresh or resumed."""
+        from telegram_search_mcp.session_owner import OwnerLeaseError, acquire_owner_lock
+        self.added()
+        self.alias_session()
+        self.launchctl.set_job(self.jobs.connect_label, None)
+        held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
+        try:
+            before, session = self.snapshot(), tree(self.jobs.root)
+            self.refused('account_remove', 'login_in_progress')
+            self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
+        finally:
+            os.close(held)
+        refused = []
+
+        def login(stage):
+            if not self.jobs.root.exists():
+                return  # Moved aside (after its registry entry went, so no login of it is admitted any more).
+            try:
+                os.close(acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock'))
+            except OwnerLeaseError as error:
+                refused.append(error.code)
+                if stage == 'registry':
+                    raise KeyboardInterrupt  # Killed here: the retry holds it again from its start.
+            else:
+                refused.append('taken at ' + stage)
+        with self.assertRaises(KeyboardInterrupt):
+            self.account('account_remove', checkpoint=login)
+        count = len(refused)
+        result = self.account('account_remove', checkpoint=lambda stage: login(stage) if stage != 'registry' else None)
+        self.assertEqual(result['session'], 'moved')
+        self.assertGreater(count, 3)
+        self.assertGreater(len(refused), count)
+        self.assertEqual(set(refused), {'owner_busy'})
 
     def test_a_late_pending_send_refuses_before_the_bootout_and_the_retry_resumes(self):
         self.added()

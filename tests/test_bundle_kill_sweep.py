@@ -738,7 +738,7 @@ def _account(h, action, lc=None, cl=None, alias=ALIAS, **kwargs):
     """`account-add` or `account-remove` of `alias` (0.55 spec 3D) with the fakes: the default broker's check answers
     `ready` and an alias broker holds no pending send. The socket budget is widened only for the long disposable
     base (the registry's own tests apply it)."""
-    probe = {'default_check': lambda *_: 'ready'} if action == 'account_add' else {'alias_pending': lambda *_: 'none'}
+    probe = {'alias_pending': lambda *_: 'none', **({'default_check': lambda *_: 'ready'} if action == 'account_add' else {})}
     with mock.patch.object(account_registry, 'SOCKET_PATH_LIMIT', 4096), \
             mock.patch('telegram_search_mcp.bundle_install.require_platform'):
         return getattr(bundle_install, action)(h.runtime, alias=alias, user_home=h.home,
@@ -768,12 +768,14 @@ def _newer(h, **kwargs):
 
 
 def _alias_logged_in(h):
-    """What a finished login leaves for `work`: its root and session, its exact broker plist loaded, its connect job
-    still registered but idle (its helper exited)."""
+    """What a finished login leaves for `work`: its root and session (with the connect.lock every login holds for its
+    run), its exact broker plist loaded, its connect job still registered but idle (its helper exited)."""
     jobs = config.alias_jobs(ALIAS, h.home)
     for path in (jobs.root, jobs.root / 'tdlib', jobs.root / 'run'):
-        path.mkdir(mode=0o700)
+        path.mkdir(mode=0o700, exist_ok=True)
     (jobs.root / 'tdlib' / 'td.binlog').write_bytes(b'alias session bytes')
+    (jobs.root / 'run' / 'connect.lock').write_bytes(b'')
+    (jobs.root / 'run' / 'connect.lock').chmod(0o600)
     release = Path(h.pointer()['release_root'])
     payload = bundle_install._service_payload(release, jobs.broker_label, ALIAS)
     jobs.broker_plist.write_bytes(plistlib.dumps(payload, sort_keys=True))
