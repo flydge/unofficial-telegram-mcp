@@ -10,6 +10,9 @@ import tempfile
 import unittest
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
+
+import bmff_fixtures as bmff
 
 from telegram_search_mcp.config import (CAPABILITY_PROFILES, KNOWN_CAPABILITIES, LEGACY_CAPABILITIES,
                                         PROFILE_DEPENDENCIES, profile_of, unlocking_profiles)
@@ -461,6 +464,203 @@ class ObservationTests(unittest.TestCase):
         now[0] += RETENTION_SECONDS
         observations.reduce(succeeded(-11, 801, 'messagePhoto'))
         self.assertIsNone(observations.snapshot('a'))
+
+
+def image(kind='PNG', size=(64, 48), color=(200, 30, 30)):
+    import io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new('RGB', size, color).save(buffer, kind)
+    return buffer.getvalue()
+
+
+PNG, JPEG = image('PNG'), image('JPEG', (40, 30))
+PDF = b'%PDF-1.4\n% synthetic\n'
+MOVIE = bmff.movie()
+
+
+class Store:
+    """Owned artifacts in a temporary cache, outside any broker scope."""
+
+    def setUp(self):
+        from telegram_search_mcp.artifact_store import ArtifactStore
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.store = ArtifactStore(cache_dir=self.root / 'cache')
+        self.counter = 0
+
+    def artifact(self, data):
+        self.counter += 1
+        source = self.root / f'source-{self.counter}'
+        source.write_bytes(data)
+        return self.store.store(source, kind='media')
+
+    def item(self, data, name=None, group='media', caption='', mime=None):
+        from telegram_search_mcp.album_drafts import album_item
+        return album_item(group=group, artifact=self.artifact(data), recorded_name=name, recorded_mime=mime,
+                          caption=caption)
+
+    def spec(self, *items, group='media'):
+        from telegram_search_mcp.album_drafts import AlbumSpec
+        return AlbumSpec(group=group, items=tuple(items), recipient_identity=('chatTypePrivate', RECIPIENT))
+
+
+class ContractTests(Store, unittest.TestCase):
+    """Criterion 5 (reduction table) and the closed album contracts."""
+
+    def test_overall_status_reduction_table(self):
+        from telegram_search_mcp.album_drafts import album_overall
+        table = [(('sent', 'sent'), 'sent'), (('sent',) * 10, 'sent'), (('failed', 'failed'), 'failed'),
+                 (('sent', 'failed'), 'partial'), (('failed', 'sent', 'failed'), 'partial'),
+                 (('sent', 'outcome_unknown'), 'partial'), (('outcome_unknown', 'sent', 'failed'), 'partial'),
+                 (('failed', 'outcome_unknown'), 'outcome_unknown'), (('outcome_unknown',) * 3, 'outcome_unknown')]
+        for statuses, expected in table:
+            with self.subTest(statuses=statuses):
+                self.assertEqual(album_overall(statuses), expected)
+        for statuses in ((), ('sent',), ('sent',) * 11, ('sent', 'pending'), ('sent', 'partial'), ('sent', None)):
+            with self.subTest(statuses=statuses), self.assertRaises(ValueError):
+                album_overall(statuses)
+
+    def test_status_model_is_closed_and_separate_from_get_send_status(self):
+        from pydantic import ValidationError
+        from telegram_search_mcp.album_drafts import GetAlbumSendStatusResponse, album_status
+        did, sha = 'draft_' + '1' * 32, 'a' * 64
+        self.assertEqual(album_status(did).model_dump(mode='json'),
+                         {'draft_id': did, 'status': 'outcome_unknown', 'evidence': 'none',
+                          'detail': 'outcome is unknown; no resend is authorized', 'album_sha256': None,
+                          'slots': [], 'next_action': 'check_send_status'})
+        partial = album_status(did, 'provider', album_sha256=sha, outcomes=(('sent', 9), ('outcome_unknown', None)))
+        self.assertEqual((partial.status, [s.status for s in partial.slots]), ('partial', ['sent', 'outcome_unknown']))
+        claimed = album_status(did, 'local_claimed', album_sha256=sha, outcomes=(('pending', None), ('sent', 9)))
+        self.assertEqual(claimed.status, 'pending')
+        self.assertEqual(album_status(did, 'local_pending', album_sha256=sha).status, 'pending')
+        self.assertEqual(album_status(did, 'local_failed', album_sha256=sha).status, 'failed')
+        base = partial.model_dump(mode='json')
+        base.pop('next_action', None)
+        for changes in ({'status': 'sent'}, {'status': 'outcome_unknown'}, {'slots': base['slots'][:1]},
+                        {'slots': [{'position': 1, 'status': 'pending', 'message_id': None}, base['slots'][1]]},
+                        {'slots': [{'position': 2, 'status': 'sent', 'message_id': 9}, base['slots'][1]]},
+                        {'slots': [{'position': 1, 'status': 'sent', 'message_id': None}, base['slots'][1]]},
+                        {'album_sha256': None}, {'evidence': 'none'}, {'detail': 'outcome is unknown; no resend is authorized'},
+                        {'next_action': 'search_again'}, {'extra': 1}):
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                GetAlbumSendStatusResponse.model_validate({**base, **changes})
+
+    def test_send_response_carries_every_slot_for_a_provider_outcome(self):
+        from pydantic import ValidationError
+        from telegram_search_mcp.album_drafts import SendPreparedAlbumResponse
+        did, sha = 'draft_' + '1' * 32, 'a' * 64
+        slots = [{'position': 1, 'status': 'sent', 'message_id': 5}, {'position': 2, 'status': 'failed'}]
+        self.assertEqual(SendPreparedAlbumResponse(status='partial', draft_id=did, album_sha256=sha, slots=slots,
+                                                   detail='x').status, 'partial')
+        SendPreparedAlbumResponse(status='outcome_unknown', draft_id=did, detail='x')  # content-free
+        for values in (dict(status='sent', album_sha256=sha, slots=slots), dict(status='sent'),
+                       dict(status='partial'), dict(status='failed', album_sha256=sha),
+                       dict(status='partial', slots=slots), dict(status='declined', album_sha256=sha, slots=slots),
+                       dict(status='partial', album_sha256=sha, slots=slots[:1]),
+                       dict(status='partial', album_sha256=sha, slots=list(reversed(slots))),
+                       dict(status='outcome_unknown', album_sha256=sha,
+                            slots=[{'position': 1, 'status': 'pending'}, {'position': 2, 'status': 'failed'}])):
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                SendPreparedAlbumResponse(draft_id=did, detail='x', **values)
+
+    def test_request_is_closed_two_to_ten_distinct_items(self):
+        from pydantic import ValidationError
+        from telegram_search_mcp.album_drafts import PrepareAlbumSendRequest
+        ids = [self.artifact(PNG + bytes([i])).artifact_id for i in range(11)]
+        request = PrepareAlbumSendRequest.model_validate({'recipient': RECIPIENT, 'items': [
+            {'artifact_id': ids[0]}, {'artifact_id': ids[1], 'caption': 'Two'}]})
+        self.assertEqual((request.group, request.items[0].caption), ('media', ''))
+        for payload in ({'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}]},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': i} for i in ids]},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[0]}]},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[1]}],
+                         'group': 'audio'},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[1], 'kind': 'x'}]},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[1],
+                                                                                    'caption': 'x' * 1025}]},
+                        {'recipient': RECIPIENT, 'items': [{'artifact_id': ids[0]}, {'artifact_id': ids[1]}], 'x': 1}):
+            with self.subTest(payload=repr(payload)[:90]), self.assertRaises(ValidationError):
+                PrepareAlbumSendRequest.model_validate(payload)
+
+    def test_items_are_classified_locally_with_per_kind_limits(self):
+        from telegram_search_mcp.album_drafts import AlbumRefusal
+        photo = self.item(PNG, 'a/b\\shot.png', caption='Cap\r\n')
+        self.assertEqual((photo.kind, photo.display_name, photo.mime_type, photo.facts, photo.caption),
+                         ('photo', 'shot.png', 'image/png', (64, 48), 'Cap'))
+        unnamed = self.item(JPEG)
+        self.assertEqual((unnamed.kind, unnamed.display_name, unnamed.facts), ('photo', 'photo.jpg', (40, 30)))
+        video = self.item(MOVIE, 'clip.mov')
+        self.assertEqual((video.kind, video.display_name, video.mime_type, video.facts.width),
+                         ('video', 'clip.mov', 'video/quicktime', 1280))
+        self.assertEqual(self.item(MOVIE).display_name, 'video.mp4')
+        document = self.item(PNG, 'scan.png', group='documents', mime='image/png')
+        self.assertEqual((document.kind, document.display_name, document.mime_type, document.facts),
+                         ('document', 'scan.png', 'image/png', None))
+        self.assertEqual(self.item(PDF, group='documents', mime='not a type').mime_type, 'application/octet-stream')
+        self.assertEqual(self.item(PDF, group='documents').display_name, 'attachment')
+        for data, name, code in ((PDF, 'doc.pdf', 'unsupported_item'), (PNG, 'shot.jpg', 'unsupported_item'),
+                                 (b'\x00' * 32, None, 'unsupported_item')):
+            with self.subTest(name=name, code=code), self.assertRaises(AlbumRefusal) as refused:
+                self.item(data, name)
+            self.assertEqual(refused.exception.code, code)
+        with patch('telegram_search_mcp.album_drafts.MAX_ITEM_BYTES', {'photo': 10, 'video': 10, 'document': 10}):
+            for group in ('media', 'documents'):
+                with self.subTest(group=group), self.assertRaises(AlbumRefusal) as refused:
+                    self.item(PNG, 'shot.png', group=group)
+                self.assertEqual(refused.exception.code, 'item_too_large')
+
+    def test_album_spec_bounds_groups_duplicates_and_total(self):
+        from telegram_search_mcp.album_drafts import AlbumSpec
+        photo, video = self.item(PNG, 'a.png'), self.item(MOVIE)
+        document = self.item(PDF, 'doc.pdf', group='documents')
+        spec = self.spec(photo, video)
+        self.assertEqual((spec.kinds, spec.artifact_ids, spec.content_types, spec.total_bytes),
+                         (frozenset({'photo', 'video'}), (photo.artifact_id, video.artifact_id),
+                          ('messagePhoto', 'messageVideo'), photo.size_bytes + video.size_bytes))
+        self.spec(document, self.item(PDF + b'2', 'two.pdf', group='documents'), group='documents')
+        for items, group in (((photo,), 'media'), ((photo, document), 'media'), ((document, document), 'documents'),
+                             ((photo, video), 'documents'), ((photo,) * 11, 'media'), ((photo, photo), 'media'),
+                             ((photo, video), 'audio')):
+            with self.subTest(items=len(items), group=group), self.assertRaises(ValueError):
+                self.spec(*items, group=group)
+        with self.assertRaises(ValueError):
+            AlbumSpec(group='media', items=(photo, video), recipient_identity=())
+        with patch('telegram_search_mcp.album_drafts.MAX_ALBUM_BYTES', photo.size_bytes + video.size_bytes - 1), \
+                self.assertRaises(ValueError):
+            self.spec(photo, video)
+
+    def test_one_ordered_digest_binds_the_preview(self):
+        from datetime import datetime, timezone
+        from pydantic import ValidationError
+        from telegram_search_mcp.album_drafts import AlbumDraftPreview, AlbumRecipient, album_digest
+        photo, video = self.item(PNG, 'a.png', caption='First'), self.item(MOVIE, caption='Second')
+        spec = self.spec(photo, video)
+        swapped = self.spec(video, photo)
+        self.assertNotEqual(spec.sha256, swapped.sha256)
+        self.assertEqual(spec.sha256, album_digest('media', (photo, video)))
+        preview = AlbumDraftPreview.create(draft_id='draft_' + '1' * 32, account_id=ACCOUNT,
+            expires_at=datetime(2030, 1, 2, tzinfo=timezone.utc),
+            recipient=AlbumRecipient(chat_id=RECIPIENT, title='Recipient'), album=spec)
+        self.assertEqual((preview.album_sha256, preview.total_size_bytes, [i.position for i in preview.items]),
+                         (spec.sha256, spec.total_bytes, [1, 2]))
+        self.assertEqual([i.raw_caption for i in preview.items], ['First', 'Second'])
+        self.assertTrue(preview.items[0].display_name.startswith('[untrusted Telegram evidence] '))
+        dumped = preview.model_dump(mode='json')
+        AlbumDraftPreview.model_validate(dumped)
+        tampered = []
+        for change in (lambda d: d['items'].reverse(), lambda d: d.__setitem__('total_size_bytes', 1),
+                       lambda d: d['items'][0].__setitem__('position', 2),
+                       lambda d: d['items'][1].__setitem__('caption', None),
+                       lambda d: d.__setitem__('album_sha256', 'b' * 64), lambda d: d.__setitem__('group', 'documents'),
+                       lambda d: d['recipient'].__setitem__('title', 'Other'),
+                       lambda d: d['items'][0]['photo'].__setitem__('width', 65)):
+            value = copy.deepcopy(dumped)
+            change(value)
+            tampered.append(value)
+        for value in tampered:
+            with self.subTest(value=repr(value)[:60]), self.assertRaises(ValidationError):
+                AlbumDraftPreview.model_validate(value)
 
 
 if __name__ == '__main__':
