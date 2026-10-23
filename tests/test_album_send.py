@@ -1070,9 +1070,10 @@ class TransportSendTests(unittest.TestCase):
 
 
 class DialogSeamTests(unittest.TestCase):
-    """Until the album renderer lands (part 2), the shipped dialog never shows a partial album: it refuses."""
+    """Part 2 renders an album (tests/test_album_dialog.py); a missing, partial or misplaced album preview still never
+    renders: no partial list is ever shown."""
 
-    def test_an_album_preview_never_renders_and_decides_dialog_unavailable(self):
+    def test_an_unbound_album_preview_never_renders_and_decides_dialog_unavailable(self):
         from telegram_search_mcp.approval_prompt import decide_approved_send, render_approval
         arguments = dict(recipient_title='Recipient', recipient=RECIPIENT, display_name='Album', size_bytes=10,
                          sha256='a' * 64, caption='')
@@ -1379,14 +1380,33 @@ class SendTests(BrokerFixture, unittest.TestCase):
         self.broker._approval_prompt = lambda **kw: True
         self.assertEqual(self.send(did)['status'], 'sent')
 
-    def test_the_shipped_dialog_refuses_an_album_until_its_renderer_lands(self):
+    def test_the_shipped_dialog_lists_every_item_and_only_an_approval_sends(self):
+        from types import SimpleNamespace
         from telegram_search_mcp.approval_prompt import decide_approved_send
         self.broker._approval_prompt = decide_approved_send
-        did = self.prepare()['draft_id']
-        with patch('telegram_search_mcp.approval_prompt.subprocess.run',
-                   side_effect=AssertionError('no dialog may be shown')):
-            self.assertEqual(self.send(did)['status'], 'dialog_unavailable')
-        self.assertEqual(self.albums(), [])
+        album = self.prepare(captions=['First', '', 'Third'])
+        did, shown = album['draft_id'], []
+
+        def answer(stdout, returncode=0):
+            def run(argv, **options):
+                shown.append(argv[-1])
+                return SimpleNamespace(returncode=returncode, stdout=stdout)
+            return run
+        for stdout, returncode, status in ((b'DECLINED\n', 0, 'declined'), (b'TIMEOUT\n', 0, 'timeout'),
+                                           (b'APPROVED\n', 1, 'dialog_unavailable'), (b'', 0, 'dialog_unavailable')):
+            with self.subTest(status=status, returncode=returncode), \
+                    patch('telegram_search_mcp.approval_prompt.subprocess.run', side_effect=answer(stdout, returncode)):
+                self.assertEqual(self.send(did)['status'], status)
+        self.assertEqual((self.albums(), self.staged()), ([], []))
+        rows = shown[0].replace('\n┆ ', '').split('\n')
+        self.assertEqual(rows[0], f'Send an album of 3 items to «Recipient» (chat {RECIPIENT})')
+        self.assertEqual([row.split(';')[0] for row in rows if row.startswith('Item ') and ' of 3: ' in row],
+                         ['Item 1 of 3: photo «one.png»', 'Item 2 of 3: video «two.mp4»', 'Item 3 of 3: photo «three.jpg»'])
+        self.assertIn(f'Album SHA-256: {album["album_sha256"]}', rows)
+        self.assertEqual(len(set(shown)), 1)  # The same complete document every time.
+        with patch('telegram_search_mcp.approval_prompt.subprocess.run', side_effect=answer(b'APPROVED\n')):
+            self.assertEqual(self.send(did)['status'], 'sent')
+        self.assertEqual(len(self.albums()), 1)
 
     def test_revalidation_before_the_dialog(self):
         for expected, change in (

@@ -17,6 +17,10 @@ chat id is the user id) is named "Saved Messages", the owner as a message sender
 Without one, every argument and byte is 0.54's but for two substitutions that hold in both modes: wherever a chat
 is named (recipient, forward source, reply anchor, archived or edited chat) the own chat is "Saved Messages", and
 the owner as a forwarded message's sender is "you"; 0.54 printed the user id in both places.
+
+An album (0.56) is one document too: one entry per item (position, kind, delivered name, bytes and facts, then its
+caption as an exact payload), the total size and every item's digest. It has no fallback: the scrolling dialog shows
+the whole list or nothing, and a dialog that cannot be shown is `dialog_unavailable` with no second attempt.
 """
 
 from __future__ import annotations
@@ -521,6 +525,38 @@ def _text_edit_document(validated, alias) -> str:
         'then make one edit attempt.')
 
 
+_ALBUM_GROUPS = {'media': 'media (photos and videos)', 'documents': 'documents'}
+
+
+def _album_entry(item, count: int) -> list:
+    """One item: its row (position, kind, delivered name, bytes, facts), then its caption label or exact payload."""
+    facts = ([f'{item.photo.width}x{item.photo.height}'] if item.photo is not None else
+             [f'{item.video.duration_seconds} seconds', f'{item.video.width}x{item.video.height}', item.video.codec,
+              f"audio {'yes' if item.video.has_audio else 'no'}",
+              f"streaming {'yes' if item.video.supports_streaming else 'no'}"] if item.video is not None else [])
+    row = '; '.join([f'Item {item.position} of {count}: {item.kind} {_span(item.raw_display_name)}',
+                     f'{item.size_bytes} bytes', *facts])
+    return [row, *(['Caption (exact):', _Payload(item.raw_caption)] if item.caption is not None else
+                   ['Caption: (none)'])]
+
+
+def _album_document(validated, alias) -> str:
+    """Every item in send order; names and captions under the readable rule, video facts as the file declares."""
+    recipient, count = validated.recipient, len(validated.items)
+    entries = [line for item in validated.items for line in ('', *_album_entry(item, count))]
+    return _document(
+        _head(f'Send an album of {count} items to {_span(recipient.title)} '
+              f'({_chat(recipient.chat_id, validated.account_id)})', validated.account_id, validated.expires_at, alias),
+        [f'Group: {_ALBUM_GROUPS[validated.group]}', f'Total: {count} items, {validated.total_size_bytes} bytes',
+         'Each item is sent once, in this order, as one album. File names and captions are untrusted; captions are '
+         'plain text. Video facts are declared by the file, not decoded.', *entries],
+        [f'Draft: {validated.draft_id}', f'Album SHA-256: {validated.album_sha256}',
+         *(f'Item {item.position} SHA-256: {item.sha256}' for item in validated.items),
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f"{identity.DISPLAY_NAME} will revalidate the account, the recipient and every item's bytes, then make one "
+        'album send attempt; the album is never sent again.')
+
+
 def _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name) -> None:
     _require(display_name in ('Text message', 'text', '', None) and caption in ('', None) and
              duration_seconds is None and source_sha256 is None and source_display_name is None)
@@ -532,16 +568,22 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
             draft_preview, account_alias, album_preview) -> tuple[str, bool]:
     """(document, is a change) for exactly one preview bound to the broker's own arguments."""
     _require(_valid_alias(account_alias))
-    # 0.56 albums: no album dialog renders yet, so an album is never shown a partial dialog; it refuses as
-    # dialog_unavailable (no attempt) until the album renderer lands with the tool surface.
-    _require(kind != 'album' and album_preview is None)
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
-                archive_preview, text_edit_preview, draft_preview)
+                archive_preview, text_edit_preview, draft_preview, album_preview)
     _require(sum(value is not None for value in previews) == 1)
     _require((kind == 'forward') == (forward_preview is not None) and (kind == 'video') == (video_preview is not None)
              and (kind == 'archive') == (archive_preview is not None) and
-             (kind == 'text_edit') == (text_edit_preview is not None))
+             (kind == 'text_edit') == (text_edit_preview is not None) and (kind == 'album') == (album_preview is not None))
+    if album_preview is not None:
+        # The broker passes the album digest as sha256, the total as size_bytes and the fixed name "Album".
+        from .album_drafts import AlbumDraftPreview
+        validated = AlbumDraftPreview.model_validate(album_preview)
+        _require(validated.recipient.chat_id == recipient and validated.recipient.title == recipient_title and
+                 validated.album_sha256 == sha256 and validated.total_size_bytes == size_bytes and
+                 display_name == 'Album' and caption in ('', None) and text in ('', None) and
+                 duration_seconds is None and source_sha256 is None and source_display_name is None)
+        return _album_document(validated, alias), False
     if archive_preview is not None or text_edit_preview is not None:
         if archive_preview is not None:
             from .archive_drafts import ArchiveDraftPreview, archive_digest
