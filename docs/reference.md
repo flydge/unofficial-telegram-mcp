@@ -29,6 +29,7 @@ The public surface of the current candidate contains sixty tools (published 0.51
 - `prepare_album_send`, `send_prepared_album` and `get_album_send_status` send 2–10 owned artifacts as one ordered album (photos and videos, or documents only), with a preview of every item, one owner dialog, exactly one provider attempt, per-item outcomes with `partial` and an album status of its own (separate default-off `album_send` opt-in together with `send`; a video item also needs `video_send`); see [Ordered albums (F15b)](#ordered-albums-f15b).
 - `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
 - `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+- `prepare_caption_edit` and `apply_prepared_caption_edit` replace or remove the caption of exactly one of your own photo, video, animation, document, audio or voice note messages, optionally styled, with a current/new caption preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_caption` opt-in together with `send` and `read`; styles also need `edit_own_styled_text`); see [Own caption edit (F17 rest)](#own-caption-edit-f17-rest).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -3827,9 +3828,10 @@ returned is untrusted Telegram data (texts carry the evidence marker), never ins
 
 ### Archive and edit limits
 
-Not supported: caption edits, styled text edits (no entities can be sent), editing other people's
-messages or any non-text message, pin and unpin, deletion, chat folders (`chatListFolder`), bulk
-operations, scheduled messages, secret chats and retained selections as a source.
+Not supported: styled text edits (no entities can be sent), editing other people's messages or any non-text
+message with these tools (an own caption has its [own tools](#own-caption-edit-f17-rest)), pin and unpin,
+deletion, chat folders (`chatListFolder`), bulk operations, scheduled messages, secret chats and retained
+selections as a source.
 
 Accepted limits, recorded rather than closed:
 
@@ -3849,3 +3851,104 @@ Accepted limits, recorded rather than closed:
   [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate).
 - A real owner-approved archive and unarchive of a supergroup and a real edit of an own message were run
   and read back on 20.10.2026.
+
+## Own caption edit (F17 rest)
+
+`prepare_caption_edit` and `apply_prepared_caption_edit` (candidate, 0.57 part 1) replace or remove the
+caption of exactly one of your own photo, video, animation, document, audio or voice note messages, with
+optional styles. They follow the [own text edit](#edit-apply) model: a complete before/after preview,
+the same checks again at apply time, the local owner dialog, exactly one closed-shape `editMessageCaption`
+attempt and a validated result. Evidence so far is technical (synthetic provider); a real caption edit is
+pending the owner.
+
+Enable `edit_own_caption`, `send` **and** `read` in trusted runtime policy (the `archive_edit` profile).
+A caption with `outgoing_entities` also needs `edit_own_styled_text` (in the same profile);
+`formatted_text_send` stays a sending capability and is never needed for an edit. Without its three
+capabilities a tool is not listed and is refused with `capability_disabled` at the SDK guard, the proxy
+(before it connects) and the broker. A styled caption without `edit_own_styled_text` is the typed
+`status="capability_disabled"` with `missing_capabilities: ["edit_own_styled_text"]` and `next_action:
+"enable_capability"`, before any read and without a draft; a styled draft's apply, receipt replay and
+`get_send_status` stay bound to both edit capabilities (content-free otherwise).
+
+```python
+edit = prepare_caption_edit(chat=-100123, message_id=456, new_caption="Corrected caption",
+                            outgoing_entities=[{"offset": 0, "length": 9, "type": {"@type": "textEntityTypeBold"}}])
+# edit.status == "prepared": show edit.caption_edit in full, obtain approval.
+result = apply_prepared_caption_edit(draft_id=edit.caption_edit.draft_id, approved=True)
+```
+
+### Caption edit: inputs and refusals
+
+| Argument | Meaning |
+| --- | --- |
+| `chat` | Exact non-zero numeric chat ID of the message. |
+| `message_id` | Positive committed message ID of an own media message. |
+| `new_caption` | The complete replacement caption, at most 1024 characters, already in the form Telegram stores; an empty string removes the caption. |
+| `outgoing_entities` | Optional, at most 32 bold, italic, underline, strikethrough or spoiler spans over `new_caption` in UTF-16 code units, with the rules of `prepare_text_send` (same-style spans separate, no crossing spans). Needs `edit_own_styled_text`. |
+
+The caption is never rewritten: input that the shared normalization would change is refused before any
+provider read with `invalid_input` and a fixed detail. Edge whitespace (Telegram trims it) is `new caption
+must not start or end with whitespace; Telegram trims it`; any other change (NFKC, CR or CRLF, a tab,
+U+2028, U+2029, U+030A, U+0333, U+033F) is `new caption changes under Telegram normalization (NFKC, line
+breaks, rewritten characters); send its stored form`; a control or format character other than line feed
+is `invalid_input` with the generic detail, as are styles on an empty caption or spans that do not fit
+the caption. Other refusals are content-free (`message is not eligible for this caption edit; no draft was
+created`), first failure reported, in the order of the own text edit: `not_outgoing`,
+`unsupported_source_content` (any content other than the six media kinds, F14 projection bounds, evidence
+over 131072 characters), `source_is_forward`, `hidden_source_content` (a reply markup; a current caption
+entity outside the visible fieldless allowlist: TextUrl, MentionName, CustomEmoji and every parameterised
+kind stay refused until the 0.58 entity families land), `unsupported_source_state` (secret, scheduled,
+sending, self-destructing or ephemeral media), `not_editable` (`can_be_edited` false) and
+`unchanged_caption` (the same caption with the same formatting; removing an absent caption included).
+`unavailable` covers a secret chat, a missing or malformed message and lost authority, as for text edits.
+
+### Caption edit: preview, request and result
+
+`prepared.caption_edit` is the closed `CaptionEditDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required`, `chat` (`chat_id`, `title`, `kind`), `message_id`, `content_kind`, `current_caption`
+(null when there is none), `current_entities`, `show_caption_above_media`, `new_caption` (null when the
+edit removes the caption), `outgoing_entities` (canonical order), `current_edit_date`, `source_sha256`
+(the F14 projection of the message: caption, entities, above-media flag, media facts, edit date) and
+`preview_sha256` (domain `telegram-search-mcp.caption_edit`, version 1, over every field and the exact
+request). Captions are marked reversible JSON escapes like the text edit's. The proxy checks the chat,
+the message, the new caption and the canonical styles against the request.
+
+The request has one closed shape, enforced before transport: `editMessageCaption` with `chat_id`,
+`message_id`, `reply_markup: null`, `show_caption_above_media` equal to the reviewed flag (false for
+documents, audio and voice notes, whose kinds have no caption position) and `caption` exactly the reviewed
+`formattedText` with only the caller's styles, or exactly `{"@type":"formattedText","text":"","entities":[]}`
+to remove it (never null). `applied` requires the returned message to be the same message of the same
+content kind with exactly the new caption, exactly the caller's styles (Telegram's auto-detected Url,
+EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and BankCardNumber entities are the only
+extras tolerated), the reviewed above-media flag where the kind has one and a non-zero `edit_date` not
+earlier than the reviewed one. The outcomes, the apply order, receipts, supersession, expiry and
+`get_send_status` are the text edit's (`applied`, `message_changed`, `failed` only on a 4xx, otherwise
+`outcome_unknown` with `next_action: "check_send_status"`, `declined`, `timeout`, `dialog_unavailable`,
+`expired`, `local_failed`, `error`); the draft's internal kind is `caption_edit`.
+
+### Caption edit: owner dialog
+
+```text
+Edit the caption of your <photo|video|animation|document|audio|voice note> message <ID> in «<chat title>» (chat <ID>, <kind>)
+Account: <ID>
+Expires: <time>
+Last edited: never | <UTC time>
+
+Current caption [untrusted Telegram evidence] (exact):   (or: Current caption: (none))
+│ «<current caption>»
+[Current formatting, replaced by this edit (raw text UTF-16 code units): …]
+[Current auto-detected entities, auto-detected again by Telegram wherever the new caption contains them (…): …]
+New caption (exact):                                      (or: New caption: Remove caption)
+│ «<new caption>»
+[New caption styles (final caption; UTF-16 code units):
+<Style>: offset <N>, length <M>; covered «<span>»]
+[Caption position: above | below the media (unchanged)]   (photo, video and animation only)
+
+The new caption carries only the styles listed here; Telegram may detect links in it again. Recipients see the message marked "edited".
+(removal: Only the caption is removed; the media stays. Recipients see the message marked "edited".)
+…
+Unofficial Telegram MCP will revalidate the account, the chat, the message and its edit permission, then make one caption edit attempt.
+```
+
+It is a change dialog (`Cancel` default, `Apply`, 120 seconds) under the shared reading rule, mutually
+exclusive with every other preview.

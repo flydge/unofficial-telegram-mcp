@@ -10,6 +10,14 @@ with `video_send` also required for a video item; 2–10 photos and videos or do
 outcomes with `partial`, never a resend.
 Technical evidence only; the owner session is pending.
 
+Also on this line, 0.57 own-message actions, F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
+part 1: one draft-kind table (no behaviour change); the default-off `edit_own_caption`, `edit_own_styled_text`,
+`pin_messages` and `delete_own_message` capabilities, each requiring `send` and `read` (the two edits in
+`archive_edit`, new `pin` and `delete` profiles); `prepare_caption_edit` and `apply_prepared_caption_edit`
+(60 tools) replace or remove one own media caption, optionally styled (styles also need
+`edit_own_styled_text`), with one closed `editMessageCaption` attempt. Styled text edits, pin/unpin and delete
+follow in later parts. Technical evidence only.
+
 ## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 
 Release candidate of 0.55.0, multiple accounts ([release notes](docs/release-notes-0.55.0rc1.md),
