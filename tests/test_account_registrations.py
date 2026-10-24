@@ -58,8 +58,12 @@ GOLDEN_054 = {
     'desktop_observe': ['absent', '514f25f100b8c0a54c14bbf034a2e03c3e393a1f466e3322173d284c8c6f67a8'],
     'desktop_removal': ['exact', 'ee9c0a4f35e22f3e0095cc385de1420a393d6076f4db567ce73c91039f28bd79'],
 }
-# The schema fingerprint c6338a0 computed (the wire contract is unchanged, spec 2).
+# The schema fingerprint c6338a0 computed. 0.55 left it unchanged (spec 2, criterion 2; verified at v0.55.0rc1).
 SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510ca37ca0e87b'
+# Every later slice that changes a tool schema lists the change in tests/fixtures/schema_changes/ and moves this
+# pin with it: 0.56 (0.56-albums, 0.56-album-tools). Accounts themselves never enter the fingerprint.
+SCHEMA_FINGERPRINT = '36e8ba0d64dafec6cd8818dfec6ce2421ed473b63d6c754ba9b8e775cefb20f2'
+SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums')
 
 
 def digest(data):
@@ -127,13 +131,17 @@ class DefaultGoldenTests(Home, unittest.TestCase):
         state, plan = desktop.observe_removal(self.home, COMMAND, ARGS)
         self.assertEqual([state, digest(plan.candidate)], GOLDEN_054['desktop_removal'])
 
-    def test_the_schema_fingerprint_and_default_policy_are_054s(self):
+    def test_the_schema_fingerprint_moves_only_with_listed_changes_and_the_default_policy_is_054s(self):
         from telegram_search_mcp import __version__
         from telegram_search_mcp.config import AccountPaths
         from telegram_search_mcp.contract import CONTRACT_VERSION, schema_fingerprint
         from telegram_search_mcp.enrollment import SetupPaths
         from telegram_search_mcp.setup_wizard import _ensure_policy
-        self.assertEqual((schema_fingerprint(), CONTRACT_VERSION), (SCHEMA_FINGERPRINT_054, 1))
+        listed = tuple(sorted(path.stem for path in (Path(__file__).parent / 'fixtures' / 'schema_changes').glob('*.json')
+                              if not path.stem.startswith(('0.54-', '0.55-'))))
+        self.assertEqual(listed, SCHEMA_CHANGES_SINCE_055)  # a new slice's schema change moves the pin below
+        self.assertEqual((schema_fingerprint(), CONTRACT_VERSION),
+                         (SCHEMA_FINGERPRINT_054 if not listed else SCHEMA_FINGERPRINT, 1))
         root = self.home / 'TelegramSearchMCP'
         root.mkdir(mode=0o700)
         _ensure_policy(SetupPaths.from_account(AccountPaths.for_alias('default', self.home).relocated(root)))
