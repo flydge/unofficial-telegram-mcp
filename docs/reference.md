@@ -4166,12 +4166,13 @@ to a deletion. `deleteChatHistory`, `deleteChatMessagesBySender`, `deleteChatMes
 The apply order is the pin's: the message is read again (a changed projection, chat identity, kind or title, or a
 message that is gone, is `message_changed`; `can_be_deleted_for_all_users` now false is `message_changed` too), then
 the dialog, the claim and, under the provider lock, the same read (chat, `getMessage`, `getMessageProperties`,
-account) and the guard, immediately followed by the one request. Pinned TDLib behaviour decides the evidence order:
+account), the guard and, as the last request before the attempt, one more `getMessage` of the message that must
+succeed with the reviewed projection. Pinned TDLib behaviour decides the evidence order:
 
 - TDLib deletes its local copy first and emits `updateDeleteMessages` before the server answers, and a later
   `getMessage` answers 404 from that local state. Neither is evidence of a deletion.
 - For a message TDLib does not hold, it answers `ok` without any server request. The attempt is therefore made only
-  right after the locked `getMessage` succeeded; a failing read there is `local_failed` with no attempt.
+  right after that last `getMessage` succeeded; a failing or changed read there is `local_failed` with no attempt.
 - `ok` after that read is `applied`: `TDLib deleted the message for everyone; the server confirmed the deletion`.
   Nothing is read afterwards.
 - After a 4xx TDLib fetches the message from the server again. One `getMessage` read-back that finds that exact

@@ -414,14 +414,14 @@ class ApplyTests(Fixture, unittest.TestCase):
         [request] = self.deletions()
         self.assertEqual(request, {'@type': 'deleteMessages', 'chat_id': CHAT, 'message_ids': [MID], 'revoke': True,
                                    '@extra': request['@extra']})
-        # ok counts only after a getMessage that succeeded under the same provider lock, right before the deletion:
-        # only the eligibility read and account checks lie between them, and nothing reads after the ok.
+        # ok counts only after a getMessage that succeeded under the same provider lock right before the deletion: the
+        # locked revalidation (chat, message, eligibility, account), then the message itself as the last request.
         types = [request['@type'] for request in self.raw.sent]
-        last_read = max(index for index, kind in enumerate(types[:types.index('deleteMessages')])
-                        if kind == 'getMessage')
-        self.assertLessEqual(set(types[last_read + 1:types.index('deleteMessages')]), {'getMessageProperties', 'getMe'})
-        self.assertIn('getMessageProperties', types[last_read + 1:types.index('deleteMessages')])
-        self.assertEqual(self.after_deletion(), [])
+        locked = types[:types.index('deleteMessages')][-7:]
+        self.assertEqual(locked, ['getMe', 'getChat', 'getMessage', 'getMessageProperties', 'getMe', 'getMe',
+                                  'getMessage'])
+        self.assertEqual(self.raw.sent[types.index('deleteMessages') - 1]['message_id'], MID)
+        self.assertEqual(self.after_deletion(), [])  # nothing reads after the ok
         [dialog] = self.approvals
         self.assertEqual((dialog['kind'], dialog['message_delete_preview'], dialog['sha256'], dialog['display_name']),
                          ('message_delete', value, value['message']['source_sha256'], 'Message deletion'))
@@ -502,21 +502,31 @@ class ApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(client._delete_transport(delete_request(CHAT, MID), pre_transport_guard=lambda: True),
                          {'@type': 'ok', '@extra': raw.sent[-1]['@extra']})
         self.assertTrue(raw.on_server)  # nothing was deleted on the server
-        did = self.prepare()
+        did = self.prepare()['draft_id']
         real = self.raw.send
+        reads = []
 
-        def send(request):
+        def send(request, fail_at):
             if request['@type'] == 'getMessage' and self.approvals:
-                self.raw.loaded = False  # the message left TDLib's memory and the server read fails
-                self.raw.sent.append(copy.deepcopy(request))
-                self.raw.events.append({'@type': 'error', 'code': 404, 'message': 'x', '@extra': request['@extra']})
-                return
+                reads.append(request)
+                if len(reads) == fail_at:  # the message left TDLib's memory and the server read fails
+                    self.raw.loaded = False
+                    self.raw.sent.append(copy.deepcopy(request))
+                    self.raw.events.append({'@type': 'error', 'code': 404, 'message': 'x',
+                                            '@extra': request['@extra']})
+                    return
             real(request)
-        self.raw.send = send
-        result = self.apply(did['draft_id'])
-        self.assertEqual((result['status'], result['detail']),
-                         ('local_failed', 'local revalidation failed; no provider change was attempted'))
-        self.assertEqual(self.deletions(), [])
+        for fail_at in (1, 2):  # the locked revalidation's read, or the read right before the attempt
+            with self.subTest(fail_at=fail_at):
+                reads.clear()
+                self.raw.send = lambda request, fail_at=fail_at: send(request, fail_at)
+                result = self.apply(did)
+                self.assertEqual((result['status'], result['detail']),
+                                 ('local_failed', 'local revalidation failed; no provider change was attempted'))
+                self.assertEqual(self.deletions(), [])
+                self.setUp()
+                did = self.prepare()['draft_id']
+                real = self.raw.send
 
     def test_the_restart_replay_of_a_logged_deletion_is_disclosed_and_never_repeated(self):
         self.raw.delete_mode = 'lost'
@@ -585,6 +595,21 @@ class ApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(self.broker._apply_prepared_message_delete(
                     ApplyPreparedMessageDeleteRequest(draft_id=did, approved=True), client_id=CLIENT).status, expected)
                 self.assertEqual(self.deletions(), [])
+
+    def test_an_edit_right_before_the_attempt_is_local_failed_without_transport(self):
+        did = self.prepare()['draft_id']
+        real, reads = self.raw.send, []
+
+        def send(request):
+            if request['@type'] == 'getMessage' and self.approvals:
+                reads.append(request)
+                if len(reads) == 2:  # edited elsewhere between the locked revalidation and the last read
+                    self.raw.message['edit_date'] = 1700000100
+            real(request)
+        self.raw.send = send
+        result = self.apply(did)
+        self.assertEqual(result['status'], 'local_failed')
+        self.assertEqual(self.deletions(), [])
 
     def test_guard_failures_inside_the_provider_lock_are_local_failed_without_transport(self):
         for name, change in (('capability', lambda: setattr(self.broker, '_policy', OTHERS)),

@@ -2174,13 +2174,15 @@ class TDLibClient:
         """Revalidate the reviewed own message and its deletion for everyone under the provider lock, then make one
         deleteMessages attempt there; returns only after the server confirmed it (`ok`).
 
-        The getMessage of that revalidation is the evidence `ok` needs: TDLib answers `ok` without any server request
-        for a message it does not hold, and the attempt follows a successful read under the same lock. Every refusal
-        before the raw send is no-attempt evidence. TDLib deletes the local copy first and answers a later getMessage
-        from it, so only `ok` is evidence of a deletion. After a 4xx TDLib fetches the message from the server again;
-        one read-back that finds it raises the rejection (`failed`), anything else is unknown. Every other error, a
-        lost or late answer and any other result are unknown. Nothing is retried."""
+        TDLib answers `ok` without any server request for a message it does not hold, so the last request before the
+        attempt is a getMessage of the exact message, under the same lock, that must succeed with the reviewed
+        projection: `ok` counts only after it. Every refusal before the raw send is no-attempt evidence. TDLib
+        deletes the local copy first and answers a later getMessage from it, so only `ok` is evidence of a deletion.
+        After a 4xx TDLib fetches the message from the server again; one read-back that finds it raises the rejection
+        (`failed`), anything else is unknown. Every other error, a lost or late answer and any other result are
+        unknown. Nothing is retried."""
         from .delete_drafts import DeleteSnapshot, MessageDeleteSpec, delete_request, message_present
+        from .forward_sources import ForwardSource
         with self._serialized_reply_call():
             def current_authority():
                 if (not isinstance(expected, DeleteSnapshot) or expected.anchor != (chat_id, message_id) or
@@ -2194,6 +2196,10 @@ class TDLibClient:
             try:
                 if not current_authority():
                     raise ValueError("delete authority changed")
+                held = self.get_message(chat_id, message_id)  # the read `ok` needs, right before the attempt
+                if (not message_present(held, chat_id, message_id) or
+                        ForwardSource.from_message(held, chat_id, message_id) != expected.source):
+                    raise ValueError("delete message changed")
             except Exception as error:
                 raise MessageSendNotAttempted("delete revalidation failed") from error
             response = self._delete_transport(delete_request(chat_id, message_id), pre_transport_guard=pre_send_guard)
