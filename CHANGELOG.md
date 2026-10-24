@@ -15,8 +15,13 @@ part 1: one draft-kind table (no behaviour change); the default-off `edit_own_ca
 `pin_messages` and `delete_own_message` capabilities, each requiring `send` and `read` (the two edits in
 `archive_edit`, new `pin` and `delete` profiles); `prepare_caption_edit` and `apply_prepared_caption_edit`
 (60 tools) replace or remove one own media caption, optionally styled (styles also need
-`edit_own_styled_text`), with one closed `editMessageCaption` attempt. Styled text edits, pin/unpin and delete
-follow in later parts. Technical evidence only.
+`edit_own_styled_text`), with one closed `editMessageCaption` attempt. Part 2: `prepare_text_edit` gains an
+optional `outgoing_entities` behind `edit_own_styled_text` (a listed schema change; styled text is never
+rewritten, a second closed `editMessageText` shape carries exactly the reviewed styles, plain edits are
+unchanged); `prepare_pin_change` and `apply_prepared_pin_change` (62 tools, `pin_messages`) pin or unpin one
+message silently and for everyone with one closed `pinChatMessage` or `unpinChatMessage` attempt, a bounded
+`getMessage.is_pinned` observation, and a 4xx read back as `already_pinned`, `not_pinned` or `failed`; the
+`_manifest` forbidden list names the new authority. Delete follows in part 3. Technical evidence only.
 
 ## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 

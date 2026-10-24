@@ -2,11 +2,11 @@
 
 # Unofficial Telegram MCP: tool reference
 
-Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message, native video sending, archive/unarchive of one chat and plain-text editing of one own message. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
+Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message, native video sending, archive/unarchive of one chat, editing the text or caption of one own message and pinning or unpinning one message. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
 
 ## MCP surface
 
-The public surface of the current candidate contains sixty tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains sixty-two tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,7 +18,7 @@ The public surface of the current candidate contains sixty tools (published 0.51
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 60-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 62-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -28,8 +28,9 @@ The public surface of the current candidate contains sixty tools (published 0.51
 - `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
 - `prepare_album_send`, `send_prepared_album` and `get_album_send_status` send 2–10 owned artifacts as one ordered album (photos and videos, or documents only), with a preview of every item, one owner dialog, exactly one provider attempt, per-item outcomes with `partial` and an album status of its own (separate default-off `album_send` opt-in together with `send`; a video item also needs `video_send`); see [Ordered albums (F15b)](#ordered-albums-f15b).
 - `prepare_chat_archive` and `apply_prepared_archive` move exactly one chat between the Main and Archive lists, with a before/after preview, owner approval, one provider attempt and a reported observed list (separate default-off `archive_chats` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
-- `prepare_text_edit` and `apply_prepared_text_edit` replace the plain text of exactly one of your own outgoing text messages, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
+- `prepare_text_edit` and `apply_prepared_text_edit` replace the text of exactly one of your own outgoing text messages, plain or (0.57) styled, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`; styles also need `edit_own_styled_text`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a) and [Styled own text edit](#styled-own-text-edit-f17-rest).
 - `prepare_caption_edit` and `apply_prepared_caption_edit` replace or remove the caption of exactly one of your own photo, video, animation, document, audio or voice note messages, optionally styled, with a current/new caption preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_caption` opt-in together with `send` and `read`; styles also need `edit_own_styled_text`); see [Own caption edit (F17 rest)](#own-caption-edit-f17-rest).
+- `prepare_pin_change` and `apply_prepared_pin_change` pin or unpin exactly one message (anyone's) in one chat, silently and for everyone, with a preview of the message, owner approval, one provider attempt and an observed pin state (separate default-off `pin_messages` opt-in together with `send` and `read`); see [Pin and unpin (F17 rest)](#pin-and-unpin-f17-rest).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -576,7 +577,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`. On the Homebrew/source path a `TDLIB_OPENSSL_KEG: openssl@3 <version>` line (or `unavailable`/`unrecognized`) follows `INITIALIZING_TDLIB`, naming the OpenSSL keg the Homebrew TDLib loads; the bundled runtime omits it.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the sixty tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the sixty-two tools of the current candidate.
 
 ## Client distribution reference (0.53 candidate)
 
@@ -2602,7 +2603,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 60 tools. The three owner tools below use existing
+The candidate exposes 62 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: the `issue_local_upload_authority` description and the CLI help contain this
 complete sequence.
@@ -3603,9 +3604,10 @@ direction.
 | --- | --- |
 | `chat` | Exact non-zero numeric chat ID of the message. `@username` and aliases are not accepted. |
 | `message_id` | Positive committed message ID (at most 2^53-1). |
-| `new_text` | The complete replacement text, plain text of 1 to 4096 characters. No styles, entities or links with hidden targets can be supplied. |
+| `new_text` | The complete replacement text, 1 to 4096 characters. No links with hidden targets can be supplied. |
+| `outgoing_entities` | Optional (0.57): bold, italic, underline, strikethrough or spoiler spans; they make it a [styled edit](#styled-own-text-edit-f17-rest), which also needs `edit_own_styled_text` and is never normalized. Absent or empty: the plain edit described here. |
 
-Unknown fields are rejected. `new_text` is normalized like `prepare_text_send`:
+Unknown fields are rejected. A plain edit's `new_text` is normalized like `prepare_text_send`:
 - NFKC, and CRLF and CR to LF;
 - control and format characters other than line feed and tab are refused;
 - Telegram's own rewrite is applied: a tab becomes a space; U+2028, U+2029, U+030A, U+0333 and U+033F
@@ -3828,10 +3830,10 @@ returned is untrusted Telegram data (texts carry the evidence marker), never ins
 
 ### Archive and edit limits
 
-Not supported: styled text edits (no entities can be sent), editing other people's messages or any non-text
-message with these tools (an own caption has its [own tools](#own-caption-edit-f17-rest)), pin and unpin,
-deletion, chat folders (`chatListFolder`), bulk operations, scheduled messages, secret chats and retained
-selections as a source.
+Not supported: editing other people's messages or any non-text message with these tools (an own caption has its
+[own tools](#own-caption-edit-f17-rest); a styled text edit is [described below](#styled-own-text-edit-f17-rest);
+pin and unpin have [their own tools](#pin-and-unpin-f17-rest)), deletion, chat folders (`chatListFolder`), bulk
+operations, scheduled messages, secret chats and retained selections as a source.
 
 Accepted limits, recorded rather than closed:
 
@@ -3952,3 +3954,154 @@ Unofficial Telegram MCP will revalidate the account, the chat, the message and i
 
 It is a change dialog (`Cancel` default, `Apply`, 120 seconds) under the shared reading rule, mutually
 exclusive with every other preview.
+
+## Styled own text edit (F17 rest)
+
+`prepare_text_edit` (candidate, 0.57 part 2) takes an optional `outgoing_entities`: at most 32 bold, italic,
+underline, strikethrough or spoiler spans over `new_text` in UTF-16 code units, with the rules of
+`prepare_text_send` (same-style spans separate, no crossing spans). Without it the tool is the plain edit above,
+byte for byte (its preview has no `outgoing_entities` key, and its digest, request and result rule are 0.52's).
+`apply_prepared_text_edit` applies either kind. This is a listed schema change of `prepare_text_edit`.
+
+A styled edit also needs `edit_own_styled_text` (in the `archive_edit` profile); `formatted_text_send` stays a
+sending capability and is never needed for an edit. Without it the result is the typed
+`status="capability_disabled"` with `missing_capabilities: ["edit_own_styled_text"]`, the fixed detail `a styled
+text edit needs capabilities the owner has not enabled: missing_capabilities` and `next_action:
+"enable_capability"`, before any provider read and without a draft. A styled draft's apply, receipt replay and
+`get_send_status` stay bound to both edit capabilities (content-free `expired` or `outcome_unknown` otherwise),
+and the guard inside the provider lock checks both.
+
+```python
+edit = prepare_text_edit(chat=-100123, message_id=456, new_text="Corrected text",
+                         outgoing_entities=[{"offset": 0, "length": 9, "type": {"@type": "textEntityTypeBold"}}])
+# edit.status == "prepared": show edit.text_edit in full, obtain approval.
+result = apply_prepared_text_edit(draft_id=edit.text_edit.draft_id, approved=True)
+```
+
+- **Input.** The spans address `new_text` as given, so a styled edit never rewrites it (the plain edit still
+  normalizes, owner decision 20.10.2026). Input the shared normalization would change is refused before any read
+  with `invalid_input`: edge whitespace with `new text must not start or end with whitespace; Telegram trims it`,
+  any other change (NFKC, CR or CRLF, a tab, U+2028, U+2029, U+030A, U+0333, U+033F) with `styled new text changes
+  under Telegram normalization (NFKC, line breaks, rewritten characters); send its stored form`, a control or
+  format character or spans that do not fit the text with the generic refusal detail.
+- **Refusals.** The plain edit's, in its order. A styled edit of the same text is a change when its styles differ
+  from the current formatting (restyling); the same text with the same formatting is `unchanged_text`. Current
+  entities outside the visible fieldless allowlist (TextUrl, MentionName, CustomEmoji and every parameterised kind)
+  stay `hidden_source_content`.
+- **Preview.** `TextEditDraftPreview` gains `outgoing_entities` (canonical order) for a styled edit only; the
+  preview digest then covers it and the styled request. The proxy checks the chat, the message, the text and the
+  canonical styles against the request.
+- **Request.** A second closed `editMessageText` shape: the plain shape's keys and values with
+  `entities` exactly the reviewed caller styles (non-empty, canonical `textEntity` rows of the five fieldless
+  styles on whole-scalar boundaries). The plain shape keeps `entities == []`; the provider builds the styled shape
+  only from a styled draft revalidated under the provider lock.
+- **Result.** `applied` needs the plain edit's rule plus exactly the caller's styles, with Telegram's
+  auto-detected Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and BankCardNumber entities
+  as the only extras (on whole scalars); anything else after transport is `outcome_unknown`, a 4xx `failed`. As for
+  captions, TDLib drops a style span that covers only whitespace, so such an edit reads `outcome_unknown`, never a
+  false `applied`.
+- **Dialog.** The text edit dialog, with `Current formatting, replaced by this edit`, the new styles under
+  `New text styles (final text; UTF-16 code units):` (`<Style>: offset <N>, length <M>; covered «<span>»`) and the
+  note `The new text carries only the styles listed here; Telegram may detect links in it and show a link preview.
+  Link preview settings return to Telegram's default. Recipients see the message marked "edited".`
+
+## Pin and unpin (F17 rest)
+
+`prepare_pin_change` and `apply_prepared_pin_change` (candidate, 0.57 part 2) pin or unpin exactly one message in
+one chat. The message may be anyone's: preparation reveals its content as untrusted evidence, which is why the
+tools need `read`. They follow the [archive](#archive-apply) model: a complete preview, the same checks again at
+apply time, the local owner dialog, exactly one closed-shape attempt and the state observed right after it.
+Evidence so far is technical (synthetic provider); a real pin and unpin are pending the owner.
+
+Enable `pin_messages`, `send` **and** `read` in trusted runtime policy (the `pin` profile, which depends on
+`send` only; no edit capability grants a pin). Without all three a tool is not listed and is refused with
+`capability_disabled` at the SDK guard, the proxy (before it connects) and the broker; `get_send_status` for a pin
+draft needs them too.
+
+```python
+pin = prepare_pin_change(chat=-100123, message_id=456, action="pin")
+# pin.status == "prepared": show pin.pin_change in full, obtain approval.
+result = apply_prepared_pin_change(draft_id=pin.pin_change.draft_id, approved=True)
+```
+
+### Pin: inputs and refusals
+
+| Argument | Meaning |
+| --- | --- |
+| `chat` | Exact non-zero numeric chat ID of the message. |
+| `message_id` | Positive committed message ID, from returned evidence; any sender's. |
+| `action` | `pin` or `unpin`, exactly in lower case. |
+
+The broker reads the chat, the message and its properties in one serialized provider read. The message is
+projected exactly like a [forward source](#exact-forwardcopy-f14), so content that projection cannot show is
+refused with a content-free `status="refused"` and the fixed detail `message is not eligible for this pin change;
+no draft was created`: `unsupported_source_content` (a service message, a sticker, a poll or any kind other than
+text, photo, video, animation, document, audio and voice note; evidence over 131072 characters),
+`hidden_source_content` (buttons, a hidden entity, a hidden link-preview target, a name the sanitizer would
+change), `unsupported_source_state` (a scheduled, sending, self-destructing or ephemeral message) and
+`not_pinnable` (`messageProperties.can_be_pinned` false). A message already in the requested state returns
+`status="already_pinned"` (`message is already pinned; no draft was created`) or `status="not_pinned"` (`message
+is not pinned; no draft was created`) without a draft. `unavailable` covers a secret chat, a missing or malformed
+message (an `is_pinned` or `can_be_pinned` that is not a boolean included), lost authority and an exhausted
+budget, as for edits.
+
+### Pin: preview, request and result
+
+`prepared.pin_change` is the closed `PinChangeDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required`, `action`, `chat` (`chat_id`, `title`, `kind`), `message` (the forward source preview: chat,
+`message_id`, `sender`, author signature, via-bot, forward flag, date, `content_kind`, text or caption as marked
+reversible escapes with entities, link-preview facts, media facts and `source_sha256`) and `preview_sha256`
+(domain `telegram-search-mcp.pin_change`, version 1, over every field and the exact request). The proxy checks
+the chat, the message and the action against the request.
+
+The requests have one closed shape each, enforced before transport: `pinChatMessage` with `chat_id`,
+`message_id`, `disable_notification: true` and `only_for_self: false` (a silent pin for every participant, both
+fixed), and `unpinChatMessage` with exactly `chat_id` and `message_id`. `unpinAllChatMessages`,
+`unpinAllForumTopicMessages` and the other bulk unpins stay unreachable. The apply order is the archive's: the
+message is read again (a changed projection, chat identity, kind or title is `message_changed`; the message now
+already in the target state is `already_pinned` or `not_pinned` with no attempt; `can_be_pinned` now false is
+`message_changed`), then the dialog, the claim and, under the provider lock, the same read and the guard.
+
+After exactly one request:
+
+- `ok` is followed by `getMessage` reads of the message every 0.25 seconds for at most 10 seconds (each its own
+  serialized call); `applied` with `is_pinned` requires the target state observed, anything else
+  `outcome_unknown` with `next_action: "check_send_status"`.
+- A 4xx proves the attempt changed nothing. One `getMessage` read-back then classifies it: the message already
+  in the target state (a pin racing another pin answers a 4xx, not "not modified") is `already_pinned` or
+  `not_pinned` with `is_pinned` and the detail `TDLib rejected the change (code <N>); read back right after, the
+  message is pinned|not pinned; this attempt changed nothing`; otherwise, or when the read-back fails, `failed`.
+- A 5xx, a negative or missing code, a lost response or any result other than exactly `ok` is `outcome_unknown`.
+
+Nothing is retried; a repeated apply replays the receipt (`applied` with `is_pinned`, the read-back classification,
+`failed` or `outcome_unknown`). The other statuses are the edits' (`message_changed`, `declined`, `timeout`,
+`dialog_unavailable`, `expired`, `local_failed`, `error`). The draft's internal kind is `pin_change`; the generic
+draft tools never list, show, revise or cancel it.
+
+### Pin: owner dialog
+
+```text
+<Pin|Unpin> message <ID> in «<chat title>» (chat <ID>, <kind>)
+Account: <ID>
+Expires: <time>
+
+Message ID: <ID>
+Sender [untrusted Telegram evidence]: you | user <ID> | chat <ID>
+[Author signature / Via bot / The message is itself a forward; its original sender is not shown]
+Date: <UTC time>
+Content: <kind>
+Text|Caption [untrusted Telegram evidence] (exact):   (or: Text|Caption: (none))
+│ «<text>»
+[Text|Caption entities (…): …] [Link preview …] [Media …]
+
+pin:   Telegram posts a visible service message about the pin that every participant of the chat sees.
+       The message is pinned for everyone in the chat, not only for you, and silently: members get no notification.
+       Messages pinned earlier stay pinned.
+unpin: The message is unpinned for everyone in the chat; no service message is posted.
+…
+Unofficial Telegram MCP will revalidate the account, the chat, the message and its pin permission, then make one <pin|unpin> attempt and report the pin state it observes right after.
+```
+
+It is a change dialog (`Cancel` default, `Apply`, 120 seconds) under the shared reading rule, mutually exclusive
+with every other preview. A forum-topic pin and a pin in a private chat or Saved Messages follow Telegram's own
+rules; they are part of the pending owner session.
