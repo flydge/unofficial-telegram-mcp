@@ -219,8 +219,12 @@ Every revision has a new draft ID and requires fresh approval.
 The same prepared provider/session and the full capability union must remain
 current through preview, revision, owner confirmation, claim, native registration,
 final transport, status and receipt replay. Provider evidence must match the exact
-text and style facts; only entity ordering may differ. Missing, added, shifted or
-merged styles leave delivery uncertain, with no automatic retry. This technical
+text and style facts; only entity ordering, TDLib's cut of one style into touching pieces (at a style
+nested in it or an auto-detected entity inside it; the pieces are joined before comparing) and the entities
+Telegram detects in the text (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand,
+BankCardNumber on whole scalars, and a MediaTimestamp exactly on a whole timestamp token with its value) may
+differ (review fix 057). Missing, added, shifted or merged styles leave delivery uncertain, with no automatic
+retry. This technical
 contract does not establish actual Telegram rendering or live consumer readiness.
 
 ## Pending draft ownership, revisions and cancellation
@@ -2497,8 +2501,10 @@ every client. A call that arrives while a dialog is open shows none: it answers 
 once, makes no attempt and leaves its draft pending, and nothing is queued behind the open dialog. Every
 dialog has the same size and position, so stacked dialogs would let a click meant for one draft approve
 another; a client that keeps calling `send_prepared_*` on other drafts while the owner reads a dialog gets
-only refusals. A repeated call on the same draft while its dialog is open is refused the same way; once
-that dialog approved and sent, a repeat replays the receipt. Once an alias registry exists (0.55
+only refusals. A repeated call on the same draft while its dialog is open is refused the same way, and so
+is one in the moment between that dialog closing and its claim: the call holds its draft from just before
+the dialog until the claim (review fix 057); once that dialog approved and sent, a repeat replays the
+receipt. Once an alias registry exists (0.55
 candidate) the rule holds across every account's broker, one process each: a broker holds a
 non-blocking lock on the owner-only `TelegramSearchMCP-accounts/dialog.lock` for its whole dialog, and a
 send or apply on any account while another account's dialog is open, or while that lock file is not an
@@ -2967,11 +2973,12 @@ Residual risks, recorded rather than closed:
   `prepare_chat_archive` reveals a chat's sanitized title, kind and Main/Archive membership, including
   through the `already_in_target` and `unsupported_chat` answers. Since 20.10.2026 both capabilities
   also require `read`, so these narrow reads are never available without it.
-- **Concurrent applies.** Two concurrent applies of one draft make exactly one provider attempt, but both
-  callers may see the dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt
-  authority is unavailable; do not retry automatically") although it made no attempt. This is the shared
-  pattern of forward and video sends (an attempt-outcome check routes any consumed claim to "attempted");
-  it errs towards unknown, never towards a second attempt or a false `applied`.
+- **Concurrent applies.** Two concurrent applies of one draft make exactly one provider attempt and show
+  one dialog: since review fix 057 every send and apply reserves its draft from just before the dialog
+  until its claim, so the other call answers `dialog_unavailable`. A call that arrives after the claim,
+  while the attempt runs, reads `outcome_unknown` ("current receipt authority is unavailable; do not retry
+  automatically") although it made no attempt (an attempt-outcome check routes any consumed claim to
+  "attempted"); it errs towards unknown, never towards a second attempt or a false `applied`.
 - **Plain text sends are rewritten by TDLib the same way** (see above); only edits refuse these characters.
 - **Reads are cached or offline provider state.** A remote edit, a deletion or a move from another
   client can race the final check, and Telegram acts on whatever it holds at transport time. The edit

@@ -78,3 +78,41 @@ class ProfileTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReferenceTests(unittest.TestCase):
+    """Review fix (057, low): the general passages of docs/reference.md name the 0.57 actions as they are."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.text = (Path(__file__).parents[1] / 'docs/reference.md').read_text()
+        cls.flat = ' '.join(cls.text.split())
+
+    def section(self, heading):
+        return ' '.join(self.text.split(heading, 1)[1].split('\n#', 1)[0].split())
+
+    def test_the_guard_order_adds_read_for_every_read_dependent_capability(self):
+        order = self.flat.split('`<capabilities>` lists only the missing names', 1)[1].split('retained_selections', 1)[0]
+        for name in sorted(READ_DEPENDENT_CAPABILITIES):
+            with self.subTest(name=name):
+                self.assertIn(f'`{name}`', order.split('then `read` for', 1)[1])
+
+    def test_the_recovery_row_names_the_typed_capability_disabled_of_both_edit_prepares(self):
+        row = next(line for line in self.text.splitlines() if line.startswith('| `enable_capability` |'))
+        for name in ('prepare_album_send', 'prepare_text_edit', 'prepare_caption_edit'):
+            with self.subTest(name=name):
+                self.assertIn(f'`{name}`', row)
+
+    def test_deletion_is_named_where_the_reference_lists_the_actions(self):
+        intro = self.text.split('# Unofficial Telegram MCP: tool reference', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('deleting one own message for everyone', intro)
+        limits = self.section('### Archive and edit limits')
+        unsupported = limits.split('Not supported:', 1)[1].split('Accepted limits', 1)[0]
+        self.assertIn('[its own tools](#delete-one-own-message-f17-rest)), any other deletion', unsupported)
+
+    def test_get_send_status_covers_the_caption_pin_and_deletion_drafts(self):
+        status = self.flat.split('Archive and text-edit drafts (F17a) are not sends', 1)[1].split('An album draft', 1)[0]
+        for name in ('edit_own_caption', 'pin_messages', 'delete_own_message', 'edit_own_styled_text'):
+            with self.subTest(name=name):
+                self.assertIn(f'`{name}`', status)

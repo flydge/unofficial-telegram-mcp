@@ -2,7 +2,7 @@
 
 # Unofficial Telegram MCP: tool reference
 
-Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message, native video sending, archive/unarchive of one chat, editing the text or caption of one own message and pinning or unpinning one message. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
+Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discovery, exact chat search, selected attachment transfer and analysis, and explicitly approved text, document, photo, and voice-note sending, plus (candidate) exact forward/copy of one message, native video sending, archive/unarchive of one chat, editing the text or caption of one own message, pinning or unpinning one message and deleting one own message for everyone. Each Codex task runs a thin proxy. All proxies connect through an owner-only Unix socket to one launchd-managed broker, the sole owner of TDLib and its authorized dedicated session. Public attachment reads use exact message anchors or server-issued artifact IDs; no Telegram credentials or caller-selected download paths enter MCP.
 
 ## MCP surface
 
@@ -110,7 +110,7 @@ In the 0.52 candidate, a call refused by the proxy's SDK guard, before any broke
 - `Error executing tool <tool>: config_stale (restart matching components); next_action: update_installation`: the policy file changed after the proxy loaded it, or its expected package, contract or schema pin does not match the loaded code.
 - `Error executing tool <tool>: client_schema_mismatch (refresh tools/list, then call _manifest with expected_schema_fingerprint set to the current schema_fingerprint)`
 
-`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for `archive_chats` and `edit_own_text`, then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. Since the 0.54 candidate the parenthesis names the capability profile that turns the missing capabilities on (`owner enables profile <profile>`, or `owner enables profiles <a>, <b>` when two are needed; a profile's dependencies are implied, see [Capability profiles](#capability-profiles)); when a missing capability belongs to no profile (the base `read` or `artifacts`) it reads `owner must enable in runtime.toml`. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner enables profile replies); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
+`<capabilities>` lists only the missing names, separated by `, `, in this order: the tool's own capability, then `send` for a capability that requires it, then `read` for every capability that depends on it (`archive_chats`, `edit_own_text`, `edit_own_caption`, `edit_own_styled_text`, `pin_messages` and `delete_own_message`), then `retained_selections` when `selection_id` or `reply_selection_id` is supplied. Since the 0.54 candidate the parenthesis names the capability profile that turns the missing capabilities on (`owner enables profile <profile>`, or `owner enables profiles <a>, <b>` when two are needed; a profile's dependencies are implied, see [Capability profiles](#capability-profiles)); when a missing capability belongs to no profile (the base `read` or `artifacts`) it reads `owner must enable in runtime.toml`. For example, `prepare_reply_text_send` under the default `["read", "artifacts"]` policy reads `capability_disabled: reply_text_send, send (owner enables profile replies); next_action: enable_capability`. Since the 0.54 candidate the two texts end with the fixed `; next_action: <value>` suffix from the closed recovery map (see [Recovery hints](#recovery-hints-next_action)); `client_schema_mismatch` has none. The text never contains arguments or provider text. The three local upload authority tools keep their content-free `unavailable` result instead. Schemas and the schema fingerprint are unchanged.
 
 Since the 0.54 candidate, arguments that do not match a tool's input schema get one closed text too, whatever failed: the SDK's argument model, a strict request check, a malformed `search_correspondence` query or date, or a request the tool builds from otherwise valid arguments (for example `create_local_artifact` with neither `content` nor `content_base64`). It names what failed:
 
@@ -136,7 +136,7 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
 | `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
 | `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
-| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools and `prepare_album_send` |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools, `prepare_album_send`, and `prepare_text_edit` and `prepare_caption_edit` (styles without `edit_own_styled_text`) |
 | `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools, `get_send_status` and `get_album_send_status`, and a `partial` album with an unconfirmed item; never resend |
@@ -195,8 +195,12 @@ Every revision has a new draft ID and requires fresh approval.
 The same prepared provider/session and the full capability union must remain
 current through preview, revision, owner confirmation, claim, native registration,
 final transport, status and receipt replay. Provider evidence must match the exact
-text and style facts; only entity ordering may differ. Missing, added, shifted or
-merged styles leave delivery uncertain, with no automatic retry. This technical
+text and style facts; only entity ordering, TDLib's cut of one style into touching pieces (at a style
+nested in it or an auto-detected entity inside it; the pieces are joined before comparing) and the entities
+Telegram detects in the text (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand,
+BankCardNumber on whole scalars, and a MediaTimestamp exactly on a whole timestamp token with its value) may
+differ (review fix 057). Missing, added, shifted or merged styles leave delivery uncertain, with no automatic
+retry. This technical
 contract does not establish actual Telegram rendering or live consumer readiness.
 
 ## Text in one exact forum topic
@@ -267,6 +271,10 @@ chat and temporary message ID plus a final `messageVideo`; see
 Archive and text-edit drafts (F17a) are not sends and have no message to correlate, so the
 same tool reports them only coarsely and never as `sent`; it needs `archive_chats` or
 `edit_own_text` in addition to `send` and `read`. See [Status of archive and edit drafts](#status-of-archive-and-edit-drafts).
+Caption-edit, pin and deletion drafts (0.57) get the same coarse status, bound to their own capability
+(`edit_own_caption`, `pin_messages` or `delete_own_message`, a styled caption or styled text edit also to
+`edit_own_styled_text`) in addition to `send` and `read`; see [Own caption edit](#own-caption-edit-f17-rest),
+[Pin and unpin](#pin-and-unpin-f17-rest) and [Delete one own message](#delete-one-own-message-f17-rest).
 
 An album draft (F15b) is not reported here: `get_send_status` returns its content-free unknown shape
 (`outcome_unknown`, evidence `none`) for one. Use `get_album_send_status`, which reports every item; see
@@ -3834,7 +3842,8 @@ returned is untrusted Telegram data (texts carry the evidence marker), never ins
 
 Not supported: editing other people's messages or any non-text message with these tools (an own caption has its
 [own tools](#own-caption-edit-f17-rest); a styled text edit is [described below](#styled-own-text-edit-f17-rest);
-pin and unpin have [their own tools](#pin-and-unpin-f17-rest)), deletion, chat folders (`chatListFolder`), bulk
+pin and unpin have [their own tools](#pin-and-unpin-f17-rest); deleting one own message for everyone has
+[its own tools](#delete-one-own-message-f17-rest)), any other deletion, chat folders (`chatListFolder`), bulk
 operations, scheduled messages, secret chats and retained selections as a source.
 
 Accepted limits, recorded rather than closed:
@@ -3846,10 +3855,14 @@ Accepted limits, recorded rather than closed:
 - Telegram may move an archived chat whose notifications are enabled back to Main on a new message.
   `applied` reflects only the state observed right after the call (polled up to 10 seconds); a move
   that becomes visible later is still `outcome_unknown`.
-- Two concurrent applies of one draft make exactly one provider attempt, but both callers may see the
-  owner dialog, and the caller that lost the claim reads `outcome_unknown` ("current receipt authority
-  is unavailable; do not retry automatically") although it made no attempt. This is the pattern of
-  forward and video sends; it errs towards unknown, never towards a second attempt or a false `applied`.
+- Two concurrent applies of one draft make exactly one provider attempt and show one owner dialog: the
+  first holds the draft from just before its dialog until its claim (review fix 057, every send and
+  apply), so another apply of it meanwhile answers `dialog_unavailable` with no dialog and no attempt; a
+  declined, timed-out or unavailable dialog, or a failure before the claim, leaves the draft pending. A
+  call that arrives after the claim, while the attempt runs, reads `outcome_unknown` ("current receipt
+  authority is unavailable; do not retry automatically") although it made no attempt; once the attempt
+  finished, the receipt is replayed. It errs towards unknown, never towards a second attempt or a false
+  `applied`.
 - Text sends, captions and edits share one normalization that already applies Telegram's own rewrite
   (owner decision 20.10.2026), so a reviewed text is the stored text. See the
   [security model](security.md#archive-and-own-text-edit-boundary-f17a-candidate).
@@ -3922,9 +3935,11 @@ The request has one closed shape, enforced before transport: `editMessageCaption
 documents, audio and voice notes, whose kinds have no caption position) and `caption` exactly the reviewed
 `formattedText` with only the caller's styles, or exactly `{"@type":"formattedText","text":"","entities":[]}`
 to remove it (never null). `applied` requires the returned message to be the same message of the same
-content kind with exactly the new caption, exactly the caller's styles (Telegram's auto-detected Url,
-EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and BankCardNumber entities are the only
-extras tolerated), the reviewed above-media flag where the kind has one and a non-zero `edit_date` not
+content kind with exactly the new caption, exactly the caller's styles (TDLib may return one span cut into
+touching pieces at a style nested in it or an auto-detected entity inside it, joined before comparing; Telegram's
+auto-detected Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and BankCardNumber entities,
+and a MediaTimestamp exactly on a whole timestamp token with its value, at most the duration of a video, audio or
+voice note, are the only extras tolerated), the reviewed above-media flag where the kind has one and a non-zero `edit_date` not
 earlier than the reviewed one. The outcomes, the apply order, receipts, supersession, expiry and
 `get_send_status` are the text edit's (`applied`, `message_changed`, `failed` only on a 4xx, otherwise
 `outcome_unknown` with `next_action: "check_send_status"`, `declined`, `timeout`, `dialog_unavailable`,
@@ -3997,9 +4012,10 @@ result = apply_prepared_text_edit(draft_id=edit.text_edit.draft_id, approved=Tru
   `entities` exactly the reviewed caller styles (non-empty, canonical `textEntity` rows of the five fieldless
   styles on whole-scalar boundaries). The plain shape keeps `entities == []`; the provider builds the styled shape
   only from a styled draft revalidated under the provider lock.
-- **Result.** `applied` needs the plain edit's rule plus exactly the caller's styles, with Telegram's
-  auto-detected Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand and BankCardNumber entities
-  as the only extras (on whole scalars); anything else after transport is `outcome_unknown`, a 4xx `failed`. As for
+- **Result.** `applied` needs the plain edit's rule plus exactly the caller's styles (touching pieces TDLib cut
+  one span into are joined first), with Telegram's auto-detected Url, EmailAddress, PhoneNumber, Mention, Hashtag,
+  Cashtag, BotCommand and BankCardNumber entities (on whole scalars) and a MediaTimestamp exactly on a whole
+  timestamp token with its value as the only extras; anything else after transport is `outcome_unknown`, a 4xx `failed`. As for
   captions, TDLib drops a style span that covers only whitespace, so such an edit reads `outcome_unknown`, never a
   false `applied`.
 - **Dialog.** The text edit dialog, with `Current formatting, replaced by this edit`, the new styles under

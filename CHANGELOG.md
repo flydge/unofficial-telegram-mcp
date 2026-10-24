@@ -20,7 +20,12 @@ after a `getMessage` under the same provider lock; `applied` only on the server'
 read-back after a 4xx finds the message again, everything else `outcome_unknown` with TDLib's logged deletion
 (replayed after a restart) disclosed; Saved Messages, deletion for yourself only, other people's, scheduled and
 sending messages are refused; the owner dialog has a `Delete` button and states the irreversible, for-everyone,
-unpinning effect. Technical evidence only; the owner session is pending.
+unpinning effect. Review fixes: a styled caption or text edit, and a formatted send, read TDLib's split form of
+the caller's styles (touching pieces at a nested style or an auto-detected entity) and a media timestamp on a whole
+token as the edit, never `outcome_unknown`, and a formatted send now tolerates the entities Telegram detects in
+the text; every send and apply holds its draft from just before the owner dialog until the claim, so a concurrent
+call of the same draft shows no second dialog (`dialog_unavailable`); the search skill never treats a read as proof
+of an unknown deletion; reference corrections. Technical evidence only; the owner session is pending.
 
 ## 0.56.0rc1 — release candidate, 2026-10-24 (not published)
 
