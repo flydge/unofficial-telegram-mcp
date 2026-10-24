@@ -1020,9 +1020,11 @@ The Terminal fallback works the same way (`setup --account work`, `resume --acco
 MCP clients afterwards (quit and reopen Claude Desktop); the alias is a server of its own.
 
 Before its client entries, `account-add` asks a running default broker one `check`, so the default
-account is pinned before the alias's first login: `default_check` is `ready`, `blocked` (not authorized;
-nothing to pin) or `not_loaded`. A check that does not answer refuses `default_check_failed` with the
-alias already registered; repeat the same command and it resumes there.
+account is pinned before the alias's first login: `default_check` is `ready`, `blocked` (not authorized,
+so nothing to pin, or a session the pin already refuses, such as an account an alias holds),
+`not_loaded`, or `unanswered` (loaded but no answer: still starting, crash-looping, or an edited
+`runtime.toml` not restarted yet). `account-add` goes on either way; with `not_loaded` or `unanswered`
+the default is pinned at its broker's next check (see the known limits below).
 
 The alias:
 
@@ -1225,9 +1227,9 @@ current release, and only while it knows aliases (0.55 or newer): anything else 
 
 - Each alias runs its own broker and TDLib: memory, TDLib's own session files and up to 1 GiB of
   artifact cache, per account.
-- With `default_check: not_loaded` the default account is pinned at its broker's next check. A login of
-  an alias into the default's own Telegram account before that pins the user to the alias, and the default
-  broker then refuses `account_duplicate`; `account-remove` that alias to recover.
+- With `default_check: not_loaded` or `unanswered` the default account is pinned at its broker's next
+  check. A login of an alias into the default's own Telegram account before that pins the user to the
+  alias, and the default broker then refuses `account_duplicate`; `account-remove` that alias to recover.
 - An uninstall with an alias left keeps the registry and the default's pin: installing a release older
   than 0.55 over it, logging the default into another Telegram account and then installing 0.55 again
   blocks the default with `account_mismatch`.

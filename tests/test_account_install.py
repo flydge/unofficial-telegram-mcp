@@ -319,22 +319,34 @@ class AccountAddTests(AccountHarness, unittest.TestCase):
             self.account('account_add', alias)
         self.refused('account_add', 'registry_full', 'h')
 
-    def test_the_default_check_runs_only_on_a_loaded_default_and_an_unanswered_one_resumes(self):
+    def test_the_default_check_runs_only_on_a_loaded_default_and_an_unanswered_one_is_reported(self):
+        """Critic fix (055f, low, lead decision): a loaded default broker that does not answer its one check (a
+        crash loop, a TDLib error, an edited runtime.toml not yet restarted) no longer parks account-add, which then
+        blocked every other installer action and every alias login: the result reports `default_check: unanswered`
+        and the add finishes, as for `not_loaded` (the default is pinned at its broker's next check)."""
         self.full(loaded=False)
         self.assertEqual(self.account('account_add')['default_check'], 'not_loaded')
         self.assertEqual(self.checks, [])
-        self.setUp()
-        self.full()
-        self.check_answers = ['unknown']
-        self.refused('account_add', 'default_check_failed')
-        self.assertEqual(self.registry(), ('work',))  # Registered first, so the check pins the default.
-        self.assertIsNone(self.sidecar())
-        error = self.refused('account_remove', 'transaction_pending')
-        self.assertEqual((error.pending_action, error.pending_account), ('account-add', 'work'))
-        self.check_answers = ['blocked']
-        self.assertEqual(self.account('account_add')['default_check'], 'blocked')
-        self.assertEqual(len(self.checks), 2)
-        self.assertEqual(len(self.account_journals()), 1)
+        for answer in ('unknown', None, 'error', 'stale'):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.full()
+                self.check_answers = [answer] * 3
+                result = self.account('account_add')
+                self.assertEqual((result['status'], result['default_check']), ('account_added', 'unanswered'))
+                self.assertEqual(len(self.checks), 1)  # asked once, never again on a retry
+                self.assertEqual(self.registry(), ('work',))
+                self.assertIn('work', self.sidecar()['accounts'])
+                self.assertEqual(self.account('account_add'), result)  # a retry returns the same result
+                self.assertEqual(self.account('account_add', 'play')['default_check'], 'unanswered')
+                self.assertEqual(self.account('account_remove')['status'], 'account_removed')
+        for answer in ('ready', 'blocked'):
+            with self.subTest(answer=answer):
+                self.setUp()
+                self.full()
+                self.check_answers = [answer]
+                self.assertEqual(self.account('account_add')['default_check'], answer)
+                self.assertEqual(len(self.account_journals()), 1)
 
     def test_an_unfinished_change_blocks_an_account_action_and_an_unfinished_account_action_blocks_a_change(self):
         self.full()

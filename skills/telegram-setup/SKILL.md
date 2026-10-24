@@ -173,8 +173,9 @@ the phone of the account being added, and the page names the alias. It becomes i
 this alias's own; stop and report. After an uninstall and a reinstall the same `account-add` re-registers
 an alias the uninstall kept, with its session (`service: rewritten` is normal there); `policy_conflict`
 there means a newer release served that session. `alias_exists`, `registry_full`, `alias_path_too_long`,
-`alias_name_too_long`, `accounts_inconsistent`, `release_not_current`, `policy_conflict` or
-`default_check_failed`: stop and report the code (`login_in_progress` as above). `account-remove <alias>`
+`alias_name_too_long`, `accounts_inconsistent`, `release_not_current` or `policy_conflict`: stop and
+report the code (`login_in_progress` and `connect_lock_unsafe` as above). `default_check: unanswered` is
+not a failure: the default account is pinned at its broker's next check. `account-remove <alias>`
 (renaming is remove, then add) runs only when the owner asks; it moves the session aside, never deleting
 it.
 

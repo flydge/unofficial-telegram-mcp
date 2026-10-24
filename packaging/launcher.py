@@ -39,7 +39,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'claude_desktop_registration_conflict','claude_desktop_config_unsupported','pending_send_unresolved',
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
     'service_restart_failed','downgrade_refused','uninstall_incomplete',
-    'accounts_inconsistent','default_check_failed','account_remove_incomplete','accounts_present',
+    'accounts_inconsistent','account_remove_incomplete','accounts_present',
     'release_not_current','login_in_progress','connect_lock_unsafe','alias_broker_unreadable',
     'alias_invalid','alias_exists','alias_unknown','alias_path_too_long','alias_name_too_long','registry_full',
     'registry_invalid','registry_unsafe','registry_busy'}

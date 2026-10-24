@@ -4163,11 +4163,11 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     release from any value, its session kept (review fix 055d4); the registry entry (unpinned); the alias's root,
     owner-only and empty but for its run directory (an existing one kept), which a login never creates (review fix
     055d3); one `check` on the default broker when it is loaded, so its authorized account is pinned before the
-    alias's first login (an unanswered check refuses
-    `default_check_failed`, and the retry resumes there); the Codex entry (`mcp --account <alias>`, never required);
-    the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the install's);
-    the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's accounts.json
-    record. It does not log in: the owner then runs `connect --account <alias>` (or setup) and waits. A kill at any
+    alias's first login (one that does not answer is reported as `default_check: unanswered` and the add goes on, as
+    for a default broker not loaded: critic fix 055f, lead decision); the Codex entry (`mcp --account <alias>`, never
+    required); the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the
+    install's); the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's
+    accounts.json record. It does not log in: the owner then runs `connect --account <alias>` (or setup) and waits. A kill at any
     point resumes on the retry; a retry after it finished returns its result.
     """
     try:
@@ -4328,7 +4328,11 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 broker = _default_broker(launchctl, home, installed)
                 status = 'not_loaded' if broker is None else check(home, *broker)
                 if status not in ('not_loaded', 'ready', 'blocked'):
-                    raise InstallError('default_check_failed')
+                    # Critic fix (055f, lead decision): a loaded default broker that does not answer (a crash loop, a
+                    # TDLib error, an edited runtime.toml not restarted yet) is reported, never parks the add, which
+                    # would block every other installer action and every alias login; as for `not_loaded`, the
+                    # default is pinned at its broker's next check.
+                    status = 'unanswered'
                 j.update(single=('default_check', {'status': status}))
             j.advance('default_check')
             checkpoint('default_check')

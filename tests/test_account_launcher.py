@@ -108,7 +108,7 @@ class AccountChangeGrammarTests(unittest.TestCase):
     def test_installer_codes_and_the_pending_account_reach_the_output(self):
         error = bundle_install.InstallError
         cases = {'accounts_inconsistent': error('accounts_inconsistent'), 'alias_exists': error('alias_exists'),
-                 'default_check_failed': error('default_check_failed'),
+                 'account_remove_incomplete': error('account_remove_incomplete'),
                  'alias_path_too_long': error('alias_path_too_long')}
         for code, raised in cases.items():
             with self.subTest(code=code):
@@ -166,11 +166,13 @@ class AccountChangeGrammarTests(unittest.TestCase):
     def test_every_code_an_account_transaction_can_pass_through_is_in_the_closed_set(self):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
-        self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
+        self.assertLessEqual({'accounts_inconsistent', 'account_remove_incomplete',
                               'accounts_present', 'release_not_current', 'login_in_progress',
                               'connect_lock_unsafe', 'alias_broker_unreadable'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
+        # Critic fix (055f): an unanswered default check is reported in the result, never a refusal any more.
+        self.assertNotIn('default_check_failed', self.module.INSTALL_CODES)
 
     def test_help_names_the_account_actions_and_the_capabilities_flag(self):
         code, out, _ = run(self.module.main, ['--help'])

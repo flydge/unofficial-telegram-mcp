@@ -652,7 +652,9 @@ rollback below 0.55 or an uninstall that moved the alias registry aside adds `ac
 `account-add` returns `status: account_added`, `account` (the alias), `server_name`
 (`telegram_search_<alias>`), `codex: registered`, `claude_code` (`registered`, `reused`, `failed`,
 `unavailable`, `not_found`, or `skipped` in `skip` mode), `claude_desktop` (as for an install),
-`default_check` (`ready`, `blocked` or `not_loaded`: the one `check` it asked a running default broker),
+`default_check` (the one `check` it asked a running default broker: `ready`, `blocked` for a session not
+authorized or one the pin refuses, `not_loaded`, or `unanswered` for a loaded broker that did not answer;
+the add goes on in every case),
 `next_action: run_activation_then_wait`, and `activation_arguments` and `activation_command` (the current
 release's `python3 -I -S -B launcher.py connect --account <alias>`), plus `claude_registration_command`,
 `claude_desktop_next_action` or `claude_desktop_manual_entry` as for an install, and `service: rewritten`
@@ -730,7 +732,6 @@ before the transaction exists, unless its row says otherwise:
 | --- | --- | --- |
 | `accounts_present` | A rollback to a release older than 0.55 while the alias registry or `accounts.json` lists an alias. | `account-remove` each alias, then roll back. |
 | `accounts_inconsistent` | `account-add` or `account-remove` found an `accounts.json` record for an alias the registry does not list (other than the action's own alias), or `account-add` of an alias that has such a record. An alias the registry lists without a record (as an uninstall leaves them) is not inconsistent. | Run `account-remove` of the alias that has the record (`status` lists it); it retires what is left. |
-| `default_check_failed` | `account-add`'s one `check` of the running default broker answered neither `ready` nor `blocked`. Late: the alias is already in the registry, its root exists, and the transaction stays unfinished. | Let the default broker finish starting, then repeat the same `account-add`; it resumes. |
 | `account_remove_incomplete` | `account-remove` found the alias's Claude Code or Claude Desktop entry still present (or its config unreadable) after its removal attempts. Late. | Repeat the same `account-remove` (quit Claude Desktop first if it rewrote its config). |
 | `release_not_current` | `account-add` or `account-remove` ran from a release tree other than the one `current.json` names, or the current release is older than 0.55 (after a rollback below 0.55). | Run the launcher of `current.json`'s `release_root`; below 0.55, upgrade first. |
 | `login_in_progress` | A login of an alias is running (its connect job loaded and not idle, or its connect lock held) when a transaction over aliases (upgrade, rollback, uninstall, `account-add`, `account-remove`) needs that alias's connect lock (every alias's; a new alias's own `account-add` all but its own). The refusal adds `account`, that alias. The transaction stays resumable. | Let that login end (`wait --account <account>`, or `cancel --account <account>`), then repeat the same command. |
