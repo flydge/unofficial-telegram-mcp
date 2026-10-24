@@ -26,7 +26,7 @@ from .schemas import ChatId
 from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 from .outgoing_entity_models import OutgoingEntity, OutgoingEntityList
 from .outgoing_formatting import (FrozenOutgoingEntities, _STYLES, _boundaries, freeze_outgoing_entities,
-                                  native_outgoing_entities, outgoing_entity_facts)
+                                  joined_outgoing_entities, native_outgoing_entities, outgoing_entity_facts)
 
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
@@ -109,16 +109,17 @@ def frozen_styles(text: str, entities) -> FrozenOutgoingEntities:
 
 
 def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities) -> bool:
-    """The verification rule of every styled edit (0.57): exactly the caller's styles, plus only fieldless
-    auto-detected entities on whole scalars of the text; any other entity, field or span is not the edit."""
+    """The verification rule of every styled edit (0.57) and every formatted send (review fix 057): exactly the
+    caller's styles, which TDLib may return cut into touching pieces (joined first, joined_outgoing_entities), plus only
+    fieldless auto-detected entities on whole scalars of the text; any other entity, field or span is not the edit."""
     if type(text) is not str or type(entities) is not list or len(entities) > MAX_ENTITIES:
         return False
     caller, extras = [], []
     for row in entities:
         kind = row.get('type') if type(row) is dict else None
         if (type(row) is not dict or set(row) != {'@type', 'offset', 'length', 'type'} or row['@type'] != 'textEntity'
-                or type(kind) is not dict or set(kind) != {'@type'} or type(row['offset']) is not int or
-                type(row['length']) is not int):
+                or type(kind) is not dict or set(kind) != {'@type'} or type(kind['@type']) is not str or
+                type(row['offset']) is not int or type(row['length']) is not int):
             return False
         if kind['@type'] in _STYLES:
             caller.append({'offset': row['offset'], 'length': row['length'], 'type': {'@type': kind['@type']}})
@@ -127,7 +128,7 @@ def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities)
         else:
             return False
     try:
-        if frozen_styles(text, caller) != styles:
+        if joined_outgoing_entities(text, caller) != styles:
             return False
         bounds = _boundaries(text) if extras else {}
         if any(length <= 0 or offset not in bounds or offset + length not in bounds for offset, length in extras):

@@ -1,7 +1,8 @@
 """Bounded caller-supplied styles for already normalized outgoing text.
 
 Coordinates refer to the final whole text in UTF-16 code units. This module
-neither parses formatting syntax nor grants permission to send anything.
+neither parses formatting syntax nor grants permission to send anything. It also
+reads the form the pinned TDLib (d1085f9) returns such styles in: touching pieces.
 """
 from __future__ import annotations
 
@@ -61,6 +62,41 @@ def freeze_outgoing_entities(
             if start < other_start < end < other_end:
                 raise ValueError("Crossing outgoing styles are unsupported")
     return tuple(rows)
+
+
+def joined_outgoing_entities(final_text: str, pieces: list[dict]) -> FrozenOutgoingEntities:
+    """Returned style rows as the caller's canonical spans (review fix 057). TDLib's fix_entities runs on every message
+    it returns, and its split_entities (MessageEntity.cpp) cuts a style at the start of every style nested in it and at
+    both ends of every auto-detected entity inside it, so one caller span may come back as touching pieces. Touching
+    pieces of one style are joined, as split_entities itself joins them first; overlapping pieces of one style are
+    never its output and are refused, and the joined spans must pass freeze_outgoing_entities."""
+    if type(pieces) is not list:
+        raise ValueError("Outgoing entities must be a list")
+    if not pieces:
+        return ()
+    boundaries = _boundaries(final_text)
+    rows = []
+    for entity in pieces:
+        if type(entity) is not dict or set(entity) != {"offset", "length", "type"}:
+            raise ValueError("Invalid outgoing entity fields")
+        kind, offset, length = entity["type"], entity["offset"], entity["length"]
+        if (type(kind) is not dict or set(kind) != {"@type"} or type(kind["@type"]) is not str
+                or kind["@type"] not in _STYLES):
+            raise ValueError("Unsupported outgoing style")
+        if (type(offset) is not int or type(length) is not int or not 0 <= offset < 2**31 or not 0 < length < 2**31
+                or offset not in boundaries or offset + length not in boundaries):
+            raise ValueError("Invalid whole-scalar UTF-16 range")
+        rows.append((kind["@type"], offset, offset + length))
+    joined: list[tuple[str, int, int]] = []
+    for kind, start, end in sorted(rows):
+        if joined and joined[-1][0] == kind and start <= joined[-1][2]:
+            if start < joined[-1][2]:
+                raise ValueError("Overlapping pieces of one style")
+            joined[-1] = (kind, joined[-1][1], end)
+        else:
+            joined.append((kind, start, end))
+    return freeze_outgoing_entities(final_text, [
+        {"offset": start, "length": end - start, "type": {"@type": kind}} for kind, start, end in joined])
 
 
 def native_outgoing_entities(frozen: FrozenOutgoingEntities) -> list[dict]:

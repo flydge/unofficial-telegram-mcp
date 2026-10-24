@@ -8,6 +8,8 @@ from telegram_search_mcp.reply_drafts import SEND_OPTIONS, LINK_OPTIONS, source_
 CHAT=-1007;TEXT='A🙂BC';FROZEN=((0,5,'textEntityTypeBold'),(1,2,'textEntityTypeSpoiler'))
 NATIVE=[{'@type':'textEntity','offset':0,'length':5,'type':{'@type':'textEntityTypeBold'}},{'@type':'textEntity','offset':1,'length':2,'type':{'@type':'textEntityTypeSpoiler'}}]
 TOPIC={'@type':'messageTopicForum','forum_topic_id':41}
+# The pinned TDLib's form of NATIVE (MessageEntity.cpp split_entities): the bold span cut where the spoiler starts.
+SPLIT=[{'@type':'textEntity','offset':0,'length':1,'type':{'@type':'textEntityTypeBold'}},{'@type':'textEntity','offset':1,'length':4,'type':{'@type':'textEntityTypeBold'}},NATIVE[1]]
 def reply():return {'@type':'messageReplyToMessage','chat_id':CHAT,'message_id':55,'checklist_task_id':0,'poll_option_id':'','origin_send_date':0}
 def message(identifier=-9,entities=None,topic=None,anchor=None):
  return {'@type':'message','id':identifier,'chat_id':CHAT,'is_outgoing':True,'topic_id':copy.deepcopy(topic),'reply_to':copy.deepcopy(anchor),'content':{'@type':'messageText','text':{'@type':'formattedText','text':TEXT,'entities':copy.deepcopy(NATIVE if entities is None else entities)}}}
@@ -88,6 +90,12 @@ class FormattedNativeTests(unittest.TestCase):
   raw,p=self.sender();raw.mutate=lambda m:m['content']['text']['entities'].append({'@type':'textEntity','offset':3,'length':1,'type':{'@type':'textEntityTypeItalic'}})
   with self.assertRaises(MessageSendOutcomeUnknown):self.send(p)
   self.assertEqual(sum(r['@type']=='sendMessage' for r in raw.sent),1);self.assertEqual(p._send_observations.snapshot('attempt').status,'pending')
+ def test_tdlib_split_final_confirms_with_one_attempt(self):
+  """Review fix (057, medium): TDLib returns Bold(0,5)+Spoiler(1,2) cut at the nested start (split_entities)."""
+  for route in ('plain','topic','reply','topic_reply'):
+   with self.subTest(route=route):
+    raw,p=self.sender();raw.mutate=lambda m:m['content']['text'].update(entities=copy.deepcopy(SPLIT))
+    self.assertEqual(self.send(p,route),701);self.assertEqual(sum(r['@type']=='sendMessage' for r in raw.sent),1)
  def test_empty_plain_wire_golden(self):
   raw,p=self.sender();self.assertEqual(p.send_text_message(CHAT,TEXT,attempt_id='plain'),701)
   s=next(r for r in raw.sent if r['@type']=='sendMessage');self.assertEqual(s['input_message_content'],payload([])['input_message_content']);self.assertIsNone(s['topic_id']);self.assertIsNone(s['reply_to']);self.assertEqual([r['@type'] for r in raw.sent],['sendMessage'])
@@ -172,6 +180,24 @@ class FormattedReducerTests(unittest.TestCase):
     if (changed=='topic_id' and topic) or (changed=='reply_to' and anchor):
      bad=message(701,topic=topic,anchor=anchor);bad[changed]=None;s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':bad});self.assertEqual(s.snapshot('a').status,'pending')
    s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':message(804,topic=topic,anchor=anchor)});self.assertEqual(s.snapshot('a').message_id,804)
+ def test_tdlib_split_pieces_and_auto_detected_entities_confirm(self):
+  """Review fix (057, medium): pending and final messages carry TDLib's split form and the entities Telegram detects
+  in the text (split_entities cuts a style at both ends of each); the formatted send takes the styled-edit rule."""
+  s=self.register();s.reduce(self.pending(message(entities=SPLIT)));self.assertEqual(s.snapshot('a').status,'pending');s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':message(701,entities=SPLIT)});self.assertEqual(s.snapshot('a').message_id,701)
+  text='Ask @tests now';bold=((0,14,'textEntityTypeBold'),)
+  def entity(kind,offset,length,**fields):return {'@type':'textEntity','offset':offset,'length':length,'type':{'@type':kind,**fields}}
+  def sent(identifier,rows):
+   m=message(identifier,entities=rows);m['content']['text']['text']=text;return m
+  tdlib=[entity('textEntityTypeBold',0,4),entity('textEntityTypeMention',4,6),entity('textEntityTypeBold',4,6),entity('textEntityTypeBold',10,4)]
+  for rows,confirmed in [(tdlib,True),([entity('textEntityTypeBold',0,14),entity('textEntityTypeMention',4,6)],True),
+                         ([entity('textEntityTypeBold',0,5),entity('textEntityTypeBold',4,10)],False),
+                         ([entity('textEntityTypeBold',0,14),entity('textEntityTypeMention',4,5)],True),
+                         ([entity('textEntityTypeBold',0,14),entity('textEntityTypeTextUrl',4,6,url='x')],False),
+                         ([entity('textEntityTypeBold',0,14),entity('textEntityTypeMention',4,6,extra=1)],False)]:
+   with self.subTest(rows=rows):
+    s=SendObservations();s.register('a','x',12,CHAT,'messageText',text_sha256=hashlib.sha256(text.encode()).hexdigest(),outgoing_entities=bold)
+    s.reduce(self.pending(sent(-9,rows)));s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':sent(701,rows)})
+    self.assertEqual(s.snapshot('a').message_id,701 if confirmed else None)
  def test_registration_mutable_or_artifact_expectation_refused(self):
   self.register()
   for rows,kind in [(list(FROZEN),'messageText'),(tuple(reversed(FROZEN)),'messageText'),(FROZEN,'messageDocument')]:

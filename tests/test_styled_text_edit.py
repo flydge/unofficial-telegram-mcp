@@ -60,6 +60,7 @@ class Raw(archive.Raw):
     def __init__(self):
         super().__init__()
         self.styled_mode = 'ok'
+        self.tdlib_entities = []  # 'tdlib': the entities the pinned TDLib returns in place of the request's.
 
     def send(self, request):
         if request['@type'] != 'editMessageText' or not request['input_message_content']['text']['entities']:
@@ -81,10 +82,12 @@ class Raw(archive.Raw):
             text['entities'].append(entity('textEntityTypeTextUrl', 0, 1, url='https://hidden.invalid'))
         if mode == 'wrong_text':
             text['text'] += '!'
+        if mode == 'tdlib':
+            text['entities'] = copy.deepcopy(self.tdlib_entities)
         value = copy.deepcopy(self.message)
         value['content'] = {'@type': 'messageText', 'text': text}
         value['edit_date'] = 1700000500
-        if mode in ('ok', 'auto_detected'):
+        if mode in ('ok', 'auto_detected', 'tdlib'):
             self.message = copy.deepcopy(value)
         self.events.append({'@type': 'updateMessageEdited', 'chat_id': CHAT, 'message_id': MID,
                             'edit_date': value['edit_date'], 'reply_markup': None})
@@ -315,6 +318,42 @@ class ApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(len(self.requests()), 1)
                 self.assertNotIn('PRIVATE', json.dumps(result))
 
+    def test_tdlib_split_styles_read_applied(self):
+        """Review fix (057, medium): the pinned TDLib cuts a style at every nested style and at both ends of every
+        auto-detected entity inside it (MessageEntity.cpp split_entities); the touching pieces are the caller's span."""
+        def style(kind, offset, length):
+            return {'offset': offset, 'length': length, 'type': {'@type': kind}}
+        b, i, u, s = ('textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
+                      'textEntityTypeStrikethrough')
+        for new, styles, returned in (
+                ('Hello there', [style(b, 0, 11), style(i, 6, 5)],
+                 [entity(b, 0, 6), entity(b, 6, 5), entity(i, 6, 5)]),
+                ('ab', [style(u, 0, 2), style(s, 1, 1)], [entity(u, 0, 1), entity(u, 1, 1), entity(s, 1, 1)]),
+                ('@tests @tests', [style(i, 0, 13)],
+                 [entity('textEntityTypeMention', 0, 6), entity(i, 0, 6), entity(i, 6, 1),
+                  entity('textEntityTypeMention', 7, 6), entity(i, 7, 6)]),
+                ('see example.com', [style(b, 0, 15)],
+                 [entity(b, 0, 4), entity('textEntityTypeUrl', 4, 11), entity(b, 4, 11)])):
+            with self.subTest(new=new):
+                self.setUp()
+                self.raw.styled_mode = 'tdlib'
+                self.raw.tdlib_entities = returned
+                did = self.prepare(new, styles)['draft_id']
+                result = self.apply(did)
+                self.assertEqual((result['status'], result['edit_date']), ('applied', 1700000500))
+                [request] = self.requests()
+                self.assertEqual(request['input_message_content']['text']['entities'], [native(row) for row in styles])
+        for returned in ([entity(b, 0, 6), entity(b, 5, 6), entity(i, 6, 5)],  # overlapping pieces
+                         [entity(b, 0, 5), entity(b, 6, 5), entity(i, 6, 5)],  # a gap
+                         [entity(b, 0, 6), entity(b, 6, 5)]):  # the nested style missing
+            with self.subTest(returned=returned):
+                self.setUp()
+                self.raw.styled_mode = 'tdlib'
+                self.raw.tdlib_entities = returned
+                did = self.prepare('Hello there', [style(b, 0, 11), style(i, 6, 5)])['draft_id']
+                self.assertEqual(self.apply(did)['status'], 'outcome_unknown')
+                self.assertEqual(len(self.requests()), 1)
+
     def test_a_changed_message_or_style_before_the_dialog_makes_no_attempt(self):
         did = self.prepare()['draft_id']
         self.raw.message['content']['text']['entities'] = [entity('textEntityTypeItalic', 0, 5)]
@@ -342,6 +381,12 @@ class VerificationTests(unittest.TestCase):
                          [entity('textEntityTypeBold', 0, 5), entity('textEntityTypeUrl', 6, 99)]):
             with self.subTest(entities=entities):
                 self.assertIsNone(self.check(self.result(entities=entities), bold))
+
+    def test_tdlib_split_pieces_are_the_edit(self):
+        nested = ((0, 11, 'textEntityTypeBold'), (6, 5, 'textEntityTypeItalic'))
+        self.assertEqual(self.check(self.result(entities=[entity('textEntityTypeBold', 0, 6),
+                                                          entity('textEntityTypeBold', 6, 5),
+                                                          entity('textEntityTypeItalic', 6, 5)]), nested), 1700000500)
 
     def test_the_plain_rule_is_unchanged(self):
         self.assertEqual(self.check(self.result(entities=[entity('textEntityTypeBold', 0, 5)])), 1700000500)

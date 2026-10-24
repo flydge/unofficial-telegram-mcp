@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Callable
 from .reply_drafts import LINK_OPTIONS, strict_shape
-from .outgoing_formatting import FrozenOutgoingEntities, freeze_outgoing_entities
+from .outgoing_formatting import FrozenOutgoingEntities
 
 RETENTION_SECONDS = 900
 MAX_OBSERVATIONS = 4096
@@ -459,19 +459,10 @@ class SendObservations:
         if outgoing_entities:
             if set(formatted) != {'@type', 'text', 'entities'}:
                 return False
-            rows = formatted.get('entities')
-            if type(rows) is not list or len(rows) > 32:
-                return False
-            caller = []
-            for row in rows:
-                if (type(row) is not dict or set(row) != {'@type', 'offset', 'length', 'type'} or
-                        row.get('@type') != 'textEntity'):
-                    return False
-                caller.append({key: row[key] for key in ('offset', 'length', 'type')})
-            try:
-                return freeze_outgoing_entities(text, caller) == outgoing_entities
-            except (ValueError, TypeError, UnicodeError):
-                return False
+            # Review fix (057): the styled-edit rule. TDLib returns a nested style, or one over an auto-detected
+            # entity, cut into touching pieces, and the entities Telegram detects in the text come back too.
+            from .edit_drafts import exact_styles
+            return exact_styles(text, formatted.get('entities'), outgoing_entities)
         return True
 
     @staticmethod

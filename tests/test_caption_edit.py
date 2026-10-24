@@ -126,6 +126,7 @@ class Raw(archive.Raw):
         super().__init__()
         self.message = own_media()
         self.caption_mode = 'ok'
+        self.tdlib_entities = []  # 'tdlib': the caption entities the pinned TDLib returns in place of the request's.
 
     def send(self, request):
         if request['@type'] != 'editMessageCaption':
@@ -156,6 +157,8 @@ class Raw(archive.Raw):
             caption['entities'] = []
         if mode == 'hidden_entity':
             caption['entities'].append(entity('textEntityTypeTextUrl', 0, 1, url='https://hidden.invalid'))
+        if mode == 'tdlib':
+            caption['entities'] = copy.deepcopy(self.tdlib_entities)
         content['caption'] = caption
         if 'show_caption_above_media' in content:  # TDLib drops the flag for kinds without a caption position.
             content['show_caption_above_media'] = request['show_caption_above_media'] != (mode == 'above_flipped')
@@ -166,7 +169,7 @@ class Raw(archive.Raw):
             value['id'] = MID + 1048576
         if mode == 'wrong_chat':
             value['chat_id'] = CHAT - 1
-        if mode in ('ok', 'switch_account', 'auto_detected'):
+        if mode in ('ok', 'switch_account', 'auto_detected', 'tdlib'):
             self.message = copy.deepcopy(value)
         self.events.append({'@type': 'updateMessageEdited', 'chat_id': CHAT, 'message_id': MID,
                             'edit_date': value['edit_date'], 'reply_markup': None})
@@ -566,6 +569,31 @@ class ApplyTests(Fixture, unittest.TestCase):
         [request] = self.requests('editMessageCaption')
         self.assertEqual(request['caption']['entities'], [{'@type': 'textEntity', 'offset': 0, 'length': 3,
                                                            'type': {'@type': 'textEntityTypeBold'}}])
+
+    def test_tdlib_split_caption_styles_read_applied(self):
+        """Review fix (057, medium): TDLib returns a nested style, or a style over a mention, cut into touching
+        pieces (MessageEntity.cpp split_entities); they are the caller's span."""
+        italic = {'offset': 4, 'length': 7, 'type': {'@type': 'textEntityTypeItalic'}}
+        whole = {'offset': 0, 'length': 11, 'type': {'@type': 'textEntityTypeBold'}}
+        for new, styles, returned in (
+                ('New caption', [whole, italic], [entity('textEntityTypeBold', 0, 4), entity('textEntityTypeBold', 4, 7),
+                                                  entity('textEntityTypeItalic', 4, 7)]),
+                ('ask @tests now', [{'offset': 0, 'length': 14, 'type': {'@type': 'textEntityTypeUnderline'}}],
+                 [entity('textEntityTypeUnderline', 0, 4), entity('textEntityTypeMention', 4, 6),
+                  entity('textEntityTypeUnderline', 4, 6), entity('textEntityTypeUnderline', 10, 4)])):
+            with self.subTest(new=new):
+                self.setUp()
+                self.raw.caption_mode = 'tdlib'
+                self.raw.tdlib_entities = returned
+                did = self.prepare(new, styles)['draft_id']
+                self.assertEqual(self.apply(did)['status'], 'applied')
+                self.assertEqual(len(self.requests('editMessageCaption')), 1)
+        self.setUp()
+        self.raw.caption_mode = 'tdlib'
+        self.raw.tdlib_entities = [entity('textEntityTypeBold', 0, 4), entity('textEntityTypeBold', 3, 8),
+                                   entity('textEntityTypeItalic', 4, 7)]  # overlapping pieces are not TDLib's
+        self.assertEqual(self.apply(self.prepare('New caption', [whole, italic])['draft_id'])['status'],
+                         'outcome_unknown')
 
     def test_the_reviewed_caption_position_is_sent_and_verified(self):
         for kind, above in (('photo', True), ('video', True), ('animation', False), ('document', False),
