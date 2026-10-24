@@ -1125,14 +1125,16 @@ class TransportShapeTests(unittest.TestCase):
 
 
 class FinalReviewTests(VideoFixture, unittest.TestCase):
-    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8)."""
+    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8). Review fix (057, low):
+    a call can no longer lose the claim after a dialog of its own, since the first call holds the draft from just before
+    its dialog until its claim; a concurrent call shows no dialog, even past the one-dialog gate bypassed here."""
 
     def assert_unknown(self, result, did):
         self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
                                   'message_id': None, 'detail': UNKNOWN, 'next_action': 'check_send_status'})
 
     def test_concurrent_sends_make_one_attempt(self):
-        # The second caller made no attempt but reads outcome_unknown, never sent or expired.
+        # The second caller shows no dialog and makes no attempt: dialog_unavailable, never sent or expired.
         did = self.prepare()['draft_id']
         gate = threading.Event(); results = []
         def prompt(**kw):
@@ -1144,16 +1146,17 @@ class FinalReviewTests(VideoFixture, unittest.TestCase):
         for thread in threads:
             thread.start()
         deadline = time.monotonic() + 5
-        while len(self.approvals) < 2 and time.monotonic() < deadline:
+        while not results and time.monotonic() < deadline:  # The refused call returns while the dialog is open.
             time.sleep(0.01)
         gate.set()
         for thread in threads:
             thread.join(10)
-        self.assertEqual(sorted(result['status'] for result in results), ['outcome_unknown', 'sent'])
-        self.assert_unknown(next(result for result in results if result['status'] != 'sent'), did)
-        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(sorted(result['status'] for result in results), ['dialog_unavailable', 'sent'])
+        refused = next(result for result in results if result['status'] != 'sent')
+        self.assertEqual((refused['detail'], refused['message_id']), (DETAILS['dialog_unavailable'], None))
+        self.assertEqual((len(self.approvals), len(self.sends())), (1, 1))
 
-    def test_dialog_that_outlives_the_winning_send_reads_outcome_unknown(self):
+    def test_a_send_while_the_drafts_dialog_is_open_shows_no_second_dialog(self):
         did = self.prepare()['draft_id']
         opened, release, calls, results = threading.Event(), threading.Event(), [], {}
         def prompt(**kw):
@@ -1164,13 +1167,13 @@ class FinalReviewTests(VideoFixture, unittest.TestCase):
         self.broker._approval_prompt = prompt
         # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
         self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
-        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
-        loser.start(); self.assertTrue(opened.wait(10))
-        winner = self.send(did)
-        release.set(); loser.join(10)
-        self.assertEqual((winner['status'], winner['message_id']), ('sent', 701))
-        self.assert_unknown(results['loser'], did)
-        self.assertEqual((self.send(did)['status'], len(self.sends())), ('sent', 1))  # Receipt replay.
+        first = threading.Thread(target=lambda: results.setdefault('first', self.send(did)))
+        first.start(); self.assertTrue(opened.wait(10))
+        refused = self.send(did)
+        release.set(); first.join(10)
+        self.assertEqual((refused['status'], refused['detail']), ('dialog_unavailable', DETAILS['dialog_unavailable']))
+        self.assertEqual((results['first']['status'], results['first']['message_id']), ('sent', 701))
+        self.assertEqual((self.send(did)['status'], len(self.sends()), len(calls)), ('sent', 1, 1))  # Receipt replay.
 
     def test_repeated_call_during_an_inflight_claim_reads_outcome_unknown_without_dialog(self):
         did = self.prepare()['draft_id']

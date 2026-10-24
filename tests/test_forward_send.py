@@ -1494,14 +1494,16 @@ UNKNOWN = 'current receipt authority is unavailable; do not retry automatically'
 
 
 class FinalReviewTests(ForwardFixture, unittest.TestCase):
-    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8)."""
+    """Whole-branch review: the caller that lost the claim reads outcome_unknown (spec 0.54 §8). Review fix (057, low):
+    a call can no longer lose the claim after a dialog of its own, since the first call holds the draft from just before
+    its dialog until its claim; a concurrent call shows no dialog, even past the one-dialog gate bypassed here."""
 
     def assert_unknown(self, result, did):
         self.assertEqual(result, {'status': 'outcome_unknown', 'draft_id': did, 'recipient': None,
                                   'message_id': None, 'detail': UNKNOWN, 'next_action': 'check_send_status'})
 
     def test_concurrent_sends_make_one_attempt(self):
-        # The second caller made no attempt but reads outcome_unknown, never sent or expired.
+        # The second caller shows no dialog and makes no attempt: dialog_unavailable, never sent or expired.
         did = self.prepare()['draft_id']
         gate = threading.Event(); results = []
         def prompt(**kw):
@@ -1513,16 +1515,17 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
         for thread in threads:
             thread.start()
         deadline = time.monotonic() + 5
-        while len(self.approvals) < 2 and time.monotonic() < deadline:
+        while not results and time.monotonic() < deadline:  # The refused call returns while the dialog is open.
             time.sleep(0.01)
         gate.set()
         for thread in threads:
             thread.join(10)
-        self.assertEqual(sorted(result['status'] for result in results), ['outcome_unknown', 'sent'])
-        self.assert_unknown(next(result for result in results if result['status'] != 'sent'), did)
-        self.assertEqual(len(self.forwards()), 1)
+        self.assertEqual(sorted(result['status'] for result in results), ['dialog_unavailable', 'sent'])
+        refused = next(result for result in results if result['status'] != 'sent')
+        self.assertEqual((refused['detail'], refused['message_id']), (DETAILS['dialog_unavailable'], None))
+        self.assertEqual((len(self.approvals), len(self.forwards())), (1, 1))
 
-    def test_dialog_that_outlives_the_winning_send_reads_outcome_unknown(self):
+    def test_a_send_while_the_drafts_dialog_is_open_shows_no_second_dialog(self):
         did = self.prepare()['draft_id']
         opened, release, calls, results = threading.Event(), threading.Event(), [], {}
         def prompt(**kw):
@@ -1533,34 +1536,36 @@ class FinalReviewTests(ForwardFixture, unittest.TestCase):
         self.broker._approval_prompt = prompt
         # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
         self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
-        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
-        loser.start(); self.assertTrue(opened.wait(10))
-        winner = self.send(did)
-        release.set(); loser.join(10)
-        self.assertEqual((winner['status'], winner['message_id']), ('sent', 701))
-        self.assert_unknown(results['loser'], did)
-        self.assertEqual((self.send(did)['status'], len(self.forwards())), ('sent', 1))  # Receipt replay.
+        first = threading.Thread(target=lambda: results.setdefault('first', self.send(did)))
+        first.start(); self.assertTrue(opened.wait(10))
+        refused = self.send(did)
+        release.set(); first.join(10)
+        self.assertEqual((refused['status'], refused['detail']), ('dialog_unavailable', DETAILS['dialog_unavailable']))
+        self.assertEqual((results['first']['status'], results['first']['message_id']), ('sent', 701))
+        self.assertEqual((self.send(did)['status'], len(self.forwards()), len(calls)), ('sent', 1, 1))  # Receipt replay.
 
     def test_loser_after_a_local_failure_reads_local_failed(self):
+        # The loser revalidated the draft; before it could reserve it, the winner claimed it and failed locally.
         did = self.prepare()['draft_id']
-        opened, release, calls, results = threading.Event(), threading.Event(), [], {}
+        calls, started, results = [], [], {}
         def prompt(**kw):
             calls.append(kw)
-            if len(calls) == 1:
-                opened.set(); release.wait(10)
-            else:
-                self.raw.source['edit_date'] = 1700000100  # The winner's post-approval revalidation fails.
+            self.raw.source['edit_date'] = 1700000100  # The winner's post-approval revalidation fails.
             return True
         self.broker._approval_prompt = prompt
-        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
-        self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
-        loser = threading.Thread(target=lambda: results.setdefault('loser', self.send(did)))
-        loser.start(); self.assertTrue(opened.wait(10))
-        self.assertEqual(self.send(did)['status'], 'local_failed')
-        release.set(); loser.join(10)
-        self.assertEqual(results['loser'], {'status': 'local_failed', 'draft_id': did, 'recipient': None,
+        real = self.broker._drafts.reserve
+        def reserve(*args, **kwargs):
+            if not started:  # The loser, revalidated and about to reserve the draft for its dialog.
+                started.append(True)
+                winner = threading.Thread(target=lambda: results.setdefault('winner', self.send(did)))
+                winner.start(); winner.join(10)
+            return real(*args, **kwargs)
+        self.broker._drafts.reserve = reserve
+        loser = self.send(did)
+        self.assertEqual(results['winner']['status'], 'local_failed')
+        self.assertEqual(loser, {'status': 'local_failed', 'draft_id': did, 'recipient': None,
             'message_id': None, 'detail': 'local revalidation failed; no provider send was attempted'})
-        self.assertEqual(self.forwards(), [])
+        self.assertEqual((len(calls), self.forwards()), (1, []))
 
     def test_repeated_call_during_an_inflight_claim_reads_outcome_unknown_without_dialog(self):
         did = self.prepare()['draft_id']

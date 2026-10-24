@@ -108,6 +108,34 @@ class SerializedDialogTests(unittest.TestCase):
         self.assertIn("no new send", replay.detail)
         self.assertEqual((self.dialogs, len(self.sender.sent)), (["only"], 1))
 
+    def test_a_concurrent_send_between_the_dialog_and_the_claim_shows_no_second_dialog(self):
+        """Review fix (057, low): the dialog lock is free once the first dialog closed, but the first send still holds
+        its draft until the claim, so a second send of it in that moment shows no dialog and makes no attempt."""
+        self.release.set()
+        draft, started, second = self.prepare("only"), [], []
+        real = self.broker._drafts.claim
+
+        def claim(*args, **kwargs):
+            if not started:  # The first send, its dialog approved and closed, not yet claimed.
+                started.append(True)
+                worker = threading.Thread(target=lambda: second.append(self.send(draft)))
+                worker.start()
+                worker.join(10)
+            return real(*args, **kwargs)
+        self.broker._drafts.claim = claim
+        self.assertEqual(self.send(draft).status, "sent")
+        self.assertEqual([(result.status, result.detail) for result in second],
+                         [("dialog_unavailable", DETAILS["dialog_unavailable"])])
+        self.assertEqual((self.dialogs, len(self.sender.sent)), (["only"], 1))
+
+    def test_a_declined_dialog_releases_the_draft_for_its_next_dialog(self):
+        self.release.set()
+        self.answers = [False, True]
+        draft = self.prepare("only")
+        self.assertEqual(self.send(draft).status, "declined")
+        self.assertEqual(self.send(draft).status, "sent")
+        self.assertEqual((self.dialogs, len(self.sender.sent)), (["only", "only"], 1))
+
     def test_the_open_dialog_is_counted_once_for_the_installers_gate(self):
         first, second = self.prepare("first"), self.prepare("second")
         worker = threading.Thread(target=lambda: self.send(first))
@@ -147,6 +175,18 @@ class SerializedDialogTests(unittest.TestCase):
         self.assertLess(gate.index("self._dialog_lock.acquire(blocking=False)"),
                         gate.index("account_registry.dialog_lock("))
         self.assertLess(gate.index("account_registry.dialog_lock("), gate.index("self._prompt_approval("))
+
+    def test_every_dialog_is_reserved_until_its_claim(self):
+        """Review fix (057, low): each of the nine sends and applies reserves its draft just before the dialog, shows
+        none while another apply holds it, claims with its own reservation and releases it when the call ends."""
+        source = inspect.getsource(broker_module.Broker)
+        self.assertEqual(len(re.findall(r"reservation = self\._drafts\.reserve\((?:request\.)?draft_id, owner=owner, "
+                                        r"draft=entry\)\n\s+decision = 'dialog_unavailable' if reservation is None else "
+                                        r"approval_outcome\(self\._owner_dialog\(", source)), 9)
+        self.assertEqual(len(re.findall(r"self\._drafts\.claim\([^)]*reservation=reservation\)", source)), 9)
+        self.assertEqual(len(re.findall(r"self\._drafts\.claim\(", source)), 9)
+        self.assertEqual(len(re.findall(r"\n        finally:\n            self\._drafts\.release\((?:request\.)?draft_id, "
+                                        r"reservation\)\n", source)), 9)
 
     def test_without_a_registry_the_gate_reads_and_creates_nothing_in_the_accounts_folder(self):
         """0.54's bytes: no registry, so no lock file is made, and the dialog opens as before."""

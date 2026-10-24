@@ -891,8 +891,9 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(self.apply_archive(did)['status'], 'local_failed'); self.assert_no_attempt()
 
     def test_concurrent_applies_make_one_attempt(self):
-        # Recorded pattern (spec §8 amendments, shared with F14/F15): the second caller made no
-        # attempt but reads outcome_unknown, never applied or expired.
+        # Review fix (057, low), replacing the recorded 0.54 pattern (both callers saw a dialog and the one that lost
+        # the claim read outcome_unknown): the first apply holds the draft from just before its dialog until its claim,
+        # so the second shows no dialog, even past the one-dialog gate bypassed here, and reads dialog_unavailable.
         did = self.prepare_archive()['draft_id']
         gate = threading.Event(); results = []
         def prompt(**kw):
@@ -904,13 +905,13 @@ class ArchiveApplyTests(Fixture, unittest.TestCase):
         for thread in threads:
             thread.start()
         deadline = time.monotonic() + 5
-        while len(self.approvals) < 2 and time.monotonic() < deadline:
+        while not results and time.monotonic() < deadline:  # The refused apply returns while the dialog is open.
             time.sleep(0.01)
         gate.set()
         for thread in threads:
             thread.join(10)
-        self.assertEqual(sorted(results), ['applied', 'outcome_unknown'])
-        self.assertEqual(len(self.requests('addChatToList')), 1)
+        self.assertEqual(sorted(results), ['applied', 'dialog_unavailable'])
+        self.assertEqual((len(self.approvals), len(self.requests('addChatToList'))), (1, 1))
 
     def test_restart_foreign_owner_and_disabled_policy_are_content_free(self):
         did = self.prepare_archive()['draft_id']

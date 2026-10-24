@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import unittest
 from collections import deque
@@ -701,15 +701,19 @@ class TopicReplyTests(unittest.TestCase):
       self.assertNotEqual(results[0].status, 'sent')
       self.assertEqual((h.approvals, h.claim_count, h.register_count, h.sends()), ([], 0, 0, []))
     with Harness() as h:
-      h.prepare(); barrier = threading.Barrier(2)
-      h.decision = lambda: barrier.wait(timeout=5) is not None
-      # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
+      # Review fix (057, low): the first send holds the draft from just before its dialog until its claim, so the
+      # second shows no dialog (even past the one-dialog gate bypassed here) and never reaches the claim.
+      h.prepare(); gate = threading.Event()
+      h.decision = lambda: gate.wait(timeout=5)
       h.broker._owner_dialog = lambda **facts: h.broker._approval_prompt(**facts)
       with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = [f.result(timeout=8) for f in [pool.submit(h.send) for _ in range(2)]]
-      self.assertEqual(sum(r['status'] == 'sent' for r in outcomes), 1)
-      self.assertIn(h.claim_count, (1, 2))
-      self.assertEqual((len(h.approvals), h.claim_success_count, h.register_count, len(h.sends())), (2, 1, 1, 1))
+        futures = [pool.submit(h.send) for _ in range(2)]
+        refused = next(as_completed(futures, timeout=8)).result(); gate.set()
+        outcomes = [f.result(timeout=8) for f in futures]
+      self.assertEqual(refused['status'], 'dialog_unavailable')
+      self.assertEqual(sorted(r['status'] for r in outcomes), ['dialog_unavailable', 'sent'])
+      self.assertEqual((len(h.approvals), h.claim_count, h.claim_success_count, h.register_count, len(h.sends())),
+                       (1, 1, 1, 1, 1))
 
   def test_combined_attempt_retention_and_final_disclosure(self):
     with Harness() as h:

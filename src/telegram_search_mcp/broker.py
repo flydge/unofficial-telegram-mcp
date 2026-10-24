@@ -758,7 +758,12 @@ class Broker(SelectionBrokerMixin):
         Once an alias registry exists the rule holds across every broker of the user (one process per alias): the
         user's one dialog lock in the accounts directory is held for the whole dialog, and while another broker holds
         it, or it is unsafe, this call answers dialog_unavailable the same way (critic fix 055f). Without a registry
-        nothing is read or created there (0.54)."""
+        nothing is read or created there (0.54).
+
+        Every caller reserves its draft just before this call and keeps the reservation until its claim
+        (OutgoingDraftRegistry.reserve, review fix 057): a concurrent apply of the same draft, even in the moment
+        between this dialog closing and that claim, answers dialog_unavailable and never shows a second dialog; a
+        reservation that was not claimed is released when the call ends, so the draft stays pending."""
         if not self._dialog_lock.acquire(blocking=False):
             return DIALOG_UNAVAILABLE
         try:
@@ -2009,6 +2014,7 @@ class Broker(SelectionBrokerMixin):
     def _send_prepared_artifact_impl(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
         if request.approved is not True:
             return SendPreparedArtifactResponse(status="declined", draft_id=request.draft_id, detail=NOT_GIVEN)
+        reservation = None
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
@@ -2081,7 +2087,8 @@ class Broker(SelectionBrokerMixin):
             if entry.reply_source is None:
                 reply_confirmation[('topic_preview' if entry.topic is not None or entry.outgoing_entities
                                     else 'draft_preview')] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(
+            reservation = self._drafts.reserve(request.draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
                 recipient_title=expected_title, recipient=entry.recipient,
                 display_name=entry.display_name, size_bytes=entry.size_bytes,
                 sha256=entry.sha256, caption=entry.caption, kind=entry.kind, text=entry.text,
@@ -2107,7 +2114,7 @@ class Broker(SelectionBrokerMixin):
                 if provider is not provider_before_dialog or provider.send_observation_epoch is not epoch_before_dialog:
                     raise DraftError('formatting authority changed')
             claim = self._drafts.claim(request.draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             scope = active_scope(self._artifact_store)
             send_fence = (lambda: self._artifact_send_fence(scope, owner, provider, claim.provider_epoch, claim)) if scope is not None else None
             fence_kwargs = {"pre_send_fence": send_fence} if send_fence is not None else {}
@@ -2259,6 +2266,8 @@ class Broker(SelectionBrokerMixin):
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
             return SendPreparedArtifactResponse(status="expired", draft_id=request.draft_id,
                                                 detail="draft is unavailable or no longer valid")
+        finally:
+            self._drafts.release(request.draft_id, reservation)
 
     def _require_forward_policy(self) -> None:
         require_current(self._policy)
@@ -2326,6 +2335,7 @@ class Broker(SelectionBrokerMixin):
         def result(status, detail, **values):
             return SendPreparedForwardResponse(status=status, draft_id=draft_id, detail=detail, **values)
         held = False
+        reservation = None
         try:
             owner = self._forward_owner(client_id)
             if self._drafts.kind(draft_id, owner=owner) != 'forward':
@@ -2369,7 +2379,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(FORWARD_UNAVAILABLE)
             preview = self._forward_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='forward', forward_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2382,7 +2394,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(FORWARD_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             def forward_guard():
                 require_current(self._policy)
                 return ({'send', 'forward_send'} <= set(self._policy.enabled_capabilities)
@@ -2421,6 +2433,8 @@ class Broker(SelectionBrokerMixin):
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._send_claim_lost(draft_id, client_id, 'forward', result, owner=owner if held else None)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     def _send_claim_lost(self, draft_id: str, client_id: str, kind: str, result, *, owner: DraftOwner | None):
         """A call that lost the claim to a concurrent or repeated call made no attempt, but the
@@ -2511,6 +2525,7 @@ class Broker(SelectionBrokerMixin):
         def result(status, detail, **values):
             return SendPreparedVideoResponse(status=status, draft_id=draft_id, detail=detail, **values)
         held = False
+        reservation = None
         try:
             owner = self._video_owner(client_id)
             if self._drafts.kind(draft_id, owner=owner) != 'video':
@@ -2543,7 +2558,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(VIDEO_UNAVAILABLE)
             preview = self._video_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption=entry.caption, kind='video', video_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2555,7 +2572,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(VIDEO_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             scope = active_scope(self._artifact_store)
             send_fence = (lambda: self._artifact_send_fence(scope, owner, provider, claim.provider_epoch, claim)) if scope is not None else None
             def video_guard():
@@ -2613,6 +2630,8 @@ class Broker(SelectionBrokerMixin):
                           recipient=claim.draft.recipient, message_id=receipt.message_id)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._send_claim_lost(draft_id, client_id, 'video', result, owner=owner if held else None)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     # --- 0.56 ordered albums (F15b) -------------------------------------------------------------------------
 
@@ -2712,6 +2731,7 @@ class Broker(SelectionBrokerMixin):
         def result(status, detail, **values):
             return SendPreparedAlbumResponse(status=status, draft_id=draft_id, detail=detail, **values)
         held = False
+        reservation = None
         try:
             owner = self._album_owner(client_id)
             if self._drafts.kind(draft_id, owner=owner) != 'album':
@@ -2745,7 +2765,9 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(ALBUM_UNAVAILABLE)
             preview = self._album_preview(entry, owner).model_dump(mode='json')
             # One dialog for every item: the album digest stands for the content and the total for the size.
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='album', album_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -2757,7 +2779,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(ALBUM_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             scope = active_scope(self._artifact_store)
             send_fence = ((lambda: self._album_send_fence(scope, owner, provider, claim.provider_epoch, claim))
                           if scope is not None else None)
@@ -2813,6 +2835,8 @@ class Broker(SelectionBrokerMixin):
             return self._send_claim_lost(draft_id, client_id, 'album', result, owner=owner)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._send_claim_lost(draft_id, client_id, 'album', result, owner=owner if held else None)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     @contextmanager
     def _album_send_fence(self, scope, owner, provider, provider_epoch, claim):
@@ -2969,6 +2993,7 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return ApplyPreparedArchiveResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        reservation = None
         try:
             owner = self._change_owner(client_id, 'archive_chats')
             if self._drafts.kind(draft_id, owner=owner) != 'archive':
@@ -3005,7 +3030,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(ARCHIVE_UNAVAILABLE)
             preview = self._archive_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='archive', archive_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -3017,7 +3044,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(ARCHIVE_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             def archive_guard():
                 require_current(self._policy)
                 return (set(required_capabilities('archive_chats')) <= set(self._policy.enabled_capabilities)
@@ -3053,6 +3080,8 @@ class Broker(SelectionBrokerMixin):
             return self._archive_receipt(receipt, result, failure_detail=failure_detail, chat_id=entry.recipient)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'archive', result)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     @staticmethod
     def _change_failure(error: MessageSendFailed) -> str:
@@ -3168,6 +3197,7 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return ApplyPreparedTextEditResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        reservation = None
         try:
             owner = self._change_owner(client_id, 'edit_own_text')
             if self._drafts.kind(draft_id, owner=owner) != 'text_edit':
@@ -3206,7 +3236,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='text_edit', text_edit_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -3218,7 +3250,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             needed = set(required_capabilities('edit_own_text')) | ({'edit_own_styled_text'} if styled else set())
             def edit_guard():
                 require_current(self._policy)
@@ -3259,6 +3291,8 @@ class Broker(SelectionBrokerMixin):
             return result('outcome_unknown', 'the edit result is unconfirmed; do not retry automatically', **changed)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'text_edit', result)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     # 0.57 caption edits: the text edit's skeleton, with the styled conjunction checked wherever the draft is read.
     def _caption_policy(self, styled: bool) -> None:
@@ -3339,6 +3373,7 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return ApplyPreparedCaptionEditResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        reservation = None
         try:
             owner = self._caption_owner(client_id, False)
             if self._drafts.kind(draft_id, owner=owner) != 'caption_edit':
@@ -3377,7 +3412,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(CAPTION_UNAVAILABLE)
             preview = self._caption_edit_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='caption_edit', caption_edit_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -3389,7 +3426,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(CAPTION_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             needed = set(required_capabilities('edit_own_caption')) | ({'edit_own_styled_text'} if styled else set())
             def caption_guard():
                 require_current(self._policy)
@@ -3430,6 +3467,8 @@ class Broker(SelectionBrokerMixin):
                           **changed)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'caption_edit', result)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     # 0.57 pin and unpin: the archive skeleton (an already-in-target state, an observation after the call), with a
     # 4xx read back as the message already being in the target state or failed.
@@ -3485,6 +3524,7 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return ApplyPreparedPinChangeResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        reservation = None
         try:
             owner = self._change_owner(client_id, 'pin_messages')
             if self._drafts.kind(draft_id, owner=owner) != 'pin_change':
@@ -3526,7 +3566,9 @@ class Broker(SelectionBrokerMixin):
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(PIN_UNAVAILABLE)
             preview = self._pin_change_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='pin_change', pin_change_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -3538,7 +3580,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(PIN_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             def pin_guard():
                 require_current(self._policy)
                 return (set(required_capabilities('pin_messages')) <= set(self._policy.enabled_capabilities)
@@ -3579,6 +3621,8 @@ class Broker(SelectionBrokerMixin):
             return self._pin_receipt(receipt, result, failure_detail=failure_detail, action=spec.action, **changed)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'pin_change', result)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     @staticmethod
     def _pin_receipt(receipt, result, *, replay: bool = False, failure_detail: str = 'TDLib rejected the change',
@@ -3660,6 +3704,7 @@ class Broker(SelectionBrokerMixin):
         draft_id = request.draft_id
         def result(status, detail, **values):
             return ApplyPreparedMessageDeleteResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        reservation = None
         try:
             owner = self._change_owner(client_id, 'delete_own_message')
             if self._drafts.kind(draft_id, owner=owner) != 'message_delete':
@@ -3696,7 +3741,9 @@ class Broker(SelectionBrokerMixin):
                     or provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(DELETE_UNAVAILABLE)
             preview = self._message_delete_preview(entry, owner).model_dump(mode='json')
-            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+            reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
+            decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
+                    recipient_title=expected_title,
                     recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
                     sha256=entry.sha256, caption='', kind='message_delete', message_delete_preview=preview))
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
@@ -3708,7 +3755,7 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError(DELETE_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
-                                       provider_epoch=provider.send_observation_epoch)
+                                       provider_epoch=provider.send_observation_epoch, reservation=reservation)
             def delete_guard():
                 require_current(self._policy)
                 return (set(required_capabilities('delete_own_message')) <= set(self._policy.enabled_capabilities)
@@ -3745,6 +3792,8 @@ class Broker(SelectionBrokerMixin):
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'message_delete', result,
                                           unknown=DELETE_AUTHORITY_UNKNOWN)
+        finally:
+            self._drafts.release(draft_id, reservation)
 
     @staticmethod
     def _message_delete_receipt(receipt, result, *, replay: bool = False,

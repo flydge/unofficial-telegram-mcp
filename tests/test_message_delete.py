@@ -39,7 +39,7 @@ from telegram_search_mcp.delete_drafts import (ApplyPreparedMessageDeleteRequest
     PrepareMessageDeleteResponse, UNAVAILABLE as DELETE_UNAVAILABLE, delete_request)
 from telegram_search_mcp.draft_kinds import DRAFT_KINDS
 from telegram_search_mcp.edit_drafts import EditChat
-from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
+from telegram_search_mcp.outgoing_drafts import DraftError, DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.server import _TOOL_CAPABILITIES, _TOOL_NAMES, available_tools, build_server
 from telegram_search_mcp.tdjson import (ForbiddenTDLibRequest, MessageSendNotAttempted, TDLibClient,
                                         _validate_bounded_request)
@@ -648,6 +648,56 @@ class ApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(len(self.deletions()), 1)
         self.assertIn('applied', [result['status'] for result in results])
 
+    def test_a_concurrent_apply_between_the_dialog_and_the_claim_shows_no_second_dialog(self):
+        """Review fix (057, low): the first apply holds the draft from just before its dialog until its claim, so a
+        second apply of the same draft in the moment after the dialog closed answers dialog_unavailable: no second
+        Delete dialog, no attempt, and the first apply's answer stays the confirmed deletion."""
+        did = self.prepare()['draft_id']
+        real, started, second = self.broker._drafts.claim, [], []
+
+        def claim(*args, **kwargs):
+            if not started:  # The first apply, its dialog approved and closed, not yet claimed.
+                started.append(True)
+                worker = threading.Thread(target=lambda: second.append(self.apply(did)))
+                worker.start()
+                worker.join(10)
+            return real(*args, **kwargs)
+        self.broker._drafts.claim = claim
+        first = self.apply(did)
+        self.assertEqual((first['status'], first['detail']), ('applied', APPLIED))
+        self.assertEqual([(result['status'], result['detail']) for result in second],
+                         [('dialog_unavailable', DETAILS['dialog_unavailable'])])
+        self.assertEqual((len(self.approvals), len(self.deletions())), (1, 1))
+        replay = self.apply(did)  # The receipt is replayed; still one dialog and one deletion.
+        self.assertEqual(replay['status'], 'applied')
+        self.assertEqual((len(self.approvals), len(self.deletions())), (1, 1))
+
+    def test_a_reservation_not_claimed_is_released_and_the_draft_stays_pending(self):
+        did = self.prepare()['draft_id']
+        for answer, status in ((False, 'declined'), (ApprovalDecision('timeout'), 'timeout'),
+                               (ApprovalDecision('dialog_unavailable'), 'dialog_unavailable')):
+            with self.subTest(answer=answer):
+                self.broker._approval_prompt = lambda answer=answer, **kw: answer
+                self.assertEqual(self.apply(did)['status'], status)
+        policy = self.broker._policy
+
+        def revoked(**kw):  # Approved, but the capability is gone before the claim.
+            self.broker._policy = RuntimePolicy(enabled_capabilities=('send', 'read'))
+            return True
+        self.broker._approval_prompt = revoked
+        self.assertEqual(self.apply(did)['status'], 'expired')
+        self.broker._policy = policy
+
+        def broken(**kw):
+            raise RuntimeError('osascript')
+        self.broker._approval_prompt = broken
+        with self.assertRaises(RuntimeError):
+            self.apply(did)
+        self.assertEqual(self.deletions(), [])
+        self.broker._approval_prompt = lambda **kw: self.approvals.append(kw) or True
+        self.assertEqual(self.apply(did)['status'], 'applied')
+        self.assertEqual((len(self.approvals), len(self.deletions())), (1, 1))
+
     def test_account_switch_after_the_call_is_outcome_unknown_never_expired(self):
         self.raw.delete_mode = 'switch_account'
         did = self.prepare()['draft_id']
@@ -809,6 +859,38 @@ class RegistryTests(unittest.TestCase):
             claim = registry.claim(draft.draft_id, owner=owner, approved=True)
             receipt = registry.finish(draft.draft_id, owner=owner, claim=claim, status='applied', observed='deleted')
             self.assertEqual((receipt.status, receipt.observed), ('applied', 'deleted'))
+
+    def test_one_reservation_per_draft_until_its_claim_or_release(self):
+        """Review fix (057, low): the registry side of one dialog per draft."""
+        with tempfile.TemporaryDirectory() as directory:
+            registry = OutgoingDraftRegistry(ArtifactStore(cache_dir=Path(directory) / 'cache'))
+            owner = DraftOwner(client_id=CLIENT, account_id=ACCOUNT)
+            draft = registry.prepare_change(owner=owner, chat_id=CHAT, chat_title='Team Chat',
+                                            change=MessageDeleteSpec(snapshot=snapshot()))
+            first = registry.reserve(draft.draft_id, owner=owner, draft=draft)
+            self.assertIsNotNone(first)
+            self.assertIsNone(registry.reserve(draft.draft_id, owner=owner, draft=draft))
+            self.assertEqual(registry.peek(draft.draft_id, owner=owner), draft)  # Still pending for status reads.
+            with self.assertRaises(DraftError):  # Another apply's claim, with or without a reservation of its own.
+                registry.claim(draft.draft_id, owner=owner, approved=True)
+            with self.assertRaises(DraftError):
+                registry.claim(draft.draft_id, owner=owner, approved=True, reservation=object())
+            registry.release(draft.draft_id, object())  # Someone else's token releases nothing.
+            self.assertIsNone(registry.reserve(draft.draft_id, owner=owner, draft=draft))
+            registry.release(draft.draft_id, first)
+            second = registry.reserve(draft.draft_id, owner=owner, draft=draft)
+            self.assertIsNotNone(second)
+            claim = registry.claim(draft.draft_id, owner=owner, approved=True, reservation=second)
+            registry.release(draft.draft_id, second)  # After the claim: nothing left to release.
+            with self.assertRaises(DraftError):  # Claimed: no longer pending, so never reserved again.
+                registry.reserve(draft.draft_id, owner=owner, draft=draft)
+            registry.finish(draft.draft_id, owner=owner, claim=claim, status='applied', observed='deleted')
+            other = registry.prepare_change(owner=owner, chat_id=CHAT, chat_title='Team Chat',
+                                            change=MessageDeleteSpec(snapshot=snapshot()))
+            with self.assertRaises(DraftError):  # Only the draft the apply revalidated.
+                registry.reserve(other.draft_id, owner=owner, draft=draft)
+            with self.assertRaises(DraftError):
+                registry.reserve(other.draft_id, owner=DraftOwner(client_id=FOREIGN, account_id=ACCOUNT), draft=other)
 
 
 class _Service:

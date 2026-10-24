@@ -193,6 +193,7 @@ class _Entry:
     provider_epoch: object | None = None
     artifact_authority: tuple | None = None
     claim_token: object | None = None
+    reservation: object | None = None  # One apply's owner dialog, from just before it until the claim (review fix 057).
 
 
 class OutgoingDraftRegistry:
@@ -657,14 +658,43 @@ class OutgoingDraftRegistry:
                 else entry.draft.expires_at > now)
         }
 
-    def claim(self, draft_id: str, *, owner: DraftOwner, approved: bool, provider: object | None = None, provider_epoch: object | None = None) -> ClaimedDraft:
-        """Atomically consume a live, explicitly approved draft before sending."""
+    def reserve(self, draft_id: str, *, owner: DraftOwner, draft: OutgoingDraft) -> object | None:
+        """Reserve the reviewed pending draft for one apply's owner dialog, until its claim (review fix 057).
+
+        Taken under the registry lock just before the dialog: the draft must still be pending and equal to the one the
+        apply revalidated. None while another apply holds it: that apply answers dialog_unavailable and shows no second
+        dialog. release() ends a reservation the apply did not claim, so a declined, timed-out or unavailable dialog
+        leaves the draft pending.
+        """
+        with self._lock:
+            entry = self._get(draft_id, owner)
+            self._pending_locked(entry, verify_artifact=False)
+            if entry.draft != draft:
+                raise DraftError("draft is unavailable")
+            if entry.reservation is not None:
+                return None
+            entry.reservation = object()
+            return entry.reservation
+
+    def release(self, draft_id: object, reservation: object | None) -> None:
+        """End a reservation that was not claimed; any other reservation or entry is left as it is."""
+        with self._lock:
+            entry = self._entries.get(draft_id) if isinstance(draft_id, str) else None
+            if entry is not None and reservation is not None and entry.reservation is reservation:
+                entry.reservation = None
+
+    def claim(self, draft_id: str, *, owner: DraftOwner, approved: bool, provider: object | None = None,
+              provider_epoch: object | None = None, reservation: object | None = None) -> ClaimedDraft:
+        """Atomically consume a live, explicitly approved draft before sending. A draft reserved for another apply's
+        dialog is not claimable (review fix 057); the claim ends this apply's own reservation."""
         if approved is not True:
             raise DraftError("explicit approval is required")
         with self._lock:
             entry = self._get(draft_id, owner)
             if entry.state != "pending":
                 raise DraftError("draft has already been used")
+            if entry.reservation is not None and entry.reservation is not reservation:
+                raise DraftError("draft is reserved by another apply")
             path = self._pending_locked(entry)
             if (entry.draft.topic is not None and entry.draft.reply_source is not None and
                     (entry.draft.topic_provider is not provider or entry.draft.topic_provider_epoch is not provider_epoch)):
@@ -673,6 +703,7 @@ class OutgoingDraftRegistry:
                     entry.draft.formatting_provider_epoch is not provider_epoch):
                 raise DraftError('formatting provider authority changed')
             entry.state = "claimed"
+            entry.reservation = None
             entry.attempted_at = self._attempt_clock()
             entry.provider = provider
             entry.provider_epoch = provider_epoch

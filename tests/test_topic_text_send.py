@@ -10,7 +10,7 @@ import unittest
 import subprocess
 import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier
@@ -452,20 +452,24 @@ class TopicTextTests(unittest.TestCase):
             self.assertEqual(self.send(preview['draft_id'])['status'], 'failed')
         self.assertEqual(self.sends(), [])
 
-    def test_two_concurrent_owner_approvals_make_one_transport_attempt(self):
+    def test_two_concurrent_sends_show_one_dialog_and_make_one_transport_attempt(self):
+        # Review fix (057, low): two owner approvals of one draft can no longer happen; the first send holds the draft
+        # from just before its dialog until its claim, even past the one-dialog gate bypassed here.
         preview = self.prepare()
-        barrier = Barrier(2)
+        gate, dialogs = threading.Event(), []
         def approve(**kwargs):
-            barrier.wait(timeout=5)
+            dialogs.append(kwargs)
+            gate.wait(timeout=5)
             return True
         self.broker._approval_prompt = approve
-        # The broker shows one dialog at a time (test_approval_serialization); bypass that gate to drive the claim race.
         self.broker._owner_dialog = lambda **facts: self.broker._approval_prompt(**facts)
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self.send, preview['draft_id']) for _ in range(2)]
-            outcomes = [f.result(timeout=8)['status'] for f in futures]
-        self.assertIn('sent', outcomes)
-        self.assertEqual(len(self.sends()), 1)
+            refused = next(as_completed(futures, timeout=8)).result()  # Returns while the dialog is open.
+            gate.set()
+            outcomes = sorted(f.result(timeout=8)['status'] for f in futures)
+        self.assertEqual((refused['status'], outcomes), ('dialog_unavailable', ['dialog_unavailable', 'sent']))
+        self.assertEqual((len(dialogs), len(self.sends())), (1, 1))
 
     def test_revocation_after_registration_refuses_transport(self):
         preview = self.prepare()
