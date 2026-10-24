@@ -198,6 +198,21 @@ class FormattedReducerTests(unittest.TestCase):
     s=SendObservations();s.register('a','x',12,CHAT,'messageText',text_sha256=hashlib.sha256(text.encode()).hexdigest(),outgoing_entities=bold)
     s.reduce(self.pending(sent(-9,rows)));s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':sent(701,rows)})
     self.assertEqual(s.snapshot('a').message_id,701 if confirmed else None)
+ def test_a_media_timestamp_confirms_only_on_its_whole_token(self):
+  """Review fix (057, low): a formatted reply to a video carries TDLib's media timestamp (find_media_timestamps)."""
+  text='Watch from 0:05';bold=((0,15,'textEntityTypeBold'),)
+  def entity(kind,offset,length,**fields):return {'@type':'textEntity','offset':offset,'length':length,'type':{'@type':kind,**fields}}
+  def sent(identifier,rows):
+   m=message(identifier,entities=rows);m['content']['text']['text']=text;return m
+  for stamp,confirmed in [(entity('textEntityTypeMediaTimestamp',11,4,media_timestamp=5),True),
+                          (entity('textEntityTypeMediaTimestamp',11,4,media_timestamp=4),False),
+                          (entity('textEntityTypeMediaTimestamp',12,3,media_timestamp=5),False),
+                          (entity('textEntityTypeMediaTimestamp',11,4),False)]:
+   with self.subTest(stamp=stamp):
+    rows=[entity('textEntityTypeBold',0,11),entity('textEntityTypeBold',11,4),stamp]
+    s=SendObservations();s.register('a','x',12,CHAT,'messageText',text_sha256=hashlib.sha256(text.encode()).hexdigest(),outgoing_entities=bold)
+    s.reduce(self.pending(sent(-9,rows)));s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':sent(701,rows)})
+    self.assertEqual(s.snapshot('a').message_id,701 if confirmed else None)
  def test_registration_mutable_or_artifact_expectation_refused(self):
   self.register()
   for rows,kind in [(list(FROZEN),'messageText'),(tuple(reversed(FROZEN)),'messageText'),(FROZEN,'messageDocument')]:

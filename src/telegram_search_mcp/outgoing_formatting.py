@@ -2,7 +2,8 @@
 
 Coordinates refer to the final whole text in UTF-16 code units. This module
 neither parses formatting syntax nor grants permission to send anything. It also
-reads the form the pinned TDLib (d1085f9) returns such styles in: touching pieces.
+reads the two forms the pinned TDLib (d1085f9) returns such a text in: styles cut
+into touching pieces, and media timestamps it marks in the text.
 """
 from __future__ import annotations
 
@@ -97,6 +98,45 @@ def joined_outgoing_entities(final_text: str, pieces: list[dict]) -> FrozenOutgo
             joined.append((kind, start, end))
     return freeze_outgoing_entities(final_text, [
         {"offset": start, "length": end - start, "type": {"@type": kind}} for kind, start, end in joined])
+
+
+def _timestamp_seconds(parts: list[str]) -> int | None:
+    if len(parts) > 3 or len(parts[-1]) != 2 or int(parts[-1]) >= 60:
+        return None
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1]) if 1 <= len(parts[0]) <= 4 else None
+    if not 1 <= len(parts[0]) <= 2 or not 1 <= len(parts[1]) <= 2 or int(parts[1]) >= 60:
+        return None
+    return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+
+
+def media_timestamp_tokens(text: str) -> dict[tuple[int, int], int]:
+    """Every media timestamp TDLib finds in the text (MessageEntity.cpp match_media_timestamps, find_media_timestamps),
+    keyed by its UTF-16 (offset, length), valued in seconds: a whole run of ASCII digits and colons around a colon with
+    a digit right after it and something before it, with no letter, number or underscore next to the run, of the form
+    m:ss to mmmm:ss or h:m:ss to hh:mm:ss (seconds and the minutes of three parts below 60)."""
+    def word(character: str) -> bool:
+        return character == "_" or unicodedata.category(character)[0] in "LN"
+    def digit(character: str) -> bool:
+        return "0" <= character <= "9"
+    units = [0]
+    for character in text:
+        units.append(units[-1] + (2 if ord(character) > 0xFFFF else 1))
+    tokens: dict[tuple[int, int], int] = {}
+    colon = text.find(":")
+    while colon != -1:
+        begin, end = colon, colon + 1
+        while begin and (text[begin - 1] == ":" or digit(text[begin - 1])):
+            begin -= 1
+        while end < len(text) and (text[end] == ":" or digit(text[end])):
+            end += 1
+        if (begin != colon and end != colon + 1 and digit(text[colon + 1])
+                and not (begin and word(text[begin - 1])) and not (end < len(text) and word(text[end]))):
+            seconds = _timestamp_seconds(text[begin:end].split(":"))
+            if seconds is not None:
+                tokens[(units[begin], units[end] - units[begin])] = seconds
+        colon = text.find(":", end)
+    return tokens
 
 
 def native_outgoing_entities(frozen: FrozenOutgoingEntities) -> list[dict]:

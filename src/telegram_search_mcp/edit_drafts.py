@@ -26,7 +26,8 @@ from .schemas import ChatId
 from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 from .outgoing_entity_models import OutgoingEntity, OutgoingEntityList
 from .outgoing_formatting import (FrozenOutgoingEntities, _STYLES, _boundaries, freeze_outgoing_entities,
-                                  joined_outgoing_entities, native_outgoing_entities, outgoing_entity_facts)
+                                  joined_outgoing_entities, media_timestamp_tokens, native_outgoing_entities,
+                                  outgoing_entity_facts)
 
 PREPARED = 'immutable text edit draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for an own text edit; no draft was created'
@@ -56,6 +57,9 @@ Title = Annotated[str, Field(strict=True, min_length=1, max_length=255)]
 AUTO_DETECTED = frozenset({'textEntityTypeUrl', 'textEntityTypeEmailAddress', 'textEntityTypePhoneNumber',
                            'textEntityTypeMention', 'textEntityTypeHashtag', 'textEntityTypeCashtag',
                            'textEntityTypeBotCommand', 'textEntityTypeBankCardNumber'})
+# The one auto-detected kind with a field: TDLib marks a timestamp in the text for a user account up to the duration of
+# the message's own media (video, audio, voice note), a link preview's or the replied message's (review fix 057).
+MEDIA_TIMESTAMP = 'textEntityTypeMediaTimestamp'
 ChatKind = Literal['private', 'basic_group', 'supergroup', 'channel']
 EditDate = Annotated[int, Field(strict=True, ge=0, le=2**31 - 1)]
 NewText = Annotated[str, Field(strict=True, min_length=1, max_length=4096)]
@@ -108,20 +112,28 @@ def frozen_styles(text: str, entities) -> FrozenOutgoingEntities:
     return freeze_outgoing_entities(text, list(entities)) if entities else ()
 
 
-def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities) -> bool:
+def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities, *,
+                 max_media_timestamp: int | None = None) -> bool:
     """The verification rule of every styled edit (0.57) and every formatted send (review fix 057): exactly the
     caller's styles, which TDLib may return cut into touching pieces (joined first, joined_outgoing_entities), plus only
-    fieldless auto-detected entities on whole scalars of the text; any other entity, field or span is not the edit."""
+    auto-detected entities on whole scalars of the text: the fieldless kinds, and a media timestamp exactly on a whole
+    timestamp token with that token's value (at most max_media_timestamp, when the bound is the message's own media).
+    Any other entity, field or span is not the edit."""
     if type(text) is not str or type(entities) is not list or len(entities) > MAX_ENTITIES:
         return False
-    caller, extras = [], []
+    caller, extras, stamps = [], [], []
     for row in entities:
         kind = row.get('type') if type(row) is dict else None
         if (type(row) is not dict or set(row) != {'@type', 'offset', 'length', 'type'} or row['@type'] != 'textEntity'
-                or type(kind) is not dict or set(kind) != {'@type'} or type(kind['@type']) is not str or
-                type(row['offset']) is not int or type(row['length']) is not int):
+                or type(kind) is not dict or type(kind.get('@type')) is not str or type(row['offset']) is not int or
+                type(row['length']) is not int):
             return False
-        if kind['@type'] in _STYLES:
+        if kind['@type'] == MEDIA_TIMESTAMP and set(kind) == {'@type', 'media_timestamp'} and \
+                type(kind['media_timestamp']) is int:
+            stamps.append((row['offset'], row['length'], kind['media_timestamp']))
+        elif set(kind) != {'@type'}:
+            return False
+        elif kind['@type'] in _STYLES:
             caller.append({'offset': row['offset'], 'length': row['length'], 'type': {'@type': kind['@type']}})
         elif kind['@type'] in AUTO_DETECTED:
             extras.append((row['offset'], row['length']))
@@ -132,6 +144,10 @@ def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities)
             return False
         bounds = _boundaries(text) if extras else {}
         if any(length <= 0 or offset not in bounds or offset + length not in bounds for offset, length in extras):
+            return False
+        tokens = media_timestamp_tokens(text) if stamps else {}
+        if any(tokens.get((offset, length)) != value or
+               (max_media_timestamp is not None and value > max_media_timestamp) for offset, length, value in stamps):
             return False
     except (ValueError, TypeError):
         return False
@@ -374,7 +390,8 @@ def edited_text_result(value: object, *, chat_id: int, message_id: int, new_text
                        previous_edit_date: int, styles: FrozenOutgoingEntities | None = None) -> int | None:
     """The returned message must be the same message, now messageText with exactly the new
     text and a non-zero edit_date not before the previous one; anything else is unknown. A styled
-    edit (styles given, 0.57) also needs exactly its styles back, with only auto-detected extras."""
+    edit (styles given, 0.57) also needs exactly its styles back, with only auto-detected extras (a text's media
+    timestamp is bounded by a link preview's or a replied media, which the result does not carry)."""
     content = value.get('content') if type(value) is dict else None
     text = content.get('text') if type(content) is dict else None
     edit_date = value.get('edit_date') if type(value) is dict else None

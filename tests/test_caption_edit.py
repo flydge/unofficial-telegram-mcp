@@ -595,6 +595,32 @@ class ApplyTests(Fixture, unittest.TestCase):
         self.assertEqual(self.apply(self.prepare('New caption', [whole, italic])['draft_id'])['status'],
                          'outcome_unknown')
 
+    def test_a_media_timestamp_is_tolerated_exactly_on_its_token(self):
+        """Review fix (057, low): for a user account TDLib marks a whole timestamp token up to the media's duration
+        (MessageEntity.cpp find_media_timestamps, get_text_entities_object); the video here lasts 5 seconds."""
+        def stamp(offset, length, value):
+            return entity('textEntityTypeMediaTimestamp', offset, length, media_timestamp=value)
+        bold = {'offset': 0, 'length': 14, 'type': {'@type': 'textEntityTypeBold'}}
+        for kind, new, styles, returned, expected in (
+                ('video', 'Chorus at 0:05', None, [stamp(10, 4, 5)], 'applied'),
+                ('video', 'Chorus at 0:05', [bold], [entity('textEntityTypeBold', 0, 10),
+                                                     entity('textEntityTypeBold', 10, 4), stamp(10, 4, 5)], 'applied'),
+                ('video', 'Chorus at 0:06', None, [stamp(10, 4, 6)], 'outcome_unknown'),  # past the duration
+                ('video', 'Chorus at 0:05', None, [stamp(10, 4, 6)], 'outcome_unknown'),  # another value
+                ('video', 'Chorus at 0:05', None, [stamp(11, 3, 5)], 'outcome_unknown'),  # part of the token
+                ('audio', 'Chorus at 0:30', None, [stamp(10, 4, 30)], 'applied'),
+                ('voice_note', 'Chorus at 0:04', None, [stamp(10, 4, 4)], 'outcome_unknown'),
+                # A photo's bound is a replied message's media, which the result does not carry.
+                ('photo', 'Scene at 1:00:00', None, [stamp(9, 7, 3600)], 'applied')):
+            with self.subTest(kind=kind, new=new, returned=returned):
+                self.setUp()
+                self.raw.message = own_media(kind)
+                self.raw.caption_mode = 'tdlib'
+                self.raw.tdlib_entities = returned
+                did = self.prepare(new, styles)['draft_id']
+                self.assertEqual(self.apply(did)['status'], expected)
+                self.assertEqual(len(self.requests('editMessageCaption')), 1)
+
     def test_the_reviewed_caption_position_is_sent_and_verified(self):
         for kind, above in (('photo', True), ('video', True), ('animation', False), ('document', False),
                             ('audio', False), ('voice_note', False)):
@@ -818,6 +844,27 @@ class VerificationTests(unittest.TestCase):
                 self.assertIsNone(self.check(self.result('New caption', entities), styles))
         self.assertEqual(self.check(self.result(''), new=''), 1700000500)
         self.assertIsNone(self.check(self.result('', [entity('textEntityTypeUrl', 0, 1)]), new=''))
+
+    def test_a_media_timestamp_is_bounded_by_the_own_media_duration_only(self):
+        stamp = [entity('textEntityTypeMediaTimestamp', 9, 7, media_timestamp=3600)]
+        def video(duration):
+            value = self.result('Scene at 1:00:00', stamp, kind='messageVideo')
+            value['content']['video']['duration'] = duration
+            return value
+        def check(value, kind='messageVideo'):
+            return self.check(value, content_type=kind, new='Scene at 1:00:00')
+        self.assertIsNone(check(video(5)))
+        self.assertEqual(check(video(3600)), 1700000500)
+        self.assertEqual(check(video(0)), 1700000500)  # TDLib: no duration, no bound.
+        for duration in (None, True, -1, '3600'):
+            with self.subTest(duration=duration):
+                self.assertIsNone(check(video(duration)))
+        malformed = self.result('Scene at 1:00:00', stamp, kind='messageVideo')
+        del malformed['content']['video']
+        self.assertIsNone(check(malformed))
+        for kind in ('messagePhoto', 'messageAnimation', 'messageDocument'):  # Bounded by a replied media.
+            with self.subTest(kind=kind):
+                self.assertEqual(check(self.result('Scene at 1:00:00', stamp, kind=kind), kind), 1700000500)
 
     def test_same_message_same_kind_and_position(self):
         self.assertIsNone(self.check(self.result(id=MID + 1)))

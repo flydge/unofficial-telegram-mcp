@@ -44,6 +44,9 @@ CONTENT_KINDS = {'messagePhoto': 'photo', 'messageVideo': 'video', 'messageAnima
                  'messageDocument': 'document', 'messageAudio': 'audio', 'messageVoiceNote': 'voice_note'}
 # Only these carry a caption position; TDLib drops show_caption_above_media for every other kind.
 ABOVE_MEDIA_KINDS = frozenset({'photo', 'video', 'animation'})
+# The kinds whose own media duration bounds a media timestamp in the caption (get_message_content_media_duration; 0 is
+# no bound). Every other kind takes the bound from the replied message's media, which the result does not carry.
+OWN_DURATION = {'messageVideo': 'video', 'messageAudio': 'audio', 'messageVoiceNote': 'voice_note'}
 REFUSALS = frozenset({'not_outgoing', 'unsupported_source_content', 'source_is_forward', 'hidden_source_content',
                       'unsupported_source_state', 'not_editable', 'unchanged_caption', 'invalid_input'})
 Refusal = Literal['not_outgoing', 'unsupported_source_content', 'source_is_forward', 'hidden_source_content',
@@ -345,8 +348,13 @@ def edited_caption_result(value: object, *, chat_id: int, message_id: int, conte
     if CONTENT_KINDS[content_type] in ABOVE_MEDIA_KINDS and content.get('show_caption_above_media') is not \
             show_caption_above_media:
         return None
+    bound = None
+    if content_type in OWN_DURATION:
+        media = content.get(OWN_DURATION[content_type])
+        duration = media.get('duration') if type(media) is dict else None
+        bound = -1 if type(duration) is not int or duration < 0 else duration or None
     # The shared styled-edit rule (0.57): exactly the caller's styles, only auto-detected extras on whole scalars.
-    return edit_date if exact_styles(new_caption, caption['entities'], styles) else None
+    return edit_date if exact_styles(new_caption, caption['entities'], styles, max_media_timestamp=bound) else None
 
 
 @dataclass(frozen=True)

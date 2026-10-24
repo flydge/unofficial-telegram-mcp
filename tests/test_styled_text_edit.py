@@ -382,11 +382,17 @@ class VerificationTests(unittest.TestCase):
             with self.subTest(entities=entities):
                 self.assertIsNone(self.check(self.result(entities=entities), bold))
 
-    def test_tdlib_split_pieces_are_the_edit(self):
+    def test_tdlib_split_pieces_and_a_media_timestamp_are_the_edit(self):
         nested = ((0, 11, 'textEntityTypeBold'), (6, 5, 'textEntityTypeItalic'))
         self.assertEqual(self.check(self.result(entities=[entity('textEntityTypeBold', 0, 6),
                                                           entity('textEntityTypeBold', 6, 5),
                                                           entity('textEntityTypeItalic', 6, 5)]), nested), 1700000500)
+        bold = ((0, 14, 'textEntityTypeBold'),)  # A link preview's or a replied media's timestamp in a text.
+        stamped = [entity('textEntityTypeBold', 0, 10), entity('textEntityTypeBold', 10, 4),
+                   entity('textEntityTypeMediaTimestamp', 10, 4, media_timestamp=5)]
+        self.assertEqual(self.check(self.result('Chorus at 0:05', stamped), bold, new='Chorus at 0:05'), 1700000500)
+        stamped[2]['type']['media_timestamp'] = 6
+        self.assertIsNone(self.check(self.result('Chorus at 0:05', stamped), bold, new='Chorus at 0:05'))
 
     def test_the_plain_rule_is_unchanged(self):
         self.assertEqual(self.check(self.result(entities=[entity('textEntityTypeBold', 0, 5)])), 1700000500)
