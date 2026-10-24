@@ -12,7 +12,8 @@ The owner rows (two really authorized accounts, one approved action each) wait f
 
 ## Available behavior
 
-- **A second account.** The owner runs the current release's `launcher.py account-add <alias>`, then
+- **A second account.** The owner runs the current release's `launcher.py account-add <alias>`, which
+  registers the alias, creates its session root and writes its client entries, then
   `connect --account <alias>` and scans the QR with that account's phone; the page names the alias. An
   alias is `[a-z][a-z0-9]{0,11}`, never `default`, at most eight per installation, and must fit the macOS
   socket-path and the clients' tool-name limits (`alias_path_too_long`, `alias_name_too_long`). See
@@ -28,8 +29,8 @@ The owner rows (two really authorized accounts, one approved action each) wait f
   exactly like an unknown handle.
 - **The account pin.** Each account's broker pins the Telegram user it first finds authorized, and every
   login applies the same rule before the handoff: `account_mismatch` for another user, `account_duplicate`
-  for a user already serving another alias or the default account. The user id is never printed; the
-  approval dialog names the alias and the last two digits of the account.
+  for a user already serving another alias or the default account. The user id is never printed once a
+  registry exists; the approval dialog names the alias and the last two digits of the account.
 - **Status and capabilities per account.** `status` reports `loaded`, `authorized` and `registered` for
   the default and every alias, never the account; `capabilities … --account <alias>` switches that alias's
   own profiles.
@@ -38,9 +39,15 @@ The owner rows (two really authorized accounts, one approved action each) wait f
   Rename is a remove plus an add.
 - **Upgrade, rollback and uninstall over every account.** One transaction moves the default and every
   alias, with a pending-send gate per broker and a refusal while an alias login runs
-  (`login_in_progress`). A rollback below 0.55 refuses while an alias exists (`accounts_present`).
-  Uninstall keeps alias sessions and the registry; a later install repairs each alias with its
-  `account-add`.
+  (`login_in_progress`). A leftover alias broker of a removed release is asked through its live socket;
+  one that cannot be read refuses `alias_broker_unreadable` with the owner's `bootout_command`. A rollback
+  below 0.55 refuses while an alias exists (`accounts_present`), and a rollback that keeps an alias on its
+  newer release leaves it offline (`newer_state_kept`). Uninstall keeps alias sessions and the registry;
+  a later install repairs each alias with its `account-add`, moving its version line onto the current
+  release only from an equal or older one (`policy_conflict` otherwise).
+- **Logins never race the installer.** No alias login runs during an installer transaction, and while one
+  is unfinished an alias login refuses `transaction_pending`, naming the action (`pending_action`,
+  `pending_account`); a login never creates an alias root (`alias_unavailable`).
 - **The default account unchanged.** Its paths and names never change, and until the first `account-add`
   every path, launchd label and plist, client entry, receipt, `runtime.toml` and the schema fingerprint
   equal 0.54.0rc1's.
@@ -82,8 +89,16 @@ together.
 - An alias added after an upgrade blocks that upgrade's rollback until it is removed.
 - An alias the registry lists without client entries (after an uninstall) gets none until its
   `account-add`.
-- An upgrade or rollback waits for a running alias login (`login_in_progress`); the account actions run only
-  from the current release (`release_not_current`).
+- Every installer transaction over aliases waits for a running alias login (`login_in_progress`), and alias
+  logins wait for any unfinished transaction (`transaction_pending`); the account actions run only from the
+  current release (`release_not_current`).
+- An alias whose root is missing (moved or deleted by hand) cannot log in (`alias_unavailable`) until it is
+  removed and added again.
+- A rollback can leave an alias offline on a newer release (`newer_state_kept`) until the next upgrade or
+  its `account-remove`; after an uninstall, installing a lower version than the one that last served an
+  alias refuses that alias's `account-add` (`policy_conflict`).
+- A loaded alias broker of a removed release that the current release cannot read blocks the installer
+  actions over it (`alias_broker_unreadable`) until the owner runs the printed `bootout_command`.
 - With the default broker not loaded at `account-add` (`default_check: not_loaded`), the default account is
   pinned only at its broker's next check; an alias logged into the default's own account first blocks the
   default with `account_duplicate` until that alias is removed.

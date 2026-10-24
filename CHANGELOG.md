@@ -15,19 +15,28 @@ fake launchd, client CLIs and TDLib sessions; two really authorized accounts are
   LaunchAgent and one connect job per alias; an alias's server names it in `serverInfo.name` and one
   instructions line, and its QR page names it.
 - The account pin: each account's first authorized user, `account_mismatch` and `account_duplicate` at
-  every login and before every Telegram-sourced operation, fail-closed; the user id is never printed. Once
-  a registry exists the approval dialog names the alias and a masked account; a chat that is the
-  account's own reads "Saved Messages" in both modes.
+  every login before the handoff and before every broker operation outside a closed local exempt set,
+  fail-closed; the user id is never printed. Once a registry exists the approval dialog names the alias
+  and a masked account; a chat that is the account's own reads "Saved Messages" in both modes.
 - Re-login hardening inside one broker: discovery `scan_` continuations bound to the account and
   generation, owner-aware draft routing.
 - Installer: `account-add` and `account-remove` (journaled; alias entries for Codex with
   `required = false`, Claude Code user scope also in plugin mode, Claude Desktop beside the default;
   `accounts.json`; removal moves the session aside as `removed-<alias>-<32 hex>`, never deleting it);
   `status` over every account; `capabilities --account`; upgrade, rollback and uninstall over the
-  default and every alias, with a pending-send gate per broker, `login_in_progress`, `accounts_present`
-  for a rollback below 0.55, and the registry moved aside once no alias is left. New installer codes
-  `accounts_present`, `accounts_inconsistent`, `default_check_failed`, `account_remove_incomplete`,
-  `release_not_current` and `login_in_progress`, plus the registry's codes.
+  default and every alias, with a pending-send gate per broker (a leftover broker of a removed release
+  through its live socket), `login_in_progress`, `accounts_present` for a rollback below 0.55, and the
+  registry moved aside once no alias is left. Only `account-add` creates an alias root; after an
+  uninstall it repairs an alias the registry kept, moving its version line onto the current release only
+  from an equal or older one. A rollback that keeps an alias on its newer release sets its plist aside
+  (`newer_state_kept`). New installer codes `accounts_present`, `accounts_inconsistent`,
+  `default_check_failed`, `account_remove_incomplete`, `release_not_current`, `login_in_progress` and
+  `alias_broker_unreadable` (with `account` and `bootout_command`), plus the registry's codes.
+- Alias logins and installer transactions never overlap: every transaction over aliases holds each
+  alias's connect lock, and an alias login run from an installed release refuses `transaction_pending`
+  (with `pending_action` and `pending_account`) while any transaction is unfinished, and
+  `newer_state_kept` while its `runtime.toml` names another release; a login never creates an alias
+  root (`alias_unavailable`).
 - Isolation matrix: every handle kind one account issues is refused by another exactly like an unknown
   handle, on two real brokers over fake sessions.
 - Docs: an Accounts section in the installation guide, the reference and the security notes, and the
