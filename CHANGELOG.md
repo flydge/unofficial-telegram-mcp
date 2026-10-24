@@ -1,16 +1,8 @@
 # Changelog
 
-## 0.56.0rc1 — release candidate, 2026-10-24 (not published)
+## 0.57.0.dev0 — unreleased
 
-Release candidate of 0.56.0, ordered albums ([release notes](docs/release-notes-0.56.0rc1.md), [spec](docs/plans/0.56-albums-spec.md),
-[task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and
-`get_album_send_status` (58 tools) behind the default-off `album_send` capability and its `albums` profile,
-with `video_send` also required for a video item; 2–10 photos and videos or documents (each with an optional
-`display_name`), one owner dialog that lists every item, exactly one `sendMessageAlbum` attempt, per-item
-outcomes with `partial`, never a resend.
-Technical evidence only; the owner session is pending.
-
-Also on this line, 0.57 own-message actions, F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
+Development of 0.57.0, own-message actions, F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
 part 1: one draft-kind table (no behaviour change); the default-off `edit_own_caption`, `edit_own_styled_text`,
 `pin_messages` and `delete_own_message` capabilities, each requiring `send` and `read` (the two edits in
 `archive_edit`, new `pin` and `delete` profiles); `prepare_caption_edit` and `apply_prepared_caption_edit`
@@ -29,6 +21,16 @@ read-back after a 4xx finds the message again, everything else `outcome_unknown`
 (replayed after a restart) disclosed; Saved Messages, deletion for yourself only, other people's, scheduled and
 sending messages are refused; the owner dialog has a `Delete` button and states the irreversible, for-everyone,
 unpinning effect. Technical evidence only; the owner session is pending.
+
+## 0.56.0rc1 — release candidate, 2026-10-24 (not published)
+
+Release candidate of 0.56.0, ordered albums ([release notes](docs/release-notes-0.56.0rc1.md), [spec](docs/plans/0.56-albums-spec.md),
+[task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and
+`get_album_send_status` (58 tools) behind the default-off `album_send` capability and its `albums` profile,
+with `video_send` also required for a video item; 2–10 photos and videos or documents (each with an optional
+`display_name`), one owner dialog that lists every item, exactly one `sendMessageAlbum` attempt, per-item
+outcomes with `partial`, never a resend.
+Technical evidence only; the owner session is pending.
 
 ## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 
