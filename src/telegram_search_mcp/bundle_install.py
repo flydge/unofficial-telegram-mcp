@@ -4218,12 +4218,18 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 _, loaded, running = _alias_service(launchctl, jobs, installed, root)
                 if loaded and running != target:
                     _alias_gate(pending, home, jobs, running, installed)
-                # Its runtime.toml version line, moved below onto this release from any value (review fix 055d4): one
-                # it could not move refuses here.
+                # Its runtime.toml version line, moved below onto this release from an equal or older one (review fix
+                # 055d4): one it could not move refuses here, and so does a newer release's line, whose session an older
+                # release must not serve (the rollback's rule; the owner installs that release or removes the account).
                 if repair and os.path.lexists(jobs.root):
                     data, exists = _read_file(jobs.policy, MAX_POLICY_BYTES)
                     if exists:
                         _policy_candidate(data, None, receipt['package_version'])
+                        pinned = [_PIN.fullmatch(line.strip()) for line in data.split(b'\n')
+                                  if line.lstrip().startswith(b'expected_package_version')]
+                        if pinned and pinned[0] is not None and _version_key(pinned[0].group(1).decode()) > \
+                                _version_key(receipt['package_version']):
+                            raise InstallError('policy_conflict')
                 source, existed = _config(config)
                 try:
                     change = merge_registration(source, registration, name=name)
@@ -4283,7 +4289,8 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                             maximum=MAX_PLIST_BYTES)
                     if _alias_service(launchctl, jobs, installed, root)[0] != _plist_bytes(target):
                         raise InstallError('service_conflict')
-            # On the repair path, its runtime.toml version line onto this release from any value (review fix 055d4),
+            # On the repair path, its runtime.toml version line onto this release from an equal or older one (review
+            # fix 055d4; a newer one refused before the transaction),
             # by state on every run and journaled (`policy`), as a first install that adopts the default's broker moves
             # the default's: a session kept by an uninstall of another release is then this release's, so its login
             # is admitted (no `newer_state_kept`) and the next upgrade moves it on (no `policy_conflict`).

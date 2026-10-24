@@ -757,6 +757,16 @@ class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
         self.refused('account_add', 'policy_conflict')
         self.assertEqual((self.snapshot(), policy.read_bytes()), (before, data))
 
+    def test_a_newer_releases_line_is_never_moved_down(self):
+        """A session a newer release served is not handed to an older one (the rollback's rule): the repair refuses
+        before the transaction, changing nothing; installing that release again, or account-remove, gets out."""
+        self.reinstalled()
+        policy = self.jobs.root / 'runtime.toml'
+        policy.write_bytes(policy.read_bytes().replace(('"%s"' % OLD_VERSION).encode(), ('"%s"' % self.THIRD).encode()))
+        before, data = self.snapshot(), policy.read_bytes()
+        self.refused('account_add', 'policy_conflict')
+        self.assertEqual((self.snapshot(), policy.read_bytes()), (before, data))
+
     def test_the_same_release_leaves_the_line_as_it_is(self):
         self.kept()
         data = (self.jobs.root / 'runtime.toml').read_bytes()
