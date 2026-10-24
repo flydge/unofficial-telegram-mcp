@@ -89,7 +89,7 @@ Never retry in a loop: run `connect` at most twice for the same failure, then st
 | `preserve_existing_session_and_use_legacy_install_path` | `legacy_unmanaged` | An unmanaged session exists and stays untouched. Stop and say so. |
 | `review_enrollment_binding_without_resetting`, `restore_exact_managed_key_without_regenerating`, `stop_and_report` | `enrollment_inconsistent`, `identity_changed`, `managed_key_missing`, `enrollment_missing`, `app_identity_invalid`, `policy_unsafe`, `owner_unsafe`, `credential_unavailable` | Stop and report the code. Never reset, regenerate or delete anything to get past it. |
 | `review_enrollment_binding_without_resetting`, `stop_and_report` | `account_duplicate`, `account_mismatch`, `alias_unavailable` | Only with account aliases (`--account <alias>`). `account_duplicate`: the Telegram account that just logged in (QR scan, `setup` or `resume`) already serves another alias or the default account. `account_mismatch`: it is not the account this alias was first connected with. `alias_unavailable`: the alias is no longer registered, or its account directory is missing (only `account-add` creates it). Nothing was handed to the broker; stop and tell the user which alias was connecting. Never remove an alias or reset a session to get past it. |
-| `finish_pending_installer_action_then_retry`, `upgrade_installation_or_remove_account` | `transaction_pending`, `newer_state_kept` | Only with account aliases on an installed release; nothing changed. `transaction_pending`: an upgrade, rollback, uninstall, `account-add` or `account-remove` is unfinished; `pending_action` names it, and `pending_account` the alias of an account action. The user runs that installer action again, then `connect` again (with no `pending_action`, stop and report). `newer_state_kept`: a rollback kept this alias on the newer release its session was made with, so this release cannot serve it; it stays offline until the next upgrade (then `connect` again) or its `account-remove`. Never edit its files or reset its session to get past it. |
+| `finish_pending_installer_action_then_retry`, `upgrade_installation_or_remove_account` | `transaction_pending`, `newer_state_kept` | Only with account aliases on an installed release; nothing changed. `transaction_pending`: a first install, upgrade, rollback, uninstall, `account-add` or `account-remove` is unfinished; `pending_action` names it, and `pending_account` the alias of an account action. The user runs that installer action again, then `connect` again (with no `pending_action`, stop and report). `newer_state_kept`: a rollback kept this alias on the newer release its session was made with, so this release cannot serve it; it stays offline until the next upgrade (then `connect` again) or its `account-remove`. Never edit its files or reset its session to get past it. |
 | `exit_connect_process_then_run_connect_again` | `auth_destroy_failed` | Let the connect process exit (close that Terminal run), then `connect` again. |
 | `run_in_foreground_native_terminal` | `secure_terminal_required` | `setup`, `resume` and `api-credentials` run only in the user's own foreground native Terminal. |
 | `run_connect` | `enrollment_exists`, `connect_helper_requires_launchd` | Use `connect`. `connect-helper` is internal; never run it. |
@@ -134,6 +134,10 @@ Telegram tools unused for about five minutes) and run the same command again; st
   Uninstall removes only what the installer owns; the Telegram session, enrollment and Keychain stay.
 - `downgrade_refused`, `upgrade_conflict`, `policy_conflict`, `rollback_unavailable`, `service_conflict`,
   `service_restart_failed`, `uninstall_incomplete`, `installation_refused`: stop and report the code.
+  `login_in_progress`: an account login still runs; let it end (`wait --account <alias>` or
+  `cancel --account <alias>`), then the same command again. `alias_broker_unreadable`: a leftover account
+  broker of a removed release; the user runs the returned `bootout_command` themselves, then the same
+  command again.
   `transaction_pending`: an earlier install, upgrade, rollback, uninstall, `account-add` or
   `account-remove` is unfinished, and `pending_action` names it (`pending_account` the alias of an account
   action); repeat that command first. An uninstall interrupted after it renamed the
@@ -157,16 +161,19 @@ Telegram tools unused for about five minutes) and run the same command again; st
 
 Only when the owner asks. The owner picks an alias: a lowercase letter, then at most 11 lowercase letters
 or digits, never `default`. Run the installed launcher (`RELEASE` as for rollback above) with
-`account-add <alias>`: it registers the alias and its client entries, never logs in, and prints
-`account_added` with an `activation_command` ending in `connect --account <alias>`. Then do steps 2 to 4
-with `--account <alias>` after `connect`, `wait` and `cancel`; the user scans with the phone of the
-account being added, and the page names the alias. It becomes its own server `telegram_search_<alias>`
-(the plugin serves only the default account). `account_duplicate` or `account_mismatch` from `wait`
-(table above) means that phone holds an account already connected, or not this alias's own; stop and
-report. `alias_exists`, `registry_full`, `alias_path_too_long`, `alias_name_too_long`,
-`release_not_current`, `login_in_progress` or `default_check_failed`: stop and report the code.
-`account-remove <alias>` (renaming is remove, then add) runs only when the owner asks; it moves the
-session aside, never deleting it.
+`account-add <alias>`: it registers the alias, creates its account directory and client entries, never
+logs in, and prints `account_added` with an `activation_command` ending in `connect --account <alias>`.
+Then do steps 2 to 4 with `--account <alias>` after `connect`, `wait` and `cancel`; the user scans with
+the phone of the account being added, and the page names the alias. It becomes its own server
+`telegram_search_<alias>` (the plugin serves only the default account). `account_duplicate` or
+`account_mismatch` from `wait` (table above) means that phone holds an account already connected, or not
+this alias's own; stop and report. After an uninstall and a reinstall the same `account-add` re-registers
+an alias the uninstall kept, with its session (`service: rewritten` is normal there); `policy_conflict`
+there means a newer release served that session. `alias_exists`, `registry_full`, `alias_path_too_long`,
+`alias_name_too_long`, `accounts_inconsistent`, `release_not_current`, `policy_conflict` or
+`default_check_failed`: stop and report the code (`login_in_progress` as above). `account-remove <alias>`
+(renaming is remove, then add) runs only when the owner asks; it moves the session aside, never deleting
+it.
 
 ## Terminal fallback
 
