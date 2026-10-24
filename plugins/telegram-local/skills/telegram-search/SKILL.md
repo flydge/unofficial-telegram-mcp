@@ -229,10 +229,11 @@ of one own text message, or one own media caption (empty removes it); old format
 it marked edited; a pin is silent, for everyone, and posts a visible service message; a deletion is for everyone,
 irreversible and unpins it. Show the entire preview; video facts are declared by the file. An album is 2–10 own files in order (a video item also needs
 `video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend.
-A `refused` result names a closed `refusal` code: report it; never work around it (re-sending a download,
-re-encoding, retyping, the Telegram app).
-After `outcome_unknown` on an archive move, edit, pin or deletion, check the chat or message (`list_chats`,
-`read_messages`) and ask; never apply again (a deletion may still complete later, even after a restart).
+A `refused` result names a closed `refusal` code: report it; never work around it (re-encoding, retyping, the
+Telegram app).
+After `outcome_unknown` on an archive move, edit or pin, check the chat or message (`list_chats`, `read_messages`)
+and ask; never apply again. Never report an unknown deletion as deleted: no read confirms it (a missing message
+is TDLib's local state), and it may still complete, even after a restart.
 
 ## Recovery
 
@@ -251,8 +252,8 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments` names only the missing or
 invalid schema parameters (never values): fix those once, without looping; `unknown_tool` means refresh
 tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means report it and
-stop (on a lost broker one `_manifest(check_broker=true)` tells). A broker restart
-clears drafts, uploads, cursors and selections, so check pending send outcomes before the owner restarts it.
+stop. A broker restart clears drafts, uploads, cursors and selections, so check pending send outcomes
+before the owner restarts it.
 
 ## Never
 

@@ -282,6 +282,14 @@ class SkillCoverageTests(unittest.TestCase):
         self.assertIn('`partial`', self.text)
         self.assertIn('`video_send`', self.text.split('**Forward, video, album, archive, edit, pin, delete.**', 1)[1])
 
+    def test_an_unknown_deletion_is_never_confirmed_by_a_read(self):
+        # Review fix (057, low): TDLib deletes its local copy first, so a read after outcome_unknown shows the message
+        # gone even when the server still holds it; the skill must keep the deletion unknown.
+        flat = ' '.join(self.text.split())
+        readback = next(sentence for sentence in flat.split('. ') if sentence.startswith('After `outcome_unknown`'))
+        self.assertNotIn('delet', readback)
+        self.assertIn('Never report an unknown deletion as deleted: no read confirms it', flat)
+
     def test_recovery_table_lists_the_closed_next_action_map(self):
         lines = self.text.splitlines()
         start = lines.index('| `next_action` | Condition | Do |')
