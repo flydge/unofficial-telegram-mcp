@@ -319,6 +319,33 @@ class AccountAddTests(AccountHarness, unittest.TestCase):
             self.account('account_add', alias)
         self.refused('account_add', 'registry_full', 'h')
 
+    def test_a_non_private_accounts_folder_without_a_registry_refuses_before_the_transaction(self):
+        """Critic fix (055f, low): account-add judges the accounts folder it would write into before its transaction
+        opens, so a folder that is not owner-only (or a link) refuses `registry_unsafe` with nothing changed and
+        nothing pending, rather than inside the transaction at its registry step."""
+        self.full()
+        accounts = config.accounts_root(self.home)
+        target = self.base / 'elsewhere'
+        target.mkdir(mode=0o700)
+        for label, make, undo in (('0755', lambda: accounts.mkdir(mode=0o755), accounts.rmdir),
+                                  ('0750', lambda: accounts.mkdir(mode=0o750), accounts.rmdir),
+                                  ('link', lambda: accounts.symlink_to(target), accounts.unlink)):
+            with self.subTest(label):
+                make()
+                try:
+                    if label != 'link':
+                        accounts.chmod(int(label, 8))
+                    before = self.snapshot()
+                    self.refused('account_add', 'registry_unsafe')
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertEqual(self.account_journals(), [])
+                    self.assertIsNone(bundle_install.account_pending(self.runtime))
+                    self.assertEqual(list(target.iterdir()), [])
+                finally:
+                    undo()
+        accounts.mkdir(mode=0o700)
+        self.assertEqual(self.account('account_add')['status'], 'account_added')
+
     def test_the_default_check_runs_only_on_a_loaded_default_and_an_unanswered_one_is_reported(self):
         """Critic fix (055f, low, lead decision): a loaded default broker that does not answer its one check (a
         crash loop, a TDLib error, an edited runtime.toml not yet restarted) no longer parks account-add, which then

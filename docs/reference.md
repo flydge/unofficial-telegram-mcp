@@ -744,7 +744,7 @@ before the transaction exists, unless its row says otherwise:
 | `alias_unknown` | `account-remove` of an alias neither the registry nor `accounts.json` lists. | Check the name in `status`. |
 | `registry_full` | `account-add` beyond eight aliases. | `account-remove` one first. |
 | `registry_invalid` | `registry.json` is not the closed schema `{"version": 1, "aliases": {…}, "default_user_id": …}` (at most eight aliases, 4 KiB); any action that reads it refuses. | Stop and report; never edit the registry by hand. |
-| `registry_unsafe` | `registry.json`, its lease or its folder is not owner-only (`0600` file, `0700` folder), not a regular single-link file, or a link. Without a `registry.json` the folder is not judged. | Stop and report. |
+| `registry_unsafe` | `registry.json`, its lease or its folder is not owner-only (`0600` file, `0700` folder), not a regular single-link file, or a link. Without a `registry.json` the folder is not judged, except by `account-add`, which writes into it and needs an owner-only `TelegramSearchMCP-accounts` folder (or none) even without a registry; it refuses before its transaction, with nothing changed. | Stop and report; for `account-add` with no registry, the owner may `chmod 700` the folder (or move a link aside), then repeat. |
 | `registry_busy` | Another process held the registry's lease beyond its bounded wait (about two seconds). | Repeat the same command. |
 
 `registry.json` and `accounts.json` say different things on purpose: the registry which aliases exist (for

@@ -1042,7 +1042,9 @@ The alias:
   longest tool (`alias_name_too_long`). Every 12-character alias fits today.
 
 For a new alias `account-add` also refuses, before anything, a folder or broker plist already at its
-place (`runtime_conflict`, `service_conflict`; never adopted). Every `account-add` refuses, before
+place (`runtime_conflict`, `service_conflict`; never adopted), and a `TelegramSearchMCP-accounts` folder
+that is not owner-only (`0700`) or is a link, even before any registry exists (`registry_unsafe`;
+`chmod 700` it, then repeat). Every `account-add` refuses, before
 anything, an existing entry under the alias's server name (`registration_conflict`,
 `claude_registration_conflict`, `claude_desktop_registration_conflict`,
 `claude_desktop_config_unsupported`; an identical Claude Code or Claude Desktop entry is reused), a

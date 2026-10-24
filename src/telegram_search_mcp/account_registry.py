@@ -187,6 +187,19 @@ def _open_root(root: Path, *, create: bool = False) -> int:
         raise RegistryError("registry_unsafe") from None
 
 
+def check_root(root: Path) -> None:
+    """The accounts directory an `account-add` would write into, judged before anything is written (critic fix
+    055f): absent, or an owner-only directory reached without a link; anything else refuses `registry_unsafe`.
+    Reads only, never creates. `load` alone does not judge a directory without a registry (0.54's paths)."""
+    try:
+        os.lstat(root)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    os.close(_open_root(root))
+
+
 def load(root: Path) -> Registry | None:
     """The registry in `root`, or None when there is none (0.54). Never creates anything.
 

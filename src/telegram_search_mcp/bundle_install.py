@@ -4148,7 +4148,8 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     """`launcher.py account-add <alias>`: register a named alias and write its client entries (0.55 spec 3D).
 
     Every refusal comes before the transaction exists: the alias grammar and budgets (account_registry, before any
-    directory exists), a run from anything but the receipt's current release or a current release older than 0.55
+    directory exists), an accounts folder that is not owner-only (`registry_unsafe`, with or without a registry:
+    critic fix 055f), a run from anything but the receipt's current release or a current release older than 0.55
     (`release_not_current`), an alias the registry and sidecar already list, another alias's record the registry
     does not list (`accounts_inconsistent`; one the registry lists alone is repairable), an existing entry under the
     alias's server name (Codex `registration_conflict`, Claude Code `claude_registration_conflict`, Claude Desktop
@@ -4213,6 +4214,9 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 if alias not in registry:
                     try:
                         account_registry.check_budgets(alias, home, longest_tool=longest)
+                        # The folder its registry step writes into, owner-only even without a registry, judged
+                        # before the transaction opens (critic fix 055f): never a late, pending refusal.
+                        account_registry.check_root(accounts_root(home))
                     except account_registry.RegistryError as error:
                         raise InstallError(error.code) from None
                     if len(registry) >= account_registry.MAX_ALIASES:
