@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.56.0.dev0 — unreleased
+
+Development of 0.56.0, ordered albums ([spec](docs/plans/0.56-albums-spec.md),
+[task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and
+`get_album_send_status` (58 tools) behind the default-off `album_send` capability and its `albums` profile,
+with `video_send` also required for a video item; 2–10 photos and videos or documents (each with an optional
+`display_name`), one owner dialog that lists every item, exactly one `sendMessageAlbum` attempt, per-item
+outcomes with `partial`, never a resend.
+Technical evidence only; the owner session is pending.
+
 ## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 
 Release candidate of 0.55.0, multiple accounts ([release notes](docs/release-notes-0.55.0rc1.md),
@@ -47,14 +57,6 @@ fake launchd, client CLIs and TDLib sessions; two really authorized accounts are
   handle, on two real brokers over fake sessions.
 - Docs: an Accounts section in the installation guide, the reference and the security notes, and the
   setup skill.
-
-On the same development line, 0.56 ordered albums ([spec](docs/plans/0.56-albums-spec.md),
-[task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and
-`get_album_send_status` (58 tools) behind the default-off `album_send` capability and its `albums` profile,
-with `video_send` also required for a video item; 2–10 photos and videos or documents (each with an optional
-`display_name`), one owner dialog that lists every item, exactly one `sendMessageAlbum` attempt, per-item
-outcomes with `partial`, never a resend.
-Technical evidence only; the owner session is pending.
 
 ## 0.54.0rc1 — release candidate, 2026-10-23 (not published)
 

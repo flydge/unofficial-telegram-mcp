@@ -4,7 +4,7 @@
 
 **Existing installations:** the product was renamed from TelegramSearch. Keep your current installation folder and MCP configuration. The package, commands, skill identifier and local data paths retain their existing names for compatibility; new checkouts use `unofficial-telegram-mcp`.
 
-## Private bundle 0.55.0rc1
+## Private bundle 0.56.0.dev0
 
 **Current behavior versus the 0.52 target:** the approved
 [0.52 QR-first requirement](plans/0.52-qr-onboarding.md) is the primary path of this
@@ -196,7 +196,7 @@ mitigation. This was accepted by the owner on 2026-10-14 and is not legal sign-o
 
 `connect` writes `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (mode `0600` in
 a `0700` directory) with `expected_package_version` set to the running package version
-(`"0.55.0rc1"` for this candidate),
+(`"0.56.0.dev0"` for this candidate),
 `expected_contract_version = 1` and `enabled_capabilities = ["read", "artifacts"]`: sending, forwarding,
 video, archive and edit, and every extended reader are off. Since the 0.54 candidate the installed launcher
 switches whole **capability profiles**. Only you, the owner, run the switch, in your own Terminal; an
@@ -432,7 +432,7 @@ Needs Apple silicon and macOS 26 or later (`unsupported_platform` otherwise).
 4. `bootstrap.sh` copies the seed to a private stage under `/private/tmp`, checks its sha256 and size,
    with `--seed-team` checks its Developer ID signature, and runs it. The seed authenticates the index
    and every archive member before extraction, and the installer from the extracted tree then does the
-   [bundle installation](#private-bundle-0550rc1) and client registrations above. The stage directory
+   [bundle installation](#private-bundle-0560dev0) and client registrations above. The stage directory
    is not removed by the scripts.
 5. `Install.command` prints the installer's JSON result and accepts exactly the results the installer
    returns for a kit. After a first install it continues only when `status` is `activation_required`
