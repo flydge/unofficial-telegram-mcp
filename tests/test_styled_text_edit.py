@@ -21,6 +21,7 @@ from mcp import Client
 import test_archive_edit as archive
 from approval_layout import tail as dialog_tail
 from schema_changes import DIRECTORY as SCHEMA_CHANGES
+from test_provider_entity_forms import hashtags_under_bold
 from test_archive_edit import (ACCOUNT, CHAT, CLIENT, DID, ERRORS, EXPIRY, MARK, MID, PROPERTIES, chat, entity,
                                escape, own_message)
 from telegram_search_mcp.approval_prompt import confirm_approved_send
@@ -48,6 +49,7 @@ REFUSED = 'message is not eligible for an own text edit; no draft was created'
 UNAVAILABLE = 'text edit draft is unavailable'
 BOLD = {'offset': 0, 'length': 5, 'type': {'@type': 'textEntityTypeBold'}}
 ITALIC = {'offset': 6, 'length': 5, 'type': {'@type': 'textEntityTypeItalic'}}
+HASHTAGS = hashtags_under_bold(34)[0]
 
 
 def native(row):
@@ -333,7 +335,9 @@ class ApplyTests(Fixture, unittest.TestCase):
                  [entity('textEntityTypeMention', 0, 6), entity(i, 0, 6), entity(i, 6, 1),
                   entity('textEntityTypeMention', 7, 6), entity(i, 7, 6)]),
                 ('see example.com', [style(b, 0, 15)],
-                 [entity(b, 0, 4), entity('textEntityTypeUrl', 4, 11), entity(b, 4, 11)])):
+                 [entity(b, 0, 4), entity('textEntityTypeUrl', 4, 11), entity(b, 4, 11)]),
+                # Review fix (057b, low): 34 hashtags under one bold span come back as 101 rows.
+                (HASHTAGS, [style(b, 0, 237)], hashtags_under_bold(34)[2])):
             with self.subTest(new=new):
                 self.setUp()
                 self.raw.styled_mode = 'tdlib'

@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import test_archive_edit as archive
 from approval_layout import tail as dialog_tail
+from test_provider_entity_forms import hashtags_under_bold
 from test_archive_edit import (ACCOUNT, CHAT, CLIENT, DID, ERRORS, EXPIRY, FOREIGN, MARK, MID, PROPERTIES, UNKNOWN,
                                chat, digest, entity, escape, formatted)
 from telegram_search_mcp import broker_client as broker_client_module
@@ -580,7 +581,10 @@ class ApplyTests(Fixture, unittest.TestCase):
                                                   entity('textEntityTypeItalic', 4, 7)]),
                 ('ask @tests now', [{'offset': 0, 'length': 14, 'type': {'@type': 'textEntityTypeUnderline'}}],
                  [entity('textEntityTypeUnderline', 0, 4), entity('textEntityTypeMention', 4, 6),
-                  entity('textEntityTypeUnderline', 4, 6), entity('textEntityTypeUnderline', 10, 4)])):
+                  entity('textEntityTypeUnderline', 4, 6), entity('textEntityTypeUnderline', 10, 4)]),
+                # Review fix (057b, low): 34 hashtags under one bold span come back as 101 rows.
+                (hashtags_under_bold(34)[0], [{'offset': 0, 'length': 237, 'type': {'@type': 'textEntityTypeBold'}}],
+                 hashtags_under_bold(34)[2])):
             with self.subTest(new=new):
                 self.setUp()
                 self.raw.caption_mode = 'tdlib'

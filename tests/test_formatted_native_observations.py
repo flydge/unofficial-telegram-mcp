@@ -4,6 +4,7 @@ from collections import deque
 from telegram_search_mcp.tdjson import TDLibClient, _validate_bounded_request, ForbiddenTDLibRequest, MessageSendNotAttempted, MessageSendOutcomeUnknown
 from telegram_search_mcp.send_observations import SendObservations, ObservationUnavailable
 from telegram_search_mcp.reply_drafts import SEND_OPTIONS, LINK_OPTIONS, source_from_message
+from test_provider_entity_forms import hashtags_under_bold
 
 CHAT=-1007;TEXT='A🙂BC';FROZEN=((0,5,'textEntityTypeBold'),(1,2,'textEntityTypeSpoiler'))
 NATIVE=[{'@type':'textEntity','offset':0,'length':5,'type':{'@type':'textEntityTypeBold'}},{'@type':'textEntity','offset':1,'length':2,'type':{'@type':'textEntityTypeSpoiler'}}]
@@ -197,6 +198,15 @@ class FormattedReducerTests(unittest.TestCase):
    with self.subTest(rows=rows):
     s=SendObservations();s.register('a','x',12,CHAT,'messageText',text_sha256=hashlib.sha256(text.encode()).hexdigest(),outgoing_entities=bold)
     s.reduce(self.pending(sent(-9,rows)));s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':sent(701,rows)})
+    self.assertEqual(s.snapshot('a').message_id,701 if confirmed else None)
+ def test_more_than_100_returned_rows_confirm(self):
+  """Review fix (057b, low): 34 hashtags under one bold span come back as 101 rows; the bounds are per kind."""
+  text,styles,rows=hashtags_under_bold(34);self.assertEqual(len(rows),101)
+  for returned,confirmed in [(rows,True),(rows[:-1],False)]:
+   with self.subTest(confirmed=confirmed):
+    s=SendObservations();s.register('a','x',12,CHAT,'messageText',text_sha256=hashlib.sha256(text.encode()).hexdigest(),outgoing_entities=styles)
+    m=message(-9,entities=returned);m['content']['text']['text']=text;s.reduce(self.pending(m))
+    m=message(701,entities=returned);m['content']['text']['text']=text;s.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-9,'message':m})
     self.assertEqual(s.snapshot('a').message_id,701 if confirmed else None)
  def test_a_media_timestamp_confirms_only_on_its_whole_token(self):
   """Review fix (057, low): a formatted reply to a video carries TDLib's media timestamp (find_media_timestamps)."""

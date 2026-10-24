@@ -341,7 +341,7 @@ def edited_caption_result(value: object, *, chat_id: int, message_id: int, conte
             type(content) is not dict or content_type not in CONTENT_KINDS or content.get('@type') != content_type or
             type(caption) is not dict or set(caption) != {'@type', 'text', 'entities'} or
             caption['@type'] != 'formattedText' or type(caption['text']) is not str or caption['text'] != new_caption or
-            type(caption['entities']) is not list or len(caption['entities']) > MAX_ENTITIES or
+            type(caption['entities']) is not list or
             type(edit_date) is not int or not 0 < edit_date <= 2**31 - 1 or type(previous_edit_date) is not int or
             edit_date < previous_edit_date):
         return None

@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import unittest
 
-from telegram_search_mcp.edit_drafts import exact_styles
+from telegram_search_mcp import edit_drafts
+from telegram_search_mcp.caption_edit_drafts import edited_caption_result
+from telegram_search_mcp.edit_drafts import edited_text_result, exact_styles
 from telegram_search_mcp.outgoing_formatting import joined_outgoing_entities, media_timestamp_tokens
 
 B, I, U, S, P = ('textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
                  'textEntityTypeStrikethrough', 'textEntityTypeSpoiler')
 MENTION, URL, STAMP = 'textEntityTypeMention', 'textEntityTypeUrl', 'textEntityTypeMediaTimestamp'
+HASHTAG = 'textEntityTypeHashtag'
 
 
 def span(kind, offset, length):
@@ -74,6 +77,61 @@ class JoinedPiecesTests(unittest.TestCase):
         self.assertFalse(exact_styles('A\U0001f642B', [entity(B, 0, 2), entity(B, 2, 2)], ((0, 4, B),)))
         with self.assertRaises(ValueError):
             joined_outgoing_entities('Hello there', [span(B, 0, 6), span(B, 5, 6)])
+
+
+def hashtags_under_bold(count):
+    """'#tag00 #tag01 ...' under one caller Bold span, in the form the pinned TDLib returns it (traced through
+    split_entities): the bold span cut at both ends of every hashtag, so count hashtags come back as count hashtag rows
+    plus 2 * count - 1 touching bold pieces (34 hashtags: 101 rows for one caller span)."""
+    text = ' '.join('#tag%02d' % index for index in range(count))
+    rows = []
+    for index in range(count):
+        rows += [entity(HASHTAG, 7 * index, 6), entity(B, 7 * index, 6)]
+        if index + 1 < count:
+            rows.append(entity(B, 7 * index + 6, 1))
+    return text, ((0, len(text), B),), rows
+
+
+class ReturnedRowBoundTests(unittest.TestCase):
+    """Review fix (057b, low): TDLib's returned rows grow with its pieces and the auto-detected entities, so the
+    bounds are per kind (joined caller spans, auto-detected entities, style pieces), never on the raw row count."""
+
+    def test_more_than_100_returned_rows_read_as_the_edit(self):
+        for count in (34, 100):
+            text, styles, rows = hashtags_under_bold(count)
+            with self.subTest(count=count):
+                self.assertGreater(len(rows), 100)
+                self.assertTrue(exact_styles(text, rows, styles))
+                message = {'@type': 'message', 'id': 5, 'chat_id': -7, 'edit_date': 200, 'content': {
+                    '@type': 'messageText', 'text': {'@type': 'formattedText', 'text': text, 'entities': rows}}}
+                self.assertEqual(edited_text_result(message, chat_id=-7, message_id=5, new_text=text,
+                                                    previous_edit_date=100, styles=styles), 200)
+                photo = {'@type': 'message', 'id': 5, 'chat_id': -7, 'edit_date': 200, 'content': {
+                    '@type': 'messagePhoto', 'show_caption_above_media': False,
+                    'caption': {'@type': 'formattedText', 'text': text, 'entities': rows}}}
+                self.assertEqual(edited_caption_result(photo, chat_id=-7, message_id=5, content_type='messagePhoto',
+                                                       new_caption=text, styles=styles, show_caption_above_media=False,
+                                                       previous_edit_date=100), 200)
+                # Still exactly the edit: a bold piece short is not the caller's span.
+                self.assertFalse(exact_styles(text, rows[:-1], styles))
+
+    def test_each_kind_has_its_own_fixed_bound(self):
+        self.assertEqual((edit_drafts.MAX_AUTO_DETECTED, edit_drafts.MAX_STYLE_PIECES), (4096, 5 * 4096))
+        # At most one auto-detected entity per character, and one piece per character of each style, of the longest
+        # text: continuous entities never intersect and pieces of one style never overlap.
+        text = 'a' * 4096
+        styles = tuple((0, 4096, kind) for kind in sorted((B, I, U, S, P)))
+        extras = [entity(HASHTAG, offset, 1) for offset in range(4096)]
+        pieces = [entity(kind, offset, 1) for kind in (B, I, U, S, P) for offset in range(4096)]
+        self.assertTrue(exact_styles(text, extras + pieces, styles))
+        self.assertFalse(exact_styles(text, extras + [entity(HASHTAG, 0, 1)] + pieces, styles))
+        self.assertFalse(exact_styles(text, extras + pieces + [entity(B, 0, 1)], styles))
+        # The joined caller spans: at most 32, as at prepare.
+        spaced = ' '.join('a' * 33)
+        separate = tuple((2 * index, 1, B) for index in range(33))
+        self.assertFalse(exact_styles(spaced, [entity(B, offset, 1) for offset, _, _ in separate], separate))
+        self.assertTrue(exact_styles(spaced, [entity(B, offset, 1) for offset, _, _ in separate[:32]],
+                                     separate[:32]))
 
 
 class MediaTimestampGrammarTests(unittest.TestCase):

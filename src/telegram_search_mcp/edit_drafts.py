@@ -60,6 +60,12 @@ AUTO_DETECTED = frozenset({'textEntityTypeUrl', 'textEntityTypeEmailAddress', 't
 # The one auto-detected kind with a field: TDLib marks a timestamp in the text for a user account up to the duration of
 # the message's own media (video, audio, voice note), a link preview's or the replied message's (review fix 057).
 MEDIA_TIMESTAMP = 'textEntityTypeMediaTimestamp'
+# Review fix (057b): returned rows grow with TDLib's pieces and with the auto-detected entities, so each kind has its own
+# bound. TDLib's continuous entities never intersect and pieces of one style never overlap, each covering a whole
+# character, so a text of at most 4096 characters has at most 4096 of the first and 4096 pieces of each style; the
+# joined caller spans stay at most 32 (freeze_outgoing_entities).
+MAX_AUTO_DETECTED = 4096
+MAX_STYLE_PIECES = len(_STYLES) * 4096
 ChatKind = Literal['private', 'basic_group', 'supergroup', 'channel']
 EditDate = Annotated[int, Field(strict=True, ge=0, le=2**31 - 1)]
 NewText = Annotated[str, Field(strict=True, min_length=1, max_length=4096)]
@@ -118,8 +124,9 @@ def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities,
     caller's styles, which TDLib may return cut into touching pieces (joined first, joined_outgoing_entities), plus only
     auto-detected entities on whole scalars of the text: the fieldless kinds, and a media timestamp exactly on a whole
     timestamp token with that token's value (at most max_media_timestamp, when the bound is the message's own media).
-    Any other entity, field or span is not the edit."""
-    if type(text) is not str or type(entities) is not list or len(entities) > MAX_ENTITIES:
+    Any other entity, field or span is not the edit. Bounded per kind (MAX_AUTO_DETECTED, MAX_STYLE_PIECES), never by
+    the raw row count, which TDLib's pieces make grow."""
+    if type(text) is not str or type(entities) is not list or len(entities) > MAX_AUTO_DETECTED + MAX_STYLE_PIECES:
         return False
     caller, extras, stamps = [], [], []
     for row in entities:
@@ -139,6 +146,8 @@ def exact_styles(text: object, entities: object, styles: FrozenOutgoingEntities,
             extras.append((row['offset'], row['length']))
         else:
             return False
+    if len(caller) > MAX_STYLE_PIECES or len(extras) + len(stamps) > MAX_AUTO_DETECTED:
+        return False
     try:
         if joined_outgoing_entities(text, caller) != styles:
             return False
