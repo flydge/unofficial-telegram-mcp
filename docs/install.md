@@ -88,8 +88,10 @@ was running, and rewrites only the `expected_package_version` line of `runtime.t
 rollback likewise stop only the receipt-bound (or adopted) broker and the broker of each account alias,
 start each again only if it was running, and rewrite only that line in each account's `runtime.toml`
 (a rollback below 0.55 with no alias left also moves the default broker's `run/readiness.json` into its
-transaction); `uninstall` stops only those brokers and the alias connect jobs and writes nothing in any
-session directory. None of them logs in or touches the Keychain. A launch checks the release
+transaction); `uninstall` stops only those brokers and the alias connect jobs and writes nothing in the
+default session directory. In an alias's session root, besides that line, a transaction creates at most
+the empty `run/connect.lock` it holds while it runs ([Accounts](#accounts-055-candidate)). None of them
+logs in or touches the Keychain. A launch checks the release
 tree, index, receipt, pointer, transaction journal and home binding, and only the shape of
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
@@ -704,8 +706,8 @@ client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included
 pending: a send or apply request in flight, an approval dialog open, or a send outcome `get_send_status`
 could still settle (an `outcome_unknown` within its 15-minute status window), and whether any client
 context is connected. Any of them counts as pending. With account aliases every running broker is asked,
-each through its own socket and policy, and any one of them refuses the whole change. A 0.51 or 0.52
-broker reports only client contexts, which never show a send, so there a connected context is an
+each through its own socket and policy (a leftover of a removed release through its live socket), and any
+one of them refuses the whole change. A 0.51 or 0.52 broker reports only client contexts, which never show a send, so there a connected context is an
 unknown answer, and an unknown answer counts as pending too. It asks before the transaction exists, again once the new release is copied, and a
 last time right before the broker is stopped, which comes before any client file is written. Any such
 answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
@@ -807,13 +809,13 @@ finishing repeat remove any such file the change's journal names.
 **Other refusals.** A new package version lower than the installed one refuses as `downgrade_refused`
 (going back is only `rollback`). A different Codex home, skills root or home than the installed receipt,
 or an explicitly given `--claude-code` mode other than the installed one, refuses as `upgrade_conflict`,
-also when the kit is the installed release's own (a repeat).
-Another install, upgrade, rollback or uninstall started while one is unfinished refuses as
-`transaction_pending`, and the refusal's `pending_action` (`install`, `upgrade`, `rollback` or
-`uninstall`, or `account-add` or `account-remove` with the alias in `pending_account`) names the command
-to repeat first. The one exception is an `uninstall` over a parked upgrade or rollback (above). A running
-login of an account alias refuses as `login_in_progress`
-([with accounts](#upgrade-rollback-and-uninstall-with-accounts)).
+also when the kit is the installed release's own (a repeat). Another install, upgrade, rollback or
+uninstall started while one is unfinished refuses as `transaction_pending`, and the refusal's
+`pending_action` (`install`, `upgrade`, `rollback` or `uninstall`, or `account-add` or `account-remove`
+with the alias in `pending_account`) names the command to repeat first. The one exception is an
+`uninstall` over a parked upgrade or rollback (above). A login of an account alias still running refuses
+the transaction as `login_in_progress`, and while a transaction is unfinished an alias login refuses
+`transaction_pending` ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)).
 
 ### Rollback
 
@@ -1006,15 +1008,16 @@ RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
   "$RELEASE/python/bin/python3" -I -S -B "$RELEASE/launcher.py" account-add work
 ```
 
-`account-add` registers the alias and writes its client entries; it never logs in. The result is
-`status: account_added` with `account`, `server_name` (`telegram_search_work`), `codex: registered`,
-`claude_code`, `claude_desktop` (with the manual command or entry when one is needed, as for an install),
-`default_check`, `next_action: run_activation_then_wait` and the `activation_command`: the same launcher
-ending in `connect --account work`. Then connect that account as under
-[Connect with a QR code](#connect-with-a-qr-code-primary-path), with `--account work` after `connect`,
-`wait` and `cancel`, and scan with the phone of the account you add. The page names the alias. The
-Terminal fallback works the same way (`setup --account work`, `resume --account work`). Reconnect the MCP
-clients afterwards (quit and reopen Claude Desktop); the alias is a server of its own.
+`account-add` registers the alias, creates its session root (owner-only, empty but for `run/`; no login
+ever creates it) and writes its client entries; it never logs in. The result is `status: account_added`
+with `account`, `server_name` (`telegram_search_work`), `codex: registered`, `claude_code`,
+`claude_desktop` (with the manual command or entry when one is needed, as for an install),
+`default_check`, `next_action: run_activation_then_wait` and `activation_arguments` and
+`activation_command`: the same launcher ending in `connect --account work`. Then connect that account as
+under [Connect with a QR code](#connect-with-a-qr-code-primary-path), with `--account work` after
+`connect`, `wait` and `cancel`, and scan with the phone of the account you add. The page names the alias.
+The Terminal fallback works the same way (`setup --account work`, `resume --account work`). Reconnect the
+MCP clients afterwards (quit and reopen Claude Desktop); the alias is a server of its own.
 
 Before its client entries, `account-add` asks a running default broker one `check`, so the default
 account is pinned before the alias's first login: `default_check` is `ready`, `blocked` (not authorized;
@@ -1026,7 +1029,9 @@ The alias:
 - is `[a-z][a-z0-9]{0,11}`: a lowercase letter, then at most 11 lowercase letters or digits. `default` is
   reserved: the default account is spelled by leaving `--account` out. Anything else is refused before
   anything happens (by the launcher as `bundle_admission_or_install_failed`).
-- is one of at most eight (`registry_full`), and not one already registered (`alias_exists`).
+- is one of at most eight (`registry_full`), and not one already added (`alias_exists`). An alias the
+  registry still lists without client entries, as an uninstall leaves it, is repaired instead
+  ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)).
 - fits the macOS socket limit: the alias's broker socket path is at most 103 bytes, so the home
   directory path and the alias together may use at most 31 bytes (for `/Users/<name>`, the name and the
   alias at most 24). A longer one is refused as `alias_path_too_long` before any folder exists, never
@@ -1034,11 +1039,15 @@ The alias:
 - fits the clients' 64-character tool names: `mcp__telegram_search_<alias>__<tool>` for this release's
   longest tool (`alias_name_too_long`). Every 12-character alias fits today.
 
-`account-add` also refuses, before anything, a folder or broker plist already at the alias's place
-(`runtime_conflict`, `service_conflict`; never adopted), an existing entry under the alias's server name
-(`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`,
-`claude_desktop_config_unsupported`), a loaded default broker that is not the receipt's exact definition
-(`service_conflict`) and any unfinished installer transaction (`transaction_pending`).
+For a new alias `account-add` also refuses, before anything, a folder or broker plist already at its
+place (`runtime_conflict`, `service_conflict`; never adopted). Every `account-add` refuses, before
+anything, an existing entry under the alias's server name (`registration_conflict`,
+`claude_registration_conflict`, `claude_desktop_registration_conflict`,
+`claude_desktop_config_unsupported`; an identical Claude Code or Claude Desktop entry is reused), a
+loaded default broker that is not the receipt's exact definition (`service_conflict`), a running login of
+another alias, or on the repair path of this one (`login_in_progress`), an `accounts.json` record of an
+alias the registry does not list (`accounts_inconsistent`), a run from anything but the current release
+(`release_not_current`) and any unfinished installer transaction (`transaction_pending`).
 
 ### What an alias gets
 
@@ -1075,21 +1084,21 @@ login (QR, `setup`, `resume`) applies the same rule before it hands the session 
 refused: `account_mismatch` when it is not the alias's own user, `account_duplicate` when that user
 already serves another alias or the default account. Nothing is handed to the broker, the enrollment stays
 pending and the authorized session stays on disk, never logged out or deleted. Stop and check which
-phone scanned; to put another Telegram account under a name, remove the alias and add it again. The user
-id is never printed: once a registry exists, the approval dialog names the alias and the last two digits
+phone scanned; to put another Telegram account under a name, remove the alias and add it again. Once a
+registry exists the user id is never printed: the approval dialog names the alias and the last two digits
 of the account (`Account: work (Telegram account ••42)`), for the default account too (`default`).
 
 ### Status and capabilities of each account
 
 `status` without `--account` adds `accounts` once a registry exists, for `default` and every alias:
-`loaded` (its broker LaunchAgent), `authorized` (as its running broker recorded at its last account check;
-`null` when unknown) and `registered` (every client entry the installation recorded for it is present
-exactly, also an entry you added yourself from a printed command; `false` when one is missing or
-different; `null` when a client config cannot be read). It is `"unavailable"` when the registry or the
-installation cannot be read. `status` sends no check, starts nothing and never reports the account.
-`status --account <alias>` is that alias's own status plus `alias`, `loaded`, `authorized` and
-`registered`, without the default's `clients`. Without a registry the default's status keeps its 0.54
-keys.
+`loaded` (its broker LaunchAgent), `authorized` (as its running broker recorded at its last account
+check; `null` when unknown) and `registered` (every client entry the installation recorded for it is
+present exactly, also an entry you added yourself from a printed command; `false` when one is missing or
+different, and for an alias the registry lists without client entries; `null` when a client config cannot
+be read). It is `"unavailable"` when the registry or the installation cannot be read. `status` sends no
+check, starts nothing and never reports the account. `status --account <alias>` is that alias's own
+status plus `alias`, `loaded`, `authorized` and `registered`, without the default's `clients`. Without a
+registry the default's status keeps its 0.54 keys.
 
 `capabilities show | enable <profile> | disable <profile> --account <alias>` switches that alias's own
 `runtime.toml`, behind its own broker's pending-send gate, and restarts its own broker
@@ -1097,28 +1106,43 @@ keys.
 
 `mcp`, `setup`, `resume`, `connect`, `wait`, `cancel`, `api-credentials` and `status` take the same
 trailing `--account <alias>`. An alias the registry does not list refuses `alias_unavailable` before any
-folder is created.
+folder is created. A login never creates an alias's root: `connect`, `setup`, `resume` and
+`api-credentials` of an alias whose root is missing (moved or deleted by hand) refuse `alias_unavailable`
+too, and `cancel` creates nothing; remove the alias and add it again. Run from the installed release, a
+login of an alias (`connect`, its connect job, `setup`, `resume`) also refuses, changing nothing:
+
+- `transaction_pending` while any installer transaction is unfinished, with `pending_action` and, for an
+  account action, `pending_account`, as the installer's own refusal names them: repeat that action, then
+  connect again;
+- `newer_state_kept` while the alias's `runtime.toml` names another release than the running one (a
+  rollback left the alias on a newer release, [below](#upgrade-rollback-and-uninstall-with-accounts)):
+  upgrade, or remove the account.
 
 ### Removing or renaming an account
 
 `account-remove <alias>`, run like `account-add`, retires an alias. Refusals come first and change
 nothing: `alias_unknown`; an entry under the alias's name that is not exactly the one the installation
 recorded for it (`registration_conflict`, `claude_registration_conflict`,
-`claude_desktop_registration_conflict`; never overwritten); an alias broker plist that is not this
-installation's own shape (`service_conflict`); a send pending on the alias's broker
-(`pending_send_unresolved`: settle it and quit the clients that used the alias); a running login of the
-alias (`login_in_progress`).
+`claude_desktop_registration_conflict`, `claude_desktop_config_unsupported`; never overwritten); an alias
+broker plist that is not this installation's own shape, or a process outside launchd holding the alias's
+broker or connect lock (`service_conflict`); a send pending on the alias's broker
+(`pending_send_unresolved`: settle it and quit the clients that used the alias) or a leftover broker it
+cannot read (`alias_broker_unreadable`, [below](#upgrade-rollback-and-uninstall-with-accounts)); a running
+login of any alias (`login_in_progress`); and, as for `account-add`, `accounts_inconsistent`,
+`release_not_current` and `transaction_pending`.
 
 Then, journaled: its connect job is booted out, then its broker (gated again first) and its plist
 removed, both again on every attempt until the root moves; its own Codex, Claude Code and Claude Desktop
 entries are removed, neighbours kept; its registry entry and pin are dropped; its root is moved aside to
-`TelegramSearchMCP-accounts/removed-<alias>-<32 hex>`. The session is never deleted and never logged
-out: Telegram lists that device until you end it on the phone (Settings → Devices), and the moved folder
-stays until you remove it yourself. The result is `status: account_removed` with `service`, `connect_job`,
-`codex`, `claude_code`, `claude_desktop`, `session` (`moved` with `session_moved_to`, or `absent`) and
-`next_action: restart_mcp_clients`, plus `claude_removal_command` when the `claude` CLI was not found or
-`~/.claude.json` could not be read. `account_remove_incomplete` means an entry the installation owns was
-still present after its removal attempts; repeat the command.
+`TelegramSearchMCP-accounts/removed-<alias>-<32 hex>`. An alias that never logged in has a root holding
+only `run/` (and the empty `run/connect.lock` any later installer transaction held), moved aside the same
+way. The session is never deleted and never logged out: Telegram lists that device until you end it on
+the phone (Settings → Devices), and the moved folder stays until you remove it yourself. The result is
+`status: account_removed` with `service`, `connect_job`, `codex`, `claude_code`, `claude_desktop`,
+`session` (`moved` with `session_moved_to`, or `absent`) and `next_action: restart_mcp_clients`, plus
+`claude_removal_command` when the `claude` CLI was not found or `~/.claude.json` could not be read.
+`account_remove_incomplete` means an entry the installation owns was still present after its removal
+attempts; repeat the command.
 
 Renaming is a remove plus an add, then a new `connect --account <new alias>` login: the enrollment binds
 absolute paths, so a session never moves to another name. Adding a removed name again starts a new empty
@@ -1127,10 +1151,11 @@ account's pin, so `status` keeps reporting `accounts` and the dialog keeps namin
 rollback below 0.55 or an uninstall with no alias left moves the registry aside.
 
 Both actions are journaled transactions like an upgrade: a repeat after an interruption resumes, and a
-repeat after one finished returns its result. While one is unfinished, every other installer action
-refuses `transaction_pending` with `pending_action` (`account-add` or `account-remove`) and
-`pending_account` (the alias); repeat that command first. Both run only from the current release, and
-only while it knows aliases (0.55 or newer): anything else refuses `release_not_current`.
+repeat after one finished returns its result. While one is unfinished, every other installer action, and
+every login of an alias, refuses `transaction_pending` with `pending_action` (`account-add` or
+`account-remove`) and `pending_account` (the alias); repeat that command first. Both run only from the
+current release, and only while it knows aliases (0.55 or newer): anything else refuses
+`release_not_current`.
 
 ### Upgrade, rollback and uninstall with accounts
 
@@ -1142,29 +1167,52 @@ only while it knows aliases (0.55 or newer): anything else refuses `release_not_
   Claude Desktop entries are re-pointed like the default's. A late refusal restores every stopped broker,
   the default's first. The result adds `accounts` (per alias its `service` and client outcomes).
 - **Logins.** For each run, every transaction over aliases (upgrade, rollback, uninstall, `account-add`,
-  `account-remove`) holds every alias's connect lock, so a login of an alias started meanwhile is refused.
-  A login already running refuses the transaction as `login_in_progress`, and the transaction stays
-  resumable: let the login finish (`wait --account <alias>`) or end it (`cancel --account <alias>`), then
-  repeat the same command. A finished login's idle connect job is no login.
+  `account-remove`) holds every alias's connect lock (a new alias's own `account-add` excepted), so no
+  login of an alias runs during it. A login already running refuses the transaction as
+  `login_in_progress` with nothing changed, and the transaction stays resumable: let the login finish
+  (`wait --account <alias>`) or end it (`cancel --account <alias>`, or close the Terminal running
+  `setup`), then repeat the same command. A finished login's idle connect job is no login. While a
+  transaction is unfinished, between two runs too, every alias login refuses `transaction_pending`
+  ([above](#status-and-capabilities-of-each-account)). Holding the lock can leave an empty
+  `run/connect.lock` in an alias root that had none.
 - **Plists.** An alias broker plist in the installer's own shape for this installation, naming any of its
   releases (also one no longer installed), is repairable: `account-remove` and `uninstall` remove it, an
-  upgrade and a rollback rewrite it. Any other definition is foreign and never touched
+  upgrade and a rollback rewrite it, and `account-add` on its repair path rewrites it to the current
+  release (`service: rewritten`) without starting it. Any other definition is foreign and never touched
   (`service_conflict`).
+- **Leftover brokers.** A loaded alias broker whose definition names a release since removed is asked
+  through its live socket under the current release: a stale socket holds nothing, a broker that answers
+  is gated as usual, and one that cannot be read refuses (upgrade, rollback, uninstall and that alias's
+  own `account-add` or `account-remove`) as `alias_broker_unreadable`, with nothing changed. That refusal
+  adds `account`, `next_action: boot_out_alias_broker_then_retry` and `bootout_command`, the argument
+  list `["launchctl", "bootout", "gui/<uid>/<that alias's broker label>"]`: run it yourself, then repeat
+  the same command. The installer never boots out a broker it cannot ask.
 - **Rollback.** Each alias's session state is checked like the default's: its `enrollment.json` as at the
   upgrade, its `runtime.toml` equal but for the version and `enabled_capabilities` lines. An alias added
-  after the upgrade, or one whose enrollment changed since, refuses `rollback_refused`. A rollback to a release
-  older than 0.55 refuses `accounts_present` while any alias exists: `account-remove` each first. With
-  none left, once the older broker serves again, it moves the registry aside to
-  `TelegramSearchMCP-accounts/retired-<32 hex>-registry.json` and the default broker's
+  after the upgrade, or one whose enrollment or `runtime.toml` changed otherwise since, refuses
+  `rollback_refused`. An alias whose broker plist appeared while a rollback was parked, and whose session
+  changed since the upgrade, is not moved back: the rollback finishes, its version line stays the newer
+  release's, its plist is moved into the rollback's transaction directory (`service-<alias>.newer`, never
+  deleted), no broker runs for it, and its `service` reads `newer_state_kept`. It stays offline, and its
+  logins refuse `newer_state_kept`, until the next upgrade moves it on (then `connect --account <alias>`
+  starts the new broker, with no new scan while Telegram keeps the session) or its `account-remove`. A
+  rollback to a release older than 0.55 refuses `accounts_present` while any alias exists:
+  `account-remove` each first. With none left, once the older broker serves again, it moves the registry
+  aside to `TelegramSearchMCP-accounts/retired-<32 hex>-registry.json` and the default broker's
   `run/readiness.json` into its transaction (`account_registry: retired`); the older release reads
   neither, and nothing is deleted.
-- **Uninstall.** On every attempt it stops each alias's connect job and broker again (gated first),
-  removes its plist and the Codex, Claude Code and Claude Desktop entries the installation owns for it;
-  the result adds `accounts`. Alias roots, sessions and the registry are never touched while an alias
-  exists. After a later install, `account-add <alias>` repairs each of them: it writes the client entries
-  again and keeps the alias's registry entry, pin and session; `connect --account <alias>` then starts its
-  broker again, with no new scan while Telegram keeps that session. With no alias left, uninstall moves
-  the registry aside as above (`account_registry: retired`).
+- **Uninstall.** On every attempt it first gates every running broker in one pass, then stops each
+  alias's connect job and broker, removes its plist and the Codex, Claude Code and Claude Desktop entries
+  the installation owns for it; the result adds `accounts`. Alias roots, sessions and the registry are
+  never touched while an alias exists. After a later install, `account-add <alias>` repairs each of them:
+  holding the alias's connect lock (`login_in_progress`), it writes the client entries again, keeps the
+  alias's registry entry, pin and session, and moves its `runtime.toml` version line onto the current
+  release. Only a line from an equal or older release moves: one naming a newer release (a lower version
+  installed after the uninstall) refuses `policy_conflict` with nothing changed, since a session a newer
+  release served is never handed to an older one; install that release again, or remove the account. A
+  line it cannot rewrite exactly refuses `policy_conflict` too. `connect --account <alias>` then starts
+  its broker again, with no new scan while Telegram keeps that session. With no alias left, uninstall
+  moves the registry aside as above (`account_registry: retired`).
 
 ### Known limits of accounts
 
@@ -1179,8 +1227,19 @@ only while it knows aliases (0.55 or newer): anything else refuses `release_not_
 - An alias added after an upgrade blocks that upgrade's rollback until it is removed.
 - An alias the registry lists without client entries (after an uninstall) gets none until its
   `account-add`.
-- An upgrade or rollback waits for a running alias login (`login_in_progress`), and the account actions
+- Every installer transaction over aliases waits for a running alias login (`login_in_progress`), and an
+  alias login started while one runs or stays unfinished is refused (`transaction_pending`, or before the
+  transaction exists `connect_in_progress`, for `setup` and `resume` `owner_busy`). The account actions
   run only from the current release (`release_not_current`).
+- An alias whose root is missing (moved or deleted by hand) cannot log in (`alias_unavailable`) until it
+  is removed and added again; its `account-remove` still finishes (`session: absent`).
+- A rollback can leave an alias offline on a newer release (`newer_state_kept`) until the next upgrade or
+  its `account-remove`.
+- `account-add`'s repair never moves an alias's version line down: after an uninstall, installing a lower
+  version than the one that last served an alias refuses that alias's `account-add` (`policy_conflict`).
+- A loaded alias broker of a removed release that the current release cannot read blocks upgrade,
+  rollback, uninstall and that alias's own account actions (`alias_broker_unreadable`) until you run the
+  printed `bootout_command`.
 
 ## Published 0.51: prepare the legacy runtime
 
