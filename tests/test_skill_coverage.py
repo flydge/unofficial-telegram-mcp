@@ -290,6 +290,12 @@ class SkillCoverageTests(unittest.TestCase):
         self.assertNotIn('delet', readback)
         self.assertIn('Never report an unknown deletion as deleted: no read confirms it', flat)
 
+    def test_a_refusal_is_never_worked_around_by_resending_a_download(self):
+        # Review fix (057b, low): no tool description carries this example; it guards against downloading a refused
+        # forward source with get_attachment and sending it again as a file.
+        flat = ' '.join(self.text.split())
+        self.assertIn('never work around it (re-sending a download, re-encoding, retyping, the Telegram app)', flat)
+
     def test_recovery_table_lists_the_closed_next_action_map(self):
         lines = self.text.splitlines()
         start = lines.index('| `next_action` | Condition | Do |')

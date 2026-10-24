@@ -191,8 +191,7 @@ Every send or change needs two approvals: the user's in the chat, then the owner
    `declined`, `timeout` and `dialog_unavailable` mean nothing was sent or changed; the draft stays pending
    until it expires or is superseded. Ask the user again before another call.
 6. `outcome_unknown` means it may have reached Telegram: call `get_send_status` (`get_album_send_status`
-   for an album) and report its `status` and `evidence`. Never send again, and never prepare a new draft to
-   retry.
+   for an album) and report its `status` and `evidence`. Never send again or prepare a new draft to retry.
 
 **Outcomes.** `sent` carries the final `message_id`; `applied` confirms an archive move (`observed_list`), an
 edit, a pin (`is_pinned`) or a deletion. `expired`, `recipient_changed`, `source_changed`, `chat_changed`,
@@ -229,11 +228,11 @@ of one own text message, or one own media caption (empty removes it); old format
 it marked edited; a pin is silent, for everyone, and posts a visible service message; a deletion is for everyone,
 irreversible and unpins it. Show the entire preview; video facts are declared by the file. An album is 2–10 own files in order (a video item also needs
 `video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend.
-A `refused` result names a closed `refusal` code: report it; never work around it (re-encoding, retyping, the
-Telegram app).
+A `refused` result names a closed `refusal` code: report it; never work around it (re-sending a download,
+re-encoding, retyping, the Telegram app).
 After `outcome_unknown` on an archive move, edit or pin, check the chat or message (`list_chats`, `read_messages`)
-and ask; never apply again. Never report an unknown deletion as deleted: no read confirms it (a missing message
-is TDLib's local state), and it may still complete, even after a restart.
+and ask; never apply again. Never report an unknown deletion as deleted: no read confirms it (reads see
+TDLib's local copy), and it may still complete, even after a restart.
 
 ## Recovery
 
