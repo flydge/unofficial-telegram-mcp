@@ -36,6 +36,7 @@ import test_archive_edit as archive_fixture
 import test_caption_edit as caption_fixture
 import test_styled_text_edit as styled_fixture
 import test_pin_change as pin_fixture
+import test_message_delete as delete_fixture
 import test_artifact_replies as artifact_reply_fixture
 import test_forward_send as forward_fixture
 import test_send_status as text_fixture
@@ -69,7 +70,7 @@ CLIENT = 'client_' + 'i' * 24
 HELPER = 'client_' + 'h' * 24  # the transfer helper's own client (upload authority redemption)
 LONGEST = account_registry.longest_tool_name()
 MUTATING = frozenset({'sendMessage', 'forwardMessages', 'addChatToList', 'editMessageText', 'sendMessageAlbum',
-                      'editMessageCaption', 'pinChatMessage', 'unpinChatMessage'})
+                      'editMessageCaption', 'pinChatMessage', 'unpinChatMessage', 'deleteMessages'})
 POLICY_TOML = ('config_version = 1\nenabled_capabilities = [' +
                ', '.join(f'"{name}"' for name in sorted(KNOWN_CAPABILITIES)) + ']\n')
 
@@ -219,6 +220,7 @@ DRAFT_OPERATIONS = (
     ('apply_prepared_text_edit', lambda d: {'draft_id': d, 'approved': True}),
     ('apply_prepared_caption_edit', lambda d: {'draft_id': d, 'approved': True}),
     ('apply_prepared_pin_change', lambda d: {'draft_id': d, 'approved': True}),
+    ('apply_prepared_message_delete', lambda d: {'draft_id': d, 'approved': True}),
     ('send_prepared_album', lambda d: {'draft_id': d, 'approved': True}),
     ('get_album_send_status', lambda d: {'draft_id': d}),
     ('send_prepared_text', lambda d: {'draft_id': d, 'approved': False}),
@@ -413,6 +415,17 @@ class PinChangeDraftTests(DraftMatrix, Pair):
                                                         'message_id': archive_fixture.MID, 'action': 'pin'}))
 
 
+class MessageDeleteDraftTests(DraftMatrix, Pair):
+    """0.57 criterion 7 (part 3): the message deletion draft id is one more handle kind. Presented to the other alias
+    pending, and again after the minting alias deleted the message, it is answered exactly like an unknown handle:
+    no dialog, no deletion and no evidence of the message there."""
+    RAW, SEND, SENT = delete_fixture.Raw, 'apply_prepared_message_delete', 'applied'
+
+    def prepare(self, a):
+        return draft_of(a.result('prepare_message_delete', {'chat': archive_fixture.CHAT,
+                                                            'message_id': archive_fixture.MID}))
+
+
 class AlbumDraftTests(DraftMatrix, Pair):
     """0.56 criterion 8: the album draft id is one more handle kind. Its item artifacts are account-bound like every
     artifact id, and its items are staged under the minting alias's own staging root."""
@@ -507,6 +520,10 @@ class CaptionEditDraftReverseTests(CaptionEditDraftTests):
 
 
 class PinChangeDraftReverseTests(PinChangeDraftTests):
+    MINTER = 'work'
+
+
+class MessageDeleteDraftReverseTests(MessageDeleteDraftTests):
     MINTER = 'work'
 
 
