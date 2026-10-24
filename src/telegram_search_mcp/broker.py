@@ -103,6 +103,9 @@ from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditS
     edge_whitespace, normalized_text, rewritten_text, PREPARED as TEXT_EDIT_PREPARED, REFUSED as TEXT_EDIT_REFUSED,
     REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE)
 
+from .draft_kinds import (CHANGE_CAPABILITIES, DEDICATED_KINDS, DRAFT_KINDS, GENERIC_ARTIFACT_KINDS,
+                          REFUSED as STATUS_REFUSED)
+
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 # The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
@@ -563,7 +566,7 @@ class Broker(SelectionBrokerMixin):
         video = operation == 'send_prepared_video'
         album = operation == 'send_prepared_album'
         outcome = (self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None,
-                   kinds=frozenset({'video'} if video else {'album'} if album else {'document', 'photo', 'voice_note'}))
+                   kinds=frozenset({'video'} if video else {'album'} if album else GENERIC_ARTIFACT_KINDS))
                    if client_id is not None else None)
         if outcome is None:
             return None
@@ -1294,23 +1297,24 @@ class Broker(SelectionBrokerMixin):
         )
 
     def _require_topic_policy(self, draft_id: str, owner: DraftOwner, *, stored_source: bool = True) -> None:
-        kind = self._drafts.kind(draft_id, owner=owner)
-        if kind == 'forward':
-            self._require_forward_policy()  # Status and receipts stay bound to forward_send.
-        elif kind == 'video':
-            self._require_video_policy()  # Status and receipts stay bound to video_send.
-        elif kind == 'archive':
-            self._require_change_policy('archive_chats')  # Status and receipts stay bound to archive_chats.
-        elif kind == 'text_edit':
-            self._require_change_policy('edit_own_text')  # Status and receipts stay bound to edit_own_text.
-        elif kind == 'album':
-            raise DraftError('draft is unavailable')  # An album has its own status model; generic tools see none.
+        # The kind's status rule from the draft-kind table: a dedicated kind's status and receipts stay bound to its
+        # own capability (with what that capability requires); an album has its own status model and none here.
+        status = DRAFT_KINDS[self._drafts.kind(draft_id, owner=owner)].status
+        if status == STATUS_REFUSED:
+            raise DraftError('draft is unavailable')
+        if status is not None:
+            self._require_status_policy(status)
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         self._require_capabilities('send')
         provider = self._shared_client()
         self._require_capabilities(*self._drafts.source_required_capabilities(draft_id, owner=owner,
             provider=provider, provider_epoch=provider.send_observation_epoch, stored_source=stored_source))
+
+    def _require_status_policy(self, capability: str) -> None:
+        require_current(self._policy)
+        if not set(required_capabilities(capability)) <= set(self._policy.enabled_capabilities):
+            raise CompatibilityError('capability_disabled')
 
     def _require_capabilities(self, *required: str) -> None:
         """Refuse with only the missing names, in requirement order; reply tools return them typed."""
@@ -1384,7 +1388,7 @@ class Broker(SelectionBrokerMixin):
             return ListDraftsResponse(status="unavailable", detail="drafts are unavailable")
 
     def _draft_preview(self, draft, owner: DraftOwner) -> DraftPreview:
-        if draft.reply_source is not None or draft.kind in ("forward", "video", "archive", "text_edit", "album"):
+        if draft.reply_source is not None or draft.kind in DEDICATED_KINDS:
             raise DraftError("draft is unavailable")
         self._require_topic_policy(draft.draft_id, owner)
         return self._plain_draft_preview(draft,owner)
@@ -1966,7 +1970,7 @@ class Broker(SelectionBrokerMixin):
         try:
             owner = self._draft_owner(client_id)
             kind = self._drafts.kind(request.draft_id, owner=owner)
-            if kind in ("forward", "video", "archive", "text_edit", "album") or (kind == "text") != text_only:
+            if kind in DEDICATED_KINDS or (kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             self._require_topic_policy(request.draft_id, owner)
@@ -1992,7 +1996,7 @@ class Broker(SelectionBrokerMixin):
                                                     detail="draft is unavailable after expiry or restart")
             # The recipient is resolved again immediately before the single provider attempt.
             entry = self._drafts.peek(request.draft_id, owner=owner)
-            if entry.kind in ("forward", "video", "archive", "text_edit", "album") or (entry.kind == "text") != text_only:
+            if entry.kind in DEDICATED_KINDS or (entry.kind == "text") != text_only:
                 return SendPreparedArtifactResponse(status="error", draft_id=request.draft_id,
                                                     detail="draft kind does not match send tool")
             chat = self._shared_client().resolve_target(entry.recipient)
@@ -2844,7 +2848,7 @@ class Broker(SelectionBrokerMixin):
 
     def _require_change_policy(self, capability: str) -> None:
         require_current(self._policy)
-        if capability not in ('archive_chats', 'edit_own_text') or not set(required_capabilities(capability)) <= set(
+        if capability not in CHANGE_CAPABILITIES or not set(required_capabilities(capability)) <= set(
                 self._policy.enabled_capabilities):
             raise CompatibilityError('capability_disabled')
 

@@ -289,6 +289,10 @@ class TextEditSpec:
         return ('text_edit', *self.snapshot.anchor)
 
     @property
+    def chat_id(self) -> int:
+        return self.snapshot.anchor[0]
+
+    @property
     def sha256(self) -> str:
         return self.snapshot.source.source_sha256
 

@@ -24,6 +24,7 @@ from .sanitize import sanitize_telegram_text
 from .reply_drafts import ReplySource
 from .topic_models import TopicSnapshot
 from .outgoing_formatting import FrozenOutgoingEntities, freeze_outgoing_entities
+from .draft_kinds import CHANGE_KINDS, DEDICATED_KINDS, UNBACKED_KINDS, change_kind_of
 
 DRAFT_TTL_SECONDS = 15 * 60
 DEFAULT_CAPACITY = 4096
@@ -136,12 +137,12 @@ class OutgoingDraft:
     album: object | None = None  # album_drafts.AlbumSpec; every item artifact-backed
 
 
-# Provider state changes with a dedicated apply tool; a receipt may be `applied`.
-_CHANGE_KINDS = frozenset({"archive", "text_edit"})
-_UNBACKED_KINDS = frozenset({"text", "forward"}) | _CHANGE_KINDS
-# Kinds with a dedicated send tool; the generic draft tools never list, revise or cancel them.
-# The 0.57 draft-kind table has not landed: the album kind sits in this dedicated set (0.56 spec).
-_DEDICATED_KINDS = frozenset({"forward", "video", "album"}) | _CHANGE_KINDS
+# The kind flags come from the one draft-kind table (draft_kinds.DRAFT_KINDS, 0.57): change kinds have a dedicated
+# apply tool and may end `applied`; unbacked kinds have no artifact; dedicated kinds are never listed, revised or
+# cancelled by the generic draft tools.
+_CHANGE_KINDS = CHANGE_KINDS
+_UNBACKED_KINDS = UNBACKED_KINDS
+_DEDICATED_KINDS = DEDICATED_KINDS
 _SLOT_OUTCOMES = frozenset({"sent", "failed", "outcome_unknown"})
 
 
@@ -527,23 +528,21 @@ class OutgoingDraftRegistry:
 
     def prepare_change(self, *, owner: DraftOwner, chat_id: int, chat_title: str, change: object,
                        evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
-        """Record one archive move or own text edit; generic draft tools never expose these kinds.
+        """Record one change of a change kind (draft_kinds.DRAFT_KINDS); generic draft tools never expose these kinds.
 
         `evidence` builds and validates the public preview of the exact candidate before
         insertion; if it raises, nothing is inserted and no pending draft is superseded."""
-        from .archive_drafts import ArchiveSpec
-        from .edit_drafts import TextEditSpec
         self._validate_owner(owner)
         if type(chat_id) is not int or chat_id == 0:
             raise ValueError("chat must be a nonzero numeric chat ID")
-        kind = "archive" if isinstance(change, ArchiveSpec) else "text_edit" if isinstance(change, TextEditSpec) else None
-        if (kind is None or type(chat_title) is not str or not chat_title or
-                (change.snapshot.chat_id if kind == "archive" else change.snapshot.anchor[0]) != chat_id):
+        row = change_kind_of(change)
+        if row is None or type(chat_title) is not str or not chat_title or change.chat_id != chat_id:
             raise DraftError("change draft is unavailable")
+        kind = row.name
         now = self._clock()
         draft = OutgoingDraft(
             draft_id=f"draft_{uuid.uuid4().hex}", artifact_id="", sha256=change.sha256, size_bytes=change.size_bytes,
-            display_name="Chat list move" if kind == "archive" else "Text edit", mime_type="application/json",
+            display_name=row.display_name, mime_type="application/json",
             caption="", recipient=chat_id, expires_at=now + self._max_ttl_seconds, recipient_title=chat_title,
             kind=kind, **{kind: change},
         )

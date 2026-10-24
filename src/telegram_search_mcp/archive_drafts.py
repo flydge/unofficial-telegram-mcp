@@ -194,6 +194,10 @@ class ArchiveSpec:
         return ('archive', self.snapshot.chat_id)
 
     @property
+    def chat_id(self) -> int:
+        return self.snapshot.chat_id
+
+    @property
     def sha256(self) -> str:
         return archive_digest(self.snapshot.chat_id, self.snapshot.kind, self.snapshot.current_list, self.target_list)
 
