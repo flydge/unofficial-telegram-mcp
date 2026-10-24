@@ -358,6 +358,15 @@ class ApplyTests(Fixture, unittest.TestCase):
                 self.assertEqual(self.apply(did)['status'], 'outcome_unknown')
                 self.assertEqual(len(self.requests()), 1)
 
+    def test_a_span_covering_only_a_space_reads_applied(self):
+        """Review fix (057b, low): the pinned TDLib keeps a style span over a space inside the text, so it comes back
+        as sent and the edit reads applied."""
+        space = {'offset': 5, 'length': 1, 'type': {'@type': 'textEntityTypeUnderline'}}
+        result = self.apply(self.prepare('Hello there', [space])['draft_id'])
+        self.assertEqual((result['status'], result['edit_date']), ('applied', 1700000500))
+        [request] = self.requests()
+        self.assertEqual(request['input_message_content']['text']['entities'], [native(space)])
+
     def test_a_changed_message_or_style_before_the_dialog_makes_no_attempt(self):
         did = self.prepare()['draft_id']
         self.raw.message['content']['text']['entities'] = [entity('textEntityTypeItalic', 0, 5)]

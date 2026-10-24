@@ -4016,8 +4016,9 @@ result = apply_prepared_text_edit(draft_id=edit.text_edit.draft_id, approved=Tru
   one span into are joined first), with Telegram's auto-detected Url, EmailAddress, PhoneNumber, Mention, Hashtag,
   Cashtag, BotCommand and BankCardNumber entities (on whole scalars) and a MediaTimestamp exactly on a whole
   timestamp token with its value as the only extras; anything else after transport is `outcome_unknown`, a 4xx `failed`. As for
-  captions, TDLib drops a style span that covers only whitespace, so such an edit reads `outcome_unknown`, never a
-  false `applied`.
+  captions, the pinned TDLib keeps a style span that covers only whitespace inside the text (it removes only empty
+  spans and trims the edges, which preparation refuses), so such an edit reads `applied` unless Telegram returns the
+  span changed (review fix 057b).
 - **Dialog.** The text edit dialog, with `Current formatting, replaced by this edit`, the new styles under
   `New text styles (final text; UTF-16 code units):` (`<Style>: offset <N>, length <M>; covered «<span>»`) and the
   note `The new text carries only the styles listed here; Telegram may detect links in it and show a link preview.

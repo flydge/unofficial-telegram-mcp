@@ -60,6 +60,28 @@ class JoinedPiecesTests(unittest.TestCase):
                 self.assertTrue(exact_styles(text, [entity(kind, offset, length) for offset, length, kind in styles],
                                              styles))
 
+    def test_a_span_covering_only_a_space_is_kept(self):
+        """Review fix (057b, low): the pinned TDLib keeps a style span over whitespace inside the text
+        (remove_invalid_entities removes only empty entities; test/message_entities.cpp keeps Bold(2,1) on the space
+        of "👉 👉"), so the returned span is the caller's and the edit reads applied."""
+        for text, styles in (('a b', ((1, 1, B),)), ('\U0001f449 \U0001f449', ((2, 1, B),)),
+                             ('Hello there', ((0, 5, I), (5, 1, U)))):
+            with self.subTest(text=text):
+                rows = [entity(kind, offset, length) for offset, length, kind in styles]
+                self.assertTrue(exact_styles(text, rows, styles))
+                message = {'@type': 'message', 'id': 5, 'chat_id': -7, 'edit_date': 200, 'content': {
+                    '@type': 'messageText', 'text': {'@type': 'formattedText', 'text': text, 'entities': rows}}}
+                self.assertEqual(edited_text_result(message, chat_id=-7, message_id=5, new_text=text,
+                                                    previous_edit_date=100, styles=styles), 200)
+                photo = {'@type': 'message', 'id': 5, 'chat_id': -7, 'edit_date': 200, 'content': {
+                    '@type': 'messagePhoto', 'show_caption_above_media': False,
+                    'caption': {'@type': 'formattedText', 'text': text, 'entities': rows}}}
+                self.assertEqual(edited_caption_result(photo, chat_id=-7, message_id=5, content_type='messagePhoto',
+                                                       new_caption=text, styles=styles, show_caption_above_media=False,
+                                                       previous_edit_date=100), 200)
+                # Only a dropped span would leave it unknown.
+                self.assertFalse(exact_styles(text, rows[:-1], styles))
+
     def test_pieces_that_are_not_the_caller_span_never_join(self):
         styles = ((0, 11, B), (6, 5, I))
         for returned in (
