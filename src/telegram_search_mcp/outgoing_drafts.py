@@ -116,7 +116,7 @@ class OutgoingDraft:
     recipient_title: str = ""
     approval_required: bool = True
     kind: Literal["document", "photo", "voice_note", "text", "forward", "video", "archive", "text_edit",
-                  "album"] = "document"
+                  "caption_edit", "album"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -134,6 +134,7 @@ class OutgoingDraft:
     video: object | None = None  # video_drafts.VideoSpec; artifact-backed
     archive: object | None = None  # archive_drafts.ArchiveSpec; never artifact-backed
     text_edit: object | None = None  # edit_drafts.TextEditSpec; never artifact-backed
+    caption_edit: object | None = None  # caption_edit_drafts.CaptionEditSpec; never artifact-backed
     album: object | None = None  # album_drafts.AlbumSpec; every item artifact-backed
 
 
@@ -783,7 +784,7 @@ class OutgoingDraftRegistry:
 
     def change_claim_current(self, draft_id: str, *, owner: DraftOwner, kind: str,
                              provider: object, provider_epoch: object) -> bool:
-        """Final local prewire check for the one consumed archive or text edit claim."""
+        """Final local prewire check for the one consumed claim of a change kind."""
         with self._lock:
             entry = self._get(draft_id, owner)
             return (kind in _CHANGE_KINDS and entry.state == 'claimed' and entry.draft.kind == kind and
@@ -855,6 +856,13 @@ class OutgoingDraftRegistry:
     def kind(self, draft_id: str, *, owner: DraftOwner) -> str:
         with self._lock:
             return self._get(draft_id, owner).draft.kind
+
+    def extra_capabilities(self, draft_id: str, *, owner: DraftOwner) -> tuple[str, ...]:
+        """The capabilities a change payload names beyond its kind's own (a styled caption: edit_own_styled_text)."""
+        with self._lock:
+            draft = self._get(draft_id, owner).draft
+            payload = getattr(draft, draft.kind, None) if draft.kind in _CHANGE_KINDS else None
+            return tuple(getattr(payload, 'extra_capabilities', ()))
 
     def finish(
         self,

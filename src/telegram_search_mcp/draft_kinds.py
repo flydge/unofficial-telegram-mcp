@@ -6,7 +6,8 @@ it; the generic draft tools never list, show, revise or cancel it, and the gener
 `status`: the capability a status read and a receipt replay of the kind stay bound to (`required_capabilities` of
 it), None for the generic send rules, or REFUSED for a kind with its own status model that generic status never
 reads. A change kind also names its payload class (`spec`, stored in the OutgoingDraft field of the kind's name)
-and its fixed display name. Adding a kind is adding a row; nothing dispatches on kind names elsewhere.
+and its fixed display name; a payload may name more capabilities its status and replay need
+(`extra_capabilities`, e.g. edit_own_styled_text for a styled caption). Adding a kind is adding a row; nothing dispatches on kind names elsewhere.
 """
 from __future__ import annotations
 
@@ -58,6 +59,8 @@ DRAFT_KINDS = MappingProxyType({row.name: row for row in (
               spec='archive_drafts:ArchiveSpec', display_name='Chat list move'),
     DraftKind('text_edit', change=True, unbacked=True, dedicated=True, status='edit_own_text',
               spec='edit_drafts:TextEditSpec', display_name='Text edit'),
+    DraftKind('caption_edit', change=True, unbacked=True, dedicated=True, status='edit_own_caption',
+              spec='caption_edit_drafts:CaptionEditSpec', display_name='Caption edit'),
     # An album has its own status model (get_album_send_status); generic status never reads one (0.56).
     DraftKind('album', dedicated=True, status=REFUSED),
 )})

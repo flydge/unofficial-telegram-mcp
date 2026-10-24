@@ -58,11 +58,12 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "forwardMessages",
         "addChatToList",
         "editMessageText",
+        "editMessageCaption",
     }
 )
 
 # State changes travel only through the dedicated one-attempt transport, never `_call`.
-_CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText"})
+_CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText", "editMessageCaption"})
 # Only the dedicated forward and album transports may send a forward or an album; `_call` refuses them in any shape.
 _CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages", "sendMessageAlbum"}
 
@@ -224,6 +225,21 @@ def _exact_edit_text(value: str) -> bool:
     """No edge whitespace and no character the pinned TDLib rewrites: stored text equals the reviewed text."""
     from .edit_drafts import edge_whitespace, rewritten_text
     return not edge_whitespace(value) and not rewritten_text(value)
+
+
+def _exact_caption(formatted) -> bool:
+    """An edited caption Telegram stores exactly: the empty caption without entities, or the stored form with only
+    canonical caller styles."""
+    try:
+        from .caption_edit_drafts import stored_form
+        text, entities = formatted["text"], formatted["entities"]
+        if type(entities) is not list or not stored_form(text):
+            return False
+        if text == "":
+            return entities == []
+        return native_outgoing_entities(_native_outgoing_entity_expectation(text, entities)) == entities
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
 
 
 # Closed per-kind media contents, shared by sendMessage and sendMessageAlbum.
@@ -496,6 +512,22 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             or not _normalized_message_text(text["text"]) or not _exact_edit_text(text["text"])
         ):
             raise ForbiddenTDLibRequest("TDLib edit request shape is not allowed")
+    if request_type == "editMessageCaption":
+        # The reviewed caption in its stored form with only the caller's styles, or exactly the empty formatted text
+        # that removes it (never null); no markup; the reviewed above-media flag (0.57).
+        caption = payload.get("caption")
+        if (
+            set(payload) != {"@type", "chat_id", "message_id", "reply_markup", "caption", "show_caption_above_media"}
+            or not _is_forum_chat_id(payload.get("chat_id"))
+            or not _is_integer_in_range(payload.get("message_id"), 1, 2**53 - 1)
+            or payload.get("reply_markup") is not None
+            or type(payload.get("show_caption_above_media")) is not bool
+            or type(caption) is not dict or set(caption) != {"@type", "text", "entities"}
+            or caption.get("@type") != "formattedText"
+            or type(caption.get("text")) is not str or len(caption["text"]) > 1024
+            or not _exact_caption(caption)
+        ):
+            raise ForbiddenTDLibRequest("TDLib caption edit request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
         file_id = payload.get("file_id")
         if not _is_strict_integer(file_id) or not 0 < file_id <= (1 << 31) - 1:
@@ -1946,6 +1978,52 @@ class TDLibClient:
                                        previous_edit_date=expected.edit_date)
         if edit_date is None:
             raise MessageSendOutcomeUnknown("TDLib returned an invalid edit result")
+        return edit_date
+
+    def read_own_caption_message(self, chat_id: int, message_id: int):
+        """One serialized read of chat identity, the own-media projection and edit permission (0.57)."""
+        from .caption_edit_drafts import CaptionEditSnapshot
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError("caption edit message is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            chat = self.resolve_target(chat_id)
+            message = self.get_message(chat_id, message_id)
+            properties = self._call({"@type": "getMessageProperties", "chat_id": chat_id, "message_id": message_id})
+            return CaptionEditSnapshot.create(chat, chat_id, message, message_id, properties)
+
+    def edit_own_caption(self, chat_id: int, message_id: int, *, new_caption: str, styles, expected,
+                         expected_account_id: int, pre_send_guard: Callable[[], bool]) -> int:
+        """Revalidate the reviewed projection and edit permission under the provider lock, make one
+        editMessageCaption attempt and return the validated edit_date of the returned message.
+
+        Every refusal before the raw send is no-attempt evidence; a result that is not exactly the edited message
+        (same kind, the new caption, the caller's styles and only auto-detected extras) is an unknown outcome.
+        Nothing is retried."""
+        from .caption_edit_drafts import CaptionEditSnapshot, CaptionEditSpec, caption_request, edited_caption_result
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(expected, CaptionEditSnapshot) or expected.anchor != (chat_id, message_id) or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                CaptionEditSpec(snapshot=expected, new_caption=new_caption, styles=styles)  # a change, still valid
+                return (self.read_own_caption_message(chat_id, message_id) == expected and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError("caption edit authority changed")
+            except Exception as error:
+                raise MessageSendNotAttempted("caption edit revalidation failed") from error
+            response = self._change_transport(caption_request(chat_id, message_id, new_caption, styles,
+                                                              expected.show_caption_above_media),
+                                              pre_transport_guard=pre_send_guard)
+        edit_date = edited_caption_result(response, chat_id=chat_id, message_id=message_id,
+                                          content_type=expected.content_type, new_caption=new_caption, styles=styles,
+                                          show_caption_above_media=expected.show_caption_above_media,
+                                          previous_edit_date=expected.edit_date)
+        if edit_date is None:
+            raise MessageSendOutcomeUnknown("TDLib returned an invalid caption edit result")
         return edit_date
 
     def _change_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:

@@ -20,6 +20,8 @@ OPERATION_CAPABILITIES = {
     **{name: "album_send" for name in ("prepare_album_send", "send_prepared_album", "get_album_send_status")},
     **{name: "archive_chats" for name in ("prepare_chat_archive", "apply_prepared_archive")},
     **{name: "edit_own_text" for name in ("prepare_text_edit", "apply_prepared_text_edit")},
+    # 0.57: a styled caption also needs edit_own_styled_text; that per-draft conjunction is the broker's.
+    **{name: "edit_own_caption" for name in ("prepare_caption_edit", "apply_prepared_caption_edit")},
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},
     **{name: "reply_text_send" for name in ("prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft")},
     "read_presentation": "presentations",

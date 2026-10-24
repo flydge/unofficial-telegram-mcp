@@ -105,12 +105,16 @@ from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditS
 
 from .draft_kinds import (CHANGE_CAPABILITIES, DEDICATED_KINDS, DRAFT_KINDS, GENERIC_ARTIFACT_KINDS,
                           REFUSED as STATUS_REFUSED)
+from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPreparedCaptionEditResponse, CaptionEditDraftPreview,
+    CaptionEditSpec, CaptionRefusal, PrepareCaptionEditRequest, PrepareCaptionEditResponse, caption_styles,
+    evidence_fits as caption_evidence_fits, input_refusal as caption_input_refusal, DISABLED as CAPTION_DISABLED,
+    PREPARED as CAPTION_PREPARED, REFUSED as CAPTION_REFUSED, UNAVAILABLE as CAPTION_UNAVAILABLE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 # The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
                              'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit',
-                             'send_prepared_album'})
+                             'send_prepared_album', 'apply_prepared_caption_edit'})
 # The 0.56 album operations. The contract row (album_send, then send) is checked with every other operation's; the
 # broker also checks the album policy itself (`_require_album_policy`) before admission, and the per-draft video
 # conjunction (video_send for a video item) wherever a draft is read.
@@ -987,6 +991,14 @@ class Broker(SelectionBrokerMixin):
         if operation == "apply_prepared_text_edit":
             model = ApplyPreparedTextEditRequest.model_validate(payload)
             return self._apply_prepared_text_edit(model, client_id=client_id, deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_caption_edit":
+            model = PrepareCaptionEditRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_caption_edit(model, client_id=client_id).model_dump(mode="json")
+        if operation == "apply_prepared_caption_edit":
+            model = ApplyPreparedCaptionEditRequest.model_validate(payload)
+            return self._apply_prepared_caption_edit(model, client_id=client_id,
+                                                     deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -1304,6 +1316,8 @@ class Broker(SelectionBrokerMixin):
             raise DraftError('draft is unavailable')
         if status is not None:
             self._require_status_policy(status)
+            for capability in self._drafts.extra_capabilities(draft_id, owner=owner):
+                self._require_status_policy(capability)  # A styled caption's status needs edit_own_styled_text too.
         if not (self._drafts.is_topic(draft_id, owner=owner) or self._drafts.is_formatted(draft_id, owner=owner)):
             return
         self._require_capabilities('send')
@@ -3181,6 +3195,177 @@ class Broker(SelectionBrokerMixin):
             return result('outcome_unknown', 'the edit result is unconfirmed; do not retry automatically', **changed)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'text_edit', result)
+
+    # 0.57 caption edits: the text edit's skeleton, with the styled conjunction checked wherever the draft is read.
+    def _caption_policy(self, styled: bool) -> None:
+        """edit_own_caption with send and read; a styled caption also needs edit_own_styled_text. Refuses with only
+        the missing names, in that order."""
+        self._require_capabilities(*required_capabilities('edit_own_caption'),
+                                   *(('edit_own_styled_text',) if styled else ()))
+
+    def _caption_owner(self, client_id: str, styled: bool) -> DraftOwner:
+        owner = self._draft_owner(client_id)
+        self._caption_policy(styled)
+        return owner
+
+    def _caption_edit_preview(self, draft, owner: DraftOwner) -> CaptionEditDraftPreview:
+        spec = draft.caption_edit
+        if draft.kind != 'caption_edit' or type(spec) is not CaptionEditSpec:
+            raise DraftError(CAPTION_UNAVAILABLE)
+        self._caption_policy(bool(spec.styles))
+        return CaptionEditDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title, kind=spec.snapshot.chat_kind),
+            spec=spec)
+
+    def _prepare_caption_edit(self, request: PrepareCaptionEditRequest, *, client_id: str) -> PrepareCaptionEditResponse:
+        from .outgoing_entity_models import caller_outgoing_entities
+        try:
+            styled = bool(request.outgoing_entities)
+            owner = self._caption_owner(client_id, styled)  # The styled conjunction precedes every read.
+            new_caption = request.new_caption
+            detail = caption_input_refusal(new_caption)  # Never rewritten: refused before any provider read.
+            if detail is not None:
+                return PrepareCaptionEditResponse(status='refused', refusal='invalid_input', detail=detail)
+            try:
+                styles = caption_styles(new_caption, caller_outgoing_entities(request.outgoing_entities))
+            except ValueError:
+                raise CaptionRefusal('invalid_input') from None
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            snapshot = provider.read_own_caption_message(request.chat, request.message_id)
+            refusal = snapshot.refusal()
+            if refusal is not None:
+                raise CaptionRefusal(refusal)
+            if not caption_evidence_fits(snapshot, new_caption, styles):
+                raise CaptionRefusal('unsupported_source_content')
+            if snapshot.unchanged(new_caption, styles):
+                raise CaptionRefusal('unchanged_caption')
+            spec = CaptionEditSpec(snapshot=snapshot, new_caption=new_caption, styles=styles)
+            self._reply_budget_check(provider)
+            if (self._caption_owner(client_id, styled) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(CAPTION_UNAVAILABLE)
+            previews = []
+            draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.chat_title,
+                change=spec, evidence=lambda candidate: previews.append(self._caption_edit_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PrepareCaptionEditResponse(status='prepared', caption_edit=preview, detail=CAPTION_PREPARED)
+        except CaptionRefusal as refusal:
+            return PrepareCaptionEditResponse(status='refused', refusal=refusal.code, detail=CAPTION_REFUSED)
+        except CapabilityDisabled as error:
+            # Only the missing names (edit_own_styled_text for a styled caption), before any read; no draft.
+            return PrepareCaptionEditResponse(status='capability_disabled', missing_capabilities=list(error.missing),
+                                              detail=CAPTION_DISABLED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PrepareCaptionEditResponse(status='unavailable', detail=CAPTION_UNAVAILABLE)
+
+    def _apply_prepared_caption_edit(self, request: ApplyPreparedCaptionEditRequest, *, client_id: str,
+                                     deadline: float | None = None) -> ApplyPreparedCaptionEditResponse:
+        if request.approved is not True:
+            return ApplyPreparedCaptionEditResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
+        # Capture once: account reads, owner confirmation and transport share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._apply_prepared_caption_edit_impl(request, client_id=client_id)
+
+    def _apply_prepared_caption_edit_impl(self, request: ApplyPreparedCaptionEditRequest, *,
+                                          client_id: str) -> ApplyPreparedCaptionEditResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return ApplyPreparedCaptionEditResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._caption_owner(client_id, False)
+            if self._drafts.kind(draft_id, owner=owner) != 'caption_edit':
+                return result('error', 'draft kind does not match apply tool')
+            styled = bool(self._drafts.extra_capabilities(draft_id, owner=owner))
+            self._caption_policy(styled)  # Receipts stay bound to both edit capabilities for a styled caption.
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                if previous.evidence == 'local_failed':
+                    return result('local_failed', 'previous local failure receipt; no provider change was attempted')
+                return result(previous.status, 'previous provider attempt receipt; no new change was attempted',
+                              **({'edit_date': previous.observed} if previous.status == 'applied' else {}))
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.caption_edit
+            if entry.kind != 'caption_edit' or type(spec) is not CaptionEditSpec or bool(spec.styles) != styled:
+                return result('error', 'draft kind does not match apply tool')
+            chat_id, message_id = spec.snapshot.anchor
+            changed = dict(chat_id=chat_id, message_id=message_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                current = provider.read_own_caption_message(chat_id, message_id)
+            except (CaptionRefusal, MessageNotFound, SecretChatRejected, ValueError):
+                return result('message_changed', 'message changed; prepare a new caption edit draft', **changed)
+            if (current.source != spec.snapshot.source or current.chat_identity != spec.snapshot.chat_identity or
+                    current.chat_title != spec.snapshot.chat_title or current.chat_title != expected_title):
+                return result('message_changed', 'message changed; prepare a new caption edit draft', **changed)
+            if not current.can_be_edited:
+                return result('message_changed', 'message can no longer be edited; no change was attempted', **changed)
+            self._reply_budget_check(provider)
+            if (self._caption_owner(client_id, styled) != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(CAPTION_UNAVAILABLE)
+            preview = self._caption_edit_preview(entry, owner).model_dump(mode='json')
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='caption_edit', caption_edit_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
+            # The local dialog may remain open while account, policy or provider change.
+            if self._caption_owner(client_id, styled) != owner:
+                raise DraftError(CAPTION_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(CAPTION_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            needed = set(required_capabilities('edit_own_caption')) | ({'edit_own_styled_text'} if styled else set())
+            def caption_guard():
+                require_current(self._policy)
+                return (needed <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.change_claim_current(draft_id, owner=owner, kind='caption_edit', provider=provider,
+                                                          provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the change'
+            try:
+                editor = getattr(provider, 'edit_own_caption', None)
+                if not callable(editor):
+                    raise MessageSendNotAttempted('caption edit provider is unavailable')
+                edit_date = editor(chat_id, message_id, new_caption=spec.new_caption, styles=spec.styles,
+                                   expected=spec.snapshot, expected_account_id=owner.account_id,
+                                   pre_send_guard=caption_guard)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed=edit_date)
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                failure_detail = self._change_failure(error)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider change was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._caption_owner(client_id, styled) != owner:
+                    raise DraftError(CAPTION_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            if receipt.status == 'applied':
+                return result('applied', 'TDLib returned the edited message with the new caption',
+                              edit_date=receipt.observed, **changed)
+            if receipt.status == 'failed':
+                return result('failed', failure_detail, **changed)
+            return result('outcome_unknown', 'the caption edit result is unconfirmed; do not retry automatically',
+                          **changed)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._change_attempted(draft_id, client_id, 'caption_edit', result)
 
     @staticmethod
     def _error_code(error: BaseException) -> str:

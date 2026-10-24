@@ -32,7 +32,11 @@ UNBACKED_056 = {'text', 'forward', 'archive', 'text_edit'}
 DEDICATED_056 = {'forward', 'video', 'album', 'archive', 'text_edit'}
 STATUS_056 = {'forward': 'forward_send', 'video': 'video_send', 'archive': 'archive_chats',
               'text_edit': 'edit_own_text', 'album': 'refused'}
-ALL = ('document', 'photo', 'voice_note', 'text', 'forward', 'video', 'archive', 'text_edit', 'album')
+# 0.57 adds one row: the caption edit, a dedicated unbacked change bound to edit_own_caption.
+CHANGE_057, UNBACKED_057, DEDICATED_057 = (CHANGE_056 | {'caption_edit'}, UNBACKED_056 | {'caption_edit'},
+                                           DEDICATED_056 | {'caption_edit'})
+STATUS_057 = {**STATUS_056, 'caption_edit': 'edit_own_caption'}
+ALL = ('document', 'photo', 'voice_note', 'text', 'forward', 'video', 'archive', 'text_edit', 'caption_edit', 'album')
 
 
 def insert(registry, kind, owner=OWNER, state='pending', payload=False):
@@ -59,12 +63,12 @@ class Store:
 class TableTests(unittest.TestCase):
     def test_rows_reproduce_the_replaced_sets(self):
         self.assertEqual(tuple(DRAFT_KINDS), ALL)
-        self.assertEqual(draft_kinds.CHANGE_KINDS, CHANGE_056)
-        self.assertEqual(draft_kinds.UNBACKED_KINDS, UNBACKED_056)
-        self.assertEqual(draft_kinds.DEDICATED_KINDS, DEDICATED_056)
-        self.assertEqual({name: row.status for name, row in DRAFT_KINDS.items() if row.status is not None}, STATUS_056)
+        self.assertEqual(draft_kinds.CHANGE_KINDS, CHANGE_057)
+        self.assertEqual(draft_kinds.UNBACKED_KINDS, UNBACKED_057)
+        self.assertEqual(draft_kinds.DEDICATED_KINDS, DEDICATED_057)
+        self.assertEqual({name: row.status for name, row in DRAFT_KINDS.items() if row.status is not None}, STATUS_057)
         self.assertEqual(draft_kinds.GENERIC_ARTIFACT_KINDS, {'document', 'photo', 'voice_note'})
-        self.assertEqual(draft_kinds.CHANGE_CAPABILITIES, {'archive_chats', 'edit_own_text'})
+        self.assertEqual(draft_kinds.CHANGE_CAPABILITIES, {'archive_chats', 'edit_own_text', 'edit_own_caption'})
 
     def test_every_kind_literal_follows_the_table(self):
         self.assertEqual(set(typing.get_args(OutgoingDraft.__dataclass_fields__['kind'].type
@@ -76,9 +80,11 @@ class TableTests(unittest.TestCase):
 
     def test_change_rows_name_their_payload_field_class_and_display_name(self):
         from telegram_search_mcp.archive_drafts import ArchiveSpec
+        from telegram_search_mcp.caption_edit_drafts import CaptionEditSpec
         from telegram_search_mcp.edit_drafts import TextEditSpec
         self.assertIs(DRAFT_KINDS['archive'].spec_type(), ArchiveSpec)
         self.assertIs(DRAFT_KINDS['text_edit'].spec_type(), TextEditSpec)
+        self.assertIs(DRAFT_KINDS['caption_edit'].spec_type(), CaptionEditSpec)
         self.assertEqual((DRAFT_KINDS['archive'].display_name, DRAFT_KINDS['text_edit'].display_name),
                          ('Chat list move', 'Text edit'))
         for name in draft_kinds.CHANGE_KINDS:
@@ -108,7 +114,7 @@ class ChangeFlagTests(unittest.TestCase):
                 registry = OutgoingDraftRegistry(Store())
                 did = insert(registry, kind, state='claimed', payload=True)
                 registry._entries[did].attempted_at = time.monotonic()
-                change = kind in CHANGE_056
+                change = kind in CHANGE_057
                 self.assertEqual(registry.change_claim_current(did, owner=OWNER, kind=kind, provider=None,
                                                                provider_epoch=None), change)
                 with self.assertRaises(ValueError):
@@ -139,7 +145,7 @@ class UnbackedFlagTests(unittest.TestCase):
                 store = Store()
                 registry = OutgoingDraftRegistry(store)
                 did = insert(registry, kind)
-                if kind in UNBACKED_056:
+                if kind in UNBACKED_057:
                     self.assertIsNone(registry._pending_locked(registry._entries[did]))
                     self.assertEqual(store.lookups, [])
                 else:
@@ -166,12 +172,13 @@ class DedicatedFlagTests(unittest.TestCase):
 
     def test_generic_tools_skip_and_refuse_dedicated_kinds(self):
         registry = OutgoingDraftRegistry(Store())
-        ids = {kind: insert(registry, kind) for kind in ('text', 'forward', 'video', 'archive', 'text_edit', 'album')}
+        ids = {kind: insert(registry, kind) for kind in ('text', 'forward', 'video', 'archive', 'text_edit',
+                                                         'caption_edit', 'album')}
         listed, _ = registry.list_pending(owner=OWNER, limit=50)
         self.assertEqual({draft.kind for draft in listed}, {'text'})
         for kind, did in ids.items():
             with self.subTest(kind=kind):
-                dedicated = kind in DEDICATED_056
+                dedicated = kind in DEDICATED_057
                 with self.assertRaises(DraftError) if dedicated else _no_error():
                     registry.revise(did, owner=OWNER, recipient_title='Team', text='new' if kind == 'text' else None)
                 with self.assertRaises(DraftError) if dedicated else _no_error():
@@ -182,7 +189,7 @@ class DedicatedFlagTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 did = insert(self.broker._drafts, kind)
                 draft = self.broker._drafts._entries[did].draft
-                if kind in DEDICATED_056:
+                if kind in DEDICATED_057:
                     with self.assertRaises(DraftError):
                         self.broker._draft_preview(draft, OWNER)
                     for text_only in (True, False):
@@ -211,7 +218,7 @@ class StatusPolicyTests(unittest.TestCase):
 
     def test_each_kind_checks_exactly_its_status_capability(self):
         for kind in ALL:
-            status = STATUS_056.get(kind)
+            status = STATUS_057.get(kind)
             with self.subTest(kind=kind):
                 base = self.broker(('send', 'read', 'artifacts'))
                 did = insert(base._drafts, kind)
@@ -234,9 +241,9 @@ class StatusPolicyTests(unittest.TestCase):
                 self.assertIsNone(full._require_topic_policy(insert(full._drafts, kind), OWNER))
 
     def test_change_policy_admits_only_change_capabilities(self):
-        broker = self.broker(tuple(sorted({'send', 'read', 'archive_chats', 'edit_own_text', 'forward_send',
-                                           'video_send'})))
-        for capability in ('archive_chats', 'edit_own_text'):
+        broker = self.broker(tuple(sorted({'send', 'read', 'archive_chats', 'edit_own_text', 'edit_own_caption',
+                                           'forward_send', 'video_send'})))
+        for capability in ('archive_chats', 'edit_own_text', 'edit_own_caption'):
             self.assertIsNone(broker._require_change_policy(capability))
         for capability in ('forward_send', 'video_send', 'send', 'read'):
             with self.subTest(capability=capability), self.assertRaises(CompatibilityError):

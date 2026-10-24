@@ -1,0 +1,6 @@
+{
+  "structure": {
+    "apply_prepared_caption_edit": "new tool (0.57 caption edit): one approved editMessageCaption attempt with the 0.54 approval statuses and next_action",
+    "prepare_caption_edit": "new tool (0.57 caption edit): replace or remove one own media caption as an immutable draft; optional styles behind edit_own_styled_text, typed capability_disabled"
+  }
+}

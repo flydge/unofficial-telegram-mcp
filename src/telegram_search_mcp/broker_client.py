@@ -52,6 +52,8 @@ from .album_drafts import (GetAlbumSendStatusRequest, GetAlbumSendStatusResponse
     SEND_DETAILS as ALBUM_SEND_DETAILS, UNAVAILABLE as ALBUM_UNAVAILABLE)
 from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveResponse, ApplyPreparedArchiveRequest,
     ApplyPreparedArchiveResponse, UNAVAILABLE as ARCHIVE_UNAVAILABLE)
+from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPreparedCaptionEditResponse,
+    PrepareCaptionEditRequest, PrepareCaptionEditResponse, UNAVAILABLE as CAPTION_EDIT_UNAVAILABLE)
 from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
     ApplyPreparedTextEditResponse, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE)
 from .schemas import (
@@ -251,7 +253,7 @@ SHORT_DEADLINE_OPERATIONS = frozenset({
     "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send",
     "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send",
     "prepare_chat_archive", "prepare_text_edit", "get_send_status", "search_chats", "verify_target",
-    "read_target_messages", "read_presentation", "prepare_album_send", "get_album_send_status"})
+    "read_target_messages", "read_presentation", "prepare_album_send", "get_album_send_status", "prepare_caption_edit"})
 
 
 from .selection_client import SelectionClientMixin, selected_method, selection_wire, strict_selection_response
@@ -1898,6 +1900,36 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError, ValueError):
             return ApplyPreparedTextEditResponse(status="outcome_unknown", draft_id=request.draft_id,
                                                  detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_caption_edit(self, request: PrepareCaptionEditRequest) -> PrepareCaptionEditResponse:
+        from .caption_edit_drafts import caption_styles
+        from .outgoing_entity_models import caller_outgoing_entities
+        try:
+            response = PrepareCaptionEditResponse.model_validate(
+                self._request("prepare_caption_edit", request.model_dump(mode="json")))
+            if response.caption_edit is not None:
+                preview = response.caption_edit
+                if (preview.chat.chat_id != request.chat or preview.message_id != request.message_id or
+                        preview.raw_new_caption != request.new_caption or preview.styles() != caption_styles(
+                            request.new_caption, caller_outgoing_entities(request.outgoing_entities))):
+                    raise BrokerUnavailable("caption edit preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PrepareCaptionEditResponse(status="unavailable", detail=CAPTION_EDIT_UNAVAILABLE)
+
+    def apply_prepared_caption_edit(self, request: ApplyPreparedCaptionEditRequest) -> ApplyPreparedCaptionEditResponse:
+        try:
+            response = ApplyPreparedCaptionEditResponse.model_validate(
+                self._request("apply_prepared_caption_edit", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("caption edit receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return ApplyPreparedCaptionEditResponse(status="error", draft_id=request.draft_id,
+                                                    detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return ApplyPreparedCaptionEditResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                                    detail="broker response is unavailable; do not retry automatically")
 
     def check(self) -> str:
         result = self._request("check", {})

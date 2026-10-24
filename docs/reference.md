@@ -6,7 +6,7 @@ Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discov
 
 ## MCP surface
 
-The public surface of the current candidate contains fifty-eight tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains sixty tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,7 +18,7 @@ The public surface of the current candidate contains fifty-eight tools (publishe
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 58-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 60-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -575,7 +575,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`. On the Homebrew/source path a `TDLIB_OPENSSL_KEG: openssl@3 <version>` line (or `unavailable`/`unrecognized`) follows `INITIALIZING_TDLIB`, naming the OpenSSL keg the Homebrew TDLib loads; the bundled runtime omits it.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the fifty-eight tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the sixty tools of the current candidate.
 
 ## Client distribution reference (0.53 candidate)
 
@@ -2601,7 +2601,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 58 tools. The three owner tools below use existing
+The candidate exposes 60 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: the `issue_local_upload_authority` description and the CLI help contain this
 complete sequence.

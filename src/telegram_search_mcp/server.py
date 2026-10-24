@@ -61,6 +61,8 @@ from .archive_drafts import (PrepareChatArchiveRequest, PrepareChatArchiveRespon
     ApplyPreparedArchiveResponse, ChatList)
 from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
     ApplyPreparedTextEditResponse, NewText)
+from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPreparedCaptionEditResponse, NewCaption,
+    PrepareCaptionEditRequest, PrepareCaptionEditResponse)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -168,6 +170,8 @@ _TOOL_NAMES = [
     "prepare_album_send",
     "send_prepared_album",
     "get_album_send_status",
+    "prepare_caption_edit",
+    "apply_prepared_caption_edit",
 ]
 # Each tool's full capability requirement, the guard's own rule; `_manifest` needs none.
 _TOOL_CAPABILITIES = {name: required_capabilities(OPERATION_CAPABILITIES[TOOL_OPERATIONS[name]])
@@ -525,6 +529,19 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "Use it after outcome_unknown or partial instead of sending again; it never sends or retries, and may settle "
         "late items. sent requires an exact final message ID. Observations last at most 900 seconds; this is not "
         "delivery or read status."),
+    # 0.57 own-message actions; each description adds at most 600 characters to the surface budget.
+    "prepare_caption_edit": ("Prepare editing own caption",
+        "Prepare replacing the caption of one of your own photo, video, animation, document, audio or voice note "
+        "messages; an empty new_caption removes it.",
+        "new_caption must already be the text Telegram stores, else invalid_input. outgoing_entities also need "
+        "edit_own_styled_text. Incoming, forwarded or uneditable messages, hidden caption formatting and unchanged "
+        "captions are refused. Nothing changes; show the preview and ask first. Preparing again supersedes. "
+        + _UNTRUSTED),
+    "apply_prepared_caption_edit": ("Apply a prepared caption edit",
+        "Revalidate the message and its edit permission, then make exactly one caption edit attempt; recipients see "
+        "it marked edited.",
+        "applied requires exactly the new caption and styles back; message_changed means no attempt. "
+        + _approval("changes")),
 }
 
 
@@ -585,6 +602,10 @@ _FIELD_DOCS = {
     "album_items": "2–10 {artifact_id, caption, display_name} in send order; artifact_ids as from get_attachment "
                    "or create_local_artifact.",
     "album_group": "media: photos and videos (the default); documents: documents only.",
+    "caption_message_id": "ID of your own outgoing photo, video, animation, document, audio or voice note message.",
+    "new_caption": "The complete replacement caption as Telegram stores it; an empty string removes the caption.",
+    "edit_entities": "Optional bold, italic, underline, strikethrough or spoiler spans (UTF-16 code units); needs "
+                     "edit_own_styled_text.",
 }
 
 
@@ -1862,6 +1883,22 @@ def build_server(
     def get_album_send_status(draft_id: Annotated[DraftId, _about("draft_id")]) -> GetAlbumSendStatusResponse:
         return get_service().get_album_send_status(GetAlbumSendStatusRequest(draft_id=draft_id))
 
+    @server.tool(name="prepare_caption_edit", annotations=_READ_ONLY_STATEFUL, structured_output=True)
+    def prepare_caption_edit(chat: Annotated[ChatId, _about("chat")],
+                             message_id: Annotated[PositiveMessageId, _about("caption_message_id")],
+                             new_caption: Annotated[NewCaption, _about("new_caption")],
+                             outgoing_entities: Annotated[OutgoingEntityList, _about("edit_entities")] = [],
+                             ) -> PrepareCaptionEditResponse:
+        return get_service().prepare_caption_edit(PrepareCaptionEditRequest(
+            chat=chat, message_id=message_id, new_caption=new_caption, outgoing_entities=outgoing_entities))
+
+    @server.tool(name="apply_prepared_caption_edit", annotations=_OVERWRITE, structured_output=True)
+    def apply_prepared_caption_edit(draft_id: Annotated[DraftId, _about("draft_id")],
+                                    approved: Annotated[bool, Field(strict=True), _about("approved")],
+                                    ) -> ApplyPreparedCaptionEditResponse:
+        return get_service().apply_prepared_caption_edit(ApplyPreparedCaptionEditRequest(draft_id=draft_id,
+                                                                                         approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
@@ -1871,7 +1908,8 @@ def build_server(
             ("send_prepared_video",SendPreparedVideoRequest),("prepare_chat_archive",PrepareChatArchiveRequest),
             ("apply_prepared_archive",ApplyPreparedArchiveRequest),("prepare_text_edit",PrepareTextEditRequest),
             ("apply_prepared_text_edit",ApplyPreparedTextEditRequest),("prepare_album_send",PrepareAlbumSendRequest),
-            ("send_prepared_album",SendPreparedAlbumRequest),("get_album_send_status",GetAlbumSendStatusRequest)):
+            ("send_prepared_album",SendPreparedAlbumRequest),("get_album_send_status",GetAlbumSendStatusRequest),
+            ("prepare_caption_edit",PrepareCaptionEditRequest),("apply_prepared_caption_edit",ApplyPreparedCaptionEditRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):

@@ -330,7 +330,8 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         tools = {tool['name']: tool for tool in schema_document(build_server(policy=RuntimePolicy()))['tools']}
         self.assertEqual(len(tools), len(_TOOL_NAMES))  # the registration, independent of the listing policy
         new = {'prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'}
-        later = {'prepare_album_send', 'send_prepared_album', 'get_album_send_status'}  # 0.56 albums, after this slice
+        later = {'prepare_album_send', 'send_prepared_album', 'get_album_send_status',  # 0.56 albums, after this slice
+                 'prepare_caption_edit', 'apply_prepared_caption_edit'}  # 0.57 caption edits
         self.assertTrue(new <= set(tools))
         existing = [tools[name] for name in sorted(set(tools) - new - later)]
         self.assertEqual(len(existing), 51)
@@ -354,9 +355,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         async with Client(build_server(service_factory=lambda: self.fail('provider opened'), policy=full)) as consumer:
             tools = {t.name: t for t in (await consumer.list_tools()).tools}
         self.assertEqual(len(tools), len(_TOOL_NAMES))
-        # The 0.56 album tools follow these four in registration order.
+        # The 0.56 album tools and the 0.57 caption tools follow these four in registration order.
         ours = ['prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit']
-        self.assertEqual(list(tools)[-7:-3], ours)
+        self.assertEqual(list(tools)[51:55], ours)
         self.assertEqual(set(tools['prepare_chat_archive'].input_schema['properties']), {'chat', 'target_list'})
         self.assertEqual(set(tools['prepare_text_edit'].input_schema['properties']),
                          {'chat', 'message_id', 'new_text'})

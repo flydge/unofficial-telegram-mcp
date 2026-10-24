@@ -61,10 +61,10 @@ GOLDEN_054 = {
 # The schema fingerprint c6338a0 computed. 0.55 left it unchanged (spec 2, criterion 2; verified at v0.55.0rc1).
 SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510ca37ca0e87b'
 # Every later slice that changes a tool schema lists the change in tests/fixtures/schema_changes/ and moves this
-# pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 (0.57-capabilities). Accounts themselves never enter the
-# fingerprint.
-SCHEMA_FINGERPRINT = '0f233adedcc516b5d99c84940b98727835d1801c1907c6f88eecd8c553a3e16e'
-SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities')
+# pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 part 1 (0.57-capabilities, 0.57-caption-tools). Accounts
+# themselves never enter the fingerprint.
+SCHEMA_FINGERPRINT = 'b291f8f2e96e200335da2c9a1f3560dd4d442f08a69e3eb39f50aacd402b518c'
+SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities', '0.57-caption-tools')
 
 
 def digest(data):

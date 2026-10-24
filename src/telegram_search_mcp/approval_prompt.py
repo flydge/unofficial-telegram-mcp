@@ -525,6 +525,53 @@ def _text_edit_document(validated, alias) -> str:
         'then make one edit attempt.')
 
 
+_MEDIA_WORDS = {'photo': 'photo', 'video': 'video', 'animation': 'animation', 'document': 'document', 'audio': 'audio',
+                'voice_note': 'voice note'}
+
+
+def _caption_edit_document(validated, alias) -> str:
+    """The old and new caption as exact payloads, or "(none)" and "Remove caption". Only formatting Telegram does not
+    detect again is listed as replaced; the caller's styles are listed with their covered text (0.57)."""
+    from datetime import datetime, timezone
+    from .caption_edit_drafts import ABOVE_MEDIA_KINDS
+    from .edit_drafts import AUTO_DETECTED
+    from .outgoing_formatting import outgoing_entity_facts
+    chat = validated.chat
+    rows = list(zip(validated.current_entities, validated.entity_rows()))
+    formatting = (_entity_rows('Current formatting, replaced by this edit',
+                               [row for entity, row in rows if entity.type not in AUTO_DETECTED]) +
+                  _entity_rows('Current auto-detected entities, auto-detected again by Telegram wherever the new '
+                               'caption contains them', [row for entity, row in rows if entity.type in AUTO_DETECTED]))
+    current = ([f'Current caption {_MARK} (exact):', _Payload(validated.raw_current_caption), *formatting]
+               if validated.current_caption is not None else ['Current caption: (none)'])
+    if validated.new_caption is None:
+        new = ['New caption: Remove caption']
+        note = 'Only the caption is removed; the media stays. Recipients see the message marked "edited".'
+    else:
+        styles = validated.styles()
+        new = ['New caption (exact):', _Payload(validated.raw_new_caption)] + (
+            ['New caption styles (final caption; UTF-16 code units):'] +
+            [f'{kind[len("textEntityType"):]}: offset {offset}, length {length}; covered {_span(covered)}'
+             for offset, length, kind, covered in outgoing_entity_facts(validated.raw_new_caption, styles)]
+            if styles else [])
+        note = ('The new caption carries only the styles listed here; Telegram may detect links in it again. '
+                'Recipients see the message marked "edited".')
+    position = ([f"Caption position: {'above' if validated.show_caption_above_media else 'below'} the media "
+                 '(unchanged)'] if validated.content_kind in ABOVE_MEDIA_KINDS else [])
+    edited = (datetime.fromtimestamp(validated.current_edit_date, tz=timezone.utc).isoformat()
+              if validated.current_edit_date else 'never')
+    return _document(
+        [*_head(f'Edit the caption of your {_MEDIA_WORDS[validated.content_kind]} message {validated.message_id} in '
+                f'{_span(chat.title)} ({_chat(chat.chat_id, validated.account_id)}, {_EDIT_CHAT_KINDS[chat.kind]})',
+                validated.account_id, validated.expires_at, alias),
+         f'Last edited: {edited}'],
+        [*current, *new, *position, '', note],
+        [f'Draft: {validated.draft_id}', f'Source SHA-256: {validated.source_sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its edit permission, '
+        'then make one caption edit attempt.')
+
+
 _ALBUM_GROUPS = {'media': 'media (photos and videos)', 'documents': 'documents'}
 
 
@@ -565,16 +612,25 @@ def _text_only(display_name, caption, duration_seconds, source_sha256, source_di
 def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
-            draft_preview, account_alias, album_preview) -> tuple[str, bool]:
+            draft_preview, account_alias, album_preview, caption_edit_preview) -> tuple[str, bool]:
     """(document, is a change) for exactly one preview bound to the broker's own arguments."""
     _require(_valid_alias(account_alias))
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
-                archive_preview, text_edit_preview, draft_preview, album_preview)
+                archive_preview, text_edit_preview, draft_preview, album_preview, caption_edit_preview)
     _require(sum(value is not None for value in previews) == 1)
     _require((kind == 'forward') == (forward_preview is not None) and (kind == 'video') == (video_preview is not None)
              and (kind == 'archive') == (archive_preview is not None) and
-             (kind == 'text_edit') == (text_edit_preview is not None) and (kind == 'album') == (album_preview is not None))
+             (kind == 'text_edit') == (text_edit_preview is not None) and (kind == 'album') == (album_preview is not None)
+             and (kind == 'caption_edit') == (caption_edit_preview is not None))
+    if caption_edit_preview is not None:
+        # A change bound like a text edit: the chat, its title and the hashed source projection (0.57).
+        from .caption_edit_drafts import CaptionEditDraftPreview
+        validated = CaptionEditDraftPreview.model_validate(caption_edit_preview)
+        _require(validated.chat.chat_id == recipient and validated.chat.title == recipient_title and
+                 sha256 == validated.source_sha256 and text in ('', None) and caption in ('', None) and
+                 duration_seconds is None and source_sha256 is None and source_display_name is None)
+        return _caption_edit_document(validated, alias), True
     if album_preview is not None:
         # The broker passes the album digest as sha256, the total as size_bytes and the fixed name "Album".
         from .album_drafts import AlbumDraftPreview
@@ -667,7 +723,7 @@ def render_approval(**arguments) -> tuple[str, bool] | None:
 _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
                  video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
-                 account_alias=None, album_preview=None)
+                 account_alias=None, album_preview=None, caption_edit_preview=None)
 
 
 def decide_approved_send(
@@ -686,6 +742,7 @@ def decide_approved_send(
     timeout_seconds: int = DIALOG_SECONDS,
     account_alias: str | None = None,
     album_preview: dict | None = None,
+    caption_edit_preview: dict | None = None,
 ) -> ApprovalDecision:
     """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
     timer, or any failure to render or show the dialog means no send or change. `account_alias` (only once an
@@ -696,7 +753,8 @@ def decide_approved_send(
         source_sha256=source_sha256, source_display_name=source_display_name, reply_preview=reply_preview,
         reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
-        draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview)
+        draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview,
+        caption_edit_preview=caption_edit_preview)
     if rendered is None:
         return UNAVAILABLE
     document, change = rendered

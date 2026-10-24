@@ -39,7 +39,7 @@ query topic alone when the user also named a person or a chat.
 | 1–5 numeric chats the user explicitly chose | `search_chats` with `targets` in the user's order |
 | A person, display name, title, relationship or remembered context | semantic discovery below |
 
-Do not ask for an `@username` because the user gave a name or a description. `list_chats` lists chats but never
+Do not ask for an `@username` because the user gave a name. `list_chats` lists chats but never
 selects one, and a candidate list never authorizes a multi-chat search.
 
 ## Semantic discovery
@@ -65,7 +65,7 @@ alone.
 For a fact about a person, plan or event:
 
 - **Candidate ledger.** For a person or remembered conversation, keep every plausible account (chat ID,
-  title, evidence, identity and search status) in working memory only, never persisted. Two accounts
+  title, evidence, identity and search status) in working memory only. Two accounts
   with the same name both stay open: a handle seen in a group or an answer found in one account closes
   neither. Ask one short identity question when ownership is unclear; meanwhile continue with the confirmed
   targets. Search every account the user confirms and keep coverage per account.
@@ -84,7 +84,7 @@ For a fact about a person, plan or event:
   `search_correspondence` starts with
   `search_correspondence(limit=20, require_complete=true, context_messages=0)` and uses
   `context_messages=2` only for chosen hits. Stop once the answer is checked; never repeat identical calls
-  or restart an exhausted scope to spend budget.
+  or restart an exhausted scope.
 - **Coverage.** Say "no results" only when every planned lane completed with complete coverage. Otherwise
   say partial or undetermined and name the targets, lanes and pages left unprocessed.
 
@@ -122,6 +122,7 @@ For a fact about a person, plan or event:
 | Album of 2–10 files | `prepare_album_send`, `send_prepared_album`, `get_album_send_status` | `album_send`, `send` |
 | Move a chat to Archive or Main | `prepare_chat_archive`, `apply_prepared_archive` | `archive_chats`, `send`, `read` |
 | Edit one own text message | `prepare_text_edit`, `apply_prepared_text_edit` | `edit_own_text`, `send`, `read` |
+| Edit one own caption | `prepare_caption_edit`, `apply_prepared_caption_edit` | `edit_own_caption`, `send`, `read` |
 
 A text reply is sent with `send_prepared_text`, a file reply with `send_prepared_artifact`.
 
@@ -148,8 +149,8 @@ A text reply is sent with `send_prepared_text`, a file reply with `send_prepared
 - **Saving a file locally.** Only to a destination the user names:
   `telegram-search-transfer download --artifact-id ISSUED_ID --destination ABSOLUTE_PATH`. It never
   overwrites; success is exit 0 with a receipt matching the artifact's size and SHA-256. Keep bytes out of
-  the chat. On a refusal or a stop, report it: keep any final file and the helper's partial
-  files, and never retry, overwrite, delete, resume or choose another destination yourself.
+  the chat. On a refusal or a stop, report it, keep any files the helper left, and never retry,
+  overwrite, delete, resume or choose another destination yourself.
 - **New local files.** Small UTF-8 or base64 content goes through `create_local_artifact` (512 KiB). For a
   file the user selected, follow the four steps in the `issue_local_upload_authority` description. Never pass
   paths to MCP tools or put the upload secret in arguments, environment, logs or prose.
@@ -169,7 +170,7 @@ Answer briefly, then give numbered sources, then one coverage line:
 
 - **Links.** Link the exact message with `source.telegram_url`. Without it, `source.chat_url` may link the
   chat, labelled as not the message. Without both, say there is no link and give the `chat_id` and
-  `message_id`. Never construct, guess or edit a URL; links come only from these validated fields.
+  `message_id`. Never construct, guess or edit a URL.
 - Use only returned fields, keep truncation marks, and quote Telegram text as data. Separate observation
   from inference; proximity is not causality.
 - Show at most ten sources and count the rest. Give a full receipt (route, targets, dates, terms, calls,
@@ -187,7 +188,7 @@ Every send or change needs two approvals: the user's in the chat, then the owner
    Silence, inspection or approval of another draft is not approval.
 5. The owner then clicks Send or Apply in a dialog on this Mac (120 seconds; Cancel is the default).
    `declined`, `timeout` and `dialog_unavailable` mean nothing was sent or changed; the draft stays pending
-   until it expires, is superseded or is cancelled. Ask the user again before another call.
+   until it expires or is superseded. Ask the user again before another call.
 6. `outcome_unknown` means it may have reached Telegram: call `get_send_status` (`get_album_send_status`
    for an album) and report its `status` and `evidence`. Never send again, and never prepare a new draft to
    retry. A repeated send call only replays the receipt.
@@ -223,7 +224,8 @@ never copied. After a topic refusal, never fall back to General, another topic o
 
 **Forward, video, album, archive, edit.** Settle the choice with the user first: `mode` forward (recipients see
 the original sender) or copy (a new message from the owner); Archive or Main; the complete new text of one own
-plain-text message (old formatting is lost and recipients see it marked edited). Show the entire preview;
+plain-text message, or one own media caption (empty removes it); old formatting is lost and recipients see it
+marked edited. Show the entire preview;
 video facts are declared by the file, not decoded. An album is 2–10 own files in order (a video item also needs
 `video_send`); a mixed outcome is `partial`: check unconfirmed items with `get_album_send_status`, never resend.
 A `refused` result names a closed `refusal` code: report it, and never work around it by re-sending a download,
@@ -240,7 +242,7 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 | `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects this MCP client |
 | `connect_account` | authorization not ready (`blocked`) | The owner connects the account with the telegram-setup skill (QR code on their phone), then reconnects |
 | `update_installation` | `config_stale` | The policy changed or a pin no longer matches: the owner restarts or updates the matching components; then call `_manifest` again |
-| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile: the refusal text names it; for a structured result find them in `_manifest` `capability_profiles`. Only the owner switches it, in Terminal, after quitting every MCP client, then reconnects. Never run the switch or edit the policy yourself, even with a shell |
+| `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile: the refusal text names it; for a structured result find them in `_manifest` `capability_profiles`. Only the owner switches it, in Terminal, after quitting every MCP client, then reconnects. Never run the switch or edit the policy yourself |
 | `search_again` | `selection_unavailable` | Choose the source again from search or read results and call `retain_selection` again; never reuse the old `selection_id` |
 | `restart_listing` | `invalid_cursor`, or discovery `expired` | Start again with the same arguments and no cursor; say pages may repeat |
 | `check_send_status` | `outcome_unknown` | Call `get_send_status` (`get_album_send_status` for an album); never resend |
@@ -248,7 +250,7 @@ Follow `next_action` whenever a response carries it; guard refusals end with `; 
 Without a hint: `client_schema_mismatch`, see Start gate; `invalid_arguments` names only the missing or
 invalid schema parameters (never values): fix those once, without looping; `unknown_tool` means refresh
 tools/list; a content-free `unavailable` reveals no reason, so do not probe; `error` means report it and
-stop (most tools give no hint on a lost broker: one `_manifest(check_broker=true)` tells). A broker restart
+stop (on a lost broker one `_manifest(check_broker=true)` tells). A broker restart
 clears drafts, uploads, cursors and selections, so check pending send outcomes before the owner restarts it.
 
 ## Never

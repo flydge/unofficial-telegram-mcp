@@ -59,10 +59,10 @@ class ContractTests(unittest.TestCase):
                 self.assertIn(name, OPERATIONS)
                 self.assertEqual(_TOOL_CAPABILITIES[name], ('album_send', 'send'))
 
-    def test_the_census_grows_from_55_to_58(self):
-        self.assertEqual(len(_TOOL_NAMES), 58)
-        self.assertEqual(len(set(_TOOL_NAMES)), 58)
-        self.assertEqual(tuple(_TOOL_NAMES[-3:]), TOOLS)
+    def test_the_albums_add_three_tools_after_the_55_of_054(self):
+        # Later slices append after these three (0.57: the caption tools); the census itself is theirs.
+        self.assertEqual(len(set(_TOOL_NAMES)), len(_TOOL_NAMES))
+        self.assertEqual(tuple(_TOOL_NAMES[55:58]), TOOLS)
 
     def test_the_frozen_get_send_status_schema_and_every_earlier_row_are_untouched(self):
         rows = {row['name']: row for row in schema_document(build_server())['tools']}
@@ -131,7 +131,7 @@ class _Service:
 class SdkSurfaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_schemas_titles_and_annotations(self):
         tools = await full_listing()
-        self.assertEqual(list(tools)[-3:], list(TOOLS))
+        self.assertEqual(list(tools)[55:58], list(TOOLS))
         prepare, send, status = (tools[name] for name in TOOLS)
         self.assertEqual(set(prepare.input_schema['properties']), {'recipient', 'items', 'group'})
         self.assertEqual(sorted(prepare.input_schema['required']), ['items', 'recipient'])

@@ -78,6 +78,12 @@ def rewritten_text(text: object) -> bool:
 def own_text_source(raw: object, chat_id: int, message_id: int) -> ForwardSource:
     """Own-message checks in the stated order, then F14's projection (state, markup, entities,
     link preview), whose refusals keep their codes. Absence of a safety field is never safe."""
+    return own_source(raw, chat_id, message_id, content_types=frozenset({'messageText'}))
+
+
+def own_source(raw: object, chat_id: int, message_id: int, *, content_types: frozenset) -> ForwardSource:
+    """The own-message checks of every edit (0.57: a caption edit admits the media kinds), in the stated order, then
+    F14's projection, whose refusals keep their codes."""
     if (type(raw) is not dict or raw.get('@type') != 'message' or type(raw.get('chat_id')) is not int or
             raw['chat_id'] != chat_id or type(raw.get('id')) is not int or raw['id'] != message_id or
             type(raw.get('is_outgoing')) is not bool):
@@ -85,7 +91,7 @@ def own_text_source(raw: object, chat_id: int, message_id: int) -> ForwardSource
     if raw['is_outgoing'] is not True:
         raise EditRefusal('not_outgoing')
     content = raw.get('content')
-    if type(content) is not dict or content.get('@type') != 'messageText':
+    if type(content) is not dict or content.get('@type') not in content_types:
         raise EditRefusal('unsupported_source_content')
     if raw.get('forward_info') is not None:
         raise EditRefusal('source_is_forward')
