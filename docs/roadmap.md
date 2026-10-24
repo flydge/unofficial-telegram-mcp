@@ -7,9 +7,10 @@ Updated **2026-10-24**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## In development — **0.56.0.dev0**
+## Release candidate — **0.56.0rc1**
 
-Ordered albums: [spec](plans/0.56-albums-spec.md) and its [task record](plans/0.56-albums-spec.tasks.md).
+Ordered albums: [spec](plans/0.56-albums-spec.md), its [task record](plans/0.56-albums-spec.tasks.md) and the
+[release notes](release-notes-0.56.0rc1.md). A local annotated tag with release-gate evidence; not published.
 
 ## Release candidate — **0.55.0rc1**
 

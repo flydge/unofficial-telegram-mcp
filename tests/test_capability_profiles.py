@@ -14,7 +14,7 @@ from telegram_search_mcp.config import CAPABILITY_PROFILES, _owner_paths, load_r
 POLICY = (b'# owner policy, written by connect\n'
           b'config_version = 1\n'
           b'enabled_capabilities = ["read", "artifacts"] # the default\n'
-          b'expected_package_version = "0.56.0.dev0"\n'
+          b'expected_package_version = "0.56.0rc1"\n'
           b'max_draft_ttl_seconds = 600\n')
 
 
