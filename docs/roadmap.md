@@ -2,15 +2,17 @@
 
 [Overview](../README.md) · [Original plan](plans/initial-roadmap.md) · [0.51.0 release notes](release-notes-0.51.0.md) · [Licensing](licensing.md) · [Releasing](releasing.md)
 
-Updated **2026-10-22**. The released baseline remains **0.51.0**; the
+Updated **2026-10-24**. The released baseline remains **0.51.0**; the
 **0.52.0** release is recorded below.
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## In development — **0.55.0.dev0**
+## Release candidate — **0.55.0rc1**
 
-Multiple accounts: [spec](plans/0.55-multiple-accounts-spec.md) and its
-[task record](plans/0.55-multiple-accounts-spec.tasks.md).
+Multiple accounts: [spec](plans/0.55-multiple-accounts-spec.md), its
+[task record](plans/0.55-multiple-accounts-spec.tasks.md) and the [release notes](release-notes-0.55.0rc1.md). A
+local annotated tag with release-gate evidence; not published. Later releases: 0.56 albums, 0.57 own-message
+actions, 0.58 reply-source families, then final acceptance (specs in `plans/`).
 
 ## Release candidate — **0.54.0rc1**
 

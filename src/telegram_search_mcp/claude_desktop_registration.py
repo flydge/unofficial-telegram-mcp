@@ -18,12 +18,10 @@ import json
 import os
 from pathlib import Path
 
-from . import product_identity as identity
 from .bundle_paths import RuntimePathError, require_object_binding
 from .claude_registration import _strict_json
-from .codex_registration import ConfigConflict, Receipt, _atomic_write, _open_parent, _read_at
+from .codex_registration import ConfigConflict, Receipt, _atomic_write, _open_parent, _read_at, _name
 
-SERVER_NAME = identity.MCP_SERVER_NAME
 CONFIG_NAME = 'claude_desktop_config.json'
 MAX_CONFIG_BYTES = 1024 * 1024
 SHARED_MODE = 0o644
@@ -45,19 +43,20 @@ def entry(command, args):
     return {'command': command, 'args': list(args)}
 
 
-def manual_entry(command, args):
-    """Nonsecret JSON the user can merge into the config themselves."""
-    return {'mcpServers': {SERVER_NAME: entry(command, args)}}
+def manual_entry(command, args, name=None):
+    """Nonsecret JSON the user can merge into the config themselves. `name` is a named alias's server name
+    (AccountPaths.server_name), an entry beside the default's (0.55 spec 3D); None is the default's."""
+    return {'mcpServers': {_name(name): entry(command, args)}}
 
 
-def subtree(command, args):
+def subtree(command, args, name=None):
     """Canonical bytes of the owned subtree; its sha256 is the receipt's post-subtree hash."""
-    return json.dumps(manual_entry(command, args), sort_keys=True, separators=(',', ':')).encode()
+    return json.dumps(manual_entry(command, args, name), sort_keys=True, separators=(',', ':')).encode()
 
 
-def receipt(installation_id, transaction_id, command, args):
+def receipt(installation_id, transaction_id, command, args, name=None):
     """Ownership of an entry added where none existed (no preimage)."""
-    return Receipt(installation_id, transaction_id, None, hashlib.sha256(subtree(command, args)).hexdigest(),
+    return Receipt(installation_id, transaction_id, None, hashlib.sha256(subtree(command, args, name)).hexdigest(),
                    None, client='claude-desktop')
 
 
@@ -143,16 +142,16 @@ class Change:
         return 'Change(<redacted>)'
 
 
-def _plan(document, source, existed, command, args):
-    """Our entry set to (command, args) in place, or removed when `command` is None."""
+def _plan(document, source, existed, command, args, name):
+    """Our entry `name` set to (command, args) in place, or removed when `command` is None."""
     servers = document.get('mcpServers')
-    neighbours = {k: v for k, v in (servers or {}).items() if k != SERVER_NAME}
+    neighbours = {k: v for k, v in (servers or {}).items() if k != name}
     changed = dict(document)  # Order kept: a new `mcpServers` goes last, an existing one stays in place.
-    changed['mcpServers'] = neighbours if command is None else {**(servers or {}), SERVER_NAME: entry(command, args)}
+    changed['mcpServers'] = neighbours if command is None else {**(servers or {}), name: entry(command, args)}
     candidate = _encode(changed)
     # Re-read our own bytes: our entry (or none) plus exactly the original neighbours, in their order.
     after, faithful = _document(candidate)
-    mine = after['mcpServers'].pop(SERVER_NAME, None)
+    mine = after['mcpServers'].pop(name, None)
     expected = dict(document)
     if servers is not None:
         expected['mcpServers'] = neighbours
@@ -178,8 +177,10 @@ def read(home):
         os.close(fd)
 
 
-def observe(home, command, args):
-    """(state, Change or None). A file read only; a Change only for `absent`."""
+def observe(home, command, args, name=None):
+    """(state, Change or None) of the entry `name` (None: the default's). A file read only; a Change only for
+    `absent`."""
+    name = _name(name)
     if not os.path.lexists(directory(home)):
         return 'skipped', None
     try:
@@ -188,20 +189,20 @@ def observe(home, command, args):
     except (ConfigConflict, OSError, ValueError, TypeError, RecursionError, UnicodeError):
         return 'unavailable', None
     servers = document.get('mcpServers', {})
-    if SERVER_NAME in servers:
-        return ('exact' if _exact(servers[SERVER_NAME], command, args) else 'different'), None
+    if name in servers:
+        return ('exact' if _exact(servers[name], command, args) else 'different'), None
     try:
         if not faithful:
             raise _Unsupported()  # A neighbour's lexeme matters only when we would write.
-        return 'absent', _plan(document, source, existed, command, args)
+        return 'absent', _plan(document, source, existed, command, args, name)
     except _Unsupported:
         return 'unsupported', None
     except (ValueError, TypeError, RecursionError, UnicodeError):
         return 'unavailable', None
 
 
-def state(home, command, args):
-    return observe(home, command, args)[0]
+def state(home, command, args, name=None):
+    return observe(home, command, args, name)[0]
 
 
 def _current(home):
@@ -216,21 +217,25 @@ def _current(home):
     return document, faithful, source, existed
 
 
-def observe_change(home, owned, command, args, *, adopted=None):
-    """Upgrade/rollback/adoption read: (state, Change or None). A file read only.
+def observe_change(home, owned, command, args, *, adopted=None, name=None):
+    """Upgrade/rollback/adoption read: (state, Change or None) of the entry `name` (None: the default's; only the
+    default's is ever adopted). A file read only.
 
     `owned` is the (command, args) our receipt owns, or None. States: `exact` (already the target),
     `owned` (exactly the owned entry: Change replaces it), `adopted` (a foreign entry whose canonical
     backup hash is `adopted`: Change replaces it), `absent` (Change adds it), `different`,
     `unsupported`, `unavailable`, `skipped`.
     """
+    name = _name(name)
+    if adopted is not None and name != _name():
+        raise ConfigConflict('invalid_registration')
     current = _current(home)
     if type(current) is str:
         return current, None
     document, faithful, source, existed = current
     servers = document.get('mcpServers', {})
-    if SERVER_NAME in servers:
-        value = servers[SERVER_NAME]
+    if name in servers:
+        value = servers[name]
         if _exact(value, command, args):
             return 'exact', None
         if owned is not None and _exact(value, *owned):
@@ -244,28 +249,30 @@ def observe_change(home, owned, command, args, *, adopted=None):
     try:
         if not faithful:
             raise _Unsupported()
-        return label, _plan(document, source, existed, command, args)
+        return label, _plan(document, source, existed, command, args, name)
     except _Unsupported:
         return 'unsupported', None
     except (ValueError, TypeError, RecursionError, UnicodeError):
         return 'unavailable', None
 
 
-def observe_removal(home, command, args):
-    """Uninstall read: `exact` with a Change removing only our entry, else absent/different/... and None."""
+def observe_removal(home, command, args, name=None):
+    """Uninstall read of the entry `name` (None: the default's): `exact` with a Change removing only that entry,
+    else absent/different/... and None."""
+    name = _name(name)
     current = _current(home)
     if type(current) is str:
         return current, None
     document, faithful, source, existed = current
     servers = document.get('mcpServers', {})
-    if SERVER_NAME not in servers:
+    if name not in servers:
         return 'absent', None
-    if not _exact(servers[SERVER_NAME], command, args):
+    if not _exact(servers[name], command, args):
         return 'different', None
     try:
         if not faithful:
             raise _Unsupported()
-        return 'exact', _plan(document, source, existed, None, None)
+        return 'exact', _plan(document, source, existed, None, None, name)
     except _Unsupported:
         return 'unsupported', None
     except (ValueError, TypeError, RecursionError, UnicodeError):
@@ -277,8 +284,8 @@ def entry_backup(home):
     current = _current(home)
     if type(current) is str:
         return None
-    servers = current[0].get('mcpServers', {})
-    return _canonical(servers[SERVER_NAME]).encode() if SERVER_NAME in servers else None
+    servers, name = current[0].get('mcpServers', {}), _name()
+    return _canonical(servers[name]).encode() if name in servers else None
 
 
 def write(home, change, before_replace, temporary=None):

@@ -14,6 +14,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import secrets
 import stat
 import time
@@ -22,9 +23,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import (ALIAS_GRAMMAR, DEFAULT_ALIAS, ConfigurationError, accounts_root, alias_server_name,
-                     alias_socket_path)
-from .session_owner import OwnerLeaseError, open_private_directory
+from .config import (ALIAS_GRAMMAR, DEFAULT_ALIAS, AccountPathsError, ConfigurationError, accounts_root,
+                     alias_server_name, alias_socket_path)
+from .session_owner import OwnerLeaseError, acquire_owner_lock, open_private_directory
 
 REGISTRY_NAME = "registry.json"
 LEASE_NAME = "registry.lock"
@@ -36,6 +37,9 @@ SOCKET_PATH_LIMIT = 103
 TOOL_NAME_LIMIT = 64
 USER_ID_BOUND = 2**53
 LEASE_ATTEMPTS, LEASE_INTERVAL = 100, 0.02
+# The accounts directory's bounded listing: the registry, its lease, the alias roots and the roots removal moved aside.
+MAX_LISTING = 4096
+_TEMPORARY = re.compile(r"\.registry\.json\.[0-9a-f]{32}\.tmp\Z")
 CODES = frozenset({
     "registry_invalid",     # the file is not the closed schema
     "registry_unsafe",      # the file or its directory is not owner-only, regular and unlinked
@@ -183,14 +187,32 @@ def _open_root(root: Path, *, create: bool = False) -> int:
         raise RegistryError("registry_unsafe") from None
 
 
+def check_root(root: Path) -> None:
+    """The accounts directory an `account-add` would write into, judged before anything is written (critic fix
+    055f): absent, or an owner-only directory reached without a link; anything else refuses `registry_unsafe`.
+    Reads only, never creates. `load` alone does not judge a directory without a registry (0.54's paths)."""
+    try:
+        os.lstat(root)
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    os.close(_open_root(root))
+
+
 def load(root: Path) -> Registry | None:
-    """The registry in `root`, or None when there is none (0.54). Never creates anything."""
+    """The registry in `root`, or None when there is none (0.54). Never creates anything.
+
+    Without a registry the directory is not judged: 0.54 never read it, so a non-private one leaves every path as
+    0.54's (an upgrade, rollback or uninstall included). With a registry, an unsafe directory or file refuses."""
     try:
         os.lstat(root)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError:
         raise RegistryError("registry_unsafe") from None
+    if not present(root):
+        return None
     directory = _open_root(root)
     try:
         return _load_at(directory)
@@ -308,12 +330,33 @@ def _write_at(directory: int, registry: Registry) -> None:
                 pass
 
 
+def _sweep_temporaries(directory: int) -> None:
+    """Under the lease no writer holds a temporary, so each one a killed write left is removed: only our exclusive
+    random name (`_write_at`), as an owner-only single-link regular file. A bounded listing."""
+    try:
+        names = os.listdir(directory)
+        if len(names) > MAX_LISTING:
+            raise RegistryError("registry_unsafe")
+        for name in names:
+            if _TEMPORARY.fullmatch(name) is None:
+                continue
+            metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and metadata.st_nlink == 1
+                    and not stat.S_IMODE(metadata.st_mode) & 0o077):
+                os.unlink(name, dir_fd=directory)
+                os.fsync(directory)
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+
+
 def _change(root: Path, change: Callable[[Registry | None], Registry | None], *, create: bool,
             sleeper: Callable[[float], None]) -> None:
-    """Read, decide and write under one lease; `change` returning None writes nothing."""
+    """Read, decide and write under one lease, after removing what killed writes left; `change` returning None
+    writes nothing."""
     directory = _open_root(root, create=create)
     try:
         with _lease(directory, sleeper):
+            _sweep_temporaries(directory)
             updated = change(_load_at(directory))
             if updated is not None:
                 _write_at(directory, updated)
@@ -388,6 +431,48 @@ def remove_alias(alias: str, home: Path, *, sleeper: Callable[[float], None] = t
     _change(root, change, create=False, sleeper=sleeper)
 
 
+_RETIRED = re.compile(r"retired-[0-9a-f]{32}-registry\.json\Z")
+
+
+def retire(root: Path, aside: str, *, sleeper: Callable[[float], None] = time.sleep) -> str:
+    """Move a registry that lists no alias aside, under its lease, to `aside` in the same directory: a closed name
+    outside the alias grammar, so it is never read as a registry or taken for an alias root. Never deletes.
+
+    'retired' (now, or by an earlier attempt: `aside` exists), 'absent' (no registry), or 'aliases' (it lists an
+    alias: nothing moves). Used by a rollback to a release that knows no aliases (0.55 spec 3D), which would leave the
+    default's pin unmaintained while it serves; a later 0.55 then starts again from no registry (0.54).
+    """
+    if type(aside) is not str or _RETIRED.fullmatch(aside) is None:
+        raise RegistryError("registry_invalid")
+    try:
+        os.lstat(root)
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent"
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    directory = _open_root(root)
+    try:
+        with _lease(directory, sleeper):
+            _sweep_temporaries(directory)
+            try:
+                os.stat(aside, dir_fd=directory, follow_symlinks=False)
+                return "retired"
+            except FileNotFoundError:
+                pass
+            current = _load_at(directory)
+            if current is None:
+                return "absent"
+            if current.aliases:
+                return "aliases"
+            os.rename(REGISTRY_NAME, aside, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+            return "retired"
+    except OSError:
+        raise RegistryError("registry_unsafe") from None
+    finally:
+        os.close(directory)
+
+
 def pin_account(root: Path, alias: str, user_id: int, *, sleeper: Callable[[float], None] = time.sleep) -> None:
     """The account pin, for the broker of `alias` whose session is authorized as `user_id`.
 
@@ -438,3 +523,122 @@ def login_refusal(account, read_user_id: Callable[[], int]) -> str | None:
     finally:
         user_id = None
     return None
+
+
+# A named alias's login entry points (review fix 055d3) ---------------------------------------------------------------
+
+def _still_at(path: Path, descriptor: int) -> bool:
+    """Whether the held lock is still the file at `path`, reached from `/` again: its root was not moved since."""
+    try:
+        parent = open_private_directory(path.parent)
+    except OwnerLeaseError:
+        return False
+    try:
+        held, visible = os.fstat(descriptor), os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        return (held.st_dev, held.st_ino) == (visible.st_dev, visible.st_ino)
+    except OSError:
+        return False
+    finally:
+        os.close(parent)
+
+
+def _listed(account) -> bool:
+    try:
+        registry = load(account.accounts_root)
+    except RegistryError:
+        return False  # An unreadable registry admits no login.
+    return registry is not None and account.alias in registry.aliases
+
+
+def login_lock(account) -> int:
+    """The descriptor holding a named alias's connect.lock for a login (`connect`, the connect helper, `setup`,
+    `resume`, `cancel` and `api-credentials --account`), taken only inside the alias's existing root: at most its run
+    directory is created, never the root, which only account-add creates (review fix 055d3). The registry must list
+    the alias before, and once the lock is held the lock must still be the file at the alias's path and the registry
+    must still list the alias, so a login that waited through an account-remove (which drops the registry entry, then
+    moves the root aside, holding this lock itself) never takes a lock in the moved tree or creates the root again. A
+    missing root or an alias no longer listed refuses `alias_unavailable` (AccountPathsError) with nothing created and
+    the lock released; a held lock raises OwnerLeaseError('owner_busy'), anything unsafe
+    OwnerLeaseError('owner_unsafe'). The default alias's callers keep 0.54's lock."""
+    if not _named(account.alias) or not _listed(account):
+        raise AccountPathsError()
+    try:
+        descriptor = acquire_owner_lock(account.connect_lock, within=account.root)
+    except OwnerLeaseError as error:
+        if error.code != "owner_busy" and not os.path.lexists(account.root):
+            raise AccountPathsError() from None
+        raise
+    try:
+        if not _still_at(account.connect_lock, descriptor) or not _listed(account):
+            raise AccountPathsError()
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+# One owner dialog at a time across every broker of the user (critic fix 055f) ------------------------------------------
+
+DIALOG_LOCK_NAME = "dialog.lock"
+
+
+def dialog_lock(root: Path) -> int | None:
+    """The descriptor holding the user's one owner-dialog lock, for a broker's whole approval dialog: a non-blocking
+    exclusive flock on `dialog.lock` in the accounts directory `root`, taken only once a registry exists. Without one
+    it returns None, reading and creating nothing (0.54: only the broker's own thread lock holds). The lock is created
+    owner-only only inside the existing owner-only `root`, which is never created here; an existing one must be a
+    regular, single-link, owner-owned 0600 file and is never changed. Another broker's open dialog raises
+    OwnerLeaseError('owner_busy'), anything unsafe (the directory or the lock) OwnerLeaseError('owner_unsafe'): the
+    caller answers `dialog_unavailable` for both, with no dialog shown."""
+    if not present(root):
+        return None
+    return acquire_owner_lock(Path(root) / DIALOG_LOCK_NAME, within=Path(root))
+
+
+# The codes `login_admission` refuses with, each in the connect and setup code tables with its next action.
+ADMISSION_CODES = ("transaction_pending", "newer_state_kept", "older_state_kept")
+
+
+def login_admission(account) -> str | None:
+    """None, or the fixed code a named alias's login refuses with once it holds the alias's connect.lock, changing
+    nothing (review fix 055d3). Only run from an installed release: `transaction_pending` while the installation has
+    an unfinished installer transaction (upgrade, rollback, uninstall, account-add or account-remove: between two runs
+    of a parked transaction no lock is held, so a login could otherwise hand a broker off under it), and
+    `newer_state_kept` while the alias's runtime.toml pins a newer package version than this release's (or one
+    outside the version grammar): a rollback kept the alias on the release its newer session was made with, and this
+    release's broker would refuse that pin (`config_stale`), so a login would end `broker_start_failed` or worse after
+    the owner logged in; and `older_state_kept` while it pins an older one (critic fix 055f): an uninstall kept the
+    alias and a newer release was installed since, so the alias's own account-add repairs it (moving the line onto
+    this release, its session kept). Source mode (no installation) and the default alias read nothing: 0.54's
+    behaviour."""
+    if not _named(account.alias):
+        return None
+    from . import __version__, bundle_runtime
+    from .config import load_runtime_policy
+    if not bundle_runtime.installed():
+        return None
+    if bundle_runtime.installer_pending():
+        return "transaction_pending"
+    try:
+        pinned = load_runtime_policy(account.policy).expected_package_version
+    except ConfigurationError:
+        return None  # The login's own read of its policy refuses it (`policy_unsafe`).
+    if pinned is None or pinned == __version__:
+        return None
+    older, current = bundle_runtime.release_order(pinned), bundle_runtime.release_order(__version__)
+    return "older_state_kept" if older is not None and current is not None and older < current else "newer_state_kept"
+
+
+def pending_fields() -> dict:
+    """What a `transaction_pending` login refusal adds, as the launcher's installer refusal does (review fix 055d4):
+    `pending_action`, the unfinished installer action from the closed PENDING_ACTIONS, and for an account action
+    `pending_account`, its alias (a closed token), read from the newest journal when the refusal is reported
+    (`bundle_runtime.installer_pending`). Empty when nothing is pending any more, outside an installed release, or
+    when the journal names none of the closed set (the refusal itself stands)."""
+    from . import bundle_runtime
+    pending = bundle_runtime.installer_pending()
+    if type(pending) is not tuple or len(pending) != 2 or pending[0] not in bundle_runtime.PENDING_ACTIONS:
+        return {}
+    action, alias = pending
+    named = action in bundle_runtime.ACCOUNT_ACTIONS and _named(alias)
+    return {"pending_action": action, **({"pending_account": alias} if named else {})}

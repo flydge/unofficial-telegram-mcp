@@ -150,6 +150,18 @@ class FileSafetyTests(Fixture):
         self.assertFalse(registry.present(self.root))
         self.assertEqual(self.snapshot(), before)
 
+    def test_without_a_registry_the_directory_is_never_judged(self):
+        """Review fix (055d, low): no registry is 0.54, whatever the accounts directory's mode; with one, unsafe stays
+        refused."""
+        self.root.mkdir(parents=True, mode=0o755)
+        self.root.chmod(0o755)
+        before = self.snapshot()
+        self.assertIsNone(registry.load(self.root))
+        self.assertFalse(registry.admits('work', self.home))
+        self.assertEqual(self.snapshot(), before)
+        self.write(encoded(document({'work': {'user_id': None}})), root_mode=0o755)
+        self.refused('registry_unsafe', lambda: registry.load(self.root))
+
     def test_an_owner_only_regular_file_loads(self):
         self.write(encoded(document({'work': {'user_id': None}})))
         self.assertTrue(registry.present(self.root))
@@ -285,6 +297,23 @@ class MutationTests(Fixture):
         self.assertEqual((self.root / registry.REGISTRY_NAME).read_bytes(), before)
         self.assertEqual(sorted(entry.name for entry in self.root.iterdir()),
                          sorted([registry.LEASE_NAME, registry.REGISTRY_NAME]))
+
+    def test_a_temporary_a_killed_write_left_is_removed_by_the_next_write_and_a_lookalike_stays(self):
+        """0.55 phase D (account-add and account-remove resume after a kill anywhere): under the lease no writer holds
+        a temporary, so the next write removes our exact random name; anything else in the directory stays."""
+        registry.add_alias('work', self.home, longest_tool='t')
+        left = self.root / ('.registry.json.' + 'a' * 32 + '.tmp')
+        left.write_bytes(b'{"version": 1}')
+        left.chmod(0o600)
+        lookalikes = {'.registry.json.short.tmp': 0o600, '.registry.json.' + 'b' * 32 + '.tmp.keep': 0o600,
+                      '.registry.json.' + 'c' * 32 + '.tmp': 0o644}
+        for name, mode in lookalikes.items():
+            (self.root / name).write_bytes(b'x')
+            (self.root / name).chmod(mode)
+        registry.add_alias('home', self.home, longest_tool='t')
+        self.assertFalse(left.exists())
+        self.assertEqual(sorted(entry.name for entry in self.root.iterdir()),
+                         sorted([registry.LEASE_NAME, registry.REGISTRY_NAME, *lookalikes]))
 
     def test_an_unsafe_registry_is_never_overwritten(self):
         self.write(encoded(document({'work': {'user_id': None}})), mode=0o644)

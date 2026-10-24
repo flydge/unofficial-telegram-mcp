@@ -53,13 +53,13 @@ class InstallHarness:
         files = {
             'launcher.py': b'# inert unit fixture\n',
             'python/bin/python3': b'inert-runtime',
-            'app/telegram_search_mcp/__init__.py': b'__version__ = "0.55.0.dev0"\n',
+            'app/telegram_search_mcp/__init__.py': b'__version__ = "0.55.0rc1"\n',
             'native/libtdjson.dylib': b'inert-native',
             'skills/telegram-search/SKILL.md': b'search-skill',
             'skills/telegram-setup/SKILL.md': b'setup-skill',
             'tdlib-lock.json': json.dumps(v1_lock(inert_natives())).encode(),  # a v1 manifest pairs with an ad-hoc lock
         }
-        manifest = dict(schema_version=1, package_version='0.55.0.dev0', target='macos-arm64',
+        manifest = dict(schema_version=1, package_version='0.55.0rc1', target='macos-arm64',
             minimum_os='26.0', contract_version=1, schema_fingerprint='a' * 64,
             tools=['_manifest', 'search_correspondence'], native_lock_sha256=hashlib.sha256(files['tdlib-lock.json']).hexdigest(),
             skills=[dict(id=n, sha256=hashlib.sha256(files['skills/' + n + '/SKILL.md']).hexdigest())
@@ -76,7 +76,7 @@ class InstallHarness:
             records.append(dict(path=name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), executable=executable))
         for parent, dirs, _ in os.walk(release):
             Path(parent).chmod(0o700)
-        index = dict(schema_version=1, target='macos-arm64', release_version='0.55.0.dev0', archive_bytes=1,
+        index = dict(schema_version=1, target='macos-arm64', release_version='0.55.0rc1', archive_bytes=1,
                      archive_sha256='b' * 64, unpacked_bytes=sum(len(v) for v in files.values()), files=records)
         index_path = self.base / 'index.json'
         index_path.write_bytes(json.dumps(index).encode())

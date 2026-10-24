@@ -7,7 +7,7 @@ import time
 from . import __version__, account_registry
 from .app_identity import AppIdentityError, bundled_app_identity
 from .auth_transport import AuthTransport, AuthTransportError, AuthorizationState
-from .config import ConfigurationError, load_runtime_policy
+from .config import DEFAULT_ALIAS, AccountPathsError, ConfigurationError, load_runtime_policy
 from .credential_identity import CredentialIdentityError, ResolvedIdentity, resolve_enrolled, valid_record
 from .credentials import CredentialStoreError
 from .enrollment import SetupPaths, EnrollmentStore, EnrollmentError, managed_key
@@ -23,7 +23,9 @@ _CODES = frozenset({'secure_terminal_required', 'owner_busy', 'owner_unsafe', 'l
     'auth_close_failed', 'auth_destroy_failed', 'broker_start_failed', 'broker_incompatible', 'broker_readiness_timeout',
     'policy_unsafe', 'app_identity_missing', 'app_identity_invalid', 'identity_changed',
     # The account pin at login, as connect reports it (0.55 spec 3C): never a user id, only these fixed codes.
-    'account_mismatch', 'account_duplicate', 'alias_unavailable'})
+    'account_mismatch', 'account_duplicate', 'alias_unavailable',
+    # A named alias's login run from an installed release (review fix 055d3, account_registry.login_admission).
+    'transaction_pending', 'newer_state_kept', 'older_state_kept'})
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,9 @@ class SetupResult:
     auth_client_closed: bool = False
     retry_after: int | None = None
     auth_client_destroyed: bool = False
+    # Only with `transaction_pending` (review fix 055d4, account_registry.pending_fields): the unfinished installer
+    # action and an account action's alias, as the installer's own refusal names them.
+    pending: tuple = ()
     @property
     def exit_code(self): return 0 if self.status == 'ready' else 2
     def to_dict(self):
@@ -43,6 +48,9 @@ class SetupResult:
             'account_mismatch': 'review_enrollment_binding_without_resetting',
             'account_duplicate': 'review_enrollment_binding_without_resetting',
             'alias_unavailable': 'stop_and_report',
+            'transaction_pending': 'finish_pending_installer_action_then_retry',
+            'newer_state_kept': 'upgrade_installation_or_remove_account',
+            'older_state_kept': 'run_account_add_for_alias_then_retry',
             'managed_key_missing': 'restore_exact_managed_key_without_regenerating',
             'auth_destroy_failed': 'exit_setup_process_then_resume_in_foreground_native_terminal',
             'unsupported_auth_state': 'complete_supported_auth_with_official_telegram_guidance',
@@ -50,12 +58,13 @@ class SetupResult:
         return dict(status=self.status, code=self.code,
             next_action='none' if self.status == 'ready' else actions.get(self.code, 'resume_in_foreground_native_terminal'),
             auth_client_closed=self.auth_client_closed, auth_client_destroyed=self.auth_client_destroyed,
-            retry_after=self.retry_after)
+            retry_after=self.retry_after, **(dict(self.pending) if self.code == 'transaction_pending' else {}))
 
 
 def _result(code, *, closed=False, destroyed=None, retry_after=None):
     code = code if code in _CODES else 'dependency_unavailable'
-    return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed)
+    pending = tuple(sorted(account_registry.pending_fields().items())) if code == 'transaction_pending' else ()
+    return SetupResult('pending', code, closed, retry_after, closed if destroyed is None else destroyed, pending)
 
 
 def _api_credentials(terminal, store, remaining, bundled_loader=lambda: None, expected_fingerprint=None):
@@ -137,6 +146,21 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     Resume always opens a fresh client and asks TDLib for its current state.
     Before enrollment, resume uses the same genuinely-new-session admission as
     setup so interrupted/partial API provisioning can continue add-only.
+
+    A named alias's run holds its connect.lock from here through the handoff,
+    as the connect helper does (review fix 055d2): held by another login or by
+    an installer transaction over the aliases, it refuses `owner_busy` before
+    anything else. The lock is taken only inside the alias's existing root,
+    which a login never creates: a missing root, or an alias the registry no
+    longer lists, refuses `alias_unavailable` (review fix 055d3). Run from an
+    installed release it then refuses `transaction_pending` while an installer
+    transaction is unfinished, and `newer_state_kept` or `older_state_kept`
+    while the alias's state is a newer or older release's
+    (account_registry.login_admission), asked again
+    right before the handoff (review fix 055d4); a `transaction_pending`
+    result names the unfinished installer action (`pending_action`, and
+    `pending_account` for an account action). The default's keeps 0.54's
+    behaviour.
     """
     if (type(paths) is not SetupPaths or type(timeout) not in (int, float)
             or not math.isfinite(timeout) or not 0 < timeout <= 3600
@@ -147,6 +171,28 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
         terminal.require_secure()
     except (Exception, KeyboardInterrupt):
         return _result('secure_terminal_required')
+    login = None
+    if paths.account.alias != DEFAULT_ALIAS:
+        refused = account_registry.login_admission(paths.account)  # Asked before the lock too: nothing created.
+        if refused is not None:
+            return _result(refused)
+        try:
+            login = account_registry.login_lock(paths.account)
+        except AccountPathsError:
+            return _result('alias_unavailable')
+        except OwnerLeaseError as error:
+            return _result(error.code)
+    try:
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _result(refused)
+        return _run_setup(paths, terminal, store, provider_factory, handoff, timeout, close_timeout, bundled_loader)
+    finally:
+        if login is not None:
+            os.close(login)
+
+
+def _run_setup(paths, terminal, store, provider_factory, handoff, timeout, close_timeout, bundled_loader):
     deadline = time.monotonic() + timeout
     def remaining():
         left = deadline - time.monotonic()
@@ -246,6 +292,11 @@ def run_setup(paths, terminal, store, provider_factory, *, handoff, resume=False
     except Exception:
         return _result('dependency_unavailable')
     if result.status == 'authorized' and result.auth_client_closed and result.auth_client_destroyed:
+        # A named alias's admission asked again right before the handoff, as the connect helper does (review fix
+        # 055d4, connect_cli._handoff): a refusal is the run's code and nothing is handed off.
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _result(refused, closed=True)
         try:
             boundary = handoff()
             if boundary != 'ready':

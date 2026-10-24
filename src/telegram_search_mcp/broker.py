@@ -41,6 +41,7 @@ from .broker_protocol import (
 )
 from .config import DEFAULT_ACCOUNT_PATHS, AccountPaths, ensure_private_directory, RuntimePolicy, load_runtime_policy
 from . import account_registry, broker_readiness
+from .session_owner import OwnerLeaseError
 from .contract import (CapabilityDisabled, CompatibilityError, contract_descriptor, missing_capabilities,
                        require_compatible, require_current, OPERATION_CAPABILITIES, required_capabilities)
 from .document_reader import read_document
@@ -733,11 +734,24 @@ class Broker(SelectionBrokerMixin):
     def _owner_dialog(self, **facts) -> ApprovalDecision | bool:
         """The owner's approval dialog, one at a time across every send and apply. While another dialog is open
         this call shows none and answers dialog_unavailable at once: its draft stays pending, and nothing waits
-        behind the open dialog, so a click meant for one draft can never approve another."""
+        behind the open dialog, so a click meant for one draft can never approve another.
+
+        Once an alias registry exists the rule holds across every broker of the user (one process per alias): the
+        user's one dialog lock in the accounts directory is held for the whole dialog, and while another broker holds
+        it, or it is unsafe, this call answers dialog_unavailable the same way (critic fix 055f). Without a registry
+        nothing is read or created there (0.54)."""
         if not self._dialog_lock.acquire(blocking=False):
             return DIALOG_UNAVAILABLE
         try:
-            return self._prompt_approval(**facts)  # counted as an open dialog for the installer's gate
+            try:
+                shared = account_registry.dialog_lock(self._accounts_root)
+            except OwnerLeaseError:
+                return DIALOG_UNAVAILABLE  # refused before any dialog: not counted as an open one
+            try:
+                return self._prompt_approval(**facts)  # counted as an open dialog for the installer's gate
+            finally:
+                if shared is not None:
+                    os.close(shared)
         finally:
             self._dialog_lock.release()
 

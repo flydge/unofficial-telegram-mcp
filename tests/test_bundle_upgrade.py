@@ -29,19 +29,30 @@ WRITE_AHEAD = {'recorded:claude_remove': 'claude', 'recorded:claude_add': 'claud
 class FakeLaunchctl:
     """`launchctl print|bootout|bootstrap` over one label; the loaded job is the plist read at bootstrap.
 
-    Like launchd, its state outlives a killed (forked) installer process: it is kept in a file.
+    `others` maps further labels (a named alias's broker and connect jobs, 0.55 spec 3D) to their plists: a call
+    naming one of them acts on that job alone; every other label is the default's, as before. Such a job prints no
+    state line (running, as launchd may show a job) until `idle` marks it `state = not running` (a helper that
+    exited, its job still registered); loading or booting it out clears that. Like launchd, its state outlives a
+    killed (forked) installer process: it is kept in a file.
     """
 
-    def __init__(self, plist, state):
+    def __init__(self, plist, state, others=None):
         self.plist, self.state, self.fail = plist, state, set()
-        self._save(None, [])
+        self.others = {label: Path(path) for label, path in (others or {}).items()}
+        self._write({'loaded': None, 'calls': [], **({'jobs': dict.fromkeys(self.others)} if self.others else {})})
+
+    def _value(self):
+        return json.loads(self.state.read_text())
+
+    def _write(self, value):
+        self.state.write_text(json.dumps(value))
 
     def _save(self, loaded, calls):
-        self.state.write_text(json.dumps({'loaded': loaded, 'calls': calls}))
+        self._write({**self._value(), 'loaded': loaded, 'calls': calls})
 
     @property
     def loaded(self):
-        return json.loads(self.state.read_text())['loaded']
+        return self._value()['loaded']
 
     @loaded.setter
     def loaded(self, value):
@@ -49,10 +60,28 @@ class FakeLaunchctl:
 
     @property
     def calls(self):
-        return json.loads(self.state.read_text())['calls']
+        return self._value()['calls']
 
-    def load(self):
-        self.loaded = plistlib.loads(self.plist.read_bytes())['ProgramArguments']
+    def job(self, label):
+        return self._value()['jobs'][label]
+
+    def set_job(self, label, value):
+        state = self._value()
+        idle = [name for name in state.get('idle', []) if name != label]
+        self._write({**{k: v for k, v in state.items() if k != 'idle'}, 'jobs': {**state['jobs'], label: value},
+                     **({'idle': idle} if idle else {})})
+
+    def idle(self, label):
+        """The loaded job `label` explicitly idle: its process exited, launchd keeps it registered."""
+        state = self._value()
+        assert state['jobs'][label] is not None, label
+        self._write({**state, 'idle': sorted({*state.get('idle', []), label})})
+
+    def load(self, label=None):
+        if label is None:
+            self.loaded = plistlib.loads(self.plist.read_bytes())['ProgramArguments']
+        else:
+            self.set_job(label, plistlib.loads(self.others[label].read_bytes())['ProgramArguments'])
 
     def verbs(self):
         return [call[0] for call in self.calls]
@@ -63,19 +92,31 @@ class FakeLaunchctl:
         self._save(self.loaded, self.calls + [argv[1:]])
         if verb in self.fail:
             return subprocess.CompletedProcess(argv, 5, '', '')
+        label = argv[2].rpartition('/')[2] if verb in ('print', 'bootout') else None
+        if label in self.others:
+            loaded, plist = self.job(label), self.others[label]
+        elif self.others and label is not None and label != self.plist.stem:
+            return subprocess.CompletedProcess(argv, 113 if verb == 'print' else 3, '', '')  # Another alias's label.
+        else:
+            loaded, plist, label = self.loaded, self.plist, None
         if verb == 'print':
-            if self.loaded is None:
+            if loaded is None:
                 return subprocess.CompletedProcess(argv, 113, '', '')
-            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % self.plist, '\tprogram = %s' % self.loaded[0],
-                              '\targuments = {', *('\t\t' + a for a in self.loaded), '\t}', '}'])
+            idle = ['\tstate = not running'] if label is not None and label in self._value().get('idle', []) else []
+            text = '\n'.join(['%s = {' % argv[2], '\tpath = %s' % plist, *idle, '\tprogram = %s' % loaded[0],
+                              '\targuments = {', *('\t\t' + a for a in loaded), '\t}', '}'])
             return subprocess.CompletedProcess(argv, 0, text, '')
         if verb == 'bootout':
-            if self.loaded is None:
+            if loaded is None:
                 return subprocess.CompletedProcess(argv, 3, '', '')
-            self.loaded = None
+            if label is None:
+                self.loaded = None
+            else:
+                self.set_job(label, None)
             return subprocess.CompletedProcess(argv, 0, '', '')
-        assert verb == 'bootstrap' and argv[3] == str(self.plist), argv
-        self.load()
+        named = next((other for other, path in self.others.items() if argv[3:4] == [str(path)]), None)
+        assert verb == 'bootstrap' and (argv[3] == str(self.plist) or named), argv
+        self.load(named)
         return subprocess.CompletedProcess(argv, 0, '', '')
 
 
@@ -95,12 +136,12 @@ class ChangeHarness(InstallHarness):
         self.probes.append((python, app))
         return self.answers.pop(0) if self.answers else 'none'
 
-    def build(self, name, *, launcher=b'# inert unit fixture\n', search=b'search-skill', version='0.55.0.dev0'):
+    def build(self, name, *, launcher=b'# inert unit fixture\n', search=b'search-skill', version='0.55.0rc1'):
         module = self.module()
         release = self.base / name
         release.mkdir(mode=0o700)
         files = {'launcher.py': launcher, 'python/bin/python3': b'inert-runtime',
-                 'app/telegram_search_mcp/__init__.py': b'__version__ = "0.55.0.dev0"\n',
+                 'app/telegram_search_mcp/__init__.py': b'__version__ = "0.55.0rc1"\n',
                  'native/libtdjson.dylib': b'inert-native', 'skills/telegram-search/SKILL.md': search,
                  'skills/telegram-setup/SKILL.md': b'setup-skill',
                  'tdlib-lock.json': json.dumps(v1_lock(inert_natives())).encode()}
@@ -277,7 +318,7 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         self.assertEqual([p[0] for p in self.probes], [Path(old['release_root']) / 'python/bin/python3'] * 3)
         self.assertEqual(self.session_hashes(), before)
         self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
-                         policy.replace(OLD_VERSION.encode(), b'0.55.0.dev0'))
+                         policy.replace(OLD_VERSION.encode(), b'0.55.0rc1'))
         for name in ('telegram-search',):
             for base in (self.skills, self.claude_skills):
                 self.assertEqual((base / name / 'SKILL.md').read_bytes(), b'search-skill-2')
@@ -449,7 +490,7 @@ class UpgradeTests(ChangeHarness, unittest.TestCase):
         after = (self.session_root / 'runtime.toml').read_bytes()
         changed = [(a, b) for a, b in zip(before.split(b'\n'), after.split(b'\n')) if a != b]
         self.assertEqual(changed, [(b'expected_package_version = "%s"' % OLD_VERSION.encode(),
-                                    b'expected_package_version = "0.55.0.dev0"')])
+                                    b'expected_package_version = "0.55.0rc1"')])
         self.assertIn(capabilities.encode(), after)
         self.assertEqual(oct((self.session_root / 'runtime.toml').stat().st_mode & 0o777), '0o600')
 
@@ -615,7 +656,7 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                                      ('change_2', installed['post_subtree_hash']))
                 self.assertEqual((self.skills / 'telegram-search' / 'SKILL.md').read_bytes(), b'search-skill')
                 self.assertEqual((self.session_root / 'runtime.toml').read_bytes(),
-                                 policy.replace(b'0.55.0.dev0', OLD_VERSION.encode()))
+                                 policy.replace(b'0.55.0rc1', OLD_VERSION.encode()))
                 self.assertEqual(self.session_hashes(), before)
                 self.selection_check(OLD_VERSION)
                 self.assertTrue((self.runtime / 'releases' / new[3]).is_dir())
@@ -644,7 +685,7 @@ class RollbackTests(ChangeHarness, unittest.TestCase):
                 switched = path.read_bytes()
                 result = self.change('rollback')
                 self.assertEqual((result['status'], result['release_root']), ('rolled_back', old['release_root']))
-                self.assertEqual(path.read_bytes(), switched.replace(b'0.55.0.dev0', OLD_VERSION.encode()))
+                self.assertEqual(path.read_bytes(), switched.replace(b'0.55.0rc1', OLD_VERSION.encode()))
                 # Forward again over the switched policy: the kept release is verified and reused.
                 self.assertEqual(self.install(new)['status'], 'upgraded')
                 self.assertEqual(path.read_bytes(), switched)

@@ -186,9 +186,21 @@ class RenameImpactTests(unittest.TestCase):
         self.assertEqual([path.name for path in self.sources() if pattern.search(path.read_text('utf-8'))], [])
 
     def test_registrations_use_the_identity_server_name(self):
-        self.assertEqual(codex_registration.SERVER_NAME, product_identity.MCP_SERVER_NAME)
-        self.assertEqual(claude_registration.SERVER_NAME, product_identity.MCP_SERVER_NAME)
+        """Read at call time since 0.55 phase D (no import-time SERVER_NAME): one edit of the identity renames the
+        default entry and every alias's `<server>_<alias>`."""
+        from unittest import mock
+        release = '/fixture/TelegramSearch/releases/' + 'a' * 64
+        command, args = release + '/python/bin/python3', ('-I', '-S', '-B', release + '/launcher.py', 'mcp')
         self.assertEqual(product_identity.MCP_SERVER_NAME, 'telegram_search')
+        for name in ('telegram_search', 'renamed_server'):
+            with self.subTest(name=name), mock.patch.object(product_identity, 'MCP_SERVER_NAME', name):
+                self.assertEqual(claude_registration.manual_command(command, args)[5], name)
+                registration = codex_registration.Registration(command, args, {}, ('_manifest',))
+                self.assertEqual(registration.server_name, name)
+                subtree = codex_registration.merge_registration(b'', registration).post_subtree
+                self.assertTrue(subtree.startswith(b'[mcp_servers.' + name.encode() + b']\n'))
+                self.assertEqual(claude_registration.manual_command(command, args + ('--account', 'work'),
+                                                                    name + '_work')[5], name + '_work')
 
     def test_internal_names_keep_their_values(self):
         self.assertEqual(product_identity.DISPLAY_NAME, 'Unofficial Telegram MCP')

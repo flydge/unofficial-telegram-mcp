@@ -967,7 +967,8 @@ def build_server(
     runtime_policy = policy if policy is not None else (
         load_runtime_policy() if account is None else load_runtime_policy(account.policy))
     # A named alias reaches the model in serverInfo.name and one instructions line, neither of which enters
-    # the schema fingerprint (spec 2); the default alias keeps both exactly.
+    # the schema fingerprint (spec 2); the default alias keeps both exactly. The line also names the transfer
+    # helper's option, whose default is the default account's broker and cache (critic fix 055f).
     named = account is not None and account.alias != DEFAULT_ALIAS
     server = _PolicyServer(
         name="telegram-search-mcp" + (f"-{account.alias}" if named else ""),
@@ -976,7 +977,9 @@ def build_server(
             "Bounded account-wide Telegram discovery, exact-chat search and reading, attachment "
             "transfer, and sends or changes the owner approves on this Mac."
         ),
-        instructions=_INSTRUCTIONS + (f"\nThis server serves the account alias «{account.alias}»." if named else ""),
+        instructions=_INSTRUCTIONS + (f"\nThis server serves the account alias «{account.alias}». Run "
+                                      f"telegram-search-transfer with --account {account.alias} for its artifacts "
+                                      "and uploads." if named else ""),
         version=__version__,
         log_level="CRITICAL",
     )

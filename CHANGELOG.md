@@ -1,12 +1,52 @@
 # Changelog
 
-## 0.55.0.dev0 — unreleased
+## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 
-Development of 0.55.0, multiple accounts ([spec](docs/plans/0.55-multiple-accounts-spec.md),
-[task record](docs/plans/0.55-multiple-accounts-spec.tasks.md)): one `AccountPaths` per account with the
-default byte-identical to 0.54; a closed owner-only alias registry; `--account <alias>` on the launcher, the
-proxy, the broker and the transfer helper; the account pin (first authorized user per alias, mismatch and
-duplicate refusals, fail-closed). Technical evidence only.
+Release candidate of 0.55.0, multiple accounts ([release notes](docs/release-notes-0.55.0rc1.md),
+[spec](docs/plans/0.55-multiple-accounts-spec.md), [task record](docs/plans/0.55-multiple-accounts-spec.tasks.md)). Technical evidence only: unit tests, synthetic homes,
+fake launchd, client CLIs and TDLib sessions; two really authorized accounts are an owner-session row.
+
+- Paths and registry: one `AccountPaths` per account, the default byte-identical to 0.54 (paths, labels,
+  plists, client entries, receipts, `runtime.toml` and the schema fingerprint, checked against
+  v0.54.0rc1); a closed owner-only alias registry (`TelegramSearchMCP-accounts/registry.json`, at most
+  eight aliases `[a-z][a-z0-9]{0,11}`) with the socket-path and tool-name budgets.
+- `--account <alias>` on the launcher, the proxy, the broker and the transfer helper; one broker
+  LaunchAgent and one connect job per alias; an alias's server names it in `serverInfo.name` and one
+  instructions line (which also names the transfer helper's `--account <alias>`), and its QR page
+  names it.
+- The account pin: each account's first authorized user, `account_mismatch` and `account_duplicate` at
+  every login before the handoff and before every broker operation outside a closed local exempt set,
+  fail-closed; the user id is never printed. Once a registry exists the approval dialog names the alias
+  and a masked account, and one owner dialog at a time holds across every account's broker (the
+  owner-only `TelegramSearchMCP-accounts/dialog.lock`; another account's send meanwhile answers
+  `dialog_unavailable`; a dialog already open when the first `account-add` runs is covered only by its own
+  broker, for at most its 120-second timeout); a chat that is the account's own reads "Saved Messages" in both
+  modes.
+- Re-login hardening inside one broker: discovery `scan_` continuations bound to the account and
+  generation, owner-aware draft routing.
+- Installer: `account-add` and `account-remove` (journaled; alias entries for Codex with
+  `required = false`, Claude Code user scope also in plugin mode, Claude Desktop beside the default;
+  `accounts.json`; removal moves the session aside as `removed-<alias>-<32 hex>`, never deleting it);
+  `status` over every account; `capabilities --account`; upgrade, rollback and uninstall over the
+  default and every alias, with a pending-send gate per broker (a leftover broker of a removed release
+  through its live socket), `login_in_progress`, `accounts_present` for a rollback below 0.55, and the
+  registry moved aside once no alias is left. Only `account-add` creates an alias root; after an
+  uninstall it repairs an alias the registry kept, moving its version line onto the current release only
+  from an equal or older one. A rollback that keeps an alias on its newer release sets its plist aside
+  (`newer_state_kept`). `account-add` reports a default broker that does not answer its one check as
+  `default_check: unanswered` and goes on. New installer codes `accounts_present`,
+  `accounts_inconsistent`, `account_remove_incomplete`, `release_not_current`, `login_in_progress` and
+  `connect_lock_unsafe` (each with `account`), and `alias_broker_unreadable` (with `account` and
+  `bootout_command`), plus the registry's codes.
+- Alias logins and installer transactions never overlap: every transaction over aliases holds each
+  alias's connect lock, and an alias login run from an installed release refuses `transaction_pending`
+  (with `pending_action` and `pending_account`) while any transaction is unfinished, and
+  `newer_state_kept` or `older_state_kept` (run `account-add <alias>`) while its `runtime.toml` names a
+  newer or an older release; a login never creates an alias root (`alias_unavailable`).
+- Isolation matrix: every handle kind one account issues is refused by another exactly like an unknown
+  handle, on two real brokers over fake sessions.
+- Docs: an Accounts section in the installation guide, the reference and the security notes, and the
+  setup skill.
 
 On the same development line, 0.56 ordered albums ([spec](docs/plans/0.56-albums-spec.md),
 [task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and

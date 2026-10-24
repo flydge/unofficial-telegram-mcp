@@ -5,7 +5,7 @@ description: Install the local Unofficial Telegram MCP bundle and connect the us
 
 # Telegram setup
 
-Paired with candidate `0.55.0.dev0`, contract 1. Needs Apple Silicon macOS 26+
+Paired with candidate `0.55.0rc1`, contract 1. Needs Apple Silicon macOS 26+
 and Claude Code, Codex or Claude Desktop running on the same Mac as the user's browser and Telegram
 phone app. The signed DMG and the public release assets do not exist yet, so the routes below
 describe what the installer does; confirm with the user which kit they have.
@@ -66,6 +66,11 @@ step seems to need one, stop and use the Terminal fallback at the end.
 `cancel` (same command, `cancel` in place of `connect`) closes a screen that `connect` opened:
 `cancelled`, or `nothing_to_cancel` when no background screen is running.
 
+**An existing account alias.** When the server that needs connecting is `telegram_search_<alias>` (its
+instructions name the alias), run steps 2 to 4 with `--account <alias>` after `connect`, `wait` and
+`cancel`. A plain `connect` serves only the default account and reports `already_connected` while the
+alias stays offline.
+
 ## Results by next_action
 
 Never retry in a loop: run `connect` at most twice for the same failure, then stop and report.
@@ -88,7 +93,8 @@ Never retry in a loop: run `connect` at most twice for the same failure, then st
 | `check_existing_broker_without_stopping_it` | `owner_busy` | Something else holds the Telegram session. Never stop it. Ask the user to finish or close it, then retry once. |
 | `preserve_existing_session_and_use_legacy_install_path` | `legacy_unmanaged` | An unmanaged session exists and stays untouched. Stop and say so. |
 | `review_enrollment_binding_without_resetting`, `restore_exact_managed_key_without_regenerating`, `stop_and_report` | `enrollment_inconsistent`, `identity_changed`, `managed_key_missing`, `enrollment_missing`, `app_identity_invalid`, `policy_unsafe`, `owner_unsafe`, `credential_unavailable` | Stop and report the code. Never reset, regenerate or delete anything to get past it. |
-| `review_enrollment_binding_without_resetting`, `stop_and_report` | `account_duplicate`, `account_mismatch`, `alias_unavailable` | Only with account aliases (`--account <alias>`). `account_duplicate`: the Telegram account that just logged in (QR scan, `setup` or `resume`) already serves another alias or the default account. `account_mismatch`: it is not the account this alias was first connected with. `alias_unavailable`: the alias is no longer registered. Nothing was handed to the broker; stop and tell the user which alias was connecting. Never remove an alias or reset a session to get past it. |
+| `review_enrollment_binding_without_resetting`, `stop_and_report` | `account_duplicate`, `account_mismatch`, `alias_unavailable` | On any login once an alias registry exists (from the first `account-add` on), the default account's included (with `--account <alias>` or without). `account_duplicate`: the Telegram account that just logged in (QR scan, `setup` or `resume`) already serves another alias or the default account. `account_mismatch`: it is not the account this alias, or the default, was first connected with. `alias_unavailable`: the alias is no longer registered, or its account directory is missing (only `account-add` creates it); on the default's login, the alias registry cannot be read. Nothing was handed to the broker; stop and tell the user which account was connecting (the alias, or the default). Never remove an alias or reset a session to get past it yourself. The owner's ways out for the default: for `account_duplicate`, `account-remove` the alias that holds that Telegram account, then `connect` again; for `account_mismatch`, log the default into the account it was first connected with (its pin stays until no alias is left and an uninstall retires the registry). |
+| `finish_pending_installer_action_then_retry`, `upgrade_installation_or_remove_account`, `run_account_add_for_alias_then_retry` | `transaction_pending`, `newer_state_kept`, `older_state_kept` | Only with account aliases on an installed release; nothing changed. `transaction_pending`: a first install, upgrade, rollback, uninstall, `account-add` or `account-remove` is unfinished; `pending_action` names it, and `pending_account` the alias of an account action. The user runs that installer action again, then `connect` again (with no `pending_action`, stop and report). `newer_state_kept`: this alias's state is a newer release's, which this release cannot serve: a rollback kept it on the release its session was made with (it stays offline until the next upgrade, then `connect` again), or a lower version was installed after an uninstall kept it (the user installs that release again, then `account-add <alias>`); or its `account-remove`. `older_state_kept`: an uninstall kept this alias and a newer release was installed since; run `account-add <alias>` (it repairs the alias and keeps its session), then `connect --account <alias>` again. After a reinstall at a newer version, run `account-add <alias>` for each alias the uninstall kept before any `connect` or upgrade: both refuse until then. After a reinstall at a lower version, upgrade to exactly the release the alias last ran, then `account-add <alias>`. Never edit its files or reset its session to get past it. |
 | `exit_connect_process_then_run_connect_again` | `auth_destroy_failed` | Let the connect process exit (close that Terminal run), then `connect` again. |
 | `run_in_foreground_native_terminal` | `secure_terminal_required` | `setup`, `resume` and `api-credentials` run only in the user's own foreground native Terminal. |
 | `run_connect` | `enrollment_exists`, `connect_helper_requires_launchd` | Use `connect`. `connect-helper` is internal; never run it. |
@@ -133,8 +139,16 @@ Telegram tools unused for about five minutes) and run the same command again; st
   Uninstall removes only what the installer owns; the Telegram session, enrollment and Keychain stay.
 - `downgrade_refused`, `upgrade_conflict`, `policy_conflict`, `rollback_unavailable`, `service_conflict`,
   `service_restart_failed`, `uninstall_incomplete`, `installation_refused`: stop and report the code.
-  `transaction_pending`: an earlier install, upgrade, rollback or uninstall is unfinished, and
-  `pending_action` names it; repeat that command first. An uninstall interrupted after it renamed the
+  `login_in_progress`: the login of the alias in `account` still runs; let it end (`wait --account <account>`
+  or `cancel --account <account>`), then the same command again. `connect_lock_unsafe`: that alias's
+  `run/connect.lock` (or its `run` folder or root) is not owner-only, which `wait` and `cancel` cannot clear;
+  stop and report the code and `account` (the user restores it: `chmod 700` the folders, `chmod 600` the
+  lock). `alias_broker_unreadable`: a leftover account
+  broker of a removed release; the user runs the returned `bootout_command` themselves, then the same
+  command again.
+  `transaction_pending`: an earlier install, upgrade, rollback, uninstall, `account-add` or
+  `account-remove` is unfinished, and `pending_action` names it (`pending_account` the alias of an account
+  action); repeat that command first. An uninstall interrupted after it renamed the
   installation folder is repeated with the launcher inside
   `~/Library/Application Support/.TelegramSearch-removed-<random>/releases/<sha256>/`. Never edit
   `runtime.toml`, the broker plist or a registration to get past a refusal.
@@ -150,6 +164,26 @@ Telegram tools unused for about five minutes) and run the same command again; st
   other way out is `uninstall`, which also removes what the change already wrote; `rollback` and another
   kit refuse with `transaction_pending` until the same command or `uninstall` has run. An adopting first
   install ends only with its own repeat.
+
+## A second account
+
+Only when the owner asks. The owner picks an alias: a lowercase letter, then at most 11 lowercase letters
+or digits, never `default`. Run the installed launcher (`RELEASE` as for rollback above) with
+`account-add <alias>`: it registers the alias, creates its account directory and client entries, never
+logs in, and prints `account_added` with an `activation_command` ending in `connect --account <alias>`.
+Then do steps 2 to 4 with `--account <alias>` after `connect`, `wait` and `cancel`; the user scans with
+the phone of the account being added, and the page names the alias. It becomes its own server
+`telegram_search_<alias>` (the plugin serves only the default account). `account_duplicate` or
+`account_mismatch` from `wait` (table above) means that phone holds an account already connected, or not
+this alias's own; stop and report. After an uninstall and a reinstall the same `account-add` re-registers
+an alias the uninstall kept, with its session (`service: rewritten` is normal there); run it for each
+kept alias before any `connect` or upgrade. `policy_conflict` there means a newer release served that
+session. `alias_exists`, `registry_full`, `alias_path_too_long`,
+`alias_name_too_long`, `accounts_inconsistent`, `release_not_current` or `policy_conflict`: stop and
+report the code (`login_in_progress` and `connect_lock_unsafe` as above). `default_check: unanswered` is
+not a failure: the default account is pinned at its broker's next check. `account-remove <alias>`
+(renaming is remove, then add) runs only when the owner asks; it moves the session aside, never deleting
+it.
 
 ## Terminal fallback
 
@@ -173,8 +207,8 @@ to 300 s after the last Telegram call). Tell the owner to settle pending sends, 
 client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
 `policy_unsupported` change nothing: stop and report the code. `status: changed` with
 `broker: restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the
-policy yourself. There is no account
-alias or profile registry, cloud auth or model provisioning route. Source and redistribution
+policy yourself. There is no cloud auth or
+model provisioning route. Source and redistribution
 completeness and public hosting remain open gates; do not call this candidate released or
 download missing runtime, source, media tools or models without authority. The plugin's pinned
 `bin/install` is the one download this skill runs, only for a user who chose the plugin, and it

@@ -329,7 +329,7 @@ class LateRefusalTests(LateHarness, unittest.TestCase):
                 untamper()
                 result = action()
                 self.assertEqual(result['service'], 'restarted')
-                self.assertIn(b'expected_package_version = "0.55.0.dev0"', policy.read_bytes())
+                self.assertIn(b'expected_package_version = "0.55.0rc1"', policy.read_bytes())
                 self.assertEqual(self.launchctl.loaded[4], str(Path(result['release_root']) / 'launcher.py'))
 
     def test_a_kill_inside_the_restore_is_finished_by_the_repeat_with_the_same_refusal(self):

@@ -36,15 +36,9 @@ CONSTANTS = frozenset({name for name, value in vars(config).items()
                        if name.isupper() and isinstance(value, (Path, AccountPaths))}) | LABELS
 # Calls that derive an account's paths; one evaluated at import binds an account just the same.
 DERIVERS = frozenset({'_owner_paths', 'for_alias', '_derive', 'relocated', 'SetupPaths', 'from_account'})
-# (module relative to the repository, bound name) -> why phase A cannot remove it.
-ALLOWED = {
-    ('src/telegram_search_mcp/codex_registration.py', 'SERVER_NAME'):
-        'Registrations take an optional server name in phase D (spec 3D); today they register the default alias.',
-    ('src/telegram_search_mcp/claude_registration.py', 'SERVER_NAME'):
-        'Registrations take an optional server name in phase D (spec 3D); today they register the default alias.',
-    ('src/telegram_search_mcp/claude_desktop_registration.py', 'SERVER_NAME'):
-        'Registrations take an optional server name in phase D (spec 3D); today they register the default alias.',
-}
+# (module relative to the repository, bound name) -> why it cannot be removed. Empty since phase D: the client
+# registrations take their server name at call time (spec 3D, criterion 3).
+ALLOWED = {}
 
 
 def _names(node):
@@ -275,6 +269,9 @@ class SweepTests(unittest.TestCase):
             for line, name, constant in violations(path.read_text(encoding='utf-8')):
                 found.setdefault((relative, name), []).append(f'{line}:{constant}')
         self.assertEqual(sorted(set(found) - set(ALLOWED)), [], found)
+
+    def test_the_allowlist_is_empty(self):
+        self.assertEqual(ALLOWED, {})  # Criterion 3: no path, label or socket default outside config.py at all.
 
     def test_every_allowlist_entry_is_still_needed_and_has_a_reason(self):
         for (relative, name), reason in ALLOWED.items():

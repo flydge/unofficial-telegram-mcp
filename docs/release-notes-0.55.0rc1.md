@@ -1,0 +1,120 @@
+# 0.55.0rc1 — release candidate, 2026-10-24
+
+[Overview](../README.md) · [Installation](install.md) · [Tool reference](reference.md) · [Roadmap](roadmap.md) · [Licensing](licensing.md)
+
+This candidate adds multiple accounts to 0.54.0rc1
+([spec](plans/0.55-multiple-accounts-spec.md), [task record](plans/0.55-multiple-accounts-spec.tasks.md),
+[changelog](../CHANGELOG.md)). It is a local annotated tag with release-gate evidence; nothing is published.
+The owner rows (two really authorized accounts, one approved action each) wait for the owner session.
+
+## Available behavior
+
+- **A second account.** The owner runs the current release's `launcher.py account-add <alias>`, which
+  registers the alias, creates its session root and writes its client entries, then
+  `connect --account <alias>` and scans the QR with that account's phone; the page names the alias. An
+  alias is `[a-z][a-z0-9]{0,11}`, never `default`, at most eight per installation, and must fit the macOS
+  socket-path and the clients' tool-name limits (`alias_path_too_long`, `alias_name_too_long`). See
+  [Accounts](install.md#accounts-055-candidate).
+- **Everything separate.** Each alias has its own session root
+  (`TelegramSearchMCP-accounts/<alias>`), broker LaunchAgent and connect job, socket, `runtime.toml`,
+  caches and one TDLib, and its own client entries under the server name `telegram_search_<alias>`: Codex
+  with `required = false`, Claude Code in user scope (also in plugin mode; the plugin stays default-only),
+  Claude Desktop beside the default's. The alias is fixed in each entry's argument list; tools, schemas and
+  the schema fingerprint are the default's.
+- **Handles stay with their account.** Every draft, send status, artifact (also through the transfer
+  helper's `download`), upload, selection, verified target and cursor of one account is refused by another
+  exactly like an unknown handle.
+- **The account pin.** Each account's broker pins the Telegram user it first finds authorized, and every
+  login applies the same rule before the handoff: `account_mismatch` for another user, `account_duplicate`
+  for a user already serving another alias or the default account. The user id is never printed once a
+  registry exists; the approval dialog names the alias and the last two digits of the account, and at most
+  one owner dialog is open across every account's broker (another account's send meanwhile answers
+  `dialog_unavailable`, its draft pending).
+- **Status and capabilities per account.** `status` reports `loaded`, `authorized` and `registered` for
+  the default and every alias, never the account; `capabilities … --account <alias>` switches that alias's
+  own profiles.
+- **Removal moves aside.** `account-remove <alias>` stops the alias's jobs, removes its own client entries
+  and its pin, and moves its session to `removed-<alias>-<32 hex>`; nothing is deleted or logged out.
+  Rename is a remove plus an add.
+- **Upgrade, rollback and uninstall over every account.** One transaction moves the default and every
+  alias, with a pending-send gate per broker and a refusal while an alias login runs (`login_in_progress`,
+  naming the alias; `connect_lock_unsafe` for its connect lock not owner-only). A leftover alias broker of
+  a removed release is asked through its live socket; one that cannot be read refuses
+  `alias_broker_unreadable` with the owner's `bootout_command`. A rollback below 0.55 refuses while an
+  alias exists (`accounts_present`), and a rollback that keeps an alias on its newer release leaves it
+  offline (`newer_state_kept`). Uninstall keeps alias sessions and the registry; a later install repairs
+  each alias with its `account-add`, moving its version line onto the current release only from an equal
+  or older one (`policy_conflict` otherwise); until then the alias's logins refuse `older_state_kept` (or
+  `newer_state_kept` after a lower version) and upgrades `policy_conflict`.
+- **Logins never race the installer.** No alias login runs during an installer transaction, and while one
+  is unfinished an alias login refuses `transaction_pending`, naming the action (`pending_action`,
+  `pending_account`); a login never creates an alias root (`alias_unavailable`).
+- **The default account unchanged.** Its paths and names never change, and until the first `account-add`
+  every path, launchd label and plist, client entry, receipt, `runtime.toml` and the schema fingerprint
+  equal 0.54.0rc1's.
+
+Package version 0.55.0rc1, public contract version 1. Tool schemas and the schema fingerprint are
+unchanged from 0.54.0rc1. New installer refusal codes are listed in the
+[reference](reference.md#installer-refusal-codes). Deploy matching proxy, broker, policy and skills
+together.
+
+## Evidence
+
+- The full isolated-HOME suite and the release gate on the tagged commit, and the consumer-matrix receipt
+  (every synthetic cell through the official SDK against the installed wheel) on the same commit.
+- Default-account goldens computed by running v0.54.0rc1's code (paths, labels, plists, client entries,
+  receipts, journals, `runtime.toml`, schema fingerprint); the isolation matrix on two real brokers over fake
+  TDLib sessions, every handle kind across accounts; the kill sweep over `account-add`, `account-remove` and
+  upgrade, rollback and uninstall over aliases, every resume equal to the uninterrupted run.
+- Adversarial reviews of every phase and fix round (each finding checked by two verifiers) and an independent
+  four-lens critic of the whole candidate whose one high (one owner dialog across accounts) is fixed and
+  survived a dedicated re-review; all recorded in the task record.
+
+## Owner rows
+
+| Row | Status |
+| --- | --- |
+| Add a second account by QR; two really authorized accounts | Owner session |
+| One approved action on each account; the dialog names the right account | Owner session |
+
+## Known limits
+
+- Owner-session rows above; every evidence item is unit and synthetic.
+- Aliases separate sessions, not users: every alias runs as the same macOS user
+  ([security](security.md#accounts-boundary-055-candidate)).
+- Each alias runs its own broker and TDLib: memory, TDLib's own session files and up to 1 GiB of artifact
+  cache per account.
+- Client allowlists, permission rules and hooks keyed on `mcp__telegram_search__*` do not cover alias
+  servers (`mcp__telegram_search_<alias>__*`).
+- A dialog already open when the first `account-add` creates the registry is covered only by its own
+  broker's lock: for at most its 120-second timeout another account's dialog can open beside it.
+- An uninstall with an alias left keeps the registry and the default's pin: installing a release below 0.55
+  over it, re-logging the default into another account and then 0.55 again meets `account_mismatch` for the
+  default.
+- An alias added after an upgrade blocks that upgrade's rollback until it is removed.
+- An alias the registry lists without client entries (after an uninstall) gets none until its
+  `account-add`; after a reinstall at another version its logins and every upgrade refuse until then, so
+  run it for each kept alias first.
+- Every installer transaction over aliases waits for a running alias login (`login_in_progress`), and alias
+  logins wait for any unfinished transaction (`transaction_pending`); the account actions run only from the
+  current release (`release_not_current`).
+- An alias whose root is missing (moved or deleted by hand) cannot log in (`alias_unavailable`) until it is
+  removed and added again.
+- A rollback can leave an alias offline on a newer release (`newer_state_kept`) until the next upgrade or
+  its `account-remove`; after an uninstall, installing a lower version than the one that last served an
+  alias refuses that alias's `account-add` (`policy_conflict`).
+- A loaded alias broker of a removed release that the current release cannot read blocks the installer
+  actions over it (`alias_broker_unreadable`) until the owner runs the printed `bootout_command`.
+- With the default broker not loaded or not answering at `account-add` (`default_check: not_loaded` or
+  `unanswered`), the default account is pinned only at its broker's next check; an alias logged into the default's own account first blocks the
+  default with `account_duplicate` until that alias is removed.
+- Removing the last alias keeps the registry with the default account's pin (`status` keeps `accounts`, the
+  dialog keeps naming `default`) until a rollback below 0.55 or an uninstall with no alias left moves it
+  aside.
+- Everything listed under Known limits in the [0.54.0rc1 notes](release-notes-0.54.0rc1.md) still applies.
+
+## License and public identifiers
+
+Project-owned code is licensed under **AGPL-3.0-only**; see [licensing](licensing.md) and
+[third-party notices](third-party-notices.md). The public name remains **Unofficial Telegram MCP**, a
+placeholder until the owner decides; compatibility identifiers are unchanged.

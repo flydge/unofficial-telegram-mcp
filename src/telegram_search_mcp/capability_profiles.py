@@ -8,7 +8,8 @@ receipt-bound broker LaunchAgent is not loaded or is exactly the installed relea
 Every refusal comes before the write. After it, the broker is restarted when loaded; a restart that fails then
 is reported in the `changed` result (`broker: restart_failed` with the manual `restart_command`), never as a
 refusal. Connected MCP clients see `config_stale` until they reconnect. Refusals are fixed codes; nothing read
-from the file is echoed.
+from the file is echoed. With `--account <alias>` (0.55 spec 3D) the same switch edits that alias's own
+runtime.toml, gated and restarted through that alias's broker and label; the default's is untouched.
 """
 from __future__ import annotations
 
@@ -102,25 +103,33 @@ def _policy(path: Path):
         raise ProfileError("policy_unsupported") from None
 
 
-def show(home: Path) -> dict:
-    policy = _policy(_owner_paths(Path(home))[0] / "runtime.toml")
+def _policy_path(home: Path, account=None) -> Path:
+    """The runtime.toml the switch edits: the default account's, or a named alias's own (0.55 spec 3D)."""
+    return _owner_paths(Path(home))[0] / "runtime.toml" if account is None else account.policy
+
+
+def show(home: Path, account=None) -> dict:
+    """The profiles of the default account's runtime.toml, or of `account`'s (a named alias's AccountPaths)."""
+    policy = _policy(_policy_path(home, account))
     return {"status": "ok", "profiles": states(policy.enabled_capabilities),
             "enabled_capabilities": list(policy.enabled_capabilities)}
 
 
-def restart_command(home: Path) -> list[str]:
-    """The owner's manual restart of the broker LaunchAgent (nonsecret argv)."""
-    return [LAUNCHCTL, "kickstart", "-k", "gui/%d/%s" % (os.getuid(), _owner_paths(Path(home))[2])]
+def restart_command(home: Path, account=None) -> list[str]:
+    """The owner's manual restart of the broker LaunchAgent (nonsecret argv): the alias's own label for `account`."""
+    label = _owner_paths(Path(home))[2] if account is None else account.broker_label
+    return [LAUNCHCTL, "kickstart", "-k", "gui/%d/%s" % (os.getuid(), label)]
 
 
 def apply(home: Path, action: str, profile: str, *, pending: Callable[[], str], restartable: Callable[[], str],
-          restart: Callable[[], str]) -> dict:
+          restart: Callable[[], str], account=None) -> dict:
     """Enable or disable one profile. Before the write, `restartable()` answers 'loaded' or 'not_running' only when
     the receipt-bound broker can be restarted (it raises, or answers anything else, otherwise) and `pending()`
     answers 'none', 'pending' or 'unknown' for the running broker. After the write, `restart()` restarts the broker
     when it is loaded and answers 'restarted' or 'not_running'; any other answer or exception there is reported as
-    `broker: restart_failed` with the manual `restart_command`."""
-    path = _owner_paths(Path(home))[0] / "runtime.toml"
+    `broker: restart_failed` with the manual `restart_command`. `account` is a named alias's AccountPaths: its own
+    runtime.toml (the callables gate and restart its own broker); None is the default's, unchanged."""
+    path = _policy_path(home, account)
     before = _read(path)
     current = _policy(path)
     enabled = planned(current.enabled_capabilities, action, profile)
@@ -167,5 +176,5 @@ def apply(home: Path, action: str, profile: str, *, pending: Callable[[], str], 
     result = {"status": "changed", "profiles": states(enabled), "enabled_capabilities": list(enabled),
               "broker": broker if broker in ("restarted", "not_running") else "restart_failed", "clients": "reconnect"}
     if result["broker"] == "restart_failed":
-        result["restart_command"] = restart_command(home)
+        result["restart_command"] = restart_command(home, account)
     return result

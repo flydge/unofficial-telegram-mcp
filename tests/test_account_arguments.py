@@ -22,6 +22,9 @@ from telegram_search_mcp.config import AccountPaths, RuntimePolicy
 from telegram_search_mcp.enrollment import SetupPaths
 
 SENTINEL = 'SYNTHETICSENTINEL'
+# The one instructions line a named alias's server adds (spec 2, A2; critic fix 055f: the transfer helper's option).
+ALIAS_LINE = ('\nThis server serves the account alias «work». Run telegram-search-transfer with --account work for '
+              'its artifacts and uploads.')
 LAUNCHER = Path(__file__).resolve().parents[1] / 'packaging' / 'launcher.py'
 # Grammar violations of the trailing flag: each must be refused before any admission or registry read.
 OUTSIDE = [['status', '--account', 'default'], ['status', '--account', 'Work'], ['status', '--account', SENTINEL],
@@ -154,8 +157,10 @@ class LauncherGrammarTests(Home):
 
         class Reached(Exception):
             pass
-        refused = [*OUTSIDE, ['connect-helper', '--account', 'default'], ['capabilities', 'show', '--account', 'work'],
-                   ['rollback', '--account', 'work'], ['mcp', '--account', 'ｗork']]
+        # `capabilities ... --account <alias>` is in the grammar since phase D (tests/test_account_launcher.py).
+        refused = [*OUTSIDE, ['connect-helper', '--account', 'default'], ['capabilities', 'show', '--account', 'Work'],
+                   ['capabilities', '--account', 'work', 'show'], ['rollback', '--account', 'work'],
+                   ['account-add', '--account', 'work'], ['mcp', '--account', 'ｗork']]
         for args in refused:
             with self.subTest(args=args), mock.patch.object(module, '_read', side_effect=Reached()) as reader:
                 code, out, err = run(module.main, args)
@@ -285,13 +290,24 @@ class ProxyArgumentTests(Home):
             self.assertNotIn('a' * 13, out + err)
             build.assert_not_called()
 
+    def test_the_alias_line_names_the_transfer_helpers_account_option_within_the_budget(self):
+        """Critic fix (055f, low): the line tells the model to pass `--account <alias>` to telegram-search-transfer,
+        whose default is the default account's broker and cache (an alias's handle would answer artifact_unverified
+        or upload_unverified there); the longest alias keeps the instructions within their 2,500 characters."""
+        self.assertIn('telegram-search-transfer with --account work', ALIAS_LINE)
+        self.assertEqual(ALIAS_LINE.count('\n'), 1)
+        account_registry.add_alias('a' * 12, self.home, longest_tool='t')
+        longest = server.build_server(policy=RuntimePolicy(), account=AccountPaths.for_alias('a' * 12, self.home))
+        self.assertTrue(longest.instructions.endswith(ALIAS_LINE.replace('work', 'a' * 12)))
+        self.assertLessEqual(len(longest.instructions), 2500)
+
     def test_a_named_server_carries_the_alias_in_its_name_and_one_instructions_line_only(self):
         policy = RuntimePolicy()
         default = server.build_server(policy=policy)
         named = server.build_server(policy=policy, account=self.work)
         self.assertEqual(default.name, 'telegram-search-mcp')
         self.assertEqual(named.name, 'telegram-search-mcp-work')
-        self.assertEqual(named.instructions, default.instructions + '\nThis server serves the account alias «work».')
+        self.assertEqual(named.instructions, default.instructions + ALIAS_LINE)
         self.assertEqual(server.build_server(policy=policy, account=AccountPaths.for_alias('default', self.home))
                          .instructions, default.instructions)
         self.assertEqual(contract.schema_document(named), contract.schema_document(default))
@@ -308,7 +324,7 @@ class ProxyServerInfoTests(unittest.IsolatedAsyncioTestCase, Home):
         async with Client(server.build_server(policy=policy, account=self.work)) as client:
             named = (client.server_info.name, client.instructions, (await client.list_tools()).tools)
         self.assertEqual((default[0], named[0]), ('telegram-search-mcp', 'telegram-search-mcp-work'))
-        self.assertEqual(named[1], default[1] + '\nThis server serves the account alias «work».')
+        self.assertEqual(named[1], default[1] + ALIAS_LINE)
         self.assertEqual(named[2], default[2])
 
 

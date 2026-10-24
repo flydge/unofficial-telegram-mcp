@@ -244,5 +244,69 @@ class RealBrokerTests(unittest.TestCase):
         self.assertEqual(self.probe(), 'unknown')
 
 
+class LeftoverAliasProbeTests(unittest.TestCase):
+    """Review fix (055d3, R4): a loaded alias broker whose definition names a release since removed made every gate
+    answer `unknown` for good (its interpreter is gone, the probe could not even start), so uninstall, account-add,
+    account-remove and upgrade refused `pending_send_unresolved` forever. With `current`, the real
+    `account_pending_sends` probes that broker's live socket under the current release: no listener (a stale socket
+    file) is `none`, a broker that answers is counted as usual, and one that cannot be read is `unreadable`."""
+
+    setUp = RealBrokerTests.setUp
+    broker = RealBrokerTests.broker
+
+    def gone(self):
+        python = self.home / 'gone-release' / 'python/bin/python3'
+        return python, python.parent.parent.parent / 'app'
+
+    def probe(self, current=True):
+        python, app = self.gone()
+        return bundle_install.account_pending_sends(self.home, python, app, self.home / SOCKET,
+                                                    self.root / 'runtime.toml',
+                                                    current=(Path(sys.executable), self.app) if current else None)
+
+    def test_no_socket_and_a_stale_socket_file_hold_nothing(self):
+        self.assertEqual(self.probe(), 'none')
+        (self.home / SOCKET).parent.mkdir(mode=0o700)
+        import socket
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(self.home / SOCKET))
+        stale.close()  # Bound, never listening: connect is refused.
+        self.assertTrue((self.home / SOCKET).exists())
+        self.assertEqual(self.probe(), 'none')
+        self.assertEqual(self.probe(current=False), 'unknown')  # Without the current release: as before.
+
+    def test_a_live_broker_that_answers_is_gated_normally(self):
+        broker = self.broker()
+        self.assertEqual(self.probe(), 'none')
+        with broker._service_lease('client_another_mcp_session'):
+            self.assertEqual(self.probe(), 'pending')
+
+    def test_a_live_listener_that_cannot_be_read_is_unreadable(self):
+        self.broker(enabled_capabilities=('read',))  # Another policy: the current release's handshake refuses.
+        self.assertEqual(self.probe(), 'unreadable')
+
+    def test_a_listener_that_is_no_broker_is_unreadable(self):
+        import socket
+        (self.home / SOCKET).parent.mkdir(mode=0o700)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(self.home / SOCKET))
+        listener.listen(4)
+        self.addCleanup(listener.close)
+        stop = threading.Event()
+
+        def drop():
+            listener.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    listener.accept()[0].close()
+                except OSError:
+                    continue
+        thread = threading.Thread(target=drop)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+        self.assertEqual(self.probe(), 'unreadable')
+
+
 if __name__ == '__main__':
     unittest.main()

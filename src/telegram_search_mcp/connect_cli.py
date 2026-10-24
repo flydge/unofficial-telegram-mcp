@@ -23,8 +23,9 @@ import subprocess
 import sys
 import threading
 import time
+from . import account_registry
 from .broker_client import BrokerCompatibilityError, BrokerUnavailable
-from .config import DEFAULT_ALIAS
+from .config import DEFAULT_ALIAS, AccountPathsError
 from .connect_flow import (_TERMINAL, ConnectResult, PHASES, STATUS_CODES, connect_status_path, next_action,
                            run_connect, valid_retry_after, write_connect_status)
 from .credentials import CredentialStoreError
@@ -55,7 +56,7 @@ _IN_PROGRESS = {'status': 'connect_in_progress', 'next_action': 'wait'}
 _AGAIN = 'run_api_credentials_in_native_terminal'
 # api-credentials keeps these codes' table actions; any other refusal there means "run it again".
 _API_KEPT = frozenset({'secure_terminal_required', 'enrollment_exists', 'legacy_unmanaged',
-                       'enrollment_inconsistent', 'owner_busy', 'credential_invalid_record'})
+                       'enrollment_inconsistent', 'owner_busy', 'credential_invalid_record', 'alias_unavailable'})
 _STORE_CODES = frozenset({'denied', 'locked', 'unavailable', 'invalid_record', 'conflict'})
 # The OS refused a write (an agent sandbox, a read-only parent): not unsafe metadata.
 _DENIED = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
@@ -88,8 +89,15 @@ def _denied(error):
 
 
 def _take_connect_lock(paths):
-    """Descriptor holding connect.lock, or None while another process holds it; unsafe raises."""
+    """Descriptor holding connect.lock, or None while another process holds it; unsafe raises.
+
+    A named alias's is taken only inside its existing root, and only while the registry still lists it
+    (account_registry.login_lock, review fix 055d3): a login never creates the alias root; a missing root or an
+    alias no longer listed raises AccountPathsError (`alias_unavailable`), nothing created. The default's is 0.54's.
+    """
     try:
+        if paths.account.alias != DEFAULT_ALIAS:
+            return account_registry.login_lock(paths.account)
         return acquire_owner_lock(connect_lock_path(paths))
     except OwnerLeaseError as error:
         if error.code == 'owner_busy':
@@ -123,15 +131,23 @@ def _connect_lock_held(paths):
         os.close(parent)
 
 
+def _pending(value):
+    """A `transaction_pending` report names the unfinished installer action (and an account action's alias) as the
+    installer's own refusal does (review fix 055d4, account_registry.pending_fields); any other is unchanged."""
+    if value['code'] == 'transaction_pending':
+        value.update(account_registry.pending_fields())
+    return value
+
+
 def _refused(code, action=None):
-    return {'status': 'refused', 'code': code, 'next_action': action or next_action('failed', code)}, 2
+    return _pending({'status': 'refused', 'code': code, 'next_action': action or next_action('failed', code)}), 2
 
 
 def _report(phase, code, retry_after=None):
     value = {'status': phase, 'code': code, 'next_action': next_action(phase, code)}
     if code == 'flood_wait':
         value['retry_after'] = retry_after  # Seconds Telegram asked to wait; None when it gave none.
-    return value, 0 if phase == 'ready' else 2
+    return _pending(value), 0 if phase == 'ready' else 2
 
 
 # connect -----------------------------------------------------------------------------------
@@ -320,15 +336,25 @@ def _connect(paths, *, client_factory, terminal, inline, runner, uid, sleeper, p
         return {'status': 'already_connected'}, 0  # Repeat use never asks for a new login.
     if probe == 'starting':
         return _starting(state, runner, uid, python_executable, broker_plist, _jobs(paths))
+    refused = account_registry.login_admission(paths.account)  # Asked before the lock too: then nothing is created.
+    if refused is not None:
+        return _refused(refused)
     try:
         lock, response = _enter(paths, runner, uid, sleeper, clock)
     except LaunchAgentError:
         return _refused('connect_launch_failed')
+    except AccountPathsError:  # A named alias's root is gone, or the registry no longer lists it: nothing created.
+        return _refused('alias_unavailable')
     except OwnerLeaseError as error:
         return _refused(_write_denied(terminal) if _denied(error) else 'owner_unsafe')
     if lock is None:
         return response
     try:  # Released right after the bootstrap; an inline run holds it throughout.
+        # A named alias run from an installed release, with the lock held: no installer transaction may be pending,
+        # and its state must be this release's (review fix 055d3); refused before any stop, job or status change.
+        refused = account_registry.login_admission(paths.account)
+        if refused is not None:
+            return _refused(refused)
         return _locked(paths, state, probe, client_factory=client_factory, terminal=terminal, inline=inline,
                        runner=runner, uid=uid, sleeper=sleeper, python_executable=python_executable,
                        broker_plist=broker_plist)
@@ -638,7 +664,10 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
     (restore_broker never creates one). With handle_sigterm (the launchd job), SIGTERM
     cancels the run through the UI so the auth client is torn down normally, and skips the
     linger. The page stays up briefly after a terminal phase, then the server closes and
-    our own launchd plist is removed.
+    our own launchd plist is removed. A named alias's helper run from an installed release
+    asks account_registry.login_admission once it holds the lock (a refusal, such as
+    `transaction_pending`, is written as its terminal status; no screen, run or restore)
+    and again right before its handoff (review fix 055d3).
     """
     if restore_broker is None:
         restore_broker = functools.partial(restore_enrolled_broker, **_jobs(paths))
@@ -653,11 +682,18 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
         if not lock_held:
             try:
                 lock = _await_connect_lock(paths, sleeper)
+            except AccountPathsError:  # A named alias's root is gone or no longer listed: nothing to own or put back.
+                return ConnectResult('failed', 'alias_unavailable')
             except OwnerLeaseError:
                 ran = True  # Nobody else can own this run: restore below.
                 return ConnectResult('failed', 'owner_unsafe')
             if lock is None:
                 return ConnectResult('failed', 'connect_in_progress')  # The lock holder owns the status.
+            refused = account_registry.login_admission(paths.account)
+            if refused is not None:
+                # A pending installer transaction owns the services (review fix 055d3): only the status is ours.
+                _record_failure(paths, clock, clock() + lifetime, refused)
+                return ConnectResult('failed', refused)
         ran = True
         expires_at = clock() + lifetime  # The one deadline of this run.
         ui = ui_factory()
@@ -672,7 +708,7 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
             pass  # Headless or no browser: the run goes on and `wait` keeps reporting its phase.
         finally:
             url = None
-        result = run(paths, store, provider_factory, ui, handoff=lambda: handoff(paths=paths),
+        result = run(paths, store, provider_factory, ui, handoff=lambda: _handoff(paths, handoff),
                      expires_at=expires_at)
         if result.phase == 'failed' and result.code == 'owner_busy':
             try:  # We hold connect.lock, so this status is ours to write.
@@ -708,6 +744,13 @@ def connect_helper(paths, *, store, provider_factory, handoff, own_plist=None, u
                 signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
             if lock is not None:
                 os.close(lock)
+
+
+def _handoff(paths, handoff):
+    """The handoff, after the admission is asked again for a named alias (review fix 055d3): a refusal is the run's
+    code and no broker is started."""
+    refused = account_registry.login_admission(paths.account)
+    return handoff(paths=paths) if refused is None else refused
 
 
 def _restore_quietly(restore_broker):
@@ -749,13 +792,18 @@ def api_credentials(paths, *, terminal, store_factory, timeout=120):
         if left <= 0:
             raise TimeoutError()
         return left
+    login = None
     try:
+        if paths.account.alias != DEFAULT_ALIAS:  # Inside the alias's existing root only (review fix 055d3).
+            login = account_registry.login_lock(paths.account)
         with SessionOwnerLease(paths.lock):  # No connect run may create an enrollment meanwhile.
             state = setup_status(paths)['state']
             if state != 'new':
                 return refuse('enrollment_exists' if state == 'managed' else 'enrollment_inconsistent')
             store = _WriteCounter(store_factory())
             _api_credentials(terminal, store, remaining)
+    except AccountPathsError:
+        return refuse('alias_unavailable')
     except OwnerLeaseError as error:
         return refuse(error.code)
     except CredentialStoreError as error:
@@ -768,4 +816,7 @@ def api_credentials(paths, *, terminal, store_factory, timeout=120):
         return refuse('timeout')
     except Exception:
         return refuse('dependency_unavailable')
+    finally:
+        if login is not None:
+            os.close(login)
     return ({'status': 'stored'} if store.writes else {'status': 'already_present'}), 0
