@@ -67,6 +67,42 @@ class AliasChangeHarness(AccountHarness):
                      if (self.jobs.root / 'runtime.toml').exists() else None)
         return state
 
+    def logins_refused(self, release, version, code, *, session=False):
+        """`connect`, `setup` and `resume --account work` run by `release` (as `version`): each refuses `code` and
+        changes nothing. `session`: the alias holds a session, so `connect` reads its enrollment as managed (the
+        synthetic one is set aside, which would read a session without enrollment as legacy_unmanaged)."""
+        from test_onboarding import MemoryStore, Terminal
+        from telegram_search_mcp import bundle_runtime, connect_cli
+        from telegram_search_mcp.enrollment import SetupPaths
+        from telegram_search_mcp.setup_wizard import run_setup
+        paths = SetupPaths.from_account(config.AccountPaths.for_alias('work', self.home))
+        # The synthetic enrollment is no valid record (`connect` would refuse `enrollment_inconsistent` first): set
+        # aside for the attempts, so the login reaches its connect.lock.
+        (self.jobs.root / 'enrollment.json').unlink()
+
+        def never(*_args, **_kwargs):
+            raise AssertionError('nothing may run')
+        selection = bundle_runtime.Selection(release, 'x' * 64)
+        try:
+            with mock.patch.object(bundle_runtime, '_SELECTION', selection), \
+                    mock.patch('telegram_search_mcp.__version__', version):
+                before, calls = (self.change_snapshot(), tree(self.jobs.root)), len(self.launchctl.calls)
+                managed = (mock.patch.object(connect_cli, 'setup_status', return_value={'state': 'managed'})
+                           if session else contextlib.nullcontext())
+                with managed:
+                    value, status = connect_cli.connect(paths, client_factory=never, terminal=Terminal(), inline=never,
+                                                        runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)
+                outcomes = [value.get('code')]
+                for resume in (False, True):
+                    outcomes.append(run_setup(paths, Terminal(), MemoryStore(), never, handoff=never, resume=resume,
+                                              bundled_loader=lambda: None).code)
+                self.assertEqual(outcomes, [code] * 3)
+                self.assertEqual((self.change_snapshot(), tree(self.jobs.root)), before)
+                self.assertLessEqual({c[0] for c in self.launchctl.calls[calls:]}, {'print'})
+        finally:
+            (self.jobs.root / 'enrollment.json').write_bytes(b'{"synthetic": "alias enrollment"}\n')
+            (self.jobs.root / 'enrollment.json').chmod(0o600)
+
     def alias_tree(self):
         """The alias's session tree but its runtime.toml (whose version line a change rewrites)."""
         return {k: v for k, v in tree(self.jobs.root).items() if k != 'runtime.toml'}
@@ -733,6 +769,38 @@ class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
         self.assertEqual(upgraded['status'], 'upgraded')
         self.assertEqual(self.pin(), self.THIRD)
         self.assertEqual(self.alias_tree(), session)
+
+    def test_before_the_repair_its_logins_refuse_older_state_kept_naming_account_add(self):
+        """Critic fix (055f, low): an alias line OLDER than the running release (a reinstall at a newer version before
+        account-add's repair) is no rollback leftover: its logins refuse `older_state_kept` (next action
+        `run_account_add_for_alias_then_retry`), not `newer_state_kept`, whose upgrade-or-remove step was a dead end
+        (an upgrade refuses `policy_conflict` until the repair, a remove moves the session aside). After the repair
+        its logins are admitted."""
+        self.reinstalled()
+        work = config.AccountPaths.for_alias('work', self.home)
+        with self.installed(NEW_VERSION):
+            self.assertEqual(account_registry.login_admission(work), 'older_state_kept')
+        self.logins_refused(self.release, NEW_VERSION, 'older_state_kept', session=True)
+        from telegram_search_mcp import connect_flow
+        self.assertEqual(connect_flow.next_action('failed', 'older_state_kept'), 'run_account_add_for_alias_then_retry')
+        self.assertEqual(self.account('account_add')['status'], 'account_added')
+        with self.installed(NEW_VERSION):
+            self.assertIsNone(account_registry.login_admission(work))
+
+    def test_a_newer_line_still_refuses_newer_state_kept_and_a_line_outside_the_grammar_too(self):
+        self.reinstalled()
+        policy = self.jobs.root / 'runtime.toml'
+        work = config.AccountPaths.for_alias('work', self.home)
+        for line, code in ((self.THIRD, 'newer_state_kept'), ('0.55.0rc1', 'newer_state_kept'),
+                           ('0.55.0.dev0', 'older_state_kept'), ('0.54.0', 'older_state_kept'),
+                           ('0.55.0.dev01', 'newer_state_kept'), ('v0.55.0', 'newer_state_kept'),
+                           (NEW_VERSION, None)):
+            with self.subTest(line=line):
+                data = policy.read_bytes()
+                current = data.split(b'expected_package_version = "', 1)[1].split(b'"', 1)[0]
+                policy.write_bytes(data.replace(b'"' + current + b'"', ('"%s"' % line).encode()))
+                with self.installed(NEW_VERSION):
+                    self.assertEqual(account_registry.login_admission(work), code)
 
     def test_a_kill_inside_the_move_resumes_to_the_same_state(self):
         for stage in ('recorded:policy', 'published:policy'):
@@ -1457,37 +1525,6 @@ class NewerStateRollbackTests(AliasChangeHarness, unittest.TestCase):
         self.assertEqual([p.name for p in self.jobs.root.iterdir() if p.name.startswith('.')], [])  # No temporary.
         self.assertEqual([p.name for p in self.jobs.broker_plist.parent.iterdir() if p.name.startswith('.')], [])
 
-    def logins_refused(self, release, version, code):
-        """`connect`, `setup` and `resume --account work` run by `release` (as `version`): each refuses `code` and
-        changes nothing."""
-        from test_onboarding import MemoryStore, Terminal
-        from telegram_search_mcp import bundle_runtime, connect_cli
-        from telegram_search_mcp.enrollment import SetupPaths
-        from telegram_search_mcp.setup_wizard import run_setup
-        paths = SetupPaths.from_account(config.AccountPaths.for_alias('work', self.home))
-        # The synthetic enrollment is no valid record (`connect` would refuse `enrollment_inconsistent` first): set
-        # aside for the attempts, so the login reaches its connect.lock.
-        (self.jobs.root / 'enrollment.json').unlink()
-
-        def never(*_args, **_kwargs):
-            raise AssertionError('nothing may run')
-        selection = bundle_runtime.Selection(release, 'x' * 64)
-        try:
-            with mock.patch.object(bundle_runtime, '_SELECTION', selection), \
-                    mock.patch('telegram_search_mcp.__version__', version):
-                before, calls = (self.change_snapshot(), tree(self.jobs.root)), len(self.launchctl.calls)
-                value, status = connect_cli.connect(paths, client_factory=never, terminal=Terminal(), inline=never,
-                                                    runner=self.launchctl, uid=os.getuid(), sleeper=lambda _: None)
-                outcomes = [value.get('code')]
-                for resume in (False, True):
-                    outcomes.append(run_setup(paths, Terminal(), MemoryStore(), never, handoff=never, resume=resume,
-                                              bundled_loader=lambda: None).code)
-                self.assertEqual(outcomes, [code] * 3)
-                self.assertEqual((self.change_snapshot(), tree(self.jobs.root)), before)
-                self.assertLessEqual({c[0] for c in self.launchctl.calls[calls:]}, {'print'})
-        finally:
-            (self.jobs.root / 'enrollment.json').write_bytes(b'{"synthetic": "alias enrollment"}\n')
-            (self.jobs.root / 'enrollment.json').chmod(0o600)
 
     def test_an_alias_a_login_gave_a_session_between_the_runs_stays_on_that_release_offline(self):
         kills = []

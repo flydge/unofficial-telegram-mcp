@@ -31,7 +31,7 @@ from .bundle_runtime import (validate_tree, require_platform, read, unique_json,
                              CLAUDE_CODE_MODES, CLAUDE_MODE_STATUSES, CLAUDE_SKILLS_STATUSES, CLAUDE_DESKTOP_STATUSES,
                              RECEIPT_KEYS, ADOPTION_CLIENTS, MAX_BACKUP_BYTES, check_receipt_v2, receipt_transaction,
                              transaction_name, ADOPTED_NAME, MAX_ADOPTED, check_adopted, CLAUDE_USER_STATUSES,
-                             desktop_ownership, PENDING_ACTIONS, ACCOUNT_ACTIONS)
+                             desktop_ownership, PENDING_ACTIONS, ACCOUNT_ACTIONS, release_order)
 from .session_owner import SessionOwnerLease, OwnerLeaseError, acquire_owner_lock, open_private_directory
 from . import account_registry, claude_desktop_registration, claude_registration
 from .config import alias_jobs, alias_server_name, accounts_root, named_alias
@@ -2032,21 +2032,13 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
         raise InstallError('installation_refused') from None
 
 
-# The one release version grammar (docs/releasing.md, Versions), as release_archive and the native seed admit it.
-_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
-                      r'(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
-_INF = float('inf')
-
-
 def _version_key(value):
-    """PEP 440 order of a release version (X.Y.Z[{a|b|rc}N][.devN]); anything else refuses."""
-    match=_VERSION.fullmatch(value) if type(value) is str else None
-    if match is None:raise InstallError('downgrade_refused')
-    major,minor,micro,letter,number,dev=match.groups()
-    if letter is not None:pre=(('a','b','rc').index(letter),int(number))
-    elif dev is not None:pre=(-_INF,0)  # X.devN sorts before X's pre-releases.
-    else:pre=(_INF,0)
-    return ((int(major),int(minor),int(micro)),pre,_INF if dev is None else int(dev))
+    """PEP 440 order of a release version (X.Y.Z[{a|b|rc}N][.devN]); anything else refuses. The one release version
+    grammar (docs/releasing.md, Versions), as release_archive and the native seed admit it, is
+    bundle_runtime.release_order's, which a named alias's login admission reads too (critic fix 055f)."""
+    key=release_order(value)
+    if key is None:raise InstallError('downgrade_refused')
+    return key
 
 
 def _changing(root, index_sha256):

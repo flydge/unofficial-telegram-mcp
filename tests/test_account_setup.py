@@ -332,7 +332,7 @@ class CodeTableTests(unittest.TestCase):
         from telegram_search_mcp import connect_flow
         from telegram_search_mcp.setup_wizard import SetupResult, _result
         for code in ('account_mismatch', 'account_duplicate', 'alias_unavailable', 'transaction_pending',
-                     'newer_state_kept'):
+                     'newer_state_kept', 'older_state_kept'):
             with self.subTest(code=code):
                 result = _result(code, closed=True)
                 self.assertIsInstance(result, SetupResult)

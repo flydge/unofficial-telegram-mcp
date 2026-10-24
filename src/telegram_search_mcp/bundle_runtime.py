@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import stat
 import sys
 
@@ -16,6 +17,28 @@ from .release_archive import load_archive_index, MAX_INDEX_BYTES
 
 class BundleError(ValueError):
     """Redacted admission or installed binding failure."""
+
+
+# The one release version grammar (docs/releasing.md, Versions), in PEP 440 order: the installer's order
+# (bundle_install._version_key) and a named alias's login admission (account_registry.login_admission) read it.
+_RELEASE_VERSION = re.compile(r'(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})'
+                              r'(?:(a|b|rc)(0|[1-9][0-9]{0,5}))?(?:\.dev(0|[1-9][0-9]{0,5}))?')
+_INF = float('inf')
+
+
+def release_order(value):
+    """The PEP 440 sort key of a release version (X.Y.Z[{a|b|rc}N][.devN]), or None for anything else."""
+    match = _RELEASE_VERSION.fullmatch(value) if type(value) is str else None
+    if match is None:
+        return None
+    major, minor, micro, letter, number, dev = match.groups()
+    if letter is not None:
+        pre = (('a', 'b', 'rc').index(letter), int(number))
+    elif dev is not None:
+        pre = (-_INF, 0)  # X.devN sorts before X's pre-releases.
+    else:
+        pre = (_INF, 0)
+    return ((int(major), int(minor), int(micro)), pre, _INF if dev is None else int(dev))
 
 
 def require_platform():

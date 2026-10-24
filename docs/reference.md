@@ -835,7 +835,8 @@ helper, `setup` and `resume` again right before their handoff. The codes, in the
 | Code | Meaning | `next_action` |
 | --- | --- | --- |
 | `transaction_pending` | An installer transaction (a first install, upgrade, rollback, uninstall, `account-add` or `account-remove`) is unfinished, or its state cannot be read. Adds `pending_action` (`install`, `upgrade`, `rollback`, `uninstall`, `account-add` or `account-remove`) and, for an account action, `pending_account` (its alias), read when the refusal is reported: both are absent when the state cannot be read or the action has finished since. | `finish_pending_installer_action_then_retry` |
-| `newer_state_kept` | The alias's `runtime.toml` names another package version than the running release (a rollback left the alias on the newer release its session was made with). | `upgrade_installation_or_remove_account` |
+| `newer_state_kept` | The alias's `runtime.toml` names a newer package version than the running release, or one outside the version grammar: a rollback left the alias on the newer release its session was made with (the next upgrade moves it on), or a lower version was installed after an uninstall kept it (install that release again, then `account-add <alias>`; its repair never moves a line down). | `upgrade_installation_or_remove_account` |
+| `older_state_kept` | The alias's `runtime.toml` names an older package version than the running release: an uninstall kept the alias and a newer release was installed since. Until its `account-add <alias>` repairs it (moving the line onto the running release, the session kept), its logins refuse here and every upgrade refuses `policy_conflict`. | `run_account_add_for_alias_then_retry` |
 
 The default account's login asks neither question (0.54), and a source checkout reads no installation.
 

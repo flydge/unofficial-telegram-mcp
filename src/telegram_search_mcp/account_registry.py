@@ -596,7 +596,7 @@ def dialog_lock(root: Path) -> int | None:
 
 
 # The codes `login_admission` refuses with, each in the connect and setup code tables with its next action.
-ADMISSION_CODES = ("transaction_pending", "newer_state_kept")
+ADMISSION_CODES = ("transaction_pending", "newer_state_kept", "older_state_kept")
 
 
 def login_admission(account) -> str | None:
@@ -604,10 +604,13 @@ def login_admission(account) -> str | None:
     nothing (review fix 055d3). Only run from an installed release: `transaction_pending` while the installation has
     an unfinished installer transaction (upgrade, rollback, uninstall, account-add or account-remove: between two runs
     of a parked transaction no lock is held, so a login could otherwise hand a broker off under it), and
-    `newer_state_kept` while the alias's runtime.toml pins another package version than this release's: a rollback
-    kept the alias on the release its newer session was made with, and this release's broker would refuse that pin
-    (`config_stale`), so a login would end `broker_start_failed` or worse after the owner logged in. Source mode (no
-    installation) and the default alias read nothing: 0.54's behaviour."""
+    `newer_state_kept` while the alias's runtime.toml pins a newer package version than this release's (or one
+    outside the version grammar): a rollback kept the alias on the release its newer session was made with, and this
+    release's broker would refuse that pin (`config_stale`), so a login would end `broker_start_failed` or worse after
+    the owner logged in; and `older_state_kept` while it pins an older one (critic fix 055f): an uninstall kept the
+    alias and a newer release was installed since, so the alias's own account-add repairs it (moving the line onto
+    this release, its session kept). Source mode (no installation) and the default alias read nothing: 0.54's
+    behaviour."""
     if not _named(account.alias):
         return None
     from . import __version__, bundle_runtime
@@ -620,7 +623,10 @@ def login_admission(account) -> str | None:
         pinned = load_runtime_policy(account.policy).expected_package_version
     except ConfigurationError:
         return None  # The login's own read of its policy refuses it (`policy_unsafe`).
-    return "newer_state_kept" if pinned is not None and pinned != __version__ else None
+    if pinned is None or pinned == __version__:
+        return None
+    older, current = bundle_runtime.release_order(pinned), bundle_runtime.release_order(__version__)
+    return "older_state_kept" if older is not None and current is not None and older < current else "newer_state_kept"
 
 
 def pending_fields() -> dict:

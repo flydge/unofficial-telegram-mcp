@@ -214,7 +214,9 @@ class CodeTableTests(unittest.TestCase):
                              ('alias_unavailable', 'stop_and_report'),
                              # Review fix 055d3: a named alias's login from an installed release.
                              ('transaction_pending', 'finish_pending_installer_action_then_retry'),
-                             ('newer_state_kept', 'upgrade_installation_or_remove_account')):
+                             ('newer_state_kept', 'upgrade_installation_or_remove_account'),
+                             # Critic fix 055f: an older line, before account-add's repair.
+                             ('older_state_kept', 'run_account_add_for_alias_then_retry')):
             self.assertIn(code, connect_flow.STATUS_CODES)
             self.assertEqual(connect_flow.next_action('failed', code), action)
             self.assertEqual(connect_cli._report('failed', code), ({'status': 'failed', 'code': code,

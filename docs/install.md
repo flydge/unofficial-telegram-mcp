@@ -1086,11 +1086,15 @@ permission allowlist or a hook keyed on `mcp__telegram_search__*` does not cover
 server name explicitly.
 
 **The account pin.** Each account's broker pins the Telegram user it first finds authorized, and every
-login (QR, `setup`, `resume`) applies the same rule before it hands the session over. Another user is
-refused: `account_mismatch` when it is not the alias's own user, `account_duplicate` when that user
-already serves another alias or the default account. Nothing is handed to the broker, the enrollment stays
-pending and the authorized session stays on disk, never logged out or deleted. Stop and check which
-phone scanned; to put another Telegram account under a name, remove the alias and add it again. Once a
+login (QR, `setup`, `resume`) applies the same rule before it hands the session over, the default
+account's included once a registry exists. Another user is refused: `account_mismatch` when it is not
+that account's own user, `account_duplicate` when that user already serves another alias or the default
+account. Nothing is handed to the broker, the enrollment stays pending and the authorized session stays
+on disk, never logged out or deleted. Stop and check which phone scanned; to put another Telegram
+account under an alias, remove the alias and add it again. The default account cannot be removed: for
+its `account_duplicate`, `account-remove` the alias that holds that Telegram account; for its
+`account_mismatch`, log it back into the account it was first connected with (its pin stays until no
+alias is left and an uninstall, or a rollback below 0.55, retires the registry). Once a
 registry exists the user id is never printed: the approval dialog names the alias and the last two digits
 of the account (`Account: work (Telegram account ••42)`), for the default account too (`default`).
 
@@ -1120,9 +1124,13 @@ login of an alias (`connect`, its connect job, `setup`, `resume`) also refuses, 
 - `transaction_pending` while any installer transaction is unfinished, with `pending_action` and, for an
   account action, `pending_account`, as the installer's own refusal names them: repeat that action, then
   connect again;
-- `newer_state_kept` while the alias's `runtime.toml` names another release than the running one (a
-  rollback left the alias on a newer release, [below](#upgrade-rollback-and-uninstall-with-accounts)):
-  upgrade, or remove the account.
+- `newer_state_kept` while the alias's `runtime.toml` names a newer release than the running one (a
+  rollback left the alias on a newer release, [below](#upgrade-rollback-and-uninstall-with-accounts):
+  upgrade, or remove the account; or a lower version was installed after an uninstall kept the alias:
+  install that release again, then `account-add <alias>`);
+- `older_state_kept` while it names an older release (an uninstall kept the alias and a newer release was
+  installed since): run `account-add <alias>`, which repairs it with its session kept, then connect
+  again (next action `run_account_add_for_alias_then_retry`).
 
 ### Removing or renaming an account
 
@@ -1213,17 +1221,20 @@ current release, and only while it knows aliases (0.55 or newer): anything else 
   `run/readiness.json` into its transaction (`account_registry: retired`); the older release reads
   neither, and nothing is deleted.
 - **Uninstall.** On every attempt it first gates every running broker in one pass, then stops each
-  alias's connect job and broker, removes its plist and the Codex, Claude Code and Claude Desktop entries
-  the installation owns for it; the result adds `accounts`. Alias roots, sessions and the registry are
-  never touched while an alias exists. After a later install, `account-add <alias>` repairs each of them:
-  holding the alias's connect lock (`login_in_progress`), it writes the client entries again, keeps the
-  alias's registry entry, pin and session, and moves its `runtime.toml` version line onto the current
-  release. Only a line from an equal or older release moves: one naming a newer release (a lower version
-  installed after the uninstall) refuses `policy_conflict` with nothing changed, since a session a newer
-  release served is never handed to an older one; install that release again, or remove the account. A
-  line it cannot rewrite exactly refuses `policy_conflict` too. `connect --account <alias>` then starts
-  its broker again, with no new scan while Telegram keeps that session. With no alias left, uninstall
-  moves the registry aside as above (`account_registry: retired`).
+  alias's connect job and broker, removes its plist and the Codex, Claude Code and Claude Desktop
+  entries the installation owns for it; the result adds `accounts`. Alias roots, sessions and the
+  registry are never touched while an alias exists. After a later install, run `account-add <alias>` for
+  each alias it kept before any `connect` or upgrade: until then a login of that alias refuses
+  (`older_state_kept`, or `newer_state_kept` for a lower version) and an upgrade refuses
+  `policy_conflict`. The `account-add` repairs it: holding the alias's connect lock
+  (`login_in_progress`), it writes the client entries again, keeps the alias's registry entry, pin and
+  session, and moves its `runtime.toml` version line onto the current release. Only a line from an equal
+  or older release moves: one naming a newer release (a lower version installed after the uninstall)
+  refuses `policy_conflict` with nothing changed, since a session a newer release served is never handed
+  to an older one; install that release again, or remove the account. A line it cannot rewrite exactly
+  refuses `policy_conflict` too. `connect --account <alias>` then starts its broker again, with no new
+  scan while Telegram keeps that session. With no alias left, uninstall moves the registry aside as
+  above (`account_registry: retired`).
 
 ### Known limits of accounts
 
@@ -1237,7 +1248,9 @@ current release, and only while it knows aliases (0.55 or newer): anything else 
   blocks the default with `account_mismatch`.
 - An alias added after an upgrade blocks that upgrade's rollback until it is removed.
 - An alias the registry lists without client entries (after an uninstall) gets none until its
-  `account-add`.
+  `account-add`. After a reinstall at another version its logins (`older_state_kept`, or
+  `newer_state_kept` for a lower version) and every upgrade (`policy_conflict`) refuse until then, so run
+  it for each kept alias first.
 - Every installer transaction over aliases waits for a running alias login (`login_in_progress`), and an
   alias login started while one runs or stays unfinished is refused (`transaction_pending`, or before the
   transaction exists `connect_in_progress`, for `setup` and `resume` `owner_busy`). The account actions
