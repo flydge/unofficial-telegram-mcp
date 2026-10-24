@@ -2282,6 +2282,16 @@ shows without revealing the id. Without a registry the default account reads no 
 dialog keeps 0.54's account line with the user id; in both modes a chat whose ID is the account's own
 reads "Saved Messages" and a forwarded own message's sender reads "you".
 
+**One dialog across accounts.** Every account's dialog has the same size, position and buttons; only the
+heading's alias and the content differ. So once a registry exists, at most one owner dialog is open across
+every broker of the user: each broker holds the user's one dialog lock
+(`TelegramSearchMCP-accounts/dialog.lock`, created `0600` only inside the existing owner-only folder, never
+changed when it exists) for its whole dialog, and a send or apply while another account's dialog is open
+shows nothing and answers `dialog_unavailable` with its draft pending, as within one broker. A lock that is
+not an owner-only regular single-link file of the user refuses every dialog the same way until the owner
+restores it (`chmod 600`). A client of one account cannot pop a dialog under a click the owner meant for
+another account's draft.
+
 **Keychain.** One Keychain service holds the application identity (`api_id`, `api_hash`), shared by every
 alias, as is the bundled `app-identity.json`: it identifies the application, not the account. Each
 enrollment still has its own random database key under its own Keychain account
@@ -2475,7 +2485,12 @@ once, makes no attempt and leaves its draft pending, and nothing is queued behin
 dialog has the same size and position, so stacked dialogs would let a click meant for one draft approve
 another; a client that keeps calling `send_prepared_*` on other drafts while the owner reads a dialog gets
 only refusals. A repeated call on the same draft while its dialog is open is refused the same way; once
-that dialog approved and sent, a repeat replays the receipt.
+that dialog approved and sent, a repeat replays the receipt. Once an alias registry exists (0.55
+candidate) the rule holds across every account's broker, one process each: a broker holds a
+non-blocking lock on the owner-only `TelegramSearchMCP-accounts/dialog.lock` for its whole dialog, and a
+send or apply on any account while another account's dialog is open, or while that lock file is not an
+owner-only (`0600`) regular single-link file of the user, answers `dialog_unavailable` the same way.
+Without a registry nothing is read or created there.
 
 The dialog runs through `subprocess.run` with a bounded timeout. Details are fixed strings; no input,
 dialog text or provider message is echoed.

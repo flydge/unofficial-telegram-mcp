@@ -1065,7 +1065,9 @@ Each session root has its own TDLib session and enrollment, `runtime.toml` (its 
 `read` and `artifacts` only), `run/` (socket, locks, connect status), artifact cache, uploads and staging,
 and its own broker with one TDLib. The alias registry, `registry.json` in `TelegramSearchMCP-accounts`
 (owner-only), lists the aliases and the account each one is pinned to; it exists only after the first
-`account-add`. The Keychain service with the API pair, the bundled application identity and the Whisper
+`account-add`. Beside it, `dialog.lock` keeps one owner dialog open at a time across every account's
+broker: while one account's approval dialog is open, a send on another account answers
+`dialog_unavailable` and its draft stays pending. The Keychain service with the API pair, the bundled application identity and the Whisper
 model are shared. Each client entry runs the release's launcher with `mcp --account <alias>`: the alias is
 fixed in the entry, never a tool argument, an environment variable or a path a client supplies.
 

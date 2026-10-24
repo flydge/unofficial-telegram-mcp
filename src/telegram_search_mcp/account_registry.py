@@ -564,6 +564,24 @@ def login_lock(account) -> int:
     return descriptor
 
 
+# One owner dialog at a time across every broker of the user (critic fix 055f) ------------------------------------------
+
+DIALOG_LOCK_NAME = "dialog.lock"
+
+
+def dialog_lock(root: Path) -> int | None:
+    """The descriptor holding the user's one owner-dialog lock, for a broker's whole approval dialog: a non-blocking
+    exclusive flock on `dialog.lock` in the accounts directory `root`, taken only once a registry exists. Without one
+    it returns None, reading and creating nothing (0.54: only the broker's own thread lock holds). The lock is created
+    owner-only only inside the existing owner-only `root`, which is never created here; an existing one must be a
+    regular, single-link, owner-owned 0600 file and is never changed. Another broker's open dialog raises
+    OwnerLeaseError('owner_busy'), anything unsafe (the directory or the lock) OwnerLeaseError('owner_unsafe'): the
+    caller answers `dialog_unavailable` for both, with no dialog shown."""
+    if not present(root):
+        return None
+    return acquire_owner_lock(Path(root) / DIALOG_LOCK_NAME, within=Path(root))
+
+
 # The codes `login_admission` refuses with, each in the connect and setup code tables with its next action.
 ADMISSION_CODES = ("transaction_pending", "newer_state_kept")
 
