@@ -1,10 +1,9 @@
 # Changelog
 
-## 0.55.0.dev0 — unreleased
+## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 
-Development of 0.55.0, multiple accounts ([spec](docs/plans/0.55-multiple-accounts-spec.md),
-[task record](docs/plans/0.55-multiple-accounts-spec.tasks.md), draft
-[release notes](docs/release-notes-0.55.0rc1.md)). Technical evidence only: unit tests, synthetic homes,
+Release candidate of 0.55.0, multiple accounts ([release notes](docs/release-notes-0.55.0rc1.md),
+[spec](docs/plans/0.55-multiple-accounts-spec.md), [task record](docs/plans/0.55-multiple-accounts-spec.tasks.md)). Technical evidence only: unit tests, synthetic homes,
 fake launchd, client CLIs and TDLib sessions; two really authorized accounts are an owner-session row.
 
 - Paths and registry: one `AccountPaths` per account, the default byte-identical to 0.54 (paths, labels,

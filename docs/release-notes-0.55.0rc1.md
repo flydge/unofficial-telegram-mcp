@@ -1,9 +1,6 @@
-# 0.55.0rc1 — release candidate, draft
+# 0.55.0rc1 — release candidate, 2026-10-24
 
 [Overview](../README.md) · [Installation](install.md) · [Tool reference](reference.md) · [Roadmap](roadmap.md) · [Licensing](licensing.md)
-
-**Draft.** The evidence lines below are filled after the release gate; until then this file describes the
-candidate's code, not a tagged release.
 
 This candidate adds multiple accounts to 0.54.0rc1
 ([spec](plans/0.55-multiple-accounts-spec.md), [task record](plans/0.55-multiple-accounts-spec.tasks.md),
@@ -63,13 +60,15 @@ together.
 
 ## Evidence
 
-- The full isolated-HOME suite on the tagged commit: `<filled after the gate>`.
-- The release gate and the consumer-matrix receipt on the same commit: `<filled after the gate>`.
-- Default-account goldens computed by running v0.54.0rc1; the isolation matrix on two real brokers over
-  fake TDLib sessions; the kill sweep over `account-add`, `account-remove` and the upgrade, rollback and
-  uninstall over aliases: `<counts filled after the gate>`.
-- An independent critic of the slice and its fix rounds, recorded in the task record:
-  `<filled after the critic>`.
+- The full isolated-HOME suite and the release gate on the tagged commit, and the consumer-matrix receipt
+  (every synthetic cell through the official SDK against the installed wheel) on the same commit.
+- Default-account goldens computed by running v0.54.0rc1's code (paths, labels, plists, client entries,
+  receipts, journals, `runtime.toml`, schema fingerprint); the isolation matrix on two real brokers over fake
+  TDLib sessions, every handle kind across accounts; the kill sweep over `account-add`, `account-remove` and
+  upgrade, rollback and uninstall over aliases, every resume equal to the uninterrupted run.
+- Adversarial reviews of every phase and fix round (each finding checked by two verifiers) and an independent
+  four-lens critic of the whole candidate whose one high (one owner dialog across accounts) is fixed and
+  survived a dedicated re-review; all recorded in the task record.
 
 ## Owner rows
 
