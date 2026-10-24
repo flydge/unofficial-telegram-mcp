@@ -552,6 +552,49 @@ class TopicTextTests(unittest.TestCase):
                 self.raw.mode = mode
                 self.assertEqual(self.send(preview['draft_id'])['status'], 'outcome_unknown')
 
+    def test_plain_topic_confirms_exactly_the_entities_telegram_detects(self):
+        """Review fix (057b, low): the pinned TDLib's pending and confirmed messages carry the entities it detects in a
+        plain text (here a mention, a link and a hashtag); the shared rule with no styles tolerates exactly those."""
+        text = 'See @tests at example.com #news'
+        detected = [{'@type': 'textEntity', 'offset': 4, 'length': 6, 'type': {'@type': 'textEntityTypeMention'}},
+                    {'@type': 'textEntity', 'offset': 14, 'length': 11, 'type': {'@type': 'textEntityTypeUrl'}},
+                    {'@type': 'textEntity', 'offset': 26, 'length': 5, 'type': {'@type': 'textEntityTypeHashtag'}}]
+        bold = {'@type': 'textEntity', 'offset': 0, 'length': 3, 'type': {'@type': 'textEntityTypeBold'}}
+        original = self.raw.send
+
+        def send(request):
+            original(request)
+            if request['@type'] == 'sendMessage':
+                for event in (self.raw.events[-2], self.raw.events[-1]['message']):
+                    event['content']['text'].update(text=text, entities=copy.deepcopy(self.raw.detected))
+        self.raw.send = send
+        for rows, status in ((detected, 'sent'), (detected + [bold], 'outcome_unknown')):
+            with self.subTest(status=status):
+                self.raw.detected = rows
+                result = self.dispatch('prepare_text_send', {'recipient': CHAT, 'text': text, 'topic': TOPIC})
+                self.assertEqual(result['status'], 'prepared', result)
+                before = len(self.sends())
+                self.assertEqual(self.send(result['draft_id'])['status'], status)
+                self.assertEqual(len(self.sends()), before + 1)
+                self.assertEqual(self.sends()[-1]['input_message_content']['text']['entities'], [])
+        # The reducer alone, pending and final: exactly the detected entities confirm.
+        from telegram_search_mcp.send_observations import SendObservations
+        for rows, confirmed in ((detected, True), ([], True), (detected + [bold], False),
+                                ([dict(detected[1], type={'@type': 'textEntityTypeTextUrl', 'url': 'x'})], False)):
+            with self.subTest(rows=rows):
+                observations = SendObservations()
+                observations.register('a', 'x', 12, CHAT, 'messageText', forum_topic_id=41,
+                                      text_sha256=hashlib.sha256(text.encode()).hexdigest())
+                def message(identifier, **changes):
+                    value = outgoing(identifier, **changes)
+                    value['content']['text'].update(text=text, entities=copy.deepcopy(rows))
+                    return value
+                observations.reduce(message(-10, **{'@extra': 'x', 'sending_state': {
+                    '@type': 'messageSendingStatePending', 'sending_id': 12}}))
+                observations.reduce({'@type': 'updateMessageSendSucceeded', 'old_message_id': -10,
+                                     'message': message(701, sending_state=None)})
+                self.assertEqual(observations.snapshot('a').message_id, 701 if confirmed else None)
+
     def test_lost_response_late_exact_success_does_not_retry(self):
         preview = self.prepare()
         self.raw.mode = 'lost'

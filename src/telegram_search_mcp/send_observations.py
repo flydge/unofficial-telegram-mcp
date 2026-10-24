@@ -466,6 +466,13 @@ class SendObservations:
         return True
 
     @staticmethod
+    def _plain_entities(formatted):
+        # Review fix (057b): TDLib's pending and confirmed messages carry the entities it detects in a plain reply or
+        # topic text; the shared rule with no styles tolerates exactly those auto-detected extras, nothing else.
+        from .edit_drafts import exact_styles
+        return exact_styles(formatted.get('text'), formatted.get('entities'), ())
+
+    @staticmethod
     def _reply_matches(value, anchor, forum_topic_id=None):
         if anchor is None:
             return True
@@ -505,7 +512,7 @@ class SendObservations:
             and ((observation.reply_anchor is None and observation.forum_topic_id is None and not observation.outgoing_entities) or observation.caption_sha256 is not None or (
                 isinstance(value["content"].get("text"),dict)
                 and set(value["content"]["text"])=={"@type","text","entities"}
-                and (bool(observation.outgoing_entities) or value["content"]["text"].get("entities")==[])
+                and (bool(observation.outgoing_entities) or SendObservations._plain_entities(value["content"]["text"]))
                 and value["content"].get("link_preview") is None
                 and (value["content"].get("link_preview_options") is None or
                     strict_shape(value["content"]["link_preview_options"],LINK_OPTIONS))))

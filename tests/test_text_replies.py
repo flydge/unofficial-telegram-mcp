@@ -209,6 +209,54 @@ class ReplyObservationRiskTests(unittest.TestCase):
         observations.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-10,'message':final})
         self.assertNotEqual(observations.snapshot('attempt').status,'sent','silent dropped reply is not success')
 
+# Review fix (057b, low): the entities the pinned TDLib detects in a plain text (Mention, Url, Hashtag) come back on
+# both the pending and the confirmed message; the shared rule with no styles tolerates exactly those.
+DETECTED_TEXT = 'See @tests at example.com #news'
+DETECTED = [{'@type':'textEntity','offset':4,'length':6,'type':{'@type':'textEntityTypeMention'}},
+            {'@type':'textEntity','offset':14,'length':11,'type':{'@type':'textEntityTypeUrl'}},
+            {'@type':'textEntity','offset':26,'length':5,'type':{'@type':'textEntityTypeHashtag'}}]
+BOLD_ROW = {'@type':'textEntity','offset':0,'length':3,'type':{'@type':'textEntityTypeBold'}}
+
+
+class PlainReplyDetectedEntityTests(ReplyFixture, unittest.TestCase):
+    def detected(self, rows):
+        original=self.raw.send
+        def send(request):
+            original(request)
+            if request['@type']=='sendMessage':
+                for event in (self.raw.events[-2], self.raw.events[-1]['message']):
+                    event['content']['text'].update(text=DETECTED_TEXT, entities=copy.deepcopy(rows))
+        self.raw.send=send
+
+    def test_reducer_confirms_exactly_the_detected_entities(self):
+        for rows,confirmed in [(DETECTED,True),([],True),(DETECTED+[BOLD_ROW],False),
+                               ([dict(DETECTED[0],type={'@type':'textEntityTypeTextUrl','url':'x'})],False),
+                               ([dict(DETECTED[0],type={'@type':'textEntityTypeMention','extra':1})],False)]:
+            with self.subTest(rows=rows):
+                observations=SendObservations()
+                observations.register('attempt','extra',1,123,'messageText',reply_anchor=(123,55),
+                                      text_sha256=hashlib.sha256(DETECTED_TEXT.encode()).hexdigest())
+                def sent(identifier, **changes):
+                    value=outgoing(identifier, **changes)
+                    value['content']['text'].update(text=DETECTED_TEXT, entities=copy.deepcopy(rows))
+                    return value
+                observations.reduce(sent(-10,**{'@extra':'extra','sending_state':{'@type':'messageSendingStatePending','sending_id':1}}))
+                observations.reduce({'@type':'updateMessageSendSucceeded','old_message_id':-10,'message':sent(701,sending_state=None)})
+                self.assertEqual(observations.snapshot('attempt').message_id, 701 if confirmed else None)
+
+    def test_transport_reply_with_detected_entities_is_sent_once(self):
+        result=self.dispatch('prepare_reply_text_send',{'recipient':123,'text':DETECTED_TEXT,'reply_to':ANCHOR})
+        self.assertEqual(result['status'],'prepared')
+        self.detected(DETECTED)
+        sent=self.send(result['reply']['draft']['draft_id'])
+        self.assertEqual((sent['status'],sent['message_id']),('sent',701))
+        [request]=self.sends()
+        self.assertEqual(request['input_message_content']['text'],{'@type':'formattedText','text':DETECTED_TEXT,'entities':[]})
+        result=self.dispatch('prepare_reply_text_send',{'recipient':123,'text':DETECTED_TEXT,'reply_to':ANCHOR})
+        self.detected(DETECTED+[BOLD_ROW])
+        self.assertEqual(self.send(result['reply']['draft']['draft_id'])['status'],'outcome_unknown')
+
+
 class ReplyBoundaryChecks(ReplyFixture, unittest.TestCase):
     # Each test protects an additional public boundary or observed local race.
     def test_emitted_ephemeral_and_offline_safety_scalars_cannot_be_missing_or_coerced(self):
