@@ -359,8 +359,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         ours = ['prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit']
         self.assertEqual(list(tools)[51:55], ours)
         self.assertEqual(set(tools['prepare_chat_archive'].input_schema['properties']), {'chat', 'target_list'})
+        # 0.57: a styled edit's optional outgoing_entities (listed in fixtures/schema_changes/0.57-styled-text-edit).
         self.assertEqual(set(tools['prepare_text_edit'].input_schema['properties']),
-                         {'chat', 'message_id', 'new_text'})
+                         {'chat', 'message_id', 'new_text', 'outgoing_entities'})
         for name in ours:
             self.assertFalse(tools[name].input_schema['additionalProperties'])
             # 0.54: preparation creates local draft state only, so it is read-only.
@@ -1540,12 +1541,15 @@ class TransportShapeTests(unittest.TestCase):
                     'input_message_content': content, **changes}
         _validate_bounded_request(request())
         bold = {'@type': 'textEntity', 'offset': 0, 'length': 1, 'type': {'@type': 'textEntityTypeBold'}}
+        # 0.57: the second, styled shape admits canonical caller styles (tests/test_styled_text_edit.py).
+        _validate_bounded_request(request(text={'@type': 'formattedText', 'text': 'New', 'entities': [bold]}))
+        url = {'@type': 'textEntity', 'offset': 0, 'length': 3, 'type': {'@type': 'textEntityTypeUrl'}}
         for bad in (request(reply_markup={'@type': 'replyMarkupRemoveKeyboard', 'is_personal': False}),
                     request(content={'link_preview_options': {'@type': 'linkPreviewOptions', 'is_disabled': True,
                         'url': '', 'force_small_media': False, 'force_large_media': False, 'show_above_text': False}}),
                     request(content={'clear_draft': True}), request(content={'clear_draft': 0}),
                     request(content={'@type': 'inputMessagePhoto'}), request(content={'extra': 1}),
-                    request(text={'@type': 'formattedText', 'text': 'New', 'entities': [bold]}),
+                    request(text={'@type': 'formattedText', 'text': 'New', 'entities': [url]}),
                     request(text={'@type': 'formattedText', 'text': '', 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'x' * 4097, 'entities': []}),
                     request(text={'@type': 'formattedText', 'text': 'a\r\nb', 'entities': []}),

@@ -34,6 +34,7 @@ from unittest import mock
 import test_album_send as album_fixture
 import test_archive_edit as archive_fixture
 import test_caption_edit as caption_fixture
+import test_styled_text_edit as styled_fixture
 import test_artifact_replies as artifact_reply_fixture
 import test_forward_send as forward_fixture
 import test_send_status as text_fixture
@@ -379,6 +380,16 @@ class TextEditDraftTests(DraftMatrix, Pair):
                                                        'message_id': archive_fixture.MID, 'new_text': 'Hello there'}))
 
 
+class StyledTextEditDraftTests(DraftMatrix, Pair):
+    """0.57 part 2: a styled text edit is a text edit draft bound to both edit capabilities, one more handle."""
+    RAW, SEND, SENT = styled_fixture.Raw, 'apply_prepared_text_edit', 'applied'
+
+    def prepare(self, a):
+        return draft_of(a.result('prepare_text_edit', {
+            'chat': archive_fixture.CHAT, 'message_id': archive_fixture.MID, 'new_text': 'PRIVATE TEXT',
+            'outgoing_entities': [{'offset': 0, 'length': 7, 'type': {'@type': 'textEntityTypeBold'}}]}))
+
+
 class CaptionEditDraftTests(DraftMatrix, Pair):
     """0.57 criterion 7: the caption edit draft id is one more handle kind (a styled caption, so both edit
     capabilities are exercised)."""
@@ -472,6 +483,10 @@ class ArchiveDraftReverseTests(ArchiveDraftTests):
 
 
 class TextEditDraftReverseTests(TextEditDraftTests):
+    MINTER = 'work'
+
+
+class StyledTextEditDraftReverseTests(StyledTextEditDraftTests):
     MINTER = 'work'
 
 

@@ -20,14 +20,14 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 
 from .draft_models import _Closed, AccountId, DraftId, Hash
-from .edit_drafts import AUTO_DETECTED, ApplyStatus, EditChat, EditDate, EditRefusal, own_source
+from .edit_drafts import AUTO_DETECTED, ApplyStatus, EditChat, EditDate, EditRefusal, exact_styles, own_source
 from .forward_drafts import (MAX_EVIDENCE, Escaped, ForwardEntity, PositiveMessageId, _Frozen, _utc, entity_rows,
                              escaped, unescaped)
 from .forward_sources import MAX_ENTITIES, ForwardSource
 from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 from .outgoing_entity_models import OutgoingEntity, OutgoingEntityList
-from .outgoing_formatting import (FrozenOutgoingEntities, _STYLES, _boundaries, freeze_outgoing_entities,
-                                  native_outgoing_entities, outgoing_entity_facts)
+from .outgoing_formatting import (FrozenOutgoingEntities, freeze_outgoing_entities, native_outgoing_entities,
+                                  outgoing_entity_facts)
 from .reply_drafts import MissingCapabilities, digest
 from .schemas import ChatId
 
@@ -345,29 +345,8 @@ def edited_caption_result(value: object, *, chat_id: int, message_id: int, conte
     if CONTENT_KINDS[content_type] in ABOVE_MEDIA_KINDS and content.get('show_caption_above_media') is not \
             show_caption_above_media:
         return None
-    caller, extras = [], []
-    for row in caption['entities']:
-        kind = row.get('type') if type(row) is dict else None
-        if (type(row) is not dict or set(row) != {'@type', 'offset', 'length', 'type'} or row['@type'] != 'textEntity'
-                or type(kind) is not dict or set(kind) != {'@type'} or type(row['offset']) is not int or
-                type(row['length']) is not int):
-            return None
-        if kind['@type'] in _STYLES:
-            caller.append({'offset': row['offset'], 'length': row['length'], 'type': {'@type': kind['@type']}})
-        elif kind['@type'] in AUTO_DETECTED:
-            extras.append((row['offset'], row['length']))
-        else:
-            return None
-    try:
-        if caption_styles(new_caption, caller) != styles:
-            return None
-        # An auto-detected span must lie on whole scalars of the caption, like any span.
-        bounds = _boundaries(new_caption) if extras else {}
-        if any(length <= 0 or offset not in bounds or offset + length not in bounds for offset, length in extras):
-            return None
-    except (ValueError, TypeError):
-        return None
-    return edit_date
+    # The shared styled-edit rule (0.57): exactly the caller's styles, only auto-detected extras on whole scalars.
+    return edit_date if exact_styles(new_caption, caption['entities'], styles) else None
 
 
 @dataclass(frozen=True)

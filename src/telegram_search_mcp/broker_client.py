@@ -1874,14 +1874,19 @@ class BrokerClient(SelectionClientMixin):
                                                 detail="broker response is unavailable; do not retry automatically")
 
     def prepare_text_edit(self, request: PrepareTextEditRequest) -> PrepareTextEditResponse:
-        from .edit_drafts import normalized_text
+        from .edit_drafts import frozen_styles, normalized_text
+        from .outgoing_entity_models import caller_outgoing_entities
         try:
             response = PrepareTextEditResponse.model_validate(
                 self._request("prepare_text_edit", request.model_dump(mode="json")))
             if response.text_edit is not None:
                 preview = response.text_edit
+                # A styled edit (0.57) is never rewritten, so its preview carries exactly the requested text and styles.
+                styled = bool(request.outgoing_entities)
                 if (preview.chat.chat_id != request.chat or preview.message_id != request.message_id or
-                        preview.raw_new_text != normalized_text(request.new_text)):
+                        preview.raw_new_text != (request.new_text if styled else normalized_text(request.new_text)) or
+                        (preview.outgoing_entities is not None) != styled or preview.styles() != frozen_styles(
+                            request.new_text, caller_outgoing_entities(request.outgoing_entities))):
                     raise BrokerUnavailable("text edit preview does not match the request")
             return response
         except (BrokerUnavailable, ValidationError, ValueError):

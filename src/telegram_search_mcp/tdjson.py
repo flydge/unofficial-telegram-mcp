@@ -227,6 +227,16 @@ def _exact_edit_text(value: str) -> bool:
     return not edge_whitespace(value) and not rewritten_text(value)
 
 
+def _styled_edit_entities(formatted) -> bool:
+    """The second editMessageText shape (0.57, a styled draft): non-empty canonical caller styles only."""
+    try:
+        entities = formatted["entities"]
+        return (type(entities) is list and entities != [] and
+                native_outgoing_entities(_native_outgoing_entity_expectation(formatted["text"], entities)) == entities)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
+
+
 def _exact_caption(formatted) -> bool:
     """An edited caption Telegram stores exactly: the empty caption without entities, or the stored form with only
     canonical caller styles."""
@@ -493,6 +503,7 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
     ):
         raise ForbiddenTDLibRequest("TDLib chat list request shape is not allowed")
     if request_type == "editMessageText":
+        # Two closed shapes: the plain one carries no entities; the styled one (0.57) only canonical caller styles.
         content = payload.get("input_message_content")
         text = content.get("text") if isinstance(content, dict) else None
         if (
@@ -508,7 +519,8 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             or type(text) is not dict or set(text) != {"@type", "text", "entities"}
             or text.get("@type") != "formattedText"
             or type(text.get("text")) is not str or not 0 < len(text["text"]) <= 4096
-            or type(text.get("entities")) is not list or text["entities"] != []
+            or type(text.get("entities")) is not list
+            or (text["entities"] != [] and not _styled_edit_entities(text))
             or not _normalized_message_text(text["text"]) or not _exact_edit_text(text["text"])
         ):
             raise ForbiddenTDLibRequest("TDLib edit request shape is not allowed")
@@ -1950,21 +1962,26 @@ class TDLibClient:
             return EditSnapshot.create(chat, chat_id, message, message_id, properties)
 
     def edit_own_text(self, chat_id: int, message_id: int, *, new_text: str, expected, expected_account_id: int,
-                      pre_send_guard: Callable[[], bool]) -> int:
+                      pre_send_guard: Callable[[], bool], styles=()) -> int:
         """Revalidate the reviewed projection and edit permission under the provider lock, make
         one editMessageText attempt and return the validated edit_date of the returned message.
 
-        Every refusal before the raw send is no-attempt evidence; a result that is not exactly
-        the edited message is an unknown outcome. Nothing is retried."""
-        from .edit_drafts import EditSnapshot, edit_request, edited_text_result
+        `styles` (0.57) are a styled draft's reviewed caller styles: they select the styled request
+        shape, and the result must carry exactly them. Every refusal before the raw send is
+        no-attempt evidence; a result that is not exactly the edited message is an unknown outcome.
+        Nothing is retried."""
+        from .edit_drafts import EditSnapshot, TextEditSpec, edit_request, edited_text_result
         with self._serialized_reply_call():
             def current_authority():
                 if (not isinstance(expected, EditSnapshot) or expected.anchor != (chat_id, message_id) or
-                        not expected.can_be_edited or type(new_text) is not str or new_text == expected.raw_text or
+                        not expected.can_be_edited or type(new_text) is not str or
+                        (not styles and new_text == expected.raw_text) or
                         type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
                         not callable(pre_send_guard) or pre_send_guard() is not True or
                         self.get_account_id() != expected_account_id):
                     return False
+                if styles:
+                    TextEditSpec(snapshot=expected, new_text=new_text, styles=styles)  # a change, canonical styles
                 return (self.read_own_text_message(chat_id, message_id) == expected and
                         self.get_account_id() == expected_account_id and pre_send_guard() is True)
             try:
@@ -1972,10 +1989,10 @@ class TDLibClient:
                     raise ValueError("edit authority changed")
             except Exception as error:
                 raise MessageSendNotAttempted("edit revalidation failed") from error
-            response = self._change_transport(edit_request(chat_id, message_id, new_text),
+            response = self._change_transport(edit_request(chat_id, message_id, new_text, styles),
                                               pre_transport_guard=pre_send_guard)
         edit_date = edited_text_result(response, chat_id=chat_id, message_id=message_id, new_text=new_text,
-                                       previous_edit_date=expected.edit_date)
+                                       previous_edit_date=expected.edit_date, styles=styles or None)
         if edit_date is None:
             raise MessageSendOutcomeUnknown("TDLib returned an invalid edit result")
         return edit_date

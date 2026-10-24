@@ -1,0 +1,5 @@
+{
+  "structure": {
+    "prepare_text_edit": "input: optional outgoing_entities (styled edit, needs edit_own_styled_text); output: capability_disabled with missing_capabilities and next_action, a styled preview's outgoing_entities and the styled-input refusal detail (0.57 part 2)"
+  }
+}

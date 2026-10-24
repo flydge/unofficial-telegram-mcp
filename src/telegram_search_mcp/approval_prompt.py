@@ -498,26 +498,39 @@ def _archive_document(validated, alias) -> str:
         'move attempt and report the list it observes right after.')
 
 
+def _new_styles(heading: str, text: str, styles) -> list[str]:
+    """A styled edit's caller styles with their covered text (0.57); nothing for a plain edit."""
+    from .outgoing_formatting import outgoing_entity_facts
+    return ([heading] + [f'{kind[len("textEntityType"):]}: offset {offset}, length {length}; covered {_span(covered)}'
+                         for offset, length, kind, covered in outgoing_entity_facts(text, styles)]) if styles else []
+
+
 def _text_edit_document(validated, alias) -> str:
-    """Only formatting Telegram does not detect again is listed as removed."""
+    """Only formatting Telegram does not detect again is listed as removed (plain) or replaced (styled, 0.57, whose
+    caller styles are listed with their covered text). A plain edit's document is 0.52's."""
     from datetime import datetime, timezone
     from .edit_drafts import AUTO_DETECTED
     chat = validated.chat
+    styles = validated.styles()
     rows = list(zip(validated.current_entities, validated.entity_rows()))
-    formatting = (_entity_rows('Current formatting, removed by this plain-text edit',
+    formatting = (_entity_rows('Current formatting, replaced by this edit' if styles else
+                               'Current formatting, removed by this plain-text edit',
                                [row for entity, row in rows if entity.type not in AUTO_DETECTED]) +
                   _entity_rows('Current auto-detected entities, auto-detected again by Telegram wherever the new '
                                'text contains them', [row for entity, row in rows if entity.type in AUTO_DETECTED]))
     edited = (datetime.fromtimestamp(validated.current_edit_date, tz=timezone.utc).isoformat()
               if validated.current_edit_date else 'never')
+    kind = ('The new text carries only the styles listed here' if styles else
+            'The new text is plain text without formatting')
     return _document(
         [*_head(f'Edit your message {validated.message_id} in {_span(chat.title)} '
                 f'({_chat(chat.chat_id, validated.account_id)}, {_EDIT_CHAT_KINDS[chat.kind]})', validated.account_id,
                 validated.expires_at, alias),
          f'Last edited: {edited}'],
         [f'Current text {_MARK} (exact):', _Payload(validated.raw_current_text), *formatting,
-         'New text (exact):', _Payload(validated.raw_new_text), '',
-         'The new text is plain text without formatting; Telegram may detect links in it and show a link preview. '
+         'New text (exact):', _Payload(validated.raw_new_text),
+         *_new_styles('New text styles (final text; UTF-16 code units):', validated.raw_new_text, styles), '',
+         f'{kind}; Telegram may detect links in it and show a link preview. '
          'Link preview settings return to Telegram\'s default. Recipients see the message marked "edited".'],
         [f'Draft: {validated.draft_id}', f'Source SHA-256: {validated.source_sha256}',
          f'Preview SHA-256: {validated.preview_sha256}'],

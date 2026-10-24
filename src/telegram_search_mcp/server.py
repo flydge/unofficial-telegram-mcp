@@ -498,16 +498,18 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "applied means the target list was observed; chat_changed or already_in_target mean no attempt. "
         + _approval("changes")),
     "prepare_text_edit": ("Prepare editing own message",
-        "Prepare replacing the whole text of one of your own outgoing text messages with plain new_text, "
-        "normalized like prepare_text_send.",
+        "Prepare replacing the whole text of one of your own outgoing text messages with new_text, normalized like "
+        "prepare_text_send; outgoing_entities restyle it.",
+        "Styles also need edit_own_styled_text, and new_text must then already be the text Telegram stores. "
         "Incoming, non-text, forwarded, scheduled or no longer editable messages, hidden formatting and "
-        "unchanged text are refused. The preview shows current and new text and the formatting the edit drops. "
+        "unchanged text are refused. The preview shows current and new text and the formatting the edit replaces. "
         "Nothing changes; show the preview and ask first. Preparing again for the same message supersedes the "
         "earlier one. Edit " + _OWN_DRAFTS + ". " + _UNTRUSTED),
     "apply_prepared_text_edit": ("Apply a prepared text edit",
         "Revalidate the message and its edit permission, then make exactly one edit attempt; recipients see it "
         "marked edited and the old text cannot be restored.",
-        "applied requires the returned message to carry exactly the new text; message_changed means no attempt. "
+        "applied requires the returned message to carry exactly the new text and styles; message_changed means no "
+        "attempt. "
         + _approval("changes")),
     # 0.56 albums; each description adds at most 600 characters to the surface budget (tests/test_surface_054.py).
     "prepare_album_send": ("Prepare an album send",
@@ -1856,9 +1858,12 @@ def build_server(
     @server.tool(name="prepare_text_edit", annotations=_READ_ONLY_STATEFUL, structured_output=True)
     def prepare_text_edit(chat: Annotated[ChatId, _about("chat")],
                           message_id: Annotated[PositiveMessageId, _about("message_id")],
-                          new_text: Annotated[NewText, _about("new_text")]) -> PrepareTextEditResponse:
+                          new_text: Annotated[NewText, _about("new_text")],
+                          outgoing_entities: Annotated[OutgoingEntityList, _about("edit_entities")] = [],
+                          ) -> PrepareTextEditResponse:
         return get_service().prepare_text_edit(PrepareTextEditRequest(chat=chat, message_id=message_id,
-                                                                      new_text=new_text))
+                                                                      new_text=new_text,
+                                                                      outgoing_entities=outgoing_entities))
 
     @server.tool(name="apply_prepared_text_edit", annotations=_OVERWRITE, structured_output=True)
     def apply_prepared_text_edit(draft_id: Annotated[DraftId, _about("draft_id")],

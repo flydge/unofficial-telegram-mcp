@@ -101,7 +101,8 @@ from .archive_drafts import (ArchiveChat, ArchiveDraftPreview, ArchiveRefusal, A
 from .edit_drafts import (EditChat, EditRefusal, TextEditDraftPreview, TextEditSpec, PrepareTextEditRequest,
     PrepareTextEditResponse, ApplyPreparedTextEditRequest, ApplyPreparedTextEditResponse, evidence_fits,
     edge_whitespace, normalized_text, rewritten_text, PREPARED as TEXT_EDIT_PREPARED, REFUSED as TEXT_EDIT_REFUSED,
-    REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE)
+    REWRITTEN as TEXT_EDIT_REWRITTEN, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE, WHITESPACE as TEXT_EDIT_WHITESPACE,
+    DISABLED as TEXT_EDIT_DISABLED, frozen_styles, styled_input_refusal)
 
 from .draft_kinds import (CHANGE_CAPABILITIES, DEDICATED_KINDS, DRAFT_KINDS, GENERIC_ARTIFACT_KINDS,
                           REFUSED as STATUS_REFUSED)
@@ -3045,43 +3046,69 @@ class Broker(SelectionBrokerMixin):
             return result('failed', failure_detail, chat_id=chat_id)
         return result('outcome_unknown', 'the target list was not observed; do not retry automatically', chat_id=chat_id)
 
+    def _text_edit_owner(self, client_id: str, styled: bool) -> DraftOwner:
+        """edit_own_text with send and read, refused untyped as before 0.57; a styled edit also needs
+        edit_own_styled_text, refused typed with only the missing names."""
+        owner = self._change_owner(client_id, 'edit_own_text')
+        if styled:
+            self._require_capabilities(*required_capabilities('edit_own_text'), 'edit_own_styled_text')
+        return owner
+
     def _text_edit_preview(self, draft, owner: DraftOwner) -> TextEditDraftPreview:
         spec = draft.text_edit
         if draft.kind != 'text_edit' or not isinstance(spec, TextEditSpec):
             raise DraftError(TEXT_EDIT_UNAVAILABLE)
         self._require_change_policy('edit_own_text')
+        if spec.styles:  # A styled draft's preview stays bound to both edit capabilities (0.57).
+            self._require_capabilities(*required_capabilities('edit_own_text'), 'edit_own_styled_text')
         return TextEditDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
             expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
             chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title, kind=spec.snapshot.chat_kind),
             snapshot=spec.snapshot,
-            new_text=spec.new_text)
+            new_text=spec.new_text, styles=spec.styles)
 
     def _prepare_text_edit(self, request: PrepareTextEditRequest, *, client_id: str) -> PrepareTextEditResponse:
+        from .outgoing_entity_models import caller_outgoing_entities
         try:
-            owner = self._change_owner(client_id, 'edit_own_text')
-            try:
-                new_text = normalized_text(request.new_text)
-            except ValueError:
-                raise EditRefusal('invalid_input') from None
-            # normalized_text already applied Telegram's own rewrite, so the dialog's new text is what Telegram
-            # stores; these two checks only guard input that skipped it.
-            if edge_whitespace(new_text):
-                return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=TEXT_EDIT_WHITESPACE)
-            if rewritten_text(new_text):
-                return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=TEXT_EDIT_REWRITTEN)
+            styled = bool(request.outgoing_entities)
+            owner = self._text_edit_owner(client_id, styled)  # The styled conjunction precedes every read.
+            if styled:
+                # Never rewritten: the caller's spans address new_text as given (0.57).
+                detail = styled_input_refusal(request.new_text)
+                if detail is not None:
+                    return PrepareTextEditResponse(status='refused', refusal='invalid_input', detail=detail)
+                new_text = request.new_text
+                try:
+                    styles = frozen_styles(new_text, caller_outgoing_entities(request.outgoing_entities))
+                except ValueError:
+                    raise EditRefusal('invalid_input') from None
+            else:
+                styles = ()
+                try:
+                    new_text = normalized_text(request.new_text)
+                except ValueError:
+                    raise EditRefusal('invalid_input') from None
+                # normalized_text already applied Telegram's own rewrite, so the dialog's new text is what Telegram
+                # stores; these two checks only guard input that skipped it.
+                if edge_whitespace(new_text):
+                    return PrepareTextEditResponse(status='refused', refusal='invalid_input',
+                                                   detail=TEXT_EDIT_WHITESPACE)
+                if rewritten_text(new_text):
+                    return PrepareTextEditResponse(status='refused', refusal='invalid_input',
+                                                   detail=TEXT_EDIT_REWRITTEN)
             provider = self._shared_client()
             epoch = provider.send_observation_epoch
             snapshot = provider.read_own_text_message(request.chat, request.message_id)
             refusal = snapshot.refusal()
             if refusal is not None:
                 raise EditRefusal(refusal)
-            if not evidence_fits(snapshot):
+            if not evidence_fits(snapshot, new_text, styles):
                 raise EditRefusal('unsupported_source_content')
-            if new_text == snapshot.raw_text:
+            if snapshot.unchanged(new_text, styles):
                 raise EditRefusal('unchanged_text')
-            spec = TextEditSpec(snapshot=snapshot, new_text=new_text)
+            spec = TextEditSpec(snapshot=snapshot, new_text=new_text, styles=styles)
             self._reply_budget_check(provider)
-            if (self._change_owner(client_id, 'edit_own_text') != owner or self._shared_client() is not provider or
+            if (self._text_edit_owner(client_id, styled) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             previews = []
@@ -3092,6 +3119,10 @@ class Broker(SelectionBrokerMixin):
             return PrepareTextEditResponse(status='prepared', text_edit=preview, detail=TEXT_EDIT_PREPARED)
         except EditRefusal as refusal:
             return PrepareTextEditResponse(status='refused', refusal=refusal.code, detail=TEXT_EDIT_REFUSED)
+        except CapabilityDisabled as error:
+            # Only a styled edit's missing names (edit_own_styled_text), before any read; no draft.
+            return PrepareTextEditResponse(status='capability_disabled', missing_capabilities=list(error.missing),
+                                           detail=TEXT_EDIT_DISABLED)
         except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
             return PrepareTextEditResponse(status='unavailable', detail=TEXT_EDIT_UNAVAILABLE)
 
@@ -3113,6 +3144,8 @@ class Broker(SelectionBrokerMixin):
             owner = self._change_owner(client_id, 'edit_own_text')
             if self._drafts.kind(draft_id, owner=owner) != 'text_edit':
                 return result('error', 'draft kind does not match apply tool')
+            styled = bool(self._drafts.extra_capabilities(draft_id, owner=owner))
+            self._text_edit_owner(client_id, styled)  # A styled draft's receipts stay bound to both edit capabilities.
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
                 if previous.evidence == 'local_failed':
@@ -3125,7 +3158,7 @@ class Broker(SelectionBrokerMixin):
                 return result('expired', 'draft is unavailable after expiry or restart')
             entry = self._drafts.peek(draft_id, owner=owner)
             spec = entry.text_edit
-            if entry.kind != 'text_edit' or not isinstance(spec, TextEditSpec):
+            if entry.kind != 'text_edit' or not isinstance(spec, TextEditSpec) or bool(spec.styles) != styled:
                 return result('error', 'draft kind does not match apply tool')
             chat_id, message_id = spec.snapshot.anchor
             changed = dict(chat_id=chat_id, message_id=message_id)
@@ -3141,7 +3174,7 @@ class Broker(SelectionBrokerMixin):
             if not current.can_be_edited:
                 return result('message_changed', 'message can no longer be edited; no change was attempted', **changed)
             self._reply_budget_check(provider)
-            if (self._change_owner(client_id, 'edit_own_text') != owner or self._shared_client() is not provider or
+            if (self._text_edit_owner(client_id, styled) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             preview = self._text_edit_preview(entry, owner).model_dump(mode='json')
@@ -3151,16 +3184,17 @@ class Broker(SelectionBrokerMixin):
             if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
                 return result(decision, APPROVAL_DETAILS[decision])
             # The local dialog may remain open while account, policy or provider change.
-            if self._change_owner(client_id, 'edit_own_text') != owner:
+            if self._text_edit_owner(client_id, styled) != owner:
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
                 raise DraftError(TEXT_EDIT_UNAVAILABLE)
             self._reply_budget_check(provider)
             claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
                                        provider_epoch=provider.send_observation_epoch)
+            needed = set(required_capabilities('edit_own_text')) | ({'edit_own_styled_text'} if styled else set())
             def edit_guard():
                 require_current(self._policy)
-                return (set(required_capabilities('edit_own_text')) <= set(self._policy.enabled_capabilities)
+                return (needed <= set(self._policy.enabled_capabilities)
                     and self._shared_client() is provider and provider.send_observation_epoch is epoch
                     and self._drafts.change_claim_current(draft_id, owner=owner, kind='text_edit', provider=provider,
                                                           provider_epoch=epoch))
@@ -3169,8 +3203,10 @@ class Broker(SelectionBrokerMixin):
                 editor = getattr(provider, 'edit_own_text', None)
                 if not callable(editor):
                     raise MessageSendNotAttempted('edit provider is unavailable')
+                # A styled draft selects the styled request shape; a plain one keeps the 0.52 call.
                 edit_date = editor(chat_id, message_id, new_text=spec.new_text, expected=spec.snapshot,
-                                   expected_account_id=owner.account_id, pre_send_guard=edit_guard)
+                                   expected_account_id=owner.account_id, pre_send_guard=edit_guard,
+                                   **({'styles': spec.styles} if styled else {}))
                 receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed=edit_date)
             except MessageSendNotAttempted:
                 receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
@@ -3183,13 +3219,13 @@ class Broker(SelectionBrokerMixin):
                 return result('local_failed', 'local revalidation failed; no provider change was attempted')
             try:
                 # Disclose observed evidence only to the same current account and policy.
-                if self._change_owner(client_id, 'edit_own_text') != owner:
+                if self._text_edit_owner(client_id, styled) != owner:
                     raise DraftError(TEXT_EDIT_UNAVAILABLE)
             except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
                 return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
             if receipt.status == 'applied':
-                return result('applied', 'TDLib returned the edited message with the new text', edit_date=receipt.observed,
-                              **changed)
+                return result('applied', 'TDLib returned the edited message with the new text' +
+                              (' and styles' if styled else ''), edit_date=receipt.observed, **changed)
             if receipt.status == 'failed':
                 return result('failed', failure_detail, **changed)
             return result('outcome_unknown', 'the edit result is unconfirmed; do not retry automatically', **changed)
