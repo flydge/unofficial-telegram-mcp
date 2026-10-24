@@ -36,3 +36,15 @@ class VersionConsistencyTests(unittest.TestCase):
     def test_bundle_fixtures_use_the_package_version(self):
         self.assertIn(f"release_version='{__version__}'", read('tests/test_bundle_archive.py'))
         self.assertIn(f"package_version='{__version__}'", read('tests/test_bundle_install.py'))
+
+    def test_change_fixtures_build_and_expect_the_package_version(self):
+        # The change harness builds its kits as the package version by default (test_account_default_goldens derives
+        # its version line from that default), and these tests expect the version line a change writes
+        # (docs/releasing.md, section 1; critic fix 055f).
+        upgrade = read('tests/test_bundle_upgrade.py')
+        self.assertIn(f"search=b'search-skill', version='{__version__}'):", upgrade)
+        self.assertIn(f"b'__version__ = \"{__version__}\"\\n'", upgrade)
+        for name in ('tests/test_adopt_legacy.py', 'tests/test_bundle_late_refusal.py',
+                     'tests/test_capability_profiles.py'):
+            with self.subTest(name=name):
+                self.assertIn(f'expected_package_version = "{__version__}"', read(name))

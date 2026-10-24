@@ -3586,6 +3586,7 @@ def _alias_registration(installed, alias, tools=None):
 # re-pointed at the target release. Without an alias the journal, its keys and its `state` are 0.54's.
 
 # The first release that knows named aliases: a rollback to an older one refuses `accounts_present` while any exists.
+# A semantic floor, not a version site: a release bump leaves it alone (docs/releasing.md, section 1).
 _ACCOUNTS_FIRST = '0.55.0.dev0'
 _RETIRED_REGISTRY = re.compile(r'retired-[0-9a-f]{32}-registry\.json\Z')
 _STATE_KEYS = frozenset({'enrollment.json', 'runtime.toml', _POLICY_BODY})

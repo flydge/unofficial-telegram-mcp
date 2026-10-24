@@ -20,7 +20,9 @@ from test_bundle_upgrade import NEIGHBOUR_CODEX, OLD_VERSION as LEGACY_VERSION
 from telegram_search_mcp import account_registry, bundle_install, config
 
 # The installed release the alias tests start from (one that knows aliases: account-add runs only from such a current
-# release), the kit an upgrade goes to, and the 0.52.9 release a rollback below 0.55 goes back to.
+# release), the kit an upgrade goes to, and the 0.52.9 release a rollback below 0.55 goes back to. With THIRD below,
+# semantic floors, not version sites: every kit is installed under its own version (AliasChangeHarness.install), so a
+# release bump leaves them alone (docs/releasing.md, section 1).
 OLD_VERSION = AccountHarness.BASE_VERSION
 NEW_VERSION = '0.55.0.dev1'
 

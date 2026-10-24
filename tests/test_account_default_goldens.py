@@ -4,7 +4,8 @@ Every literal here is what v0.54.0rc1 (c6338a0) produced for the same inputs, co
 own code (its `bundle_install`, `bundle_runtime` and test harness), never recomputed by the code under test: the
 five-element `mcp` argv, the broker plist `_service_payload` writes, `.mcp.json`, the receipt.json key sets, the
 runtime.toml version-line rewrite, and the journal shapes (top-level keys, `state` keys and record names) of a
-first install, an upgrade, a rollback and an uninstall. The client entries, receipts, the runtime.toml template and
+first install, an upgrade, a rollback and an uninstall; only the rewritten version line is the target release's, the
+version the change fixture builds with (critic fix 055f). The client entries, receipts, the runtime.toml template and
 the schema fingerprint are pinned in tests/test_account_registrations.py; paths and labels in
 tests/test_account_paths.py. With named aliases present, the default's part of a change is the same bytes as
 without them. Disposable homes and fakes only.
@@ -12,6 +13,7 @@ without them. Disposable homes and fakes only.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import shutil
 import tempfile
@@ -36,8 +38,12 @@ MCP_JSON_054 = ('{\n  "mcpServers": {\n    "tg": {\n      "command": "/bin/sh",\
 MCP_JSON_SHA256_054 = '06ef85328b9708803b1bfd93ff79d10a3ccf0706db1c9c1bf4530d317c21d3ab'
 POLICY = (b'config_version = 1\nexpected_package_version = "0.52.9"\nexpected_contract_version = 1\n'
           b'enabled_capabilities = ["read", "artifacts", "send"]\n')
-POLICY_UPGRADED_054 = (b'config_version = 1\nexpected_package_version = "0.55.0.dev0"\nexpected_contract_version = 1\n'
-                       b'enabled_capabilities = ["read", "artifacts", "send"]\n')
+# The version line 0.54's rewrite writes is the target release's: the version the change fixture builds with (its
+# `build` default, which follows the package version at every release bump), never a literal of its own (critic
+# fix 055f), so a version bump leaves this golden's shape to compare.
+BUILD_VERSION = inspect.signature(ChangeHarness.build).parameters['version'].default
+POLICY_UPGRADED_054 = (b'config_version = 1\nexpected_package_version = "%s"\nexpected_contract_version = 1\n'
+                       b'enabled_capabilities = ["read", "artifacts", "send"]\n' % BUILD_VERSION.encode())
 SERVICE_PLIST_054 = (
     '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
     '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>EnvironmentVariables</key>\n'
@@ -106,7 +112,7 @@ class InstallerGoldenTests(unittest.TestCase):
     def test_the_receipt_keys_and_the_version_line_rewrite_are_054s(self):
         self.assertEqual({k: sorted(v) for k, v in bundle_runtime.RECEIPT_KEYS.items()},
                          {1: RECEIPT_V1_054, 2: RECEIPT_V2_054})
-        self.assertEqual(bundle_install._policy_candidate(POLICY, '0.52.9', '0.55.0.dev0'), POLICY_UPGRADED_054)
+        self.assertEqual(bundle_install._policy_candidate(POLICY, '0.52.9', BUILD_VERSION), POLICY_UPGRADED_054)
 
 
 class JournalGoldenTests(ChangeHarness, unittest.TestCase):

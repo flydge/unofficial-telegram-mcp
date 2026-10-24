@@ -55,6 +55,7 @@ class AccountHarness(ChangeHarness):
     from a current release of 0.55 or newer (review fix 055d); a test that needs an older one sets its own."""
 
     ALIAS = 'work'
+    # A semantic floor, not a version site: `old` installs it under that version, so a release bump leaves it alone.
     BASE_VERSION = '0.55.0.dev0'
 
     def setUp(self):

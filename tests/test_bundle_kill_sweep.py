@@ -730,7 +730,9 @@ def _put_back_prepare(h):
 
 ALIAS = 'work'
 # The release the account scenarios start from: one that knows aliases, since account-add and account-remove run only
-# from such a current release (review fix 055d); the upgrades over aliases go to a newer 0.55 kit.
+# from such a current release (review fix 055d); the upgrades over aliases go to a newer 0.55 kit. Semantic floors, not
+# version sites (docs/releasing.md, section 1): every kit of these scenarios is built and installed as its own version
+# under that version, never the build default, so a release bump leaves them alone (critic fix 055f).
 ACCOUNTS_BASE, ACCOUNTS_NEWER = '0.55.0.dev0', '0.55.0.dev1'
 
 
@@ -757,10 +759,16 @@ def _accounts_prepare(h, *aliases):
     h.desktop_present()
     (h.home / '.claude').mkdir(mode=0o755, exist_ok=True)
     h.session(pin=ACCOUNTS_BASE)
-    h.install(h.build('a', version=ACCOUNTS_BASE))
+    _base(h, h.build('a', version=ACCOUNTS_BASE))
     h.service(Path(h.pointer()['release_root']))
     for alias in aliases:
         _account(h, 'account_add', alias=alias)
+
+
+def _base(h, packet, **kwargs):
+    """`packet` (built as ACCOUNTS_BASE) installed as its own package version, whatever the build default is."""
+    with mock.patch('telegram_search_mcp.__version__', ACCOUNTS_BASE):
+        return h.install(packet, **kwargs)
 
 
 def _newer(h, **kwargs):
@@ -895,15 +903,15 @@ def _aliases_rollback_prepare(h):
     h.codex_present()
     h.desktop_present()
     (h.home / '.claude').mkdir(mode=0o755, exist_ok=True)
-    h.session(pin='0.55.0.dev0')
-    h.install(h.build('a'))
+    h.session(pin=ACCOUNTS_BASE)
+    _base(h, h.build('a', version=ACCOUNTS_BASE))
     h.target = Path(h.pointer()['release_root'])
     h.service(h.target)
     for alias in (ALIAS, 'play'):
         _account(h, 'account_add', alias=alias)
     _alias_logged_in(h)
-    _alias_pinned(h, '0.55.0.dev0')
-    h.install(h.build('b', launcher=b'# second release\n', search=b'search-skill-2'))
+    _alias_pinned(h, ACCOUNTS_BASE)
+    _base(h, h.build('b', launcher=b'# second release\n', search=b'search-skill-2', version=ACCOUNTS_BASE))
 
 
 def _aliases_uninstall_prepare(h):

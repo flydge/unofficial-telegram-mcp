@@ -34,6 +34,8 @@ and the test is the authority if the two differ.
 | `src/telegram_search_mcp/__init__.py` | `__version__`, the single source for the package version (`pyproject.toml` reads it) |
 | `packaging/launcher.py` | the bundle admission literal (`release_version`) and the help text |
 | `tests/test_bundle_archive.py`, `tests/test_bundle_install.py` | the synthetic release fixtures |
+| `tests/test_bundle_upgrade.py` | the change harness's default kit version (`build(version=…)`) and that kit's `__version__` line; `tests/test_account_default_goldens.py` derives its version line from that default |
+| `tests/test_adopt_legacy.py`, `tests/test_bundle_late_refusal.py`, `tests/test_capability_profiles.py` | the `expected_package_version` line a change writes |
 | `skills/telegram-search/SKILL.md`, `skills/telegram-setup/SKILL.md` | the "paired with" version line of each skill |
 | `README.md`, `CHANGELOG.md` | the status paragraph and the top changelog heading |
 | `plugins/telegram-local/.claude-plugin/plugin.json` | the plugin's `version` (`tests/test_claude_plugin.py` requires `__version__`) |
@@ -45,6 +47,14 @@ A new `docs/release-notes-<version>.md` and `packaging/constraints-<version>.txt
 listed in `pyproject.toml` (`[tool.setuptools.data-files]`) and `MANIFEST.in`, as this document and
 `packaging/release_gate.py` are; the gate refuses an sdist that misses a tracked public file. To
 find stragglers: `git grep -n -F '<previous dev version>'`.
+
+That grep also lists semantic floors, which are not version sites and which a bump leaves alone:
+`_ACCOUNTS_FIRST` in `bundle_install.py` (the first release that knows account aliases) and the account
+tests' fixture versions (`BASE_VERSION` in `tests/test_account_install.py`, `NEW_VERSION` and `THIRD` in
+`tests/test_account_changes.py`, `ACCOUNTS_BASE` and `ACCOUNTS_NEWER` in `tests/test_bundle_kill_sweep.py`,
+and the version lines those tests write), each of which installs its kits under that very version
+whatever the package version is, and the `POLICY` bytes of `tests/test_account_launcher.py`, copied and
+compared as they are. Each carries a comment saying so.
 
 ### Versions
 

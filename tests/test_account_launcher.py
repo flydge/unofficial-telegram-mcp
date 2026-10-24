@@ -30,6 +30,7 @@ from telegram_search_mcp.config import AccountPaths, CAPABILITY_PROFILES
 
 LAUNCHER = Path(__file__).resolve().parents[1] / 'packaging' / 'launcher.py'
 SENTINEL = 'SYNTHETICSENTINEL'
+# Policy bytes copied and compared as they are: not a version site, a release bump leaves them alone.
 POLICY = (b'config_version = 1\nenabled_capabilities = ["read", "artifacts"]\n'
           b'expected_package_version = "0.55.0.dev0"\n')
 
