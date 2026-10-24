@@ -146,12 +146,29 @@ class AccountChangeGrammarTests(unittest.TestCase):
         self.assertIsNone(error('pending_send_unresolved', account='work').account)
         self.assertIsNone(error('alias_broker_unreadable', account='Work').account)
 
+    def test_login_in_progress_and_an_unsafe_connect_lock_name_the_alias(self):
+        """Critic fix (055f, low): `login_in_progress` and `connect_lock_unsafe` carry the alias (`account`, a closed
+        token) whose login or lock refused, as `alias_broker_unreadable` does; a forged account is dropped."""
+        error = bundle_install.InstallError
+        for code in ('login_in_progress', 'connect_lock_unsafe'):
+            for action in ('account-add', 'account-remove'):
+                with self.subTest(code=code, action=action):
+                    refusal = json.loads(self.dispatch([action, 'play'], error(code, account='work'))[2])
+                    self.assertEqual(refusal, {'status': 'refused', 'code': code, 'account': 'work'})
+            forged = error(code, account='work')
+            forged.account = '/Users/' + SENTINEL
+            self.assertEqual(json.loads(self.dispatch(['account-remove', 'work'], forged)[2]),
+                             {'status': 'refused', 'code': code})
+            self.assertEqual(json.loads(self.dispatch(['account-remove', 'work'], error(code))[2]),
+                             {'status': 'refused', 'code': code})
+            self.assertIsNone(error(code, account='Work').account)
+
     def test_every_code_an_account_transaction_can_pass_through_is_in_the_closed_set(self):
         pin_only = {'alias_unavailable', 'account_mismatch', 'account_unverified', 'account_duplicate'}
         self.assertLessEqual(account_registry.CODES - pin_only, self.module.INSTALL_CODES)
         self.assertLessEqual({'accounts_inconsistent', 'default_check_failed', 'account_remove_incomplete',
                               'accounts_present', 'release_not_current', 'login_in_progress',
-                              'alias_broker_unreadable'},
+                              'connect_lock_unsafe', 'alias_broker_unreadable'},
                              self.module.INSTALL_CODES)
         self.assertEqual(self.module.PENDING_ACTIONS, bundle_install.PENDING_ACTIONS)
 

@@ -686,8 +686,9 @@ A refused install, `rollback`, `uninstall`, `account-add` or `account-remove` pr
 `"pending_action"`, and for an unfinished `account-add` or `account-remove` also `"pending_account"`, its
 alias (a closed token); an `alias_broker_unreadable` refusal adds `"account"` (the alias, a closed
 token), `"next_action": "boot_out_alias_broker_then_retry"` and `"bootout_command"`, the argument list
-`["launchctl", "bootout", "gui/<uid>/<that alias's broker label>"]`. Inputs and neighbouring configuration
-are never echoed.
+`["launchctl", "bootout", "gui/<uid>/<that alias's broker label>"]`; a `login_in_progress` or
+`connect_lock_unsafe` refusal adds `"account"`, the alias whose login runs or whose connect lock is unsafe.
+Inputs and neighbouring configuration are never echoed.
 
 | Code | Cause |
 | --- | --- |
@@ -732,7 +733,8 @@ before the transaction exists, unless its row says otherwise:
 | `default_check_failed` | `account-add`'s one `check` of the running default broker answered neither `ready` nor `blocked`. Late: the alias is already in the registry, its root exists, and the transaction stays unfinished. | Let the default broker finish starting, then repeat the same `account-add`; it resumes. |
 | `account_remove_incomplete` | `account-remove` found the alias's Claude Code or Claude Desktop entry still present (or its config unreadable) after its removal attempts. Late. | Repeat the same `account-remove` (quit Claude Desktop first if it rewrote its config). |
 | `release_not_current` | `account-add` or `account-remove` ran from a release tree other than the one `current.json` names, or the current release is older than 0.55 (after a rollback below 0.55). | Run the launcher of `current.json`'s `release_root`; below 0.55, upgrade first. |
-| `login_in_progress` | A login of an alias is running (its connect job loaded and not idle, or its connect lock held) when a transaction over aliases (upgrade, rollback, uninstall, `account-add`, `account-remove`) needs that alias's connect lock (every alias's; a new alias's own `account-add` all but its own). The transaction stays resumable. | Let the login end (`wait --account <alias>`, or `cancel --account <alias>`), then repeat the same command. |
+| `login_in_progress` | A login of an alias is running (its connect job loaded and not idle, or its connect lock held) when a transaction over aliases (upgrade, rollback, uninstall, `account-add`, `account-remove`) needs that alias's connect lock (every alias's; a new alias's own `account-add` all but its own). The refusal adds `account`, that alias. The transaction stays resumable. | Let that login end (`wait --account <account>`, or `cancel --account <account>`), then repeat the same command. |
+| `connect_lock_unsafe` | An alias's connect lock (`run/connect.lock` in its root), its `run` folder or its root is not owner-only when a transaction over aliases needs that lock: not a `0600` regular single-link file or a `0700` folder of yours. No login holds it, so `wait` and `cancel` cannot clear it. The refusal adds `account`, that alias. Nothing is changed or repaired, and the transaction stays resumable. | Restore the shape yourself: `chmod 700` the alias's root (`TelegramSearchMCP-accounts/<account>`) and its `run` folder, and `chmod 600` its `run/connect.lock`; then repeat the same command. A lock with a second hard link or another owner: stop and report. |
 | `alias_broker_unreadable` | A loaded alias broker whose definition names a release since removed holds a live socket that the current release cannot read (a stale socket reads as no send). Refused by upgrade, rollback, uninstall and that alias's own `account-add` or `account-remove`; the installer never boots out a broker it cannot ask. The refusal adds `account`, `next_action` and `bootout_command` (above). | Run the printed `bootout_command` yourself, then repeat the same command. |
 | `alias_invalid` | The alias is outside `[a-z][a-z0-9]{0,11}` or is `default`. The launcher refuses such an argument earlier, as `bundle_admission_or_install_failed`. | Use a valid alias. |
 | `alias_path_too_long` | The alias's broker socket path would exceed the macOS 103-byte limit (home directory path plus alias above 31 bytes). Nothing is created. | Use a shorter alias. |

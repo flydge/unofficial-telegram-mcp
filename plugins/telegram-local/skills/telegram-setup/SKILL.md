@@ -134,8 +134,11 @@ Telegram tools unused for about five minutes) and run the same command again; st
   Uninstall removes only what the installer owns; the Telegram session, enrollment and Keychain stay.
 - `downgrade_refused`, `upgrade_conflict`, `policy_conflict`, `rollback_unavailable`, `service_conflict`,
   `service_restart_failed`, `uninstall_incomplete`, `installation_refused`: stop and report the code.
-  `login_in_progress`: an account login still runs; let it end (`wait --account <alias>` or
-  `cancel --account <alias>`), then the same command again. `alias_broker_unreadable`: a leftover account
+  `login_in_progress`: the login of the alias in `account` still runs; let it end (`wait --account <account>`
+  or `cancel --account <account>`), then the same command again. `connect_lock_unsafe`: that alias's
+  `run/connect.lock` (or its `run` folder or root) is not owner-only, which `wait` and `cancel` cannot clear;
+  stop and report the code and `account` (the user restores it: `chmod 700` the folders, `chmod 600` the
+  lock). `alias_broker_unreadable`: a leftover account
   broker of a removed release; the user runs the returned `bootout_command` themselves, then the same
   command again.
   `transaction_pending`: an earlier install, upgrade, rollback, uninstall, `account-add` or

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import stat
 import threading
 import time
 import unittest
@@ -509,6 +510,33 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
                 os.close(held)
         self.assertEqual(self.account('account_remove')['session'], 'moved')
 
+    def test_an_unsafe_connect_lock_has_its_own_code_naming_the_alias_and_a_running_job_names_it_too(self):
+        """Critic fix (055f, low): a connect.lock (or its run folder) that is not owner-only is no running login, so
+        `wait`/`cancel` can never clear it: it refuses `connect_lock_unsafe` naming the alias, nothing changed and
+        nothing repaired, until the owner restores its shape; a connect job still running refuses
+        `login_in_progress` naming its alias."""
+        self.added()
+        self.alias_session()
+        lock, run = self.jobs.root / 'run' / 'connect.lock', self.jobs.root / 'run'
+        before, session = self.snapshot(), tree(self.jobs.root)
+        for label, unsafe, restore in (('lock 0644', lambda: lock.chmod(0o644), lambda: lock.chmod(0o600)),
+                                       ('run 0755', lambda: run.chmod(0o755), lambda: run.chmod(0o700))):
+            with self.subTest(label):
+                unsafe()
+                for action, alias in (('account_remove', None), ('account_add', 'play')):
+                    error = self.refused(action, 'connect_lock_unsafe', alias)
+                    self.assertEqual(error.account, 'work')
+                self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
+                self.assertNotEqual(stat.S_IMODE((lock if label.startswith('lock') else run).stat().st_mode),
+                                    0o600 if label.startswith('lock') else 0o700)  # never repaired by the installer
+                restore()
+        self.launchctl.set_job(self.jobs.connect_label, None)
+        self.launchctl.load(self.jobs.connect_label)  # a helper started, not idle
+        error = self.refused('account_remove', 'login_in_progress')
+        self.assertEqual(error.account, 'work')
+        self.launchctl.idle(self.jobs.connect_label)
+        self.assertEqual(self.account('account_remove')['session'], 'moved')
+
     def test_a_login_holding_the_connect_lock_refuses_and_none_starts_during_a_run(self):
         """Review fix (055d2, lead decision A): a login's connect.lock (an inline `connect` or `setup --account` in the
         owner's Terminal, no launchd job) refuses `login_in_progress` with nothing changed; during a run the transaction
@@ -520,7 +548,8 @@ class AccountRemoveTests(AccountHarness, unittest.TestCase):
         held = acquire_owner_lock(self.jobs.root / 'run' / 'connect.lock')
         try:
             before, session = self.snapshot(), tree(self.jobs.root)
-            self.refused('account_remove', 'login_in_progress')
+            error = self.refused('account_remove', 'login_in_progress')
+            self.assertEqual(error.account, 'work')  # critic fix (055f, low): the alias whose login runs
             self.assertEqual((self.snapshot(), tree(self.jobs.root)), (before, session))
         finally:
             os.close(held)

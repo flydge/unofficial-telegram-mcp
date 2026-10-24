@@ -40,7 +40,7 @@ INSTALL_CODES=frozenset({'claude_registration_conflict','foreign_registration','
     'policy_conflict','upgrade_conflict','transaction_pending','rollback_unavailable','rollback_refused',
     'service_restart_failed','downgrade_refused','uninstall_incomplete',
     'accounts_inconsistent','default_check_failed','account_remove_incomplete','accounts_present',
-    'release_not_current','login_in_progress','alias_broker_unreadable',
+    'release_not_current','login_in_progress','connect_lock_unsafe','alias_broker_unreadable',
     'alias_invalid','alias_exists','alias_unknown','alias_path_too_long','alias_name_too_long','registry_full',
     'registry_invalid','registry_unsafe','registry_busy'}
     |{'foreign_'+n for n in ('release','receipt','pointer','telegram-search','telegram-setup',
@@ -52,6 +52,10 @@ PENDING_ACTIONS=('install','upgrade','rollback','uninstall','account-add','accou
 # step: the bootout of that alias's exact broker label, a loaded leftover of a release since removed whose live socket
 # the current release cannot read (0.55 review fix 055d3).
 UNREADABLE_ACTION='boot_out_alias_broker_then_retry'
+# `login_in_progress` (a login of that alias still runs) and `connect_lock_unsafe` (its connect lock or run folder is
+# not owner-only, which no `wait` or `cancel` clears) also name the alias (`account`, a closed token; 0.55 critic fix
+# 055f).
+ACCOUNT_NAMED=('login_in_progress','connect_lock_unsafe')
 
 
 def bootout_command(alias):
@@ -385,6 +389,8 @@ def main(argv=None):
         if code=='transaction_pending' and type(pending) is str and pending in PENDING_ACTIONS:
             refusal['pending_action']=pending
             if pending in ACCOUNT_CHANGES and alias_token(pending_account): refusal['pending_account']=pending_account
+        if code in ACCOUNT_NAMED and alias_token(account):
+            refusal['account']=account
         if code=='alias_broker_unreadable' and alias_token(account):
             try:
                 refusal.update(account=account,next_action=UNREADABLE_ACTION,bootout_command=bootout_command(account))

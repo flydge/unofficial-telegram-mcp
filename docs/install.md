@@ -1171,9 +1171,14 @@ current release, and only while it knows aliases (0.55 or newer): anything else 
 - **Logins.** For each run, every transaction over aliases (upgrade, rollback, uninstall, `account-add`,
   `account-remove`) holds every alias's connect lock (a new alias's own `account-add` excepted), so no
   login of an alias runs during it. A login already running refuses the transaction as
-  `login_in_progress` with nothing changed, and the transaction stays resumable: let the login finish
-  (`wait --account <alias>`) or end it (`cancel --account <alias>`, or close the Terminal running
-  `setup`), then repeat the same command. A finished login's idle connect job is no login. While a
+  `login_in_progress` with nothing changed, naming the alias in `account`, and the transaction stays
+  resumable: let that login finish (`wait --account <account>`) or end it (`cancel --account <account>`,
+  or close the Terminal running `setup`), then repeat the same command. A finished login's idle connect
+  job is no login. A connect lock that no login holds but that is not owner-only (its `run/connect.lock`
+  not a `0600` regular single-link file of yours, or its `run` folder or root not `0700`) refuses
+  `connect_lock_unsafe`, also naming the alias; `wait` and `cancel` cannot clear it, and the installer
+  never repairs it: `chmod 700` the alias's root and `run` folder and `chmod 600` the lock, then repeat
+  the command (a second hard link or another owner: stop and report). While a
   transaction is unfinished, between two runs too, every alias login refuses `transaction_pending`
   ([above](#status-and-capabilities-of-each-account)). Holding the lock can leave an empty
   `run/connect.lock` in an alias root that had none.

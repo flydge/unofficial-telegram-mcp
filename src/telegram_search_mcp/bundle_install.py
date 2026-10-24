@@ -50,8 +50,10 @@ class InstallError(ValueError):
 
     `pending_action` (only with `transaction_pending`) names the unfinished change from PENDING_ACTIONS that must
     be retried first, and `pending_account` (only with an account action) the alias it is for, a closed token from
-    the transaction's own journal; `account` (only with `alias_broker_unreadable`, review fix 055d3) the alias whose
-    broker the owner boots out by hand; anything else is dropped.
+    the transaction's own journal; `account` (only with ACCOUNT_FIELD_CODES) the alias, a closed token: whose broker
+    the owner boots out by hand (`alias_broker_unreadable`, review fix 055d3), whose login still runs
+    (`login_in_progress`) or whose connect lock is unsafe (`connect_lock_unsafe`, critic fix 055f); anything else is
+    dropped.
     """
 
     def __init__(self, *args, pending_action=None, pending_account=None, account=None):
@@ -60,7 +62,12 @@ class InstallError(ValueError):
                                and pending_action in PENDING_ACTIONS else None)
         self.pending_account = (pending_account if self.pending_action in ACCOUNT_ACTIONS
                                 and named_alias(pending_account) else None)
-        self.account = account if args == ('alias_broker_unreadable',) and named_alias(account) else None
+        self.account = (account if len(args) == 1 and args[0] in ACCOUNT_FIELD_CODES and named_alias(account)
+                        else None)
+
+
+# The refusals that name an alias in `account` (the launcher prints it beside the code).
+ACCOUNT_FIELD_CODES = ('alias_broker_unreadable', 'login_in_progress', 'connect_lock_unsafe')
 
 
 def encoded(value):
@@ -3996,9 +4003,12 @@ class _LoginLocks:
     uninstall, account-add, account-remove) takes it for each of `aliases` in every run, fresh or resumed, and holds
     it until the run ends (success, refusal or exception; a kill releases it with the process), so no login of an
     alias runs during any run, and no broker definition or session a login writes appears in the middle of one. A
-    lock it cannot take (held, or unsafe) refuses `login_in_progress` with nothing changed, and the transaction stays
-    resumable; so does a connect job loaded in any state but an explicit idle one (a helper started before, waiting
-    for the lock), checked once the locks are held.
+    lock a login holds refuses `login_in_progress` with nothing changed, and the transaction stays resumable; so does
+    a connect job loaded in any state but an explicit idle one (a helper started before, waiting for the lock),
+    checked once the locks are held. Both name the alias (`account`). A lock that is not held but unsafe (the alias's
+    root, its run directory or its connect.lock not owner-only, a second link, another owner) is no running login
+    that `wait` or `cancel` could end: it refuses `connect_lock_unsafe` naming the alias, nothing changed or
+    repaired, until the owner restores its shape (critic fix 055f, lead decision).
 
     Two phases, so that every refusal before a transaction exists still changes nothing. Entering takes, before any
     check, every lock that exists (the file a login creates first). `complete()` creates and takes the others: for an
@@ -4026,16 +4036,17 @@ class _LoginLocks:
         root = self.jobs[alias].root
         try:
             self.descriptors.append(acquire_owner_lock(self._path(alias), within=root))
-        except OwnerLeaseError:
+        except OwnerLeaseError as error:
             if not os.path.lexists(root):
                 return  # No root: no login of it can start (review fix 055d3), and none is created here.
-            raise InstallError('login_in_progress') from None
+            raise InstallError('login_in_progress' if error.code == 'owner_busy' else 'connect_lock_unsafe',
+                               account=alias) from None
         self.held.add(alias)
 
     def _no_running_job(self):
-        for each in self.jobs.values():
+        for alias, each in self.jobs.items():
             if _login_running(self.runner, each):
-                raise InstallError('login_in_progress')
+                raise InstallError('login_in_progress', account=alias)
 
     def __enter__(self):
         try:
