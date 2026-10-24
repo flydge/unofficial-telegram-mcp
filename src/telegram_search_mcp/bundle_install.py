@@ -4154,15 +4154,15 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
     `_LoginLocks`, review fix 055d2, and on the repair path its own too, review fix 055d4), or any unfinished
     transaction (`transaction_pending`). Then, journaled: the alias's broker definition of another release rewritten
     to this release's (`service: rewritten`); on the repair path its runtime.toml version line moved onto this
-    release from any value, its session kept (review fix 055d4); the registry entry (unpinned); the alias's root,
+    release from an equal or older one, its session kept (review fix 055d4, A9); the registry entry (unpinned); the alias's root,
     owner-only and empty but for its run directory (an existing one kept), which a login never creates (review fix
     055d3); one `check` on the default broker when it is loaded, so its authorized account is pinned before the
     alias's first login (one that does not answer is reported as `default_check: unanswered` and the add goes on, as
     for a default broker not loaded: critic fix 055f, lead decision); the Codex entry (`mcp --account <alias>`, never
     required); the Claude Code user-scope entry in `user` and `plugin` mode through the CLI (write-ahead, like the
     install's); the Claude Desktop entry beside the default's where Claude Desktop is present; and the alias's
-    accounts.json record. It does not log in: the owner then runs `connect --account <alias>` (or setup) and waits. A kill at any
-    point resumes on the retry; a retry after it finished returns its result.
+    accounts.json record. It does not log in: the owner then runs `connect --account <alias>` (or setup) and waits.
+    A kill at any point resumes on the retry; a retry after it finished returns its result.
     """
     try:
         require_platform()
