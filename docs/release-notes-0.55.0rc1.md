@@ -30,7 +30,9 @@ The owner rows (two really authorized accounts, one approved action each) wait f
 - **The account pin.** Each account's broker pins the Telegram user it first finds authorized, and every
   login applies the same rule before the handoff: `account_mismatch` for another user, `account_duplicate`
   for a user already serving another alias or the default account. The user id is never printed once a
-  registry exists; the approval dialog names the alias and the last two digits of the account.
+  registry exists; the approval dialog names the alias and the last two digits of the account, and at most
+  one owner dialog is open across every account's broker (another account's send meanwhile answers
+  `dialog_unavailable`, its draft pending).
 - **Status and capabilities per account.** `status` reports `loaded`, `authorized` and `registered` for
   the default and every alias, never the account; `capabilities … --account <alias>` switches that alias's
   own profiles.
@@ -38,13 +40,15 @@ The owner rows (two really authorized accounts, one approved action each) wait f
   and its pin, and moves its session to `removed-<alias>-<32 hex>`; nothing is deleted or logged out.
   Rename is a remove plus an add.
 - **Upgrade, rollback and uninstall over every account.** One transaction moves the default and every
-  alias, with a pending-send gate per broker and a refusal while an alias login runs
-  (`login_in_progress`). A leftover alias broker of a removed release is asked through its live socket;
-  one that cannot be read refuses `alias_broker_unreadable` with the owner's `bootout_command`. A rollback
-  below 0.55 refuses while an alias exists (`accounts_present`), and a rollback that keeps an alias on its
-  newer release leaves it offline (`newer_state_kept`). Uninstall keeps alias sessions and the registry;
-  a later install repairs each alias with its `account-add`, moving its version line onto the current
-  release only from an equal or older one (`policy_conflict` otherwise).
+  alias, with a pending-send gate per broker and a refusal while an alias login runs (`login_in_progress`,
+  naming the alias; `connect_lock_unsafe` for its connect lock not owner-only). A leftover alias broker of
+  a removed release is asked through its live socket; one that cannot be read refuses
+  `alias_broker_unreadable` with the owner's `bootout_command`. A rollback below 0.55 refuses while an
+  alias exists (`accounts_present`), and a rollback that keeps an alias on its newer release leaves it
+  offline (`newer_state_kept`). Uninstall keeps alias sessions and the registry; a later install repairs
+  each alias with its `account-add`, moving its version line onto the current release only from an equal
+  or older one (`policy_conflict` otherwise); until then the alias's logins refuse `older_state_kept` (or
+  `newer_state_kept` after a lower version) and upgrades `policy_conflict`.
 - **Logins never race the installer.** No alias login runs during an installer transaction, and while one
   is unfinished an alias login refuses `transaction_pending`, naming the action (`pending_action`,
   `pending_account`); a login never creates an alias root (`alias_unavailable`).
@@ -88,7 +92,8 @@ together.
   default.
 - An alias added after an upgrade blocks that upgrade's rollback until it is removed.
 - An alias the registry lists without client entries (after an uninstall) gets none until its
-  `account-add`.
+  `account-add`; after a reinstall at another version its logins and every upgrade refuse until then, so
+  run it for each kept alias first.
 - Every installer transaction over aliases waits for a running alias login (`login_in_progress`), and alias
   logins wait for any unfinished transaction (`transaction_pending`); the account actions run only from the
   current release (`release_not_current`).
@@ -99,8 +104,8 @@ together.
   alias refuses that alias's `account-add` (`policy_conflict`).
 - A loaded alias broker of a removed release that the current release cannot read blocks the installer
   actions over it (`alias_broker_unreadable`) until the owner runs the printed `bootout_command`.
-- With the default broker not loaded at `account-add` (`default_check: not_loaded`), the default account is
-  pinned only at its broker's next check; an alias logged into the default's own account first blocks the
+- With the default broker not loaded or not answering at `account-add` (`default_check: not_loaded` or
+  `unanswered`), the default account is pinned only at its broker's next check; an alias logged into the default's own account first blocks the
   default with `account_duplicate` until that alias is removed.
 - Removing the last alias keeps the registry with the default account's pin (`status` keeps `accounts`, the
   dialog keeps naming `default`) until a rollback below 0.55 or an uninstall with no alias left moves it

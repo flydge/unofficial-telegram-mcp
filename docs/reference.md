@@ -645,9 +645,10 @@ kept in the transaction as `service-<alias>.newer`; see
 [with accounts](install.md#upgrade-rollback-and-uninstall-with-accounts)) and, for an alias with client
 entries, `codex: registered`, `claude_code`, `claude_desktop` and the same manual extras; an uninstall's
 `service` (`removed`, `absent` or `kept`), `connect_job` (`stopped` or `not_loaded`), `codex`,
-`claude_code` and `claude_desktop`. A
-rollback below 0.55 or an uninstall that moved the alias registry aside adds `account_registry`
-(`retired`, or `absent` when there was none to move). Without an alias none of these keys appear.
+`claude_code` and `claude_desktop`. `accounts` appears only while an alias exists. `account_registry`
+appears only after a rollback below 0.55 or an uninstall with no alias left: `retired` when it moved the
+alias registry aside, `absent` when there was none to move (a rollback that found only the default's
+readiness record). An installation that never had an alias registry sees neither key.
 
 `account-add` returns `status: account_added`, `account` (the alias), `server_name`
 (`telegram_search_<alias>`), `codex: registered`, `claude_code` (`registered`, `reused`, `failed`,
@@ -749,8 +750,10 @@ before the transaction exists, unless its row says otherwise:
 
 `registry.json` and `accounts.json` say different things on purpose: the registry which aliases exist (for
 every broker and launcher action), `accounts.json` which client entries the installation owns for each.
-`account-add` writes the registry before any entry and `accounts.json` after the last; `account-remove`
-the reverse.
+`account-add` writes the registry before any entry and `accounts.json` after the last. `account-remove`
+removes the entries first, then the alias's registry entry, then moves its root aside, and drops its
+`accounts.json` record last (retiring the file with the last alias), so an interrupted removal leaves a
+record the registry no longer lists until the same `account-remove` is repeated.
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under
 [DMG path](install.md#dmg-path); the plugin's `bin/install` codes are listed under
