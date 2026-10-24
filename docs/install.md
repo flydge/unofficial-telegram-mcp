@@ -223,10 +223,12 @@ switch, then reconnect the clients:
 | `replies` | `reply_text_send`, `reply_artifact_send` and every `reply_*_targets` source family | `send` |
 | `forward` | `forward_send` | `send` |
 | `video` | `video_send` | `send` |
-| `archive_edit` | `archive_chats`, `edit_own_text` | `send` |
+| `archive_edit` | `archive_chats`, `edit_own_text`, `edit_own_caption`, `edit_own_styled_text` | `send` |
 | `albums` | `album_send` (an album with a video item also needs `video`) | `send` |
+| `pin` | `pin_messages` (its tools arrive in a later 0.57 part) | `send` |
+| `delete` | `delete_own_message` (its tools arrive in a later 0.57 part) | `send` |
 
-Disabling `send` also disables `replies`, `forward`, `video`, `archive_edit` and `albums`; the base `read` and
+Disabling `send` also disables `replies`, `forward`, `video`, `archive_edit`, `albums`, `pin` and `delete`; the base `read` and
 `artifacts` are not a profile and stay. The action changes only the `enabled_capabilities` line (every other
 byte, pins and comments included, stays) through a validated atomic replace. Every refusal comes before
 that write and changes nothing:

@@ -352,7 +352,7 @@ def _homebrew_tdlib() -> Path:
 # Trusted local policy is independent of the MCP consumer's tool allowlist.
 RUNTIME_POLICY_PATH = DEFAULT_ACCOUNT_PATHS.policy
 LEGACY_CAPABILITIES = ("artifacts", "read", "send")
-KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "forward_send", "video_send", "archive_chats", "edit_own_text", "album_send"))
+KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "forward_send", "video_send", "archive_chats", "edit_own_text", "album_send", "edit_own_caption", "edit_own_styled_text", "pin_messages", "delete_own_message"))
 # Owner-facing capability profiles: every optional capability belongs to exactly one profile; the base
 # (read, artifacts) is not a profile. Enabling a profile also enables the profiles it depends on, and
 # disabling one also disables the profiles that depend on it.
@@ -367,13 +367,18 @@ CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
                 "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets"),
     "forward": ("forward_send",),
     "video": ("video_send",),
-    "archive_edit": ("archive_chats", "edit_own_text"),
+    # Every edit of an own message (0.57: captions and styles too), so one profile unlocks a styled edit.
+    "archive_edit": ("archive_chats", "edit_own_text", "edit_own_caption", "edit_own_styled_text"),
     # Albums are their own profile, never inside `video`: an album's video items also need `video` (0.56).
     "albums": ("album_send",),
+    # A pin posts a visible service message and a delete is irreversible: each has its own profile (0.57), so
+    # enabling edits never grants either.
+    "pin": ("pin_messages",),
+    "delete": ("delete_own_message",),
 }
 PROFILE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "replies": ("send",), "forward": ("send",), "video": ("send",), "archive_edit": ("send",),
-    "albums": ("send",)}
+    "albums": ("send",), "pin": ("send",), "delete": ("send",)}
 
 
 def profile_of(capability: str) -> str | None:

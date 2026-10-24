@@ -63,7 +63,7 @@ def bootout_command(alias):
     from telegram_search_mcp.config import alias_jobs
     return ['launchctl','bootout','gui/%d/%s'%(os.getuid(),alias_jobs(alias,Path.home()).broker_label)]
 # The owner's capability profiles (telegram_search_mcp.config.CAPABILITY_PROFILES), spelled here for the grammar.
-PROFILES=('readers','send','replies','forward','video','archive_edit','albums')
+PROFILES=('readers','send','replies','forward','video','archive_edit','albums','pin','delete')
 
 
 def _acl(fd):

@@ -1,0 +1,13 @@
+{
+  "structure": {
+    "get_reply_artifact_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "get_reply_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "prepare_album_send": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "prepare_reply_artifact_send": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "prepare_reply_text_send": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "refresh_reply_artifact_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "refresh_reply_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "update_reply_artifact_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)",
+    "update_reply_draft": "output: the closed missing_capabilities enum gains edit_own_caption, edit_own_styled_text, pin_messages and delete_own_message (four more items allowed)"
+  }
+}

@@ -853,10 +853,15 @@ The default account's login asks neither question (0.54), and a source checkout 
 Since the 0.54 candidate the owner switches capabilities in named profiles with the installed launcher's
 `capabilities show | enable <profile> | disable <profile>`, in Terminal, with every MCP client quit or
 disconnected (see [installation](install.md#enabling-more-capabilities-candidate)):
-`readers`, `send`, `replies`, `forward`, `video`, `archive_edit` and `albums`. Every optional capability belongs
-to exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`, `forward`, `video`,
-`archive_edit` or `albums` also enables `send`, and disabling `send` disables them. `albums` (0.56) holds only
-`album_send` and never implies `video` or `video_send`: an album with a video item also needs the `video` profile. `_manifest` reports the table under
+`readers`, `send`, `replies`, `forward`, `video`, `archive_edit`, `albums`, `pin` and `delete`. Every optional
+capability belongs to exactly one profile; the base `read` and `artifacts` belong to none. Enabling `replies`,
+`forward`, `video`, `archive_edit`, `albums`, `pin` or `delete` also enables `send`, and disabling `send` disables
+them. `albums` (0.56) holds only `album_send` and never implies `video` or `video_send`: an album with a video item
+also needs the `video` profile. Since 0.57 `archive_edit` holds every own-message edit (`archive_chats`,
+`edit_own_text`, `edit_own_caption`, `edit_own_styled_text`), so one profile unlocks a styled edit; an owner who
+had it on sees it `partial` until enabling it again. `pin` (`pin_messages`) and `delete` (`delete_own_message`)
+are profiles of their own, so enabling edits never grants a broadcast pin or an irreversible delete; their tools
+arrive in later 0.57 parts. `_manifest` reports the table under
 `capability_profiles` (`profiles`, `dependencies`; the table only, never the switch command), and a
 `capability_disabled` guard refusal names the profile that unlocks the missing capabilities. A typed
 `capability_disabled` result (the reply tools) carries only `missing_capabilities`; the profile is the one

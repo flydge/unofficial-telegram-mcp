@@ -199,13 +199,13 @@ Installation, a started page or a launch is never Ready; only `ready` followed b
 `~/Library/Application Support/TelegramSearchMCP/tdlib` and is never overwritten, purged or
 revoked from here. The default policy (written by `connect`) enables only `read` and `artifacts`. Only the
 owner turns more on, in their own Terminal, with the installed launcher's `capabilities enable <profile>`
-(`readers`, `send`, `replies`, `forward`, `video`, `archive_edit`, `albums`; `show` lists them, `disable`
-turns one off; docs/install.md, "Enabling more capabilities"). Never run it yourself, even with a shell, and
-never present it as a step in the middle of a session: it refuses (`pending_send_unresolved`) while a send is in
-flight, an approval dialog is open, a send outcome is not yet settled, or any MCP client context is active (up
-to 300 s after the last Telegram call). Tell the owner to settle pending sends, quit or disconnect every MCP
-client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict` and
-`policy_unsupported` change nothing: stop and report the code. `status: changed` with
+(`readers`, `send`, `replies`, `forward`, `video`, `archive_edit`, `albums`, `pin`, `delete`; `show` lists
+them, `disable` turns one off; docs/install.md, "Enabling more capabilities"). Never run it yourself, even with a
+shell, and never present it as a step in the middle of a session: it refuses (`pending_send_unresolved`)
+while a send is in flight, an approval dialog is open, a send outcome is not yet settled, or any MCP client
+context is active (up to 300 s after the last Telegram call). Tell the owner to settle pending sends, quit or
+disconnect every MCP client (or wait five minutes), run it, then reconnect. `service_conflict`, `policy_conflict`
+and `policy_unsupported` change nothing: stop and report the code. `status: changed` with
 `broker: restart_failed` changed the policy: the owner runs the returned `restart_command`. Never edit the
 policy yourself. There is no cloud auth or
 model provisioning route. Source and redistribution

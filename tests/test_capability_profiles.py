@@ -29,7 +29,7 @@ class PlanTests(unittest.TestCase):
     def test_disable_removes_the_profile_and_its_dependents_only(self):
         everything = tuple(sorted({'artifacts', 'read', *(c for m in CAPABILITY_PROFILES.values() for c in m)}))
         after = set(profiles.planned(everything, 'disable', 'send'))
-        for name in ('send', 'replies', 'forward', 'video', 'archive_edit'):
+        for name in ('send', 'replies', 'forward', 'video', 'archive_edit', 'albums', 'pin', 'delete'):
             self.assertFalse(after & set(CAPABILITY_PROFILES[name]), name)
         self.assertTrue(set(CAPABILITY_PROFILES['readers']) <= after and {'read', 'artifacts'} <= after)
         self.assertEqual(set(profiles.planned(everything, 'disable', 'video')),
