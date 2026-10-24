@@ -76,10 +76,6 @@ class ProfileTests(unittest.TestCase):
                          'partial')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class ReferenceTests(unittest.TestCase):
     """Review fix (057, low): the general passages of docs/reference.md name the 0.57 actions as they are."""
 
@@ -116,3 +112,7 @@ class ReferenceTests(unittest.TestCase):
         for name in ('edit_own_caption', 'pin_messages', 'delete_own_message', 'edit_own_styled_text'):
             with self.subTest(name=name):
                 self.assertIn(f'`{name}`', status)
+
+
+if __name__ == '__main__':
+    unittest.main()
