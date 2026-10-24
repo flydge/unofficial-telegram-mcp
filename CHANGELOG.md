@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.56.0.dev0 — unreleased
+## 0.56.0rc1 — release candidate, 2026-10-24 (not published)
 
-Development of 0.56.0, ordered albums ([spec](docs/plans/0.56-albums-spec.md),
+Release candidate of 0.56.0, ordered albums ([release notes](docs/release-notes-0.56.0rc1.md), [spec](docs/plans/0.56-albums-spec.md),
 [task record](docs/plans/0.56-albums-spec.tasks.md)): `prepare_album_send`, `send_prepared_album` and
 `get_album_send_status` (58 tools) behind the default-off `album_send` capability and its `albums` profile,
 with `video_send` also required for a video item; 2–10 photos and videos or documents (each with an optional
