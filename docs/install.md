@@ -226,7 +226,7 @@ switch, then reconnect the clients:
 | `archive_edit` | `archive_chats`, `edit_own_text`, `edit_own_caption`, `edit_own_styled_text` | `send` |
 | `albums` | `album_send` (an album with a video item also needs `video`) | `send` |
 | `pin` | `pin_messages` | `send` |
-| `delete` | `delete_own_message` (its tools arrive in a later 0.57 part) | `send` |
+| `delete` | `delete_own_message` | `send` |
 
 Disabling `send` also disables `replies`, `forward`, `video`, `archive_edit`, `albums`, `pin` and `delete`; the base `read` and
 `artifacts` are not a profile and stay. The action changes only the `enabled_capabilities` line (every other
@@ -1317,7 +1317,7 @@ The check prints `INITIALIZING_TDLIB` followed by `AUTHORIZATION_READY` to stder
 
 Merge the server block from [`.codex/config.toml.example`](../.codex/config.toml.example) into `.codex/config.toml` in the project where you want to use Unofficial Telegram MCP. Preserve any existing settings. Replace **both** absolute-path placeholders. The example does not expand `~` or shell variables.
 
-The current candidate example lists all 62 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
+The current candidate example lists all 64 tools and sets the required timeouts; published 0.51 consumers must use their matching manifest. Start a fresh chat in that project after configuration or schema changes.
 
 Install the optional skill by copying [the skill file](../skills/telegram-search/SKILL.md) to `~/.agents/skills/telegram-search/SKILL.md`. Back up an existing copy first. The skill supplies search and approval guidance; the broker enforces its own permissions.
 
@@ -1386,6 +1386,7 @@ Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decima
 | Edit the plain text of one own text message (candidate) | `send`, `read` and `edit_own_text`; see the [archive and edit reference](reference.md#archiveunarchive-and-own-text-edit-f17a). Off by default, independent of `archive_chats`; each edit still needs the preview, approval and local confirmation. Requires `read` because `prepare_text_edit` reveals that message's text, formatting and edit date. A styled text edit also needs `edit_own_styled_text`; see the [styled edit reference](reference.md#styled-own-text-edit-f17-rest) |
 | Replace or remove the caption of one own media message (candidate) | `send`, `read` and `edit_own_caption`, plus `edit_own_styled_text` for styles; see the [caption edit reference](reference.md#own-caption-edit-f17-rest). Off by default; each edit still needs the preview, approval and local confirmation. Requires `read` because `prepare_caption_edit` reveals that message's caption, formatting and edit date |
 | Pin or unpin one message (candidate) | `send`, `read` and `pin_messages` (the `pin` profile); see the [pin reference](reference.md#pin-and-unpin-f17-rest). Off by default; no edit capability grants it. Each pin still needs the preview, approval and local confirmation; a pin is silent, for everyone, and posts a visible service message. Requires `read` because `prepare_pin_change` reveals that message's content, which may be another member's |
+| Delete one own message for everyone (candidate) | `send`, `read` and `delete_own_message` (the `delete` profile); see the [deletion reference](reference.md#delete-one-own-message-f17-rest). Off by default; no edit or pin capability grants it. Each deletion still needs the preview, approval and a local dialog with a Delete button. It is irreversible, removes the message for every participant and unpins it; Saved Messages and deletion for yourself only are refused. Requires `read` because `prepare_message_delete` reveals that message's content |
 
 Replying to media or formatted sources can require additional source capabilities. Use the [reply reference](reference.md#prepared-same-chat-text-replies) for the exact combinations; do not enable every capability as a shortcut.
 

@@ -39,7 +39,7 @@ MAX_BYTES, MAX_LINES = 20_000, 300
 
 SEND_APPLY = ('send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward', 'send_prepared_video',
               'apply_prepared_archive', 'apply_prepared_text_edit', 'send_prepared_album',
-              'apply_prepared_caption_edit', 'apply_prepared_pin_change')
+              'apply_prepared_caption_edit', 'apply_prepared_pin_change', 'apply_prepared_message_delete')
 REPLY_TOOLS = ('prepare_reply_artifact_send', 'get_reply_artifact_draft', 'update_reply_artifact_draft',
                'refresh_reply_artifact_draft', 'prepare_reply_text_send', 'get_reply_draft', 'update_reply_draft',
                'refresh_reply_draft')
@@ -280,7 +280,7 @@ class SkillCoverageTests(unittest.TestCase):
         self.assertIn('`get_album_send_status`', row)
         self.assertIn('partial', self.outputs['send_prepared_album'].statuses)
         self.assertIn('`partial`', self.text)
-        self.assertIn('`video_send`', self.text.split('**Forward, video, album, archive, edit, pin.**', 1)[1])
+        self.assertIn('`video_send`', self.text.split('**Forward, video, album, archive, edit, pin, delete.**', 1)[1])
 
     def test_recovery_table_lists_the_closed_next_action_map(self):
         lines = self.text.splitlines()

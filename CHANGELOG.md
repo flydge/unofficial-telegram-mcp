@@ -21,7 +21,14 @@ rewritten, a second closed `editMessageText` shape carries exactly the reviewed 
 unchanged); `prepare_pin_change` and `apply_prepared_pin_change` (62 tools, `pin_messages`) pin or unpin one
 message silently and for everyone with one closed `pinChatMessage` or `unpinChatMessage` attempt, a bounded
 `getMessage.is_pinned` observation, and a 4xx read back as `already_pinned`, `not_pinned` or `failed`; the
-`_manifest` forbidden list names the new authority. Delete follows in part 3. Technical evidence only.
+`_manifest` forbidden list names the new authority. Part 3: `prepare_message_delete` and
+`apply_prepared_message_delete` (64 tools, `delete_own_message`) delete one own message for everyone, irreversibly,
+with one closed `deleteMessages` attempt (exactly one ID, `revoke` true) through its own transport, made right
+after a `getMessage` under the same provider lock; `applied` only on the server's `ok`, `failed` only when a
+read-back after a 4xx finds the message again, everything else `outcome_unknown` with TDLib's logged deletion
+(replayed after a restart) disclosed; Saved Messages, deletion for yourself only, other people's, scheduled and
+sending messages are refused; the owner dialog has a `Delete` button and states the irreversible, for-everyone,
+unpinning effect. Technical evidence only; the owner session is pending.
 
 ## 0.55.0rc1 — release candidate, 2026-10-24 (not published)
 

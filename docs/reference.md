@@ -6,7 +6,7 @@ Unofficial Telegram MCP is a local STDIO MCP surface for bounded Telegram discov
 
 ## MCP surface
 
-The public surface of the current candidate contains sixty-two tools (published 0.51.0 has forty-three):
+The public surface of the current candidate contains sixty-four tools (published 0.51.0 has forty-three):
 
 - `_manifest` describes the fixed scope, budgets, trust boundary, and prohibitions.
 - `resolve_target` resolves only a verified Saved Messages alias or exact `@username` to an exact numeric `chat_id`.
@@ -18,7 +18,7 @@ The public surface of the current candidate contains sixty-two tools (published 
 - `analyze_media` transcribes a selected audio/video artifact locally and returns bounded video frames as MCP images.
 - `create_local_artifact` creates a bounded UTF-8 or base64 document/image/media file for review and optional sending.
 - `begin_local_upload`, `append_local_upload`, and `finish_local_upload` accept files in ordered, hash-checked chunks of at most 512 KiB decoded and return an artifact ID after complete verification.
-- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 62-tool candidate surface.
+- `issue_local_upload_authority`, `consume_local_upload_result`, and `cancel_local_upload_authority` bind NEW externally supplied bytes to the exact original live MCP owner; helper operations are absent from the 64-tool candidate surface.
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
@@ -31,6 +31,7 @@ The public surface of the current candidate contains sixty-two tools (published 
 - `prepare_text_edit` and `apply_prepared_text_edit` replace the text of exactly one of your own outgoing text messages, plain or (0.57) styled, with a current/new text preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_text` opt-in together with `send` and `read`; styles also need `edit_own_styled_text`); see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a) and [Styled own text edit](#styled-own-text-edit-f17-rest).
 - `prepare_caption_edit` and `apply_prepared_caption_edit` replace or remove the caption of exactly one of your own photo, video, animation, document, audio or voice note messages, optionally styled, with a current/new caption preview, owner approval, one provider attempt and a validated result (separate default-off `edit_own_caption` opt-in together with `send` and `read`; styles also need `edit_own_styled_text`); see [Own caption edit (F17 rest)](#own-caption-edit-f17-rest).
 - `prepare_pin_change` and `apply_prepared_pin_change` pin or unpin exactly one message (anyone's) in one chat, silently and for everyone, with a preview of the message, owner approval, one provider attempt and an observed pin state (separate default-off `pin_messages` opt-in together with `send` and `read`); see [Pin and unpin (F17 rest)](#pin-and-unpin-f17-rest).
+- `prepare_message_delete` and `apply_prepared_message_delete` delete exactly one of your own messages for everyone, irreversibly, with a preview of the message, owner approval in a dialog with a `Delete` button, one provider attempt right after a locked read, and `applied` only when Telegram confirms (separate default-off `delete_own_message` opt-in together with `send` and `read`); see [Delete one own message (F17 rest)](#delete-one-own-message-f17-rest).
 - `get_send_status` inspects the exact owned draft/attempt without approval, a send, or retry; late exact terminal evidence can refine an uncertain outcome.
 - `list_drafts`, `get_draft`, `update_draft`, `refresh_draft`, and `cancel_draft` manage pending drafts owned by this proxy and its current Telegram account (`send` capability).
 - `read_messages` reads up to 20 selected anchors with bounded full text/caption and message metadata (opt-in).
@@ -577,7 +578,7 @@ Use a stable, owner-only installation directory. Replace both `/ABSOLUTE/PATH/TO
 
 The readiness check connects to the broker, causing its sole TDLib client to initialize lazily, and verifies authorization only. It never creates a second TDLib client and does not search or read chat messages. A successful check writes `INITIALIZING_TDLIB` and `AUTHORIZATION_READY` to stderr and exits `0`. On the Homebrew/source path a `TDLIB_OPENSSL_KEG: openssl@3 <version>` line (or `unavailable`/`unrecognized`) follows `INITIALIZING_TDLIB`, naming the OpenSSL keg the Homebrew TDLib loads; the bundled runtime omits it.
 
-To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the sixty-two tools of the current candidate.
+To enable the server for this project, review `.codex/config.toml.example`, then copy it to `.codex/config.toml`. The configuration pins the absolute local executable and allowlists the sixty-four tools of the current candidate.
 
 ## Client distribution reference (0.53 candidate)
 
@@ -862,8 +863,8 @@ them. `albums` (0.56) holds only `album_send` and never implies `video` or `vide
 also needs the `video` profile. Since 0.57 `archive_edit` holds every own-message edit (`archive_chats`,
 `edit_own_text`, `edit_own_caption`, `edit_own_styled_text`), so one profile unlocks a styled edit; an owner who
 had it on sees it `partial` until enabling it again. `pin` (`pin_messages`) and `delete` (`delete_own_message`)
-are profiles of their own, so enabling edits never grants a broadcast pin or an irreversible delete; their tools
-arrive in later 0.57 parts. `_manifest` reports the table under
+are profiles of their own, so enabling edits never grants a broadcast pin or an irreversible delete.
+`_manifest` reports the table under
 `capability_profiles` (`profiles`, `dependencies`; the table only, never the switch command), and a
 `capability_disabled` guard refusal names the profile that unlocks the missing capabilities. A typed
 `capability_disabled` result (the reply tools) carries only `missing_capabilities`; the profile is the one
@@ -901,7 +902,8 @@ tool (including `get_attachment`, which only fills the owner-only local cache), 
 `update_*`, `refresh_*`, `cancel_draft`, the local artifact and upload tools and the owner upload
 authority tools. `idempotentHint` is set on pure reads and `get_*` tools, but not on the cursor readers
 or any `prepare_*` tool, because every preparation creates a new draft. `destructiveHint` is set only on
-`apply_prepared_text_edit`. Every tool is open-world.
+the tools that change provider state no tool restores: `apply_prepared_text_edit`, `apply_prepared_caption_edit`
+and `apply_prepared_message_delete`. Every tool is open-world.
 
 ### Prompts
 
@@ -2603,7 +2605,7 @@ account/session changes without provider observation are not claimed detectable.
 
 ## NEW local bytes supplied to the original MCP owner (B2C candidate)
 
-The candidate exposes 62 tools. The three owner tools below use existing
+The candidate exposes 64 tools. The three owner tools below use existing
 `artifacts` policy and compatible contract/generation admission. No skill is
 needed: the `issue_local_upload_authority` description and the CLI help contain this
 complete sequence.
@@ -4105,3 +4107,113 @@ Unofficial Telegram MCP will revalidate the account, the chat, the message and i
 It is a change dialog (`Cancel` default, `Apply`, 120 seconds) under the shared reading rule, mutually exclusive
 with every other preview. A forum-topic pin and a pin in a private chat or Saved Messages follow Telegram's own
 rules; they are part of the pending owner session.
+
+## Delete one own message (F17 rest)
+
+`prepare_message_delete` and `apply_prepared_message_delete` (candidate, 0.57 part 3) delete exactly one of your own
+messages for every participant of its chat. A deletion is irreversible: no tool, and nobody in the chat, can restore
+the message. The tools follow the [pin](#pin-and-unpin-f17-rest) model: a complete preview of the message, the same
+checks again at apply time, the local owner dialog (here with a `Delete` button), exactly one closed-shape attempt
+made right after a read of the message under the same provider lock, and a stated evidence order. Evidence so far
+is technical (synthetic provider); a real deletion is pending the owner.
+
+Enable `delete_own_message`, `send` **and** `read` in trusted runtime policy (the `delete` profile, which depends on
+`send` only; no edit or pin capability grants a deletion). Without all three a tool is not listed and is refused
+with `capability_disabled` at the SDK guard, the proxy (before it connects) and the broker; `get_send_status` for a
+deletion draft needs them too.
+
+```python
+deletion = prepare_message_delete(chat=-100123, message_id=456)
+# deletion.status == "prepared": show deletion.message_delete in full, obtain approval.
+result = apply_prepared_message_delete(draft_id=deletion.message_delete.draft_id, approved=True)
+```
+
+### Delete: inputs and refusals
+
+| Argument | Meaning |
+| --- | --- |
+| `chat` | Exact non-zero numeric chat ID of the message. |
+| `message_id` | Positive committed message ID of one of your own messages, from returned evidence. |
+
+The broker reads the chat, the message, its properties and the account in one serialized provider read and checks,
+in this order: Saved Messages (the account's own chat, where Telegram offers only a deletion for yourself) is
+`saved_messages`; a message that is not your own outgoing message is `not_outgoing`; then the message is projected
+exactly like a [forward source](#exact-forwardcopy-f14), so content that projection cannot show is refused with its
+code: `unsupported_source_content` (a service message, a sticker, a poll or any kind other than text, photo, video,
+animation, document, audio and voice note), `hidden_source_content` (buttons, a hidden entity, a hidden link-preview
+target) and `unsupported_source_state` (a scheduled, sending, self-destructing or ephemeral message); last, a
+message Telegram lets you delete only for yourself (`messageProperties.can_be_deleted_for_all_users` false) is
+`not_deletable_for_all`. Each is a content-free `status="refused"` with the fixed detail `message is not eligible
+for deletion for everyone; no draft was created`. `unavailable` covers a secret chat, a missing or malformed message
+or properties (a `can_be_deleted_for_all_users` or `can_be_deleted_only_for_self` that is not a boolean included),
+lost authority and an exhausted budget. An own forwarded message is admitted; the dialog says it is a forward.
+
+### Delete: preview, request and evidence
+
+`prepared.message_delete` is the closed `MessageDeleteDraftPreview`: `draft_id`, `account_id`, `expires_at`,
+`approval_required`, `chat` (`chat_id`, `title`, `kind`), `message` (the forward source preview: chat, `message_id`,
+`sender`, author signature, via-bot, forward flag, date, `content_kind`, text or caption as marked reversible
+escapes with entities, link-preview facts, media facts and `source_sha256`) and `preview_sha256` (domain
+`telegram-search-mcp.message_delete`, version 1, over every field and the exact request). A preview naming the
+account's own chat never validates. The proxy checks the chat and the message against the request.
+
+The request has one closed shape, enforced before transport: `deleteMessages` with `chat_id`, `message_ids` holding
+exactly one ID and `revoke: true`. Only a dedicated delete transport sends it; the generic call refuses it and the
+change transport of the archive, edits and pins refuses it too, so their "a 4xx proves no change" rule never applies
+to a deletion. `deleteChatHistory`, `deleteChatMessagesBySender`, `deleteChatMessagesByDate`, `deleteChat`,
+`deleteSavedMessagesTopicHistory`, `deleteForumTopic` and every bulk unpin stay unreachable.
+
+The apply order is the pin's: the message is read again (a changed projection, chat identity, kind or title, or a
+message that is gone, is `message_changed`; `can_be_deleted_for_all_users` now false is `message_changed` too), then
+the dialog, the claim and, under the provider lock, the same read (chat, `getMessage`, `getMessageProperties`,
+account) and the guard, immediately followed by the one request. Pinned TDLib behaviour decides the evidence order:
+
+- TDLib deletes its local copy first and emits `updateDeleteMessages` before the server answers, and a later
+  `getMessage` answers 404 from that local state. Neither is evidence of a deletion.
+- For a message TDLib does not hold, it answers `ok` without any server request. The attempt is therefore made only
+  right after the locked `getMessage` succeeded; a failing read there is `local_failed` with no attempt.
+- `ok` after that read is `applied`: `TDLib deleted the message for everyone; the server confirmed the deletion`.
+  Nothing is read afterwards.
+- After a 4xx TDLib fetches the message from the server again. One `getMessage` read-back that finds that exact
+  message is `failed` (`TDLib rejected the deletion (code <N>); read back right after, the message is still in the
+  chat`); a 404, another message, a malformed answer or a failed read-back is `outcome_unknown`.
+- A 5xx, a negative or missing code, a lost response, a closed session or any result other than exactly `ok` is
+  `outcome_unknown`, with no read-back.
+
+TDLib logs a server deletion and replays it after a restart, so an unknown deletion may still complete later. Every
+`outcome_unknown` of a deletion says so (`the deletion was not confirmed; TDLib may still complete a deletion it
+logged, also after a restart, so the message may disappear later; do not retry automatically`), and so do its
+receipt replay, the lost-authority answer and the proxy's lost-broker answer, all with
+`next_action: "check_send_status"`. `get_send_status` stays content-free (`outcome_unknown`). Nothing is retried;
+a repeated apply replays the receipt (`previous provider attempt receipt; no new deletion was attempted`). A
+deletion that completed through that replay leaves nothing to prepare again: a new prepare is `unavailable`. The
+other statuses are the pin's (`declined`, `timeout`, `dialog_unavailable`, `expired`, `local_failed`, `error`). The
+draft's internal kind is `message_delete`; the generic draft tools never list, show, revise or cancel it.
+
+### Delete: owner dialog
+
+```text
+Delete your message <ID> in «<chat title>» (chat <ID>, <kind>) for everyone
+Account: <ID>
+Expires: <time>
+
+Message ID: <ID>
+Sender [untrusted Telegram evidence]: you
+[Author signature / Via bot / The message is itself a forward; its original sender is not shown]
+Date: <UTC time>
+Content: <kind>
+Text|Caption [untrusted Telegram evidence] (exact):   (or: Text|Caption: (none))
+│ «<text>»
+[Text|Caption entities (…): …] [Link preview …] [Media …]
+
+The deletion is irreversible: nobody can restore the message, not even you.
+The message is removed for every participant of the chat, not only for you.
+If the message is pinned, deleting it also unpins it.
+…
+Unofficial Telegram MCP will revalidate the account, the chat, the message and its permission to delete it for everyone, then make one deletion attempt; a deletion is never retried.
+```
+
+It is the only dialog with a `Delete` button: its heading reads `approve deletion`, `Cancel` stays the default and
+the timer (120 seconds) ends it with nothing deleted. With an account registry the heading names the alias and the
+account line is masked, as in every dialog. The document follows the shared reading rule and is mutually exclusive
+with every other preview.
