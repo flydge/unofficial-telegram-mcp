@@ -50,7 +50,7 @@ OTHERS = RuntimePolicy(enabled_capabilities=('send', 'read', 'edit_own_text', 'e
                                              'edit_own_styled_text', 'archive_chats', 'pin_messages'))
 PREPARED = 'immutable message deletion draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for deletion for everyone; no draft was created'
-APPLIED = 'TDLib deleted the message for everyone; the server confirmed the deletion'
+APPLIED = 'TDLib answered ok after a successful local read'  # review fix 057b: not proof of a server deletion
 # The disclosure of TDLib's logged deletion, replayed after a restart: every unknown delete outcome names it.
 UNKNOWN = ('the deletion was not confirmed; TDLib may still complete a deletion it logged, also after a restart, so '
            'the message may disappear later; do not retry automatically')

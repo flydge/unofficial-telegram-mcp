@@ -3798,8 +3798,8 @@ class Broker(SelectionBrokerMixin):
     @staticmethod
     def _message_delete_receipt(receipt, result, *, replay: bool = False,
                                 failure_detail: str = 'TDLib rejected the deletion', **changed):
-        """A receipt read back: applied (the server confirmed), failed (a rejection read back with the message still
-        there), or unknown with TDLib's logged deletion disclosed, fresh and on every replay."""
+        """A receipt read back: applied (TDLib's `ok` after a successful local read), failed (a rejection read back
+        with the message still there), or unknown with TDLib's logged deletion disclosed, fresh and on every replay."""
         if receipt.evidence == 'local_failed':
             return result('local_failed', 'previous local failure receipt; no provider change was attempted')
         if replay:

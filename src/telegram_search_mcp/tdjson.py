@@ -2172,12 +2172,14 @@ class TDLibClient:
     def delete_own_message(self, chat_id: int, message_id: int, *, expected, expected_account_id: int,
                            pre_send_guard: Callable[[], bool]) -> None:
         """Revalidate the reviewed own message and its deletion for everyone under the provider lock, then make one
-        deleteMessages attempt there; returns only after the server confirmed it (`ok`).
+        deleteMessages attempt there; returns only on TDLib's `ok` after a successful local read.
 
         TDLib answers `ok` without any server request for a message it does not hold, so the last request before the
         attempt is a getMessage of the exact message, under the same lock, that must succeed with the reviewed
-        projection: `ok` counts only after it. Every refusal before the raw send is no-attempt evidence. TDLib
-        deletes the local copy first and answers a later getMessage from it, so only `ok` is evidence of a deletion.
+        projection: `ok` counts only after it. Both reads are TDLib's local copy (memory or its message database), so a
+        deletion for yourself made elsewhere and not yet received still passes them (review fix 057b). Every refusal
+        before the raw send is no-attempt evidence. TDLib deletes the local copy first and answers a later getMessage
+        from it, so only `ok` is evidence of a deletion.
         After a 4xx TDLib fetches the message from the server again; one read-back that finds it raises the rejection
         (`failed`), anything else is unknown. Every other error, a lost or late answer and any other result are
         unknown. Nothing is retried."""

@@ -33,7 +33,8 @@ from .schemas import ChatId
 PREPARED = 'immutable message deletion draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'message is not eligible for deletion for everyone; no draft was created'
 UNAVAILABLE = 'message deletion draft is unavailable'
-APPLIED = 'TDLib deleted the message for everyone; the server confirmed the deletion'
+# Review fix (057b): both locked reads are TDLib's local copy, so `ok` is what is known, not a server deletion.
+APPLIED = 'TDLib answered ok after a successful local read'
 FOUND_AGAIN = 'read back right after, the message is still in the chat'
 # TDLib logs a server deletion and replays it after a restart: every unknown outcome discloses it.
 UNKNOWN = ('the deletion was not confirmed; TDLib may still complete a deletion it logged, also after a restart, so '
@@ -238,7 +239,8 @@ class ApplyPreparedMessageDeleteRequest(_Closed):
 
 
 class ApplyPreparedMessageDeleteResponse(NextActionHint, _Closed):
-    """`applied` means the server confirmed the deletion; `failed` that a read-back found the message still there."""
+    """`applied` means TDLib answered ok after a successful local read; `failed` that a read-back found the message
+    still there."""
     status: ApplyStatus
     draft_id: DraftId
     chat_id: ChatId | None = None
