@@ -63,6 +63,8 @@ from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, Apply
     ApplyPreparedTextEditResponse, NewText)
 from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPreparedCaptionEditResponse, NewCaption,
     PrepareCaptionEditRequest, PrepareCaptionEditResponse)
+from .pin_drafts import (Action as PinAction, ApplyPreparedPinChangeRequest, ApplyPreparedPinChangeResponse,
+    PreparePinChangeRequest, PreparePinChangeResponse)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -172,6 +174,8 @@ _TOOL_NAMES = [
     "get_album_send_status",
     "prepare_caption_edit",
     "apply_prepared_caption_edit",
+    "prepare_pin_change",
+    "apply_prepared_pin_change",
 ]
 # Each tool's full capability requirement, the guard's own rule; `_manifest` needs none.
 _TOOL_CAPABILITIES = {name: required_capabilities(OPERATION_CAPABILITIES[TOOL_OPERATIONS[name]])
@@ -544,6 +548,17 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "it marked edited.",
         "applied requires exactly the new caption and styles back; message_changed means no attempt. "
         + _approval("changes")),
+    "prepare_pin_change": ("Prepare pinning a message",
+        "Prepare pinning or unpinning one message in a chat (action pin or unpin); the message may be anyone's.",
+        "already_pinned or not_pinned means no draft. Service messages, content the preview cannot show, scheduled "
+        "messages and messages you may not pin are refused. A pin is silent, for everyone, and posts a visible "
+        "service message. Nothing changes; show the preview and ask first. Preparing again supersedes. "
+        + _UNTRUSTED),
+    "apply_prepared_pin_change": ("Apply a prepared pin change",
+        "Revalidate the message and its pin permission, then make exactly one pin or unpin attempt and observe it "
+        "for up to 10 seconds.",
+        "applied means the new state was observed; already_pinned or not_pinned mean it already held; "
+        "message_changed means no attempt. " + _approval("changes")),
 }
 
 
@@ -608,6 +623,8 @@ _FIELD_DOCS = {
     "new_caption": "The complete replacement caption as Telegram stores it; an empty string removes the caption.",
     "edit_entities": "Optional bold, italic, underline, strikethrough or spoiler spans (UTF-16 code units); needs "
                      "edit_own_styled_text.",
+    "pin_message_id": "ID of the message to pin or unpin, from returned evidence; it may be anyone's.",
+    "pin_action": "pin or unpin.",
 }
 
 
@@ -1125,9 +1142,9 @@ def build_server(
                 "secret chats",
                 "global public search and searchPublicChats",
                 "raw execute or bridge calls",
-                "mutations other than one approved Main/Archive move or one approved plain-text edit of an own "
-                "text message, including caption, styled or other people's edits, deletes, pins, reactions, folders, "
-                "bulk and moderation operations",
+                "mutations other than one approved Main/Archive move, one approved text or caption edit of an own "
+                "message, or one approved pin or unpin of one message, including other people's edits, deletes, bulk "
+                "unpins, reactions, folders, bulk and moderation operations",
                 "unapproved sends and automatic send retries",
                 "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
                 "video replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
@@ -1904,6 +1921,20 @@ def build_server(
         return get_service().apply_prepared_caption_edit(ApplyPreparedCaptionEditRequest(draft_id=draft_id,
                                                                                          approved=approved))
 
+    @server.tool(name="prepare_pin_change", annotations=_READ_ONLY_STATEFUL, structured_output=True)
+    def prepare_pin_change(chat: Annotated[ChatId, _about("chat")],
+                           message_id: Annotated[PositiveMessageId, _about("pin_message_id")],
+                           action: Annotated[PinAction, _about("pin_action")]) -> PreparePinChangeResponse:
+        return get_service().prepare_pin_change(PreparePinChangeRequest(chat=chat, message_id=message_id,
+                                                                        action=action))
+
+    @server.tool(name="apply_prepared_pin_change", annotations=_TRANSFER, structured_output=True)
+    def apply_prepared_pin_change(draft_id: Annotated[DraftId, _about("draft_id")],
+                                  approved: Annotated[bool, Field(strict=True), _about("approved")],
+                                  ) -> ApplyPreparedPinChangeResponse:
+        return get_service().apply_prepared_pin_change(ApplyPreparedPinChangeRequest(draft_id=draft_id,
+                                                                                     approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
@@ -1914,7 +1945,8 @@ def build_server(
             ("apply_prepared_archive",ApplyPreparedArchiveRequest),("prepare_text_edit",PrepareTextEditRequest),
             ("apply_prepared_text_edit",ApplyPreparedTextEditRequest),("prepare_album_send",PrepareAlbumSendRequest),
             ("send_prepared_album",SendPreparedAlbumRequest),("get_album_send_status",GetAlbumSendStatusRequest),
-            ("prepare_caption_edit",PrepareCaptionEditRequest),("apply_prepared_caption_edit",ApplyPreparedCaptionEditRequest)):
+            ("prepare_caption_edit",PrepareCaptionEditRequest),("apply_prepared_caption_edit",ApplyPreparedCaptionEditRequest),
+            ("prepare_pin_change",PreparePinChangeRequest),("apply_prepared_pin_change",ApplyPreparedPinChangeRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):

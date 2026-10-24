@@ -59,11 +59,14 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "addChatToList",
         "editMessageText",
         "editMessageCaption",
+        "pinChatMessage",
+        "unpinChatMessage",
     }
 )
 
 # State changes travel only through the dedicated one-attempt transport, never `_call`.
-_CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText", "editMessageCaption"})
+_CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText", "editMessageCaption", "pinChatMessage",
+                                   "unpinChatMessage"})
 # Only the dedicated forward and album transports may send a forward or an album; `_call` refuses them in any shape.
 _CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages", "sendMessageAlbum"}
 
@@ -540,6 +543,21 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             or not _exact_caption(caption)
         ):
             raise ForbiddenTDLibRequest("TDLib caption edit request shape is not allowed")
+    if request_type == "pinChatMessage" and (
+        # A silent pin for every participant (0.57): both flags fixed, never a per-request choice.
+        set(payload) != {"@type", "chat_id", "message_id", "disable_notification", "only_for_self"}
+        or not _is_forum_chat_id(payload.get("chat_id"))
+        or not _is_integer_in_range(payload.get("message_id"), 1, 2**53 - 1)
+        or payload.get("disable_notification") is not True
+        or payload.get("only_for_self") is not False
+    ):
+        raise ForbiddenTDLibRequest("TDLib pin request shape is not allowed")
+    if request_type == "unpinChatMessage" and (
+        set(payload) != {"@type", "chat_id", "message_id"}
+        or not _is_forum_chat_id(payload.get("chat_id"))
+        or not _is_integer_in_range(payload.get("message_id"), 1, 2**53 - 1)
+    ):
+        raise ForbiddenTDLibRequest("TDLib unpin request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
         file_id = payload.get("file_id")
         if not _is_strict_integer(file_id) or not 0 < file_id <= (1 << 31) - 1:
@@ -869,6 +887,11 @@ class MessageSendFailed(TDLibError):
         if self.provider_code is None:
             return "TDLib rejected the send"
         return f"TDLib rejected the send (code {self.provider_code})"
+
+
+class ChangeRejectedInTarget(MessageSendFailed):
+    """A 4xx change rejection whose one read-back found the target state already holding (0.57 pin and unpin): this
+    attempt changed nothing, and the message already is pinned or unpinned as asked."""
 
 
 class MessageSendNotAttempted(TDLibError):
@@ -2042,6 +2065,83 @@ class TDLibClient:
         if edit_date is None:
             raise MessageSendOutcomeUnknown("TDLib returned an invalid caption edit result")
         return edit_date
+
+    def read_pin_message(self, chat_id: int, message_id: int):
+        """One serialized read of chat identity, the message projection, its pin state and pin permission (0.57)."""
+        from .pin_drafts import PinSnapshot
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError("pin message is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            chat = self.resolve_target(chat_id)
+            message = self.get_message(chat_id, message_id)
+            properties = self._call({"@type": "getMessageProperties", "chat_id": chat_id, "message_id": message_id})
+            return PinSnapshot.create(chat, chat_id, message, message_id, properties)
+
+    def read_pin_state(self, chat_id: int, message_id: int) -> bool:
+        """One serialized getMessage of the exact message: its own is_pinned."""
+        from .pin_drafts import pin_state
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError("pin message is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            return pin_state(self.get_message(chat_id, message_id), chat_id, message_id)
+
+    def change_pin(self, chat_id: int, message_id: int, *, action: str, expected, expected_account_id: int,
+                   pre_send_guard: Callable[[], bool]) -> bool | None:
+        """Revalidate the reviewed message, its pin state and permission under the provider lock, make one
+        pinChatMessage or unpinChatMessage attempt, then observe the pin state with bounded getMessage reads outside
+        the lock; returns it (None when it could not be read).
+
+        Every refusal before the raw send is no-attempt evidence. A 4xx proves this attempt changed nothing; one
+        read-back then raises ChangeRejectedInTarget when the message already is in the target state (a pin that
+        races another pin answers a 4xx, not "not modified"), else the rejection itself. Nothing is retried."""
+        from .pin_drafts import PinChangeSpec, PinSnapshot, pin_request
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(expected, PinSnapshot) or expected.anchor != (chat_id, message_id) or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                PinChangeSpec(snapshot=expected, action=action)  # still the reviewed change of a pinnable message
+                return (self.read_pin_message(chat_id, message_id) == expected and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError("pin authority changed")
+            except Exception as error:
+                raise MessageSendNotAttempted("pin revalidation failed") from error
+            target = action == "pin"
+            try:
+                response = self._change_transport(pin_request(action, chat_id, message_id),
+                                                  pre_transport_guard=pre_send_guard)
+            except MessageSendFailed as error:
+                try:
+                    in_target = self.read_pin_state(chat_id, message_id) is target
+                except Exception:
+                    in_target = False
+                if in_target:
+                    raise ChangeRejectedInTarget("TDLib rejected the change",
+                                                 provider_error={"code": error.provider_code}) from error
+                raise
+            if response.get("@type") != "ok" or set(response) - {"@type", "@extra"}:
+                raise MessageSendOutcomeUnknown("TDLib returned an invalid pin result")
+        return self._observe_pin(chat_id, message_id, target)
+
+    def _observe_pin(self, chat_id: int, message_id: int, target: bool) -> bool | None:
+        observed = None
+        deadline = time.monotonic() + self.CHANGE_OBSERVATION_SECONDS
+        aggregate_deadline = getattr(self._request_context, "deadline", None)
+        if aggregate_deadline is not None:
+            deadline = min(deadline, aggregate_deadline)
+        for _ in range(64):
+            try:
+                observed = self.read_pin_state(chat_id, message_id)
+            except Exception:
+                observed = None
+            if observed is target or time.monotonic() + self.CHANGE_POLL_SECONDS >= deadline:
+                break
+            time.sleep(self.CHANGE_POLL_SECONDS)
+        return observed
 
     def _change_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:
         """One raw state-change request and its direct result; no send observation is involved."""

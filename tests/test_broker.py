@@ -497,6 +497,8 @@ client.close()
             "get_album_send_status",
             "prepare_caption_edit",
             "apply_prepared_caption_edit",
+            "prepare_pin_change",
+            "apply_prepared_pin_change",
         ]
         # Registration order, filtered by the loaded policy (tools/list lists only usable tools).
         usable = set(available_tools(RuntimePolicy().enabled_capabilities))

@@ -400,19 +400,17 @@ def _reply_artifact_document(validated, alias) -> str:
         f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
 
 
-def _forward_document(validated, alias) -> str:
-    """The text or caption is an exact gutter payload; entity covered spans, link-preview URLs, file
-    facts and the author signature are « » spans, all under the readable rule."""
+def _message_lines(source, account_id: int, *, remove_caption: bool = False,
+                   forward_note: str = 'Source is itself a forward: the copy carries no original attribution') -> list:
+    """One projected message (a forward source; 0.57: a message to pin or unpin): the text or caption is an exact
+    gutter payload; entity covered spans, link-preview URLs, file facts and the author signature are « » spans, all
+    under the readable rule."""
     from .forward_drafts import unescaped
-    source, recipient = validated.source, validated.recipient
-    mode = ('Mode: FORWARD — recipients see the original sender' if validated.mode == 'forward' else
-            'Mode: COPY — sent as your own message, no attribution' +
-            ('; caption removed' if validated.remove_caption else ''))
     label = 'Text' if source.content_kind == 'text' else 'Caption'
 
     def name(value):  # marked sanitized names, not escapes
         return _span(_evidence(value))
-    if validated.remove_caption:
+    if remove_caption:
         content = ['Caption: removed — not sent']
     elif source.text is None:
         content = [f'{label}: (none)']
@@ -444,14 +442,23 @@ def _forward_document(validated, alias) -> str:
     attribution = (([f'Author signature {_MARK}: {name(source.author_signature)}']
                     if source.author_signature is not None else []) +
                    ([f'Via bot {_MARK}: user {source.via_bot_user_id}'] if source.via_bot_user_id is not None else []) +
-                   (['Source is itself a forward: the copy carries no original attribution'] if source.is_forward else []))
+                   ([forward_note] if source.is_forward else []))
+    return [f'Message ID: {source.message_id}',
+            f'Sender {_MARK}: {_sender(source.sender.kind, source.sender.id, account_id)}', *attribution,
+            f'Date: {source.date.isoformat()}', f'Content: {source.content_kind}', *content, *link, *media]
+
+
+def _forward_document(validated, alias) -> str:
+    """The source message under the readable rule (`_message_lines`), its chat, the mode and the recipient."""
+    source, recipient = validated.source, validated.recipient
+    mode = ('Mode: FORWARD — recipients see the original sender' if validated.mode == 'forward' else
+            'Mode: COPY — sent as your own message, no attribution' +
+            ('; caption removed' if validated.remove_caption else ''))
     return _document(
         [f'Forward a message to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})', mode,
          _account_line(validated.account_id, alias), f'Expires: {validated.expires_at.isoformat()}'],
         [f'Source chat: {_span(source.chat.title)} ({_chat(source.chat.chat_id, validated.account_id)})',
-         f'Message ID: {source.message_id}',
-         f'Sender {_MARK}: {_sender(source.sender.kind, source.sender.id, validated.account_id)}', *attribution,
-         f'Date: {source.date.isoformat()}', f'Content: {source.content_kind}', *content, *link, *media],
+         *_message_lines(source, validated.account_id, remove_caption=validated.remove_caption)],
         [f'Draft: {validated.draft_id}', f'Source SHA-256: {source.source_sha256}',
          f'Preview SHA-256: {validated.preview_sha256}'],
         f'{identity.DISPLAY_NAME} will revalidate the source, its permissions and the recipient, '
@@ -585,6 +592,29 @@ def _caption_edit_document(validated, alias) -> str:
         'then make one caption edit attempt.')
 
 
+def _pin_change_document(validated, alias) -> str:
+    """The message to pin or unpin (it may be another member's; its content is untrusted evidence) and the side
+    effects stated plainly: a pin is silent, for everyone, and posts a visible service message (0.57)."""
+    chat, message, account = validated.chat, validated.message, validated.account_id
+    if validated.action == 'pin':
+        effects = ['Telegram posts a visible service message about the pin that every participant of the chat sees.',
+                   'The message is pinned for everyone in the chat, not only for you, and silently: members get no '
+                   'notification.',
+                   'Messages pinned earlier stay pinned.']
+    else:
+        effects = ['The message is unpinned for everyone in the chat; no service message is posted.']
+    verb = 'Pin' if validated.action == 'pin' else 'Unpin'
+    return _document(
+        _head(f'{verb} message {message.message_id} in {_span(chat.title)} ({_chat(chat.chat_id, account)}, '
+              f'{_EDIT_CHAT_KINDS[chat.kind]})', account, validated.expires_at, alias),
+        [*_message_lines(message, account, forward_note='The message is itself a forward; its original sender is '
+                                                        'not shown'), '', *effects],
+        [f'Draft: {validated.draft_id}', f'Source SHA-256: {message.source_sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its pin permission, then make '
+        f'one {validated.action} attempt and report the pin state it observes right after.')
+
+
 _ALBUM_GROUPS = {'media': 'media (photos and videos)', 'documents': 'documents'}
 
 
@@ -625,17 +655,27 @@ def _text_only(display_name, caption, duration_seconds, source_sha256, source_di
 def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
-            draft_preview, account_alias, album_preview, caption_edit_preview) -> tuple[str, bool]:
+            draft_preview, account_alias, album_preview, caption_edit_preview, pin_change_preview) -> tuple[str, bool]:
     """(document, is a change) for exactly one preview bound to the broker's own arguments."""
     _require(_valid_alias(account_alias))
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
-                archive_preview, text_edit_preview, draft_preview, album_preview, caption_edit_preview)
+                archive_preview, text_edit_preview, draft_preview, album_preview, caption_edit_preview,
+                pin_change_preview)
     _require(sum(value is not None for value in previews) == 1)
     _require((kind == 'forward') == (forward_preview is not None) and (kind == 'video') == (video_preview is not None)
              and (kind == 'archive') == (archive_preview is not None) and
              (kind == 'text_edit') == (text_edit_preview is not None) and (kind == 'album') == (album_preview is not None)
-             and (kind == 'caption_edit') == (caption_edit_preview is not None))
+             and (kind == 'caption_edit') == (caption_edit_preview is not None)
+             and (kind == 'pin_change') == (pin_change_preview is not None))
+    if pin_change_preview is not None:
+        # A change bound to the chat, its title and the hashed message projection (0.57).
+        from .pin_drafts import PinChangeDraftPreview
+        validated = PinChangeDraftPreview.model_validate(pin_change_preview)
+        _require(validated.chat.chat_id == recipient and validated.chat.title == recipient_title and
+                 sha256 == validated.message.source_sha256 and text in ('', None) and caption in ('', None) and
+                 duration_seconds is None and source_sha256 is None and source_display_name is None)
+        return _pin_change_document(validated, alias), True
     if caption_edit_preview is not None:
         # A change bound like a text edit: the chat, its title and the hashed source projection (0.57).
         from .caption_edit_drafts import CaptionEditDraftPreview
@@ -736,7 +776,7 @@ def render_approval(**arguments) -> tuple[str, bool] | None:
 _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
                  video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
-                 account_alias=None, album_preview=None, caption_edit_preview=None)
+                 account_alias=None, album_preview=None, caption_edit_preview=None, pin_change_preview=None)
 
 
 def decide_approved_send(
@@ -756,6 +796,7 @@ def decide_approved_send(
     account_alias: str | None = None,
     album_preview: dict | None = None,
     caption_edit_preview: dict | None = None,
+    pin_change_preview: dict | None = None,
 ) -> ApprovalDecision:
     """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
     timer, or any failure to render or show the dialog means no send or change. `account_alias` (only once an
@@ -767,7 +808,7 @@ def decide_approved_send(
         reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
         draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview,
-        caption_edit_preview=caption_edit_preview)
+        caption_edit_preview=caption_edit_preview, pin_change_preview=pin_change_preview)
     if rendered is None:
         return UNAVAILABLE
     document, change = rendered

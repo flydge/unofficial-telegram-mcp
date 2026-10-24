@@ -61,6 +61,8 @@ DRAFT_KINDS = MappingProxyType({row.name: row for row in (
               spec='edit_drafts:TextEditSpec', display_name='Text edit'),
     DraftKind('caption_edit', change=True, unbacked=True, dedicated=True, status='edit_own_caption',
               spec='caption_edit_drafts:CaptionEditSpec', display_name='Caption edit'),
+    DraftKind('pin_change', change=True, unbacked=True, dedicated=True, status='pin_messages',
+              spec='pin_drafts:PinChangeSpec', display_name='Pin change'),
     # An album has its own status model (get_album_send_status); generic status never reads one (0.56).
     DraftKind('album', dedicated=True, status=REFUSED),
 )})

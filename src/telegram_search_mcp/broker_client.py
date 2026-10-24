@@ -56,6 +56,8 @@ from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPrepared
     PrepareCaptionEditRequest, PrepareCaptionEditResponse, UNAVAILABLE as CAPTION_EDIT_UNAVAILABLE)
 from .edit_drafts import (PrepareTextEditRequest, PrepareTextEditResponse, ApplyPreparedTextEditRequest,
     ApplyPreparedTextEditResponse, UNAVAILABLE as TEXT_EDIT_UNAVAILABLE)
+from .pin_drafts import (ApplyPreparedPinChangeRequest, ApplyPreparedPinChangeResponse, PreparePinChangeRequest,
+    PreparePinChangeResponse, UNAVAILABLE as PIN_UNAVAILABLE)
 from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, CreateLocalArtifactRequest, CreateLocalArtifactResponse,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, SendPreparedArtifactRequest, SendPreparedArtifactResponse,
@@ -253,7 +255,8 @@ SHORT_DEADLINE_OPERATIONS = frozenset({
     "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft", "prepare_reply_text_send",
     "get_reply_draft", "update_reply_draft", "refresh_reply_draft", "prepare_forward_send", "prepare_video_send",
     "prepare_chat_archive", "prepare_text_edit", "get_send_status", "search_chats", "verify_target",
-    "read_target_messages", "read_presentation", "prepare_album_send", "get_album_send_status", "prepare_caption_edit"})
+    "read_target_messages", "read_presentation", "prepare_album_send", "get_album_send_status", "prepare_caption_edit",
+    "prepare_pin_change"})
 
 
 from .selection_client import SelectionClientMixin, selected_method, selection_wire, strict_selection_response
@@ -1935,6 +1938,33 @@ class BrokerClient(SelectionClientMixin):
         except (BrokerUnavailable, ValidationError, ValueError):
             return ApplyPreparedCaptionEditResponse(status="outcome_unknown", draft_id=request.draft_id,
                                                     detail="broker response is unavailable; do not retry automatically")
+
+    def prepare_pin_change(self, request: PreparePinChangeRequest) -> PreparePinChangeResponse:
+        try:
+            response = PreparePinChangeResponse.model_validate(
+                self._request("prepare_pin_change", request.model_dump(mode="json")))
+            if response.pin_change is not None:
+                preview = response.pin_change
+                if (preview.chat.chat_id != request.chat or preview.message.message_id != request.message_id or
+                        preview.action != request.action):
+                    raise BrokerUnavailable("pin change preview does not match the request")
+            return response
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return PreparePinChangeResponse(status="unavailable", detail=PIN_UNAVAILABLE)
+
+    def apply_prepared_pin_change(self, request: ApplyPreparedPinChangeRequest) -> ApplyPreparedPinChangeResponse:
+        try:
+            response = ApplyPreparedPinChangeResponse.model_validate(
+                self._request("apply_prepared_pin_change", request.model_dump(mode="json")))
+            if response.draft_id != request.draft_id:
+                raise ValueError("pin change receipt does not match the request")
+            return response
+        except BrokerCompatibilityError as error:
+            return ApplyPreparedPinChangeResponse(status="error", draft_id=request.draft_id,
+                                                  detail="request rejected before dispatch: " + error.code)
+        except (BrokerUnavailable, ValidationError, ValueError):
+            return ApplyPreparedPinChangeResponse(status="outcome_unknown", draft_id=request.draft_id,
+                                                  detail="broker response is unavailable; do not retry automatically")
 
     def check(self) -> str:
         result = self._request("check", {})

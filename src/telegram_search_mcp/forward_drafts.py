@@ -12,7 +12,7 @@ from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .draft_models import _Closed, AccountId, DraftId, Hash
 from .forward_sources import (MAX_ENTITIES, MAX_TEXT, VISIBLE_ENTITY_TYPES, ForwardRefusal, ForwardSnapshot,
-                              visible_url)
+                              ForwardSource, visible_url)
 from .reply_drafts import EVIDENCE_MARKER, SEND_OPTIONS, digest
 from .reply_formatted_sources import _boundaries, _inert_json_string
 from .sanitize import sanitize_telegram_text
@@ -325,7 +325,13 @@ class ForwardSourcePreview(_Frozen):
     def create(cls, snapshot: ForwardSnapshot) -> 'ForwardSourcePreview':
         if not isinstance(snapshot, ForwardSnapshot):
             raise ValueError('forward snapshot is unavailable')
-        source = snapshot.source
+        return cls.from_source(snapshot.source, snapshot.chat_title)
+
+    @classmethod
+    def from_source(cls, source: ForwardSource, chat_title: str) -> 'ForwardSourcePreview':
+        """The display of one projected message in its chat (a forward source; 0.57: a message to pin or unpin)."""
+        if not isinstance(source, ForwardSource):
+            raise ValueError('forward source is unavailable')
         value = source.value
         content = value['content']
         kind = content['kind']
@@ -359,7 +365,7 @@ class ForwardSourcePreview(_Frozen):
             if 'has_spoiler' in content:
                 facts.update(has_spoiler=content['has_spoiler'], caption_above_media=content['show_caption_above_media'])
             media = ForwardMedia(size_bytes=primary['size'], unique_id_sha256=primary['unique_id_sha256'], **facts)
-        return cls(chat=ForwardChat(chat_id=value['chat_id'], title=snapshot.chat_title),
+        return cls(chat=ForwardChat(chat_id=value['chat_id'], title=chat_title),
                    message_id=value['message_id'],
                    sender=ForwardSender(kind=value['sender']['type'], id=value['sender']['id']),
                    author_signature=_name(value['author_signature']),

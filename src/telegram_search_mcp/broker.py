@@ -80,6 +80,7 @@ from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftReques
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
 from .search_service import ReadOnlyTelegramClient, SearchService
 from .tdjson import AuthorizationBlocked, MessageNotFound, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, SecretChatRejected, TDLibClient, TDLibError
+from .tdjson import ChangeRejectedInTarget
 from .forward_sources import ForwardRefusal, chat_identity
 from .forward_drafts import (ForwardChat, ForwardDraftPreview, ForwardSourcePreview, ForwardSpec,
     PrepareForwardSendRequest, PrepareForwardSendResponse, SendPreparedForwardRequest, SendPreparedForwardResponse,
@@ -110,12 +111,16 @@ from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPrepared
     CaptionEditSpec, CaptionRefusal, PrepareCaptionEditRequest, PrepareCaptionEditResponse, caption_styles,
     evidence_fits as caption_evidence_fits, input_refusal as caption_input_refusal, DISABLED as CAPTION_DISABLED,
     PREPARED as CAPTION_PREPARED, REFUSED as CAPTION_REFUSED, UNAVAILABLE as CAPTION_UNAVAILABLE)
+from .pin_drafts import (ApplyPreparedPinChangeRequest, ApplyPreparedPinChangeResponse, PinChangeDraftPreview,
+    PinChangeSpec, PinRefusal, PreparePinChangeRequest, PreparePinChangeResponse, IN_TARGET_EVIDENCE,
+    ALREADY_PINNED as PIN_ALREADY_PINNED, NOT_PINNED as PIN_NOT_PINNED, PREPARED as PIN_PREPARED,
+    REFUSED as PIN_REFUSED, UNAVAILABLE as PIN_UNAVAILABLE)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 # The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
                              'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit',
-                             'send_prepared_album', 'apply_prepared_caption_edit'})
+                             'send_prepared_album', 'apply_prepared_caption_edit', 'apply_prepared_pin_change'})
 # The 0.56 album operations. The contract row (album_send, then send) is checked with every other operation's; the
 # broker also checks the album policy itself (`_require_album_policy`) before admission, and the per-draft video
 # conjunction (video_send for a video item) wherever a draft is read.
@@ -1000,6 +1005,14 @@ class Broker(SelectionBrokerMixin):
             model = ApplyPreparedCaptionEditRequest.model_validate(payload)
             return self._apply_prepared_caption_edit(model, client_id=client_id,
                                                      deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_pin_change":
+            model = PreparePinChangeRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_pin_change(model, client_id=client_id).model_dump(mode="json")
+        if operation == "apply_prepared_pin_change":
+            model = ApplyPreparedPinChangeRequest.model_validate(payload)
+            return self._apply_prepared_pin_change(model, client_id=client_id,
+                                                   deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -3402,6 +3415,182 @@ class Broker(SelectionBrokerMixin):
                           **changed)
         except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
             return self._change_attempted(draft_id, client_id, 'caption_edit', result)
+
+    # 0.57 pin and unpin: the archive skeleton (an already-in-target state, an observation after the call), with a
+    # 4xx read back as the message already being in the target state or failed.
+    def _pin_change_preview(self, draft, owner: DraftOwner) -> PinChangeDraftPreview:
+        spec = draft.pin_change
+        if draft.kind != 'pin_change' or type(spec) is not PinChangeSpec:
+            raise DraftError(PIN_UNAVAILABLE)
+        self._require_change_policy('pin_messages')
+        return PinChangeDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title, kind=spec.snapshot.chat_kind),
+            spec=spec)
+
+    def _prepare_pin_change(self, request: PreparePinChangeRequest, *, client_id: str) -> PreparePinChangeResponse:
+        try:
+            owner = self._change_owner(client_id, 'pin_messages')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            snapshot = provider.read_pin_message(request.chat, request.message_id)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'pin_messages') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch):
+                raise DraftError(PIN_UNAVAILABLE)
+            if snapshot.is_pinned is (request.action == 'pin'):  # Already in the requested state: no draft.
+                return (PreparePinChangeResponse(status='already_pinned', detail=PIN_ALREADY_PINNED)
+                        if snapshot.is_pinned else PreparePinChangeResponse(status='not_pinned', detail=PIN_NOT_PINNED))
+            refusal = snapshot.refusal()
+            if refusal is not None:
+                raise PinRefusal(refusal)
+            spec = PinChangeSpec(snapshot=snapshot, action=request.action)
+            previews = []
+            draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.chat_title,
+                change=spec, evidence=lambda candidate: previews.append(self._pin_change_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PreparePinChangeResponse(status='prepared', pin_change=preview, detail=PIN_PREPARED)
+        except PinRefusal as refusal:
+            return PreparePinChangeResponse(status='refused', refusal=refusal.code, detail=PIN_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PreparePinChangeResponse(status='unavailable', detail=PIN_UNAVAILABLE)
+
+    def _apply_prepared_pin_change(self, request: ApplyPreparedPinChangeRequest, *, client_id: str,
+                                   deadline: float | None = None) -> ApplyPreparedPinChangeResponse:
+        if request.approved is not True:
+            return ApplyPreparedPinChangeResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
+        # Capture once: account reads, owner confirmation, the attempt and its observation share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._apply_prepared_pin_change_impl(request, client_id=client_id)
+
+    def _apply_prepared_pin_change_impl(self, request: ApplyPreparedPinChangeRequest, *,
+                                        client_id: str) -> ApplyPreparedPinChangeResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return ApplyPreparedPinChangeResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._change_owner(client_id, 'pin_messages')
+            if self._drafts.kind(draft_id, owner=owner) != 'pin_change':
+                return result('error', 'draft kind does not match apply tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                return self._pin_receipt(previous, result, replay=True)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.pin_change
+            if entry.kind != 'pin_change' or type(spec) is not PinChangeSpec:
+                return result('error', 'draft kind does not match apply tool')
+            chat_id, message_id = spec.snapshot.anchor
+            changed = dict(chat_id=chat_id, message_id=message_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                current = provider.read_pin_message(chat_id, message_id)
+            except (PinRefusal, MessageNotFound, SecretChatRejected, ValueError):
+                return result('message_changed', 'message changed; prepare a new pin change draft', **changed)
+            reviewed = spec.snapshot
+            if (current.source != reviewed.source or current.chat_identity != reviewed.chat_identity or
+                    current.chat_kind != reviewed.chat_kind or current.chat_title != reviewed.chat_title or
+                    current.chat_title != expected_title):
+                return result('message_changed', 'message changed; prepare a new pin change draft', **changed)
+            if current.is_pinned is spec.target:
+                return (result('already_pinned', 'message is already pinned; no change was attempted',
+                               is_pinned=True, **changed) if spec.target else
+                        result('not_pinned', 'message is not pinned; no change was attempted', is_pinned=False,
+                               **changed))
+            if not current.can_be_pinned:
+                return result('message_changed', 'message can no longer be pinned or unpinned; no change was '
+                              'attempted', **changed)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'pin_messages') != owner or self._shared_client() is not provider or
+                    provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(PIN_UNAVAILABLE)
+            preview = self._pin_change_preview(entry, owner).model_dump(mode='json')
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='pin_change', pin_change_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
+            # The local dialog may remain open while account, policy or provider change.
+            if self._change_owner(client_id, 'pin_messages') != owner:
+                raise DraftError(PIN_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(PIN_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            def pin_guard():
+                require_current(self._policy)
+                return (set(required_capabilities('pin_messages')) <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.change_claim_current(draft_id, owner=owner, kind='pin_change', provider=provider,
+                                                          provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the change'
+            try:
+                changer = getattr(provider, 'change_pin', None)
+                if not callable(changer):
+                    raise MessageSendNotAttempted('pin provider is unavailable')
+                observed = changer(chat_id, message_id, action=spec.action, expected=reviewed,
+                                   expected_account_id=owner.account_id, pre_send_guard=pin_guard)
+                if observed is spec.target:
+                    receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed=observed)
+                else:
+                    receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except ChangeRejectedInTarget as error:
+                # The attempt was rejected and changed nothing; the read-back found the target state holding.
+                failure_detail = self._change_failure(error)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed',
+                                              evidence=IN_TARGET_EVIDENCE[spec.target])
+            except MessageSendFailed as error:
+                failure_detail = self._change_failure(error)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider change was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._change_owner(client_id, 'pin_messages') != owner:
+                    raise DraftError(PIN_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            return self._pin_receipt(receipt, result, failure_detail=failure_detail, action=spec.action, **changed)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._change_attempted(draft_id, client_id, 'pin_change', result)
+
+    @staticmethod
+    def _pin_receipt(receipt, result, *, replay: bool = False, failure_detail: str = 'TDLib rejected the change',
+                     action: str | None = None, **changed):
+        """A receipt read back: applied with the observed state, a rejection that found the target state holding
+        (already_pinned / not_pinned), failed, or unknown."""
+        if receipt.evidence == 'local_failed':
+            return result('local_failed', 'previous local failure receipt; no provider change was attempted')
+        in_target = {value: state for state, value in IN_TARGET_EVIDENCE.items()}.get(receipt.evidence)
+        if replay:
+            detail = 'previous provider attempt receipt; no new change was attempted'
+            if receipt.status == 'applied':
+                return result('applied', detail, is_pinned=receipt.observed)
+            if receipt.status == 'failed' and in_target is not None:
+                return result('already_pinned' if in_target else 'not_pinned', detail, is_pinned=in_target)
+            return result(receipt.status, detail)
+        if receipt.status == 'applied':
+            return result('applied', f'TDLib applied the {action}; the {"pinned" if receipt.observed else "unpinned"} '
+                          'state was observed right after the call', is_pinned=receipt.observed, **changed)
+        if receipt.status == 'failed' and in_target is not None:
+            return result('already_pinned' if in_target else 'not_pinned',
+                          f'{failure_detail}; read back right after, the message is '
+                          f'{"pinned" if in_target else "not pinned"}; this attempt changed nothing',
+                          is_pinned=in_target, **changed)
+        if receipt.status == 'failed':
+            return result('failed', failure_detail, **changed)
+        return result('outcome_unknown', 'the pin state was not observed; do not retry automatically', **changed)
 
     @staticmethod
     def _error_code(error: BaseException) -> str:

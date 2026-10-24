@@ -331,7 +331,8 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tools), len(_TOOL_NAMES))  # the registration, independent of the listing policy
         new = {'prepare_chat_archive', 'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'}
         later = {'prepare_album_send', 'send_prepared_album', 'get_album_send_status',  # 0.56 albums, after this slice
-                 'prepare_caption_edit', 'apply_prepared_caption_edit'}  # 0.57 caption edits
+                 'prepare_caption_edit', 'apply_prepared_caption_edit',  # 0.57 caption edits
+                 'prepare_pin_change', 'apply_prepared_pin_change'}  # 0.57 pin and unpin
         self.assertTrue(new <= set(tools))
         existing = [tools[name] for name in sorted(set(tools) - new - later)]
         self.assertEqual(len(existing), 51)

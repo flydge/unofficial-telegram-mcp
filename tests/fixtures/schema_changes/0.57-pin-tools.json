@@ -1,0 +1,6 @@
+{
+  "structure": {
+    "apply_prepared_pin_change": "new tool (0.57 pin and unpin): one approved pinChatMessage or unpinChatMessage attempt, the observed is_pinned, already_pinned/not_pinned after a read-back, the 0.54 approval statuses and next_action",
+    "prepare_pin_change": "new tool (0.57 pin and unpin): pin or unpin one message as an immutable draft; already_pinned and not_pinned without a draft"
+  }
+}

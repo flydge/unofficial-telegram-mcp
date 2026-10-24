@@ -21,8 +21,8 @@ from mcp import Client
 import test_archive_edit as archive
 from approval_layout import tail as dialog_tail
 from schema_changes import DIRECTORY as SCHEMA_CHANGES
-from test_archive_edit import (ACCOUNT, CHAT, CLIENT, DID, ERRORS, EXPIRY, FOREIGN, MARK, MID, PROPERTIES, chat,
-                               entity, escape, own_message)
+from test_archive_edit import (ACCOUNT, CHAT, CLIENT, DID, ERRORS, EXPIRY, MARK, MID, PROPERTIES, chat, entity,
+                               escape, own_message)
 from telegram_search_mcp.approval_prompt import confirm_approved_send
 from telegram_search_mcp.artifact_store import ArtifactStore
 from telegram_search_mcp.broker import Broker
@@ -31,8 +31,7 @@ from telegram_search_mcp.config import RuntimePolicy
 from telegram_search_mcp.contract import CompatibilityError
 from telegram_search_mcp.draft_kinds import DRAFT_KINDS
 from telegram_search_mcp.edit_drafts import (ApplyPreparedTextEditRequest, EditChat, EditSnapshot,
-    PrepareTextEditRequest, PrepareTextEditResponse, TextEditDraftPreview, TextEditSpec, edit_request,
-    edited_text_result)
+    PrepareTextEditRequest, TextEditDraftPreview, TextEditSpec, edit_request, edited_text_result)
 from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.server import build_server
 from telegram_search_mcp.tdjson import ForbiddenTDLibRequest, TDLibClient, _validate_bounded_request

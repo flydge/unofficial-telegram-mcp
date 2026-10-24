@@ -42,10 +42,10 @@ class ContractTests(unittest.TestCase):
                 self.assertIn(name, OPERATIONS)
                 self.assertEqual(_TOOL_CAPABILITIES[name], ('edit_own_caption', 'send', 'read'))
 
-    def test_the_census_grows_by_two_after_the_album_tools(self):
-        self.assertEqual(len(_TOOL_NAMES), 60)
-        self.assertEqual(len(set(_TOOL_NAMES)), 60)
-        self.assertEqual(tuple(_TOOL_NAMES[-2:]), TOOLS)
+    def test_the_caption_tools_follow_the_album_tools(self):
+        # Later slices append after these two (0.57 part 2: the pin tools); the census itself is theirs.
+        self.assertEqual(len(set(_TOOL_NAMES)), len(_TOOL_NAMES))
+        self.assertEqual(tuple(_TOOL_NAMES[58:60]), TOOLS)
 
     def test_the_slice_fixtures_list_the_new_tools_and_the_grown_capability_enum(self):
         tools = json.loads((SCHEMA_CHANGES / '0.57-caption-tools.json').read_text(encoding='utf-8'))
@@ -84,7 +84,7 @@ class SdkSurfaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_schemas_titles_and_annotations(self):
         from tool_listing import full_listing
         tools = await full_listing()
-        self.assertEqual(list(tools)[-2:], list(TOOLS))
+        self.assertEqual(list(tools)[58:60], list(TOOLS))
         prepare, apply = (tools[name] for name in TOOLS)
         self.assertEqual(set(prepare.input_schema['properties']), {'chat', 'message_id', 'new_caption',
                                                                    'outgoing_entities'})

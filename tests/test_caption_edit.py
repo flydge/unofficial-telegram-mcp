@@ -54,20 +54,22 @@ BOLD = {'offset': 0, 'length': 3, 'type': {'@type': 'textEntityTypeBold'}}
 KINDS = ('photo', 'video', 'animation', 'document', 'audio', 'voice_note')
 CONTENT_TYPES = {'photo': 'messagePhoto', 'video': 'messageVideo', 'animation': 'messageAnimation',
                  'document': 'messageDocument', 'audio': 'messageAudio', 'voice_note': 'messageVoiceNote'}
-# The exact closed sets after this slice: parts 2 and 3 of 0.57 (pin, delete) extend them deliberately.
+# The exact closed sets after 0.57 part 2 (part 1 admitted the caption edit, part 2 pin and unpin); part 3 (delete)
+# extends them deliberately.
 ALLOWED = {'getAuthorizationState', 'setTdlibParameters', 'checkDatabaseEncryptionKey', 'getMe', 'createPrivateChat',
            'searchPublicChat', 'searchChats', 'searchChatsOnServer', 'getChats', 'loadChats', 'getChat',
            'getChatListsToAddChat', 'getSupergroup', 'getForumTopics', 'getForumTopic', 'getForumTopicHistory',
            'searchMessages', 'searchChatMessages', 'getMessage', 'getMessageProperties', 'getChatHistory',
            'getMessageLink', 'getUser', 'downloadFile', 'getFile', 'cancelDownloadFile', 'sendMessage',
-           'sendMessageAlbum', 'forwardMessages', 'addChatToList', 'editMessageText', 'editMessageCaption'}
-CHANGES = {'addChatToList', 'editMessageText', 'editMessageCaption'}
+           'sendMessageAlbum', 'forwardMessages', 'addChatToList', 'editMessageText', 'editMessageCaption',
+           'pinChatMessage', 'unpinChatMessage'}
+CHANGES = {'addChatToList', 'editMessageText', 'editMessageCaption', 'pinChatMessage', 'unpinChatMessage'}
 CALL_REFUSED = CHANGES | {'forwardMessages', 'sendMessageAlbum'}
-# Requests no tool may reach in this slice, whatever their shape.
+# Requests no tool may reach, whatever their shape.
 UNREACHABLE = ('editMessageMedia', 'editMessageReplyMarkup', 'editMessageLiveLocation', 'editMessageChecklist',
                'editMessageSchedulingState', 'editInlineMessageCaption', 'deleteMessages', 'deleteChatHistory',
-               'deleteChatMessagesBySender', 'deleteChatMessagesByDate', 'deleteChat', 'pinChatMessage',
-               'unpinChatMessage', 'unpinAllChatMessages', 'setMessageReactions')
+               'deleteChatMessagesBySender', 'deleteChatMessagesByDate', 'deleteChat', 'unpinAllChatMessages',
+               'unpinAllForumTopicMessages', 'unpinAllDirectMessagesChatTopicMessages', 'setMessageReactions')
 
 
 def remote_file(size=4096, unique='unique-1'):
