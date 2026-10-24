@@ -63,7 +63,7 @@ SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510c
 # Every later slice that changes a tool schema lists the change in tests/fixtures/schema_changes/ and moves this
 # pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 part 1 (0.57-capabilities, 0.57-caption-tools), 0.57 part 2
 # (0.57-styled-text-edit, 0.57-pin-tools). Accounts themselves never enter the fingerprint.
-SCHEMA_FINGERPRINT = '3dab27ca48460410626dd4427ddbbc4709f69bca753878ff0f43320d2b595b69'
+SCHEMA_FINGERPRINT = '0f6a2640fe77152f0e02edb8c538bf3e243bbcbfd3fb0119b17ba422a156126f'
 SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities', '0.57-caption-tools',
                             '0.57-pin-tools', '0.57-styled-text-edit')
 
