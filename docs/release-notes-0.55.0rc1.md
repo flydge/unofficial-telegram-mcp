@@ -87,6 +87,8 @@ together.
   cache per account.
 - Client allowlists, permission rules and hooks keyed on `mcp__telegram_search__*` do not cover alias
   servers (`mcp__telegram_search_<alias>__*`).
+- A dialog already open when the first `account-add` creates the registry is covered only by its own
+  broker's lock: for at most its 120-second timeout another account's dialog can open beside it.
 - An uninstall with an alias left keeps the registry and the default's pin: installing a release below 0.55
   over it, re-logging the default into another account and then 0.55 again meets `account_mismatch` for the
   default.

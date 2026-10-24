@@ -2290,7 +2290,9 @@ changed when it exists) for its whole dialog, and a send or apply while another 
 shows nothing and answers `dialog_unavailable` with its draft pending, as within one broker. A lock that is
 not an owner-only regular single-link file of the user refuses every dialog the same way until the owner
 restores it (`chmod 600`). A client of one account cannot pop a dialog under a click the owner meant for
-another account's draft.
+another account's draft, with one accepted gap: a dialog already open when the first `account-add` creates the
+registry holds only its own broker's lock, so for at most its 120-second timeout another account's dialog can
+open beside it.
 
 **Keychain.** One Keychain service holds the application identity (`api_id`, `api_hash`), shared by every
 alias, as is the bundled `app-identity.json`: it identifies the application, not the account. Each
@@ -2490,7 +2492,8 @@ candidate) the rule holds across every account's broker, one process each: a bro
 non-blocking lock on the owner-only `TelegramSearchMCP-accounts/dialog.lock` for its whole dialog, and a
 send or apply on any account while another account's dialog is open, or while that lock file is not an
 owner-only (`0600`) regular single-link file of the user, answers `dialog_unavailable` the same way.
-Without a registry nothing is read or created there.
+Without a registry nothing is read or created there. A dialog already open when the first `account-add`
+creates the registry holds only its own broker's lock, for at most its 120-second timeout.
 
 The dialog runs through `subprocess.run` with a bounded timeout. Details are fixed strings; no input,
 dialog text or provider message is echoed.

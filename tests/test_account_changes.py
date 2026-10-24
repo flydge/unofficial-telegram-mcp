@@ -794,7 +794,7 @@ class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
         policy = self.jobs.root / 'runtime.toml'
         work = config.AccountPaths.for_alias('work', self.home)
         for line, code in ((self.THIRD, 'newer_state_kept'), ('0.55.0rc1', 'newer_state_kept'),
-                           ('0.55.0.dev0', 'older_state_kept'), ('0.54.0', 'older_state_kept'),
+                           (OLD_VERSION, 'older_state_kept'), ('0.54.0', 'older_state_kept'),
                            ('0.55.0.dev01', 'newer_state_kept'), ('v0.55.0', 'newer_state_kept'),
                            (NEW_VERSION, None)):
             with self.subTest(line=line):

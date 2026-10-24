@@ -1071,7 +1071,8 @@ and its own broker with one TDLib. The alias registry, `registry.json` in `Teleg
 (owner-only), lists the aliases and the account each one is pinned to; it exists only after the first
 `account-add`. Beside it, `dialog.lock` keeps one owner dialog open at a time across every account's
 broker: while one account's approval dialog is open, a send on another account answers
-`dialog_unavailable` and its draft stays pending. The Keychain service with the API pair, the bundled application identity and the Whisper
+`dialog_unavailable` and its draft stays pending (a dialog already open when the first `account-add` runs is
+covered only by its own broker, for at most its 120-second timeout). The Keychain service with the API pair, the bundled application identity and the Whisper
 model are shared. Each client entry runs the release's launcher with `mcp --account <alias>`: the alias is
 fixed in the entry, never a tool argument, an environment variable or a path a client supplies.
 
@@ -1224,10 +1225,12 @@ current release, and only while it knows aliases (0.55 or newer): anything else 
 - **Uninstall.** On every attempt it first gates every running broker in one pass, then stops each
   alias's connect job and broker, removes its plist and the Codex, Claude Code and Claude Desktop
   entries the installation owns for it; the result adds `accounts`. Alias roots, sessions and the
-  registry are never touched while an alias exists. After a later install, run `account-add <alias>` for
-  each alias it kept before any `connect` or upgrade: until then a login of that alias refuses
-  (`older_state_kept`, or `newer_state_kept` for a lower version) and an upgrade refuses
-  `policy_conflict`. The `account-add` repairs it: holding the alias's connect lock
+  registry are never touched while an alias exists. After a later install of a newer release, run
+  `account-add <alias>` for each alias it kept before any `connect` or upgrade: until then a login of that
+  alias refuses `older_state_kept` and an upgrade refuses `policy_conflict`. After a later install of a
+  lower release, a login refuses `newer_state_kept` and `account-add` refuses `policy_conflict`: upgrade to
+  exactly the release the alias last ran (that upgrade passes; any other refuses `policy_conflict`), then run
+  `account-add <alias>`. The `account-add` repairs it: holding the alias's connect lock
   (`login_in_progress`), it writes the client entries again, keeps the alias's registry entry, pin and
   session, and moves its `runtime.toml` version line onto the current release. Only a line from an equal
   or older release moves: one naming a newer release (a lower version installed after the uninstall)

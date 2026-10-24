@@ -20,7 +20,9 @@ fake launchd, client CLIs and TDLib sessions; two really authorized accounts are
   fail-closed; the user id is never printed. Once a registry exists the approval dialog names the alias
   and a masked account, and one owner dialog at a time holds across every account's broker (the
   owner-only `TelegramSearchMCP-accounts/dialog.lock`; another account's send meanwhile answers
-  `dialog_unavailable`); a chat that is the account's own reads "Saved Messages" in both modes.
+  `dialog_unavailable`; a dialog already open when the first `account-add` runs is covered only by its own
+  broker, for at most its 120-second timeout); a chat that is the account's own reads "Saved Messages" in both
+  modes.
 - Re-login hardening inside one broker: discovery `scan_` continuations bound to the account and
   generation, owner-aware draft routing.
 - Installer: `account-add` and `account-remove` (journaled; alias entries for Codex with
