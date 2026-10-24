@@ -1805,7 +1805,9 @@ authorization and releases it before the broker handoff. It writes only `run/con
 closed vocabularies); `wait` reads it strictly and reports only what it validates. An account alias
 (0.55 candidate) has its own job, `com.<home-directory-name>.telegram-search-mcp.a.<alias>.connect`
 running `connect-helper --account <alias>`, with its plist, status file and lock in that alias's own `run`
-directory; its page names the alias in its title and one header line, never the account.
+directory; its page names the alias in its title and one header line, never the account. An alias's lock
+is taken only inside its existing root, which no login creates, and an alias's `setup` and `resume` hold
+it from after the secure-terminal check through the handoff.
 
 The helper serves a stdlib HTTP screen on `127.0.0.1` at an ephemeral port. A fresh random 32-byte
 token lives only in the URL fragment, so it is never sent in a request or referrer; the page
@@ -2083,10 +2085,13 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   TDLib session and the Keychain are never written; their hashes are only read. With account aliases
   (0.55 candidate) the same holds for each alias: its broker plist and its `runtime.toml` version line
   move with the default's, and `accounts.json` beside `receipt.json` records its owned entries. The
-  account actions also write the alias registry and move a removed alias's root aside; a rollback below
-  0.55 with no alias left moves the registry and the default broker's `run/readiness.json` aside, and an
-  uninstall with no alias left moves the registry aside; nothing of a session is deleted
-  ([accounts boundary](#accounts-boundary-055-candidate)).
+  account actions also write the alias registry; `account-add` creates the alias's root (owner-only,
+  empty but for `run/`) and, on its repair path, moves the alias's version line; `account-remove` moves a
+  removed alias's root aside. A transaction over aliases may create the empty `run/connect.lock` it holds
+  in an alias root. A rollback below 0.55 with no alias left moves the registry and the default broker's
+  `run/readiness.json` aside, an uninstall with no alias left moves the registry aside, and a rollback that
+  keeps an alias on its newer release moves that alias's broker plist into its transaction; nothing of a
+  session is deleted ([accounts boundary](#accounts-boundary-055-candidate)).
 - **Pending-send gate.** Before the transaction exists, inside it once the release is copied, and again
   right before the broker is booted out, a running exact receipt-bound (or adopted) broker is asked,
   through its own interpreter and only with what every adopted release ships (0.51 and 0.52 included),
@@ -2096,7 +2101,9 @@ different action or kit started over an unfinished one refuses (`transaction_pen
   and any connected client context counts as well. A 0.51 or 0.52 broker has no such count, so there any
   context is an unknown answer. Anything but "none" (including an unknown answer) refuses
   (`pending_send_unresolved`). With account aliases each running alias broker is asked the same way
-  through its own socket, and any one of them refuses the whole change. The bootout
+  through its own socket, and any one of them refuses the whole change; a leftover alias broker of a
+  removed release is asked through its live socket under the current release, and one that cannot be
+  read refuses `alias_broker_unreadable` rather than being booted out unasked. The bootout
   follows the last check directly and precedes every client write, so a refusal leaves every client
   entry, the plist and the session unchanged; after the first check, the copied release tree and the
   unfinished transaction stay until the same command is repeated. Only the exact label is
@@ -2294,9 +2301,28 @@ only from the current release that knows aliases; they never log in or read the 
 entry only while it is exactly the entry their record describes (Codex: the recorded hash; Claude Code and
 Claude Desktop: the exact alias entry of one of this installation's releases), and an alias broker plist
 only in the installer's own shape for this installation; anything else is foreign and refused, never
-overwritten or removed. Every transaction over aliases holds each alias's connect lock for its run, so no
-login of an alias writes or loads a broker of another release meanwhile (`login_in_progress`). Upgrade and
-rollback gate every running broker before any change.
+overwritten or removed. Upgrade and rollback gate every running broker before any change, and uninstall
+gates every running broker in one pass before any bootout. `account-add`'s repair path (an alias an
+uninstall kept) moves the alias's `runtime.toml` version line only from an equal or older release, so a
+session a newer release served is never handed to an older one (`policy_conflict`).
+
+**Logins and installer transactions.** Every transaction over aliases holds each alias's connect lock for
+its run (a new alias's own `account-add` excepted: no login of it is admitted before its registry entry),
+so no login of an alias writes or loads a broker of another release meanwhile (`login_in_progress`).
+Between two runs no lock is held, so every alias login run from the installed release also refuses
+`transaction_pending`, changing nothing, while any installer transaction is unfinished or its state cannot
+be read; the default's login keeps 0.54's behaviour. Alias roots are created only by `account-add`
+(`0700`, empty but for `run/`): a login takes its connect lock only inside an existing root, creating at
+most `run/`, and reads the registry before and once it holds the lock, so a login racing an
+`account-remove` never recreates a moved-aside root or builds a session in it (`alias_unavailable`). A
+rollback never leaves a KeepAlive LaunchAgent naming a release other than the current one: an alias kept on
+the newer release its session was made with (`newer_state_kept`) has its plist moved into the transaction,
+its bytes kept and nothing deleted, and its logins refuse until the next upgrade or its removal. The
+installer never boots out a broker it cannot gate: a loaded alias broker whose definition names a removed
+release is probed through its live socket under the current release's interpreter, with a minimal
+environment and reading back only a fixed token; a refused connection or a vanished socket counts as no
+send, and anything else unreadable refuses `alias_broker_unreadable`, naming the owner's manual
+`launchctl bootout` of that broker's exact label.
 
 **Client allowlists.** A client allowlist, permission rule or hook keyed on `mcp__telegram_search__*` does
 not cover an alias's tools, which clients name `mcp__telegram_search_<alias>__<tool>`; the plugin stays
