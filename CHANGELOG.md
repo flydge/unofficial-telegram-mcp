@@ -3,10 +3,35 @@
 ## 0.55.0.dev0 — unreleased
 
 Development of 0.55.0, multiple accounts ([spec](docs/plans/0.55-multiple-accounts-spec.md),
-[task record](docs/plans/0.55-multiple-accounts-spec.tasks.md)): one `AccountPaths` per account with the
-default byte-identical to 0.54; a closed owner-only alias registry; `--account <alias>` on the launcher, the
-proxy, the broker and the transfer helper; the account pin (first authorized user per alias, mismatch and
-duplicate refusals, fail-closed). Technical evidence only.
+[task record](docs/plans/0.55-multiple-accounts-spec.tasks.md), draft
+[release notes](docs/release-notes-0.55.0rc1.md)). Technical evidence only: unit tests, synthetic homes,
+fake launchd, client CLIs and TDLib sessions; two really authorized accounts are an owner-session row.
+
+- Paths and registry: one `AccountPaths` per account, the default byte-identical to 0.54 (paths, labels,
+  plists, client entries, receipts, `runtime.toml` and the schema fingerprint, checked against
+  v0.54.0rc1); a closed owner-only alias registry (`TelegramSearchMCP-accounts/registry.json`, at most
+  eight aliases `[a-z][a-z0-9]{0,11}`) with the socket-path and tool-name budgets.
+- `--account <alias>` on the launcher, the proxy, the broker and the transfer helper; one broker
+  LaunchAgent and one connect job per alias; an alias's server names it in `serverInfo.name` and one
+  instructions line, and its QR page names it.
+- The account pin: each account's first authorized user, `account_mismatch` and `account_duplicate` at
+  every login and before every Telegram-sourced operation, fail-closed; the user id is never printed. Once
+  a registry exists the approval dialog names the alias and a masked account; a chat that is the
+  account's own reads "Saved Messages" in both modes.
+- Re-login hardening inside one broker: discovery `scan_` continuations bound to the account and
+  generation, owner-aware draft routing.
+- Installer: `account-add` and `account-remove` (journaled; alias entries for Codex with
+  `required = false`, Claude Code user scope also in plugin mode, Claude Desktop beside the default;
+  `accounts.json`; removal moves the session aside as `removed-<alias>-<32 hex>`, never deleting it);
+  `status` over every account; `capabilities --account`; upgrade, rollback and uninstall over the
+  default and every alias, with a pending-send gate per broker, `login_in_progress`, `accounts_present`
+  for a rollback below 0.55, and the registry moved aside once no alias is left. New installer codes
+  `accounts_present`, `accounts_inconsistent`, `default_check_failed`, `account_remove_incomplete`,
+  `release_not_current` and `login_in_progress`, plus the registry's codes.
+- Isolation matrix: every handle kind one account issues is refused by another exactly like an unknown
+  handle, on two real brokers over fake sessions.
+- Docs: an Accounts section in the installation guide, the reference and the security notes, and the
+  setup skill.
 
 ## 0.54.0rc1 — release candidate, 2026-10-23 (not published)
 

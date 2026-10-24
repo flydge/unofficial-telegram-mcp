@@ -39,7 +39,9 @@ into a retained private stage without installing. There is no public runnable
 download URL in this candidate.
 
 Default runtime storage is `~/Library/Application Support/TelegramSearch`,
-separate from the preserved default session in `TelegramSearchMCP/tdlib`.
+separate from the preserved default session in `TelegramSearchMCP/tdlib`. Each further account added
+under an alias has its own session root in `TelegramSearchMCP-accounts/<alias>`, never inside either
+folder ([Accounts](#accounts-055-candidate)).
 The installer registers, with ownership receipts:
 
 - Codex: only its owned `mcp_servers.telegram_search` subtree in `~/.codex/config.toml`;
@@ -83,9 +85,11 @@ repeating the same admitted installation verifies/reuses it, without consulting 
 Keychain operation, service start or stop, or session mutation. The one exception is a first install
 with `--adopt-legacy`: it stops the adopted broker (after the pending-send gate), starts it again if it
 was running, and rewrites only the `expected_package_version` line of `runtime.toml`. An upgrade and a
-rollback likewise stop only the receipt-bound (or adopted) broker, start it again only if it was
-running, and rewrite only that line; `uninstall` stops only the receipt-bound broker and writes nothing
-in the session directory. None of them logs in or touches the Keychain. A launch checks the release
+rollback likewise stop only the receipt-bound (or adopted) broker and the broker of each account alias,
+start each again only if it was running, and rewrite only that line in each account's `runtime.toml`
+(a rollback below 0.55 with no alias left also moves the default broker's `run/readiness.json` into its
+transaction); `uninstall` stops only those brokers and the alias connect jobs and writes nothing in any
+session directory. None of them logs in or touches the Keychain. A launch checks the release
 tree, index, receipt, pointer, transaction journal and home binding, and only the shape of
 the client records. It never reads the Codex `config.toml`, the Claude registration or the
 skill copies in `~/.agents/skills` and `~/.claude/skills`, so editing or wiping client
@@ -202,8 +206,10 @@ assistant never runs it for you, even when it has a shell. `show` changes nothin
 ```
 
 The same command with `capabilities enable <profile>` or `capabilities disable <profile>` changes one
-profile (the `releases/<pin>` directory is the one `current.json` names). A switch is never a step in the
-middle of an assistant session: it refuses while a send is in flight, an approval dialog is open, a send
+profile (the `releases/<pin>` directory is the one `current.json` names). A trailing `--account <alias>`
+shows or switches an account alias's own `runtime.toml` instead, gated by and restarting that alias's own
+broker ([Accounts](#accounts-055-candidate)); each account's profiles are independent. A switch is never
+a step in the middle of an assistant session: it refuses while a send is in flight, an approval dialog is open, a send
 outcome is not yet settled, or any MCP client context is active, so first settle pending sends, quit or
 disconnect every MCP client that used Telegram (or leave the Telegram tools unused for five minutes), run the
 switch, then reconnect the clients:
@@ -537,14 +543,17 @@ repeat or a resumed install keeps the recorded mode; an explicitly different mod
 | `skip` | Claude Code is not touched. | `claude_code: skipped`, `claude_skills: skipped`. |
 
 User scope and the plugin are exclusive because both at once would list the tool set twice. Codex, the
-`~/.agents/skills` copies and Claude Desktop are registered in every mode.
+`~/.agents/skills` copies and Claude Desktop are registered in every mode. The plugin serves only the
+default account; an [account alias](#accounts-055-candidate) gets its own user-scope entry under its own
+name in `user` and `plugin` mode, and none in `skip` mode.
 
 ### Claude Desktop
 
 When `~/Library/Application Support/Claude` exists, the installer adds one
 `mcpServers.telegram_search` entry to `claude_desktop_config.json` there. Its `command` is the installed
 release's `python3` and its `args` are `-I -S -B <release>/launcher.py mcp`, the same runtime the other
-clients use.
+clients use. `account-add` adds one `mcpServers.telegram_search_<alias>` entry beside it for each
+[account alias](#accounts-055-candidate), by the same rules.
 
 - With no `Claude` directory the result is `claude_desktop: skipped` and nothing is read or written.
 - The file is read as strict JSON, at most 1 MiB, without following links. It must be yours, have one
@@ -681,6 +690,10 @@ that an interruption resumes by repeating the command:
 5. `receipt.json` is rewritten and `current.json` is switched last. The broker is bootstrapped again
    only if it was running before.
 
+With [account aliases](#accounts-055-candidate), steps 2 to 5 cover each alias's broker, plist,
+`runtime.toml` version line and client entries in the same transaction
+([with accounts](#upgrade-rollback-and-uninstall-with-accounts)).
+
 The result is `status: upgraded` with `previous_release_root`, `service` and `next_action:
 restart_mcp_clients`. Reconnect every client: a running proxy that loaded the old policy lists only
 `_manifest` until it restarts. The Telegram session, the enrollment, the managed key and the Keychain
@@ -690,9 +703,10 @@ are not written.
 client (a 0.51 or 0.52 source-venv broker adopted with `--adopt-legacy` included), whether a send is
 pending: a send or apply request in flight, an approval dialog open, or a send outcome `get_send_status`
 could still settle (an `outcome_unknown` within its 15-minute status window), and whether any client
-context is connected. Any of them counts as pending. A 0.51 or 0.52 broker reports only client contexts,
-which never show a send, so there a connected context is an unknown answer, and an unknown answer counts
-as pending too. It asks before the transaction exists, again once the new release is copied, and a
+context is connected. Any of them counts as pending. With account aliases every running broker is asked,
+each through its own socket and policy, and any one of them refuses the whole change. A 0.51 or 0.52
+broker reports only client contexts, which never show a send, so there a connected context is an
+unknown answer, and an unknown answer counts as pending too. It asks before the transaction exists, again once the new release is copied, and a
 last time right before the broker is stopped, which comes before any client file is written. Any such
 answer refuses as `pending_send_unresolved` with every client entry, the broker, its plist and the
 session unchanged. A refusal at the first check changes nothing at all; at a later one the new release
@@ -796,8 +810,10 @@ or an explicitly given `--claude-code` mode other than the installed one, refuse
 also when the kit is the installed release's own (a repeat).
 Another install, upgrade, rollback or uninstall started while one is unfinished refuses as
 `transaction_pending`, and the refusal's `pending_action` (`install`, `upgrade`, `rollback` or
-`uninstall`) names the command to repeat first. The one exception is an `uninstall` over a parked upgrade
-or rollback (above).
+`uninstall`, or `account-add` or `account-remove` with the alias in `pending_account`) names the command
+to repeat first. The one exception is an `uninstall` over a parked upgrade or rollback (above). A running
+login of an account alias refuses as `login_in_progress`
+([with accounts](#upgrade-rollback-and-uninstall-with-accounts)).
 
 ### Rollback
 
@@ -829,7 +845,10 @@ a new `connect` enrollment), `runtime.toml` differs from its earlier bytes in mo
 and the `enabled_capabilities` line (a [profile switch](#enabling-more-capabilities-candidate) is kept; a
 new key such as `selection_ttl_seconds` refuses, because an older release may reject it), or the previous
 release's manifest or Codex ownership no longer matches. Upgrades recorded before this rule keep the
-whole-file comparison. A rollback does not undo a
+whole-file comparison. Each [account alias](#accounts-055-candidate) is checked the same way against its
+own `enrollment.json` and `runtime.toml`; an alias added after the upgrade refuses `rollback_refused`
+until it is removed, and a rollback to a release older than 0.55 refuses `accounts_present` while any
+alias exists ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)). A rollback does not undo a
 send, move or edit that already happened. Going back to a 0.51 install is a manual procedure; see
 [rollback](security.md#rollback).
 
@@ -861,7 +880,8 @@ finally the installation root with all releases.
 
 **The installation root belongs to the installer.** `~/Library/Application Support/TelegramSearch`
 holds only what the installer writes: `releases/`, `transactions/`, `receipt.json`, `current.json`,
-`adopted.json` and `.install.lock`. Do not keep your own files or folders there. An install, upgrade or
+`adopted.json`, `accounts.json` (only while an account alias has client entries) and `.install.lock`. Do
+not keep your own files or folders there. An install, upgrade or
 rollback refuses a root with any other top-level name (`runtime_conflict`), but `uninstall` removes the
 root as one owned folder, with everything inside it, including anything you added (a file at the top
 or a copy under `releases/`). Only the `--adopt-legacy` backups are moved out first
@@ -869,7 +889,8 @@ or a copy under `releases/`). Only the `--adopt-legacy` backups are moved out fi
 
 Each part reports `removed`, `absent`, `kept` (not an entry the installation owns, or changed since it
 was written, so left alone), or for a client `skipped`, `unavailable` or `not_found`, in the result fields `service`, `codex`, `claude_code`,
-`claude_desktop` and `skills`. `uninstall_incomplete` means an entry the installer owns was still
+`claude_desktop` and `skills`; with account aliases, `accounts` adds the same for each alias (and its
+`connect_job`). `uninstall_incomplete` means an entry the installer owns was still
 present after its removal attempt; repeat the command. An unfinished first install refuses as
 `transaction_pending` with `pending_action: install` and is left as it is; repeat the install first. An
 upgrade or rollback parked by a refusal (before its broker stop, or after a late refusal's restore; see
@@ -892,7 +913,11 @@ starts, finishes the same way and reports `installation: absent`. If the interru
 folder was gone, the next install removes the leftover intent itself.
 
 It never touches the Telegram session, `enrollment.json`, `runtime.toml`, the managed key or any
-Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`. The Claude Code
+Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`, and each account
+alias's under `TelegramSearchMCP-accounts/<alias>`. With account aliases the uninstall also stops their
+brokers and connect jobs and removes their owned entries; the alias registry stays while an alias exists,
+and with none left it is moved aside, never deleted
+([with accounts](#upgrade-rollback-and-uninstall-with-accounts)). The Claude Code
 plugin itself is not removed here; remove it with Claude Code. After uninstall, clients still hold the
 old tool list until they reconnect.
 
@@ -912,7 +937,9 @@ the [curl path](#curl-path):
   --index "$KIT/release-index.json" --trusted-index-sha256 <index_sha256> --seed-team <team_id> --adopt-legacy
 ```
 
-then the printed activation command. It applies to a first install and to an upgrade, not to `rollback`.
+then the printed activation command. It applies to a first install and to an upgrade, not to `rollback`,
+and only to the default account's entries and broker: an entry or broker plist under an account alias's
+name is never adopted (`account-add` refuses it).
 
 What it checks and what it does not: the recipe itself adds no check. It runs `bootstrap.sh` from the
 kit folder as given, so the release is checked only as far as you first checked the four files and the
@@ -958,6 +985,202 @@ backups are kept, never restored automatically.
   migration test. The interpreter's signing identifier is the same in every release, so that its
   designated requirement does not change between upgrades; that is the design and is not yet
   observed on a signed build.
+
+## Accounts (0.55 candidate)
+
+One installation can serve more than one Telegram account of the same macOS user. The account connected
+first stays the **default** account, in the same paths and under the same names as before; every further
+account gets a short local **alias**. Until the first `account-add` an installation is byte-identical to
+0.54: paths, launchd labels and plists, client entries, receipts, `runtime.toml` and the schema
+fingerprint, and the default account's paths and names never change. The evidence is unit and synthetic
+tests only; two really authorized accounts are an owner-session row.
+
+### Adding an account
+
+Run the current release's `account-add`, the same way as [rollback](#rollback):
+
+```bash
+ROOT="$HOME/Library/Application Support/TelegramSearch"
+RELEASE=$(/usr/bin/plutil -extract release_root raw -o - "$ROOT/current.json")
+/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+  "$RELEASE/python/bin/python3" -I -S -B "$RELEASE/launcher.py" account-add work
+```
+
+`account-add` registers the alias and writes its client entries; it never logs in. The result is
+`status: account_added` with `account`, `server_name` (`telegram_search_work`), `codex: registered`,
+`claude_code`, `claude_desktop` (with the manual command or entry when one is needed, as for an install),
+`default_check`, `next_action: run_activation_then_wait` and the `activation_command`: the same launcher
+ending in `connect --account work`. Then connect that account as under
+[Connect with a QR code](#connect-with-a-qr-code-primary-path), with `--account work` after `connect`,
+`wait` and `cancel`, and scan with the phone of the account you add. The page names the alias. The
+Terminal fallback works the same way (`setup --account work`, `resume --account work`). Reconnect the MCP
+clients afterwards (quit and reopen Claude Desktop); the alias is a server of its own.
+
+Before its client entries, `account-add` asks a running default broker one `check`, so the default
+account is pinned before the alias's first login: `default_check` is `ready`, `blocked` (not authorized;
+nothing to pin) or `not_loaded`. A check that does not answer refuses `default_check_failed` with the
+alias already registered; repeat the same command and it resumes there.
+
+The alias:
+
+- is `[a-z][a-z0-9]{0,11}`: a lowercase letter, then at most 11 lowercase letters or digits. `default` is
+  reserved: the default account is spelled by leaving `--account` out. Anything else is refused before
+  anything happens (by the launcher as `bundle_admission_or_install_failed`).
+- is one of at most eight (`registry_full`), and not one already registered (`alias_exists`).
+- fits the macOS socket limit: the alias's broker socket path is at most 103 bytes, so the home
+  directory path and the alias together may use at most 31 bytes (for `/Users/<name>`, the name and the
+  alias at most 24). A longer one is refused as `alias_path_too_long` before any folder exists, never
+  truncated.
+- fits the clients' 64-character tool names: `mcp__telegram_search_<alias>__<tool>` for this release's
+  longest tool (`alias_name_too_long`). Every 12-character alias fits today.
+
+`account-add` also refuses, before anything, a folder or broker plist already at the alias's place
+(`runtime_conflict`, `service_conflict`; never adopted), an existing entry under the alias's server name
+(`registration_conflict`, `claude_registration_conflict`, `claude_desktop_registration_conflict`,
+`claude_desktop_config_unsupported`), a loaded default broker that is not the receipt's exact definition
+(`service_conflict`) and any unfinished installer transaction (`transaction_pending`).
+
+### What an alias gets
+
+| | Default account | Alias `<alias>` |
+| --- | --- | --- |
+| Session root | `~/Library/Application Support/TelegramSearchMCP` | `~/Library/Application Support/TelegramSearchMCP-accounts/<alias>` |
+| Broker LaunchAgent | `com.<home-directory-name>.telegram-search-mcp.broker` | `com.<home-directory-name>.telegram-search-mcp.a.<alias>.broker`, its argv ending `--account <alias>` |
+| Connect job | `….telegram-search-mcp.connect` | `….telegram-search-mcp.a.<alias>.connect` |
+| MCP server name | `telegram_search` | `telegram_search_<alias>` |
+| Codex | `mcp_servers.telegram_search` | `mcp_servers.telegram_search_<alias>` with `required = false` |
+| Claude Code | user scope in `user` mode; the plugin in `plugin` mode | user scope in `user` and `plugin` mode; none in `skip` mode |
+| Claude Desktop | `mcpServers.telegram_search` | `mcpServers.telegram_search_<alias>`, beside the default's |
+
+Each session root has its own TDLib session and enrollment, `runtime.toml` (its first `connect` writes
+`read` and `artifacts` only), `run/` (socket, locks, connect status), artifact cache, uploads and staging,
+and its own broker with one TDLib. The alias registry, `registry.json` in `TelegramSearchMCP-accounts`
+(owner-only), lists the aliases and the account each one is pinned to; it exists only after the first
+`account-add`. The Keychain service with the API pair, the bundled application identity and the Whisper
+model are shared. Each client entry runs the release's launcher with `mcp --account <alias>`: the alias is
+fixed in the entry, never a tool argument, an environment variable or a path a client supplies.
+
+The Claude Code plugin stays default-only; in `plugin` mode an alias gets a user-scope entry under its own
+name, so no tool set is listed twice. A Codex alias entry is not required, so an alias that is not
+connected yet never keeps Codex from starting. Each alias's server announces the alias in its MCP
+`serverInfo.name` (`telegram-search-mcp-<alias>`) and one instructions line; its tools and schema
+fingerprint are the default's.
+
+**Allowlists and hooks.** Clients name an alias's tools `mcp__telegram_search_<alias>__<tool>`. A
+permission allowlist or a hook keyed on `mcp__telegram_search__*` does not cover them: add each alias's
+server name explicitly.
+
+**The account pin.** Each account's broker pins the Telegram user it first finds authorized, and every
+login (QR, `setup`, `resume`) applies the same rule before it hands the session over. Another user is
+refused: `account_mismatch` when it is not the alias's own user, `account_duplicate` when that user
+already serves another alias or the default account. Nothing is handed to the broker, the enrollment stays
+pending and the authorized session stays on disk, never logged out or deleted. Stop and check which
+phone scanned; to put another Telegram account under a name, remove the alias and add it again. The user
+id is never printed: once a registry exists, the approval dialog names the alias and the last two digits
+of the account (`Account: work (Telegram account ••42)`), for the default account too (`default`).
+
+### Status and capabilities of each account
+
+`status` without `--account` adds `accounts` once a registry exists, for `default` and every alias:
+`loaded` (its broker LaunchAgent), `authorized` (as its running broker recorded at its last account check;
+`null` when unknown) and `registered` (every client entry the installation recorded for it is present
+exactly, also an entry you added yourself from a printed command; `false` when one is missing or
+different; `null` when a client config cannot be read). It is `"unavailable"` when the registry or the
+installation cannot be read. `status` sends no check, starts nothing and never reports the account.
+`status --account <alias>` is that alias's own status plus `alias`, `loaded`, `authorized` and
+`registered`, without the default's `clients`. Without a registry the default's status keeps its 0.54
+keys.
+
+`capabilities show | enable <profile> | disable <profile> --account <alias>` switches that alias's own
+`runtime.toml`, behind its own broker's pending-send gate, and restarts its own broker
+([Enabling more capabilities](#enabling-more-capabilities-candidate)).
+
+`mcp`, `setup`, `resume`, `connect`, `wait`, `cancel`, `api-credentials` and `status` take the same
+trailing `--account <alias>`. An alias the registry does not list refuses `alias_unavailable` before any
+folder is created.
+
+### Removing or renaming an account
+
+`account-remove <alias>`, run like `account-add`, retires an alias. Refusals come first and change
+nothing: `alias_unknown`; an entry under the alias's name that is not exactly the one the installation
+recorded for it (`registration_conflict`, `claude_registration_conflict`,
+`claude_desktop_registration_conflict`; never overwritten); an alias broker plist that is not this
+installation's own shape (`service_conflict`); a send pending on the alias's broker
+(`pending_send_unresolved`: settle it and quit the clients that used the alias); a running login of the
+alias (`login_in_progress`).
+
+Then, journaled: its connect job is booted out, then its broker (gated again first) and its plist
+removed, both again on every attempt until the root moves; its own Codex, Claude Code and Claude Desktop
+entries are removed, neighbours kept; its registry entry and pin are dropped; its root is moved aside to
+`TelegramSearchMCP-accounts/removed-<alias>-<32 hex>`. The session is never deleted and never logged
+out: Telegram lists that device until you end it on the phone (Settings → Devices), and the moved folder
+stays until you remove it yourself. The result is `status: account_removed` with `service`, `connect_job`,
+`codex`, `claude_code`, `claude_desktop`, `session` (`moved` with `session_moved_to`, or `absent`) and
+`next_action: restart_mcp_clients`, plus `claude_removal_command` when the `claude` CLI was not found or
+`~/.claude.json` could not be read. `account_remove_incomplete` means an entry the installation owns was
+still present after its removal attempts; repeat the command.
+
+Renaming is a remove plus an add, then a new `connect --account <new alias>` login: the enrollment binds
+absolute paths, so a session never moves to another name. Adding a removed name again starts a new empty
+session; the moved folder is never reused. Removing the last alias keeps the registry with the default
+account's pin, so `status` keeps reporting `accounts` and the dialog keeps naming `default`; only a
+rollback below 0.55 or an uninstall with no alias left moves the registry aside.
+
+Both actions are journaled transactions like an upgrade: a repeat after an interruption resumes, and a
+repeat after one finished returns its result. While one is unfinished, every other installer action
+refuses `transaction_pending` with `pending_action` (`account-add` or `account-remove`) and
+`pending_account` (the alias); repeat that command first. Both run only from the current release, and
+only while it knows aliases (0.55 or newer): anything else refuses `release_not_current`.
+
+### Upgrade, rollback and uninstall with accounts
+
+- **One transaction for every account.** An upgrade or rollback goes over the default and every alias the
+  registry or `accounts.json` lists. Each running broker passes its own pending-send gate, and any
+  `pending` or unknown answer refuses the whole change. Each alias's broker is stopped after the
+  default's, its plist rewritten to the target release before the commit and started again after it only
+  if it was running; its `runtime.toml` version line moves with the default's; its Codex, Claude Code and
+  Claude Desktop entries are re-pointed like the default's. A late refusal restores every stopped broker,
+  the default's first. The result adds `accounts` (per alias its `service` and client outcomes).
+- **Logins.** For each run, every transaction over aliases (upgrade, rollback, uninstall, `account-add`,
+  `account-remove`) holds every alias's connect lock, so a login of an alias started meanwhile is refused.
+  A login already running refuses the transaction as `login_in_progress`, and the transaction stays
+  resumable: let the login finish (`wait --account <alias>`) or end it (`cancel --account <alias>`), then
+  repeat the same command. A finished login's idle connect job is no login.
+- **Plists.** An alias broker plist in the installer's own shape for this installation, naming any of its
+  releases (also one no longer installed), is repairable: `account-remove` and `uninstall` remove it, an
+  upgrade and a rollback rewrite it. Any other definition is foreign and never touched
+  (`service_conflict`).
+- **Rollback.** Each alias's session state is checked like the default's: its `enrollment.json` as at the
+  upgrade, its `runtime.toml` equal but for the version and `enabled_capabilities` lines. An alias added
+  after the upgrade, or one whose enrollment changed since, refuses `rollback_refused`. A rollback to a release
+  older than 0.55 refuses `accounts_present` while any alias exists: `account-remove` each first. With
+  none left, once the older broker serves again, it moves the registry aside to
+  `TelegramSearchMCP-accounts/retired-<32 hex>-registry.json` and the default broker's
+  `run/readiness.json` into its transaction (`account_registry: retired`); the older release reads
+  neither, and nothing is deleted.
+- **Uninstall.** On every attempt it stops each alias's connect job and broker again (gated first),
+  removes its plist and the Codex, Claude Code and Claude Desktop entries the installation owns for it;
+  the result adds `accounts`. Alias roots, sessions and the registry are never touched while an alias
+  exists. After a later install, `account-add <alias>` repairs each of them: it writes the client entries
+  again and keeps the alias's registry entry, pin and session; `connect --account <alias>` then starts its
+  broker again, with no new scan while Telegram keeps that session. With no alias left, uninstall moves
+  the registry aside as above (`account_registry: retired`).
+
+### Known limits of accounts
+
+- Each alias runs its own broker and TDLib: memory, TDLib's own session files and up to 1 GiB of
+  artifact cache, per account.
+- With `default_check: not_loaded` the default account is pinned at its broker's next check. A login of
+  an alias into the default's own Telegram account before that pins the user to the alias, and the default
+  broker then refuses `account_duplicate`; `account-remove` that alias to recover.
+- An uninstall with an alias left keeps the registry and the default's pin: installing a release older
+  than 0.55 over it, logging the default into another Telegram account and then installing 0.55 again
+  blocks the default with `account_mismatch`.
+- An alias added after an upgrade blocks that upgrade's rollback until it is removed.
+- An alias the registry lists without client entries (after an uninstall) gets none until its
+  `account-add`.
+- An upgrade or rollback waits for a running alias login (`login_in_progress`), and the account actions
+  run only from the current release (`release_not_current`).
 
 ## Published 0.51: prepare the legacy runtime
 

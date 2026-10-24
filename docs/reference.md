@@ -76,7 +76,7 @@ Before using tools, call `_manifest(check_broker=true)`. It must report `compati
 
 The schema fingerprint covers the finalized SDK input/output schemas, permission annotations, and the operation-to-capability mapping. A consumer may send its previously observed fingerprint as `expected_schema_fingerprint`. A mismatch reports `client_schema_mismatch` and blocks subsequent tool operations in that proxy until an explicit matching fingerprint recheck: refresh the consumer's tool listing, then call `_manifest` with `expected_schema_fingerprint` set to the current `schema_fingerprint` (the mismatch response returns it). Since the 0.54 candidate the mismatch detail, the guard text, the `_manifest` description, the `check_connection` prompt and the skill all say exactly that. A refreshed tools/list or a `_manifest` call without the token never clears it (0.54 decision): the server sees a tools/list request but not the model's tool view, and SDK clients re-list on their own to validate results, so only the consumer can state the fingerprint it now sees. A manifest without that token cannot detect an unreported consumer cache. Refresh the consumer's tool listing after upgrades; recreating a Codex conversation may be necessary. `package_mismatch`, `contract_mismatch`, `schema_mismatch`, and `config_mismatch` concern loaded runtime components; refreshing a cached tool list alone cannot repair them. `handshake_unavailable_or_legacy_broker` means the handshake was not established, including a legacy broker or transport failure; it is not proof of a particular cause.
 
-Capabilities are trusted local policy, not permissions granted by an MCP caller or a consumer's `enabled_tools`. An optional `~/Library/Application Support/TelegramSearchMCP/runtime.toml` must be a regular owner-only file (`0600`) in an owner-only non-symlink directory (`0700`). For example:
+Capabilities are trusted local policy, not permissions granted by an MCP caller or a consumer's `enabled_tools`. An optional `~/Library/Application Support/TelegramSearchMCP/runtime.toml` (an account alias reads its own `runtime.toml` in its session root, see [Account aliases](#account-aliases-055-candidate)) must be a regular owner-only file (`0600`) in an owner-only non-symlink directory (`0700`). For example:
 
 ```toml
 config_version = 1
@@ -377,6 +377,13 @@ for every path.
 4. `Technical details:`, with the draft ID and every bound hash.
 5. One closing sentence naming the revalidation and the single attempt.
 
+Once an account alias registry exists (0.55 candidate), every dialog names its account: the heading ends
+in `for account «<alias>»` ("… — approve send for account «work»"), and the account line reads
+`Account: <alias> (Telegram account ••NN)`, the alias and the last two digits of the account's user id,
+for the default account too (`default`). Without a registry the heading and the `Account: <ID>` line below
+are 0.54's. In both modes a chat whose ID is the account's own reads "Saved Messages" and a forwarded own
+message's sender reads "you".
+
 A row is at most 96 columns; wide characters count as two. A longer line continues on rows that start
 with the marker `┆` plus exactly one space. It breaks before a space where it can, so that space is
 visible as text after the marker (`┆  word`); a long word or URL breaks at the width with no space
@@ -582,7 +589,9 @@ Every result is one JSON object on stdout; every refusal is one line on stderr.
 | First install, or an upgrade over an installed release | `bootstrap.sh`, which runs the new release's `launcher.py bootstrap-install` | `activation_required` (first install), `upgraded`, or `rolled_back` with `installation: reused` (the kit of the release a finished rollback went back to, run again) |
 | `rollback` | the installed release's `launcher.py rollback` | `rolled_back` |
 | `uninstall` | the installed release's `launcher.py uninstall` | `uninstalled` |
-| `status` | the installed release's `launcher.py status` | the connect status, plus `clients` |
+| `account-add <alias>` (0.55 candidate) | the current release's `launcher.py account-add <alias>` | `account_added` |
+| `account-remove <alias>` (0.55 candidate) | the current release's `launcher.py account-remove <alias>` | `account_removed` |
+| `status` | the installed release's `launcher.py status` | the connect status, plus `clients`, and `accounts` once an alias registry exists |
 
 `bootstrap-install` takes five required options, each once (`--installation-root`, `--codex-home`,
 `--skills-root`, `--index`, `--trusted-index-sha256`), an optional `--claude-code user|plugin|skip`, and
@@ -629,15 +638,47 @@ rename left), `next_action: restart_mcp_clients`, one status for each of `servic
 and `skills` (a status for each skill copy: `removed`, `absent` or `kept`), and `legacy_backups` (a path)
 when `--adopt-legacy` backups were kept.
 
+With account aliases (0.55 candidate) an upgrade, rollback or uninstall result adds `accounts`, keyed by
+alias: an upgrade's or rollback's `service` for each alias and, for an alias with client entries,
+`codex: registered`, `claude_code`, `claude_desktop` and the same manual extras; an uninstall's
+`service`, `connect_job` (`stopped` or `not_loaded`), `codex`, `claude_code` and `claude_desktop`. A
+rollback below 0.55 or an uninstall that moved the alias registry aside adds `account_registry`
+(`retired`, or `absent` when there was none to move). Without an alias none of these keys appear.
+
+`account-add` returns `status: account_added`, `account` (the alias), `server_name`
+(`telegram_search_<alias>`), `codex: registered`, `claude_code` (`registered`, `reused`, `failed`,
+`unavailable`, `not_found`, or `skipped` in `skip` mode), `claude_desktop` (as for an install),
+`default_check` (`ready`, `blocked` or `not_loaded`: the one `check` it asked a running default broker),
+`next_action: run_activation_then_wait`, and `activation_arguments` and `activation_command` (the current
+release's `python3 -I -S -B launcher.py connect --account <alias>`), plus `claude_registration_command`,
+`claude_desktop_next_action` or `claude_desktop_manual_entry` as for an install. `account-remove` returns
+`status: account_removed`, `account`, `service` (`removed` or `absent`), `connect_job` (`stopped` or
+`not_loaded`), `codex` (`removed` or `absent`), `claude_code` (`removed`, `absent`, `unavailable`,
+`not_found` or `skipped`), `claude_desktop` (`removed`, `absent`, `unavailable` or `skipped`), `session`
+(`moved` or `absent`), `session_moved_to` (the moved root,
+`TelegramSearchMCP-accounts/removed-<alias>-<32 hex>`) when moved, `claude_removal_command` (an argv
+list) when `claude_code` is `not_found` or `unavailable`, and `next_action: restart_mcp_clients`. A repeat of either after it finished returns the
+same result.
+
 `status` adds `clients` to the connect status: `claude_desktop` is `ok`, `drift` (recorded as registered
 or reused, now absent or different; `claude_desktop_manual_entry` is added), `not_registered`, `skipped`
-or `unavailable`. It reads the file and writes nothing.
+or `unavailable`. It reads the file and writes nothing. Once an alias registry exists it also adds
+`accounts`: `{"default"|<alias>: {"loaded", "authorized", "registered"}}`, each `true`, `false` or `null`
+(unknown), or the string `unavailable` when the registry or the installation cannot be read. `loaded` is
+that account's broker LaunchAgent; `authorized` is what its running broker recorded at its last account
+check (`run/readiness.json`; no check is sent); `registered` is `true` when every client entry the
+installation recorded for that account is present exactly (also one the owner added from a printed
+command), `false` when one is missing or different, `null` when a client config cannot be read. The
+account itself is never reported. `status --account <alias>` returns that alias's connect status plus
+`alias`, `loaded`, `authorized` and `registered`, without `clients`.
 
 ### Installer refusal codes
 
-A refused install, `rollback` or `uninstall` prints `{"status":"refused","code":<code>}` on stderr, with one
-of these fixed codes or `bundle_admission_or_install_failed` for anything else; a `transaction_pending`
-refusal adds `"pending_action"`. Inputs and neighbouring configuration are never echoed.
+A refused install, `rollback`, `uninstall`, `account-add` or `account-remove` prints
+`{"status":"refused","code":<code>}` on stderr, with one of these fixed codes or
+`bundle_admission_or_install_failed` for anything else; a `transaction_pending` refusal adds
+`"pending_action"`, and for an unfinished `account-add` or `account-remove` also `"pending_account"`, its
+alias (a closed token). Inputs and neighbouring configuration are never echoed.
 
 | Code | Cause |
 | --- | --- |
@@ -657,9 +698,9 @@ refusal adds `"pending_action"`. Inputs and neighbouring configuration are never
 | `policy_conflict` | The `expected_package_version` line of `runtime.toml` cannot be rewritten exactly. |
 | `upgrade_conflict` | The Codex home, skills root or home, or an explicitly given `--claude-code` mode, differs from the installed receipt. |
 | `downgrade_refused` | The new package version is lower than the installed one, or is not a parsable version. |
-| `transaction_pending` | An earlier first install, upgrade, rollback or uninstall is unfinished; `pending_action` (`install`, `upgrade`, `rollback` or `uninstall`) names the action to repeat first. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
+| `transaction_pending` | An earlier first install, upgrade, rollback, uninstall, `account-add` or `account-remove` is unfinished; `pending_action` (`install`, `upgrade`, `rollback`, `uninstall`, `account-add` or `account-remove`) names the action to repeat first, and `pending_account` the alias of an account action. An uninstall interrupted after its retiring rename (its last journaled step) does not block an install, which finishes it first, and an upgrade or rollback parked by a refusal does not block an uninstall. |
 | `rollback_unavailable` | There is no previous release to return to. |
-| `rollback_refused` | Newer session state exists (a `runtime.toml` change beyond the version and `enabled_capabilities` lines, or a changed enrollment), or the previous release no longer matches its record. |
+| `rollback_refused` | Newer session state exists (a `runtime.toml` change beyond the version and `enabled_capabilities` lines, or a changed enrollment, of the default account or of any account alias; an alias added after the upgrade counts), or the previous release no longer matches its record. |
 | `service_restart_failed` | `launchctl` could not boot out or bootstrap the broker. |
 | `uninstall_incomplete` | An entry the installer owns was still present after its removal attempt. |
 | `installation_refused` | Any other bounded failure, such as an unsafe path or file, the installer lease held by another process, or an unusable argument. |
@@ -671,6 +712,32 @@ byte for byte and bootstraps that broker again if it was running (a broker loade
 neither release's is left running and refuses as `service_conflict`); the transaction stays unfinished until the same command is repeated,
 as often as needed, or, for an upgrade or rollback, until `uninstall` removes the installation together with what the change wrote
 ([a refusal after the broker stop](install.md#a-refusal-after-the-broker-stop)).
+
+The account codes of the 0.55 candidate ([accounts](install.md#accounts-055-candidate)). Every one comes
+before the transaction exists, unless its row says otherwise:
+
+| Code | Meaning | Next step |
+| --- | --- | --- |
+| `accounts_present` | A rollback to a release older than 0.55 while the alias registry or `accounts.json` lists an alias. | `account-remove` each alias, then roll back. |
+| `accounts_inconsistent` | `account-add` or `account-remove` found an `accounts.json` record for an alias the registry does not list (other than the action's own alias), or `account-add` of an alias that has such a record. An alias the registry lists without a record (as an uninstall leaves them) is not inconsistent. | Run `account-remove` of the alias that has the record (`status` lists it); it retires what is left. |
+| `default_check_failed` | `account-add`'s one `check` of the running default broker answered neither `ready` nor `blocked`. Late: the alias is already in the registry and the transaction stays unfinished. | Let the default broker finish starting, then repeat the same `account-add`; it resumes. |
+| `account_remove_incomplete` | `account-remove` found the alias's Claude Code or Claude Desktop entry still present (or its config unreadable) after its removal attempts. Late. | Repeat the same `account-remove` (quit Claude Desktop first if it rewrote its config). |
+| `release_not_current` | `account-add` or `account-remove` ran from a release tree other than the one `current.json` names, or the current release is older than 0.55 (after a rollback below 0.55). | Run the launcher of `current.json`'s `release_root`; below 0.55, upgrade first. |
+| `login_in_progress` | A login of an alias is running (its connect job loaded and not idle, or its connect lock held) when a transaction over aliases (upgrade, rollback, uninstall, `account-add`, `account-remove`) needs that alias's connect lock. The transaction stays resumable. | Let the login end (`wait --account <alias>`, or `cancel --account <alias>`), then repeat the same command. |
+| `alias_invalid` | The alias is outside `[a-z][a-z0-9]{0,11}` or is `default`. The launcher refuses such an argument earlier, as `bundle_admission_or_install_failed`. | Use a valid alias. |
+| `alias_path_too_long` | The alias's broker socket path would exceed the macOS 103-byte limit (home directory path plus alias above 31 bytes). Nothing is created. | Use a shorter alias. |
+| `alias_name_too_long` | `mcp__telegram_search_<alias>__<tool>` would exceed 64 characters for this release's longest tool. | Use a shorter alias. |
+| `alias_exists` | `account-add` of an alias the registry and `accounts.json` both list. | Nothing to add; `account-remove` it first to start over. |
+| `alias_unknown` | `account-remove` of an alias neither the registry nor `accounts.json` lists. | Check the name in `status`. |
+| `registry_full` | `account-add` beyond eight aliases. | `account-remove` one first. |
+| `registry_invalid` | `registry.json` is not the closed schema `{"version": 1, "aliases": {…}, "default_user_id": …}` (at most eight aliases, 4 KiB); any action that reads it refuses. | Stop and report; never edit the registry by hand. |
+| `registry_unsafe` | `registry.json`, its lease or its folder is not owner-only (`0600` file, `0700` folder), not a regular single-link file, or a link. Without a `registry.json` the folder is not judged. | Stop and report. |
+| `registry_busy` | Another process held the registry's lease beyond its bounded wait (about two seconds). | Repeat the same command. |
+
+`registry.json` and `accounts.json` say different things on purpose: the registry which aliases exist (for
+every broker and launcher action), `accounts.json` which client entries the installation owns for each.
+`account-add` writes the registry before any entry and `accounts.json` after the last; `account-remove`
+the reverse.
 
 `Install.command` and `bootstrap.sh` have their own fixed codes, listed under
 [DMG path](install.md#dmg-path); the plugin's `bin/install` codes are listed under
@@ -692,7 +759,57 @@ says yes; the macOS dialog then waits 120 seconds with Cancel as the default, `d
 carries one (`check_connection`, `connect_account`, `update_installation`, `enable_capability`,
 `search_again`, `restart_listing`, `check_send_status`), and names `capability_disabled`,
 `selection_unavailable` and an unavailable broker. The paired `telegram-search` skill gives the same answer rules
-(numbered sources, one coverage line) and the same preview floor, with per-tool detail on top.
+(numbered sources, one coverage line) and the same preview floor, with per-tool detail on top. A server
+started for an account alias (0.55 candidate, `--account <alias>`) appends one line,
+`This server serves the account alias «<alias>».`, and names itself `telegram-search-mcp-<alias>` in
+`serverInfo.name`; the default account's server keeps both exactly (`telegram-search-mcp`, no extra
+line). Neither enters the schema fingerprint.
+
+### Account aliases (0.55 candidate)
+
+An account alias is a closed token `[a-z][a-z0-9]{0,11}`; `default` is reserved and is spelled by leaving
+`--account` out, which keeps every argument list and behaviour of the default account. The alias is
+checked against the registry (`TelegramSearchMCP-accounts/registry.json`) before any folder is created,
+and is never echoed in a refusal. The procedures are in [installation](install.md#accounts-055-candidate)
+and the boundaries in [security](security.md#accounts-boundary-055-candidate).
+
+| Command | Form | Alias the registry does not list |
+| --- | --- | --- |
+| Installed launcher | `launcher.py <action> --account <alias>` for `mcp`, `broker`, `setup`, `resume`, `status`, `connect`, `wait`, `cancel` and `api-credentials` (and the internal `connect-helper`); `launcher.py capabilities show\|enable <profile>\|disable <profile> --account <alias>` | `{"status":"refused","code":"alias_unavailable"}`; outside the grammar `bundle_admission_failed` |
+| Proxy | `telegram-search-mcp --account <alias>` (also with `--check`) | `ACCOUNT_ALIAS_UNAVAILABLE` on stderr, exit 1; outside the grammar a usage error without the value, exit 2 |
+| Transfer helper | `telegram-search-transfer upload … --account <alias>`, `telegram-search-transfer download … --account <alias>` | `alias_unavailable`; outside the grammar `invalid_arguments` |
+| Broker | `telegram-search-broker run\|install\|status\|uninstall --account <alias>` | `BROKER_LIFECYCLE_FAILED` on stderr, exit 1 |
+| Source setup | `telegram-search-setup <command> --account <alias>` (every command but `connect-helper`, which only the alias's own connect job runs) | `alias_unavailable`, or `alias_path_too_long`, `registry_invalid`, `registry_unsafe` |
+
+An alias's proxy reaches only its own broker socket; its policy, artifact root and broker label are its
+own. No handshake key, tool parameter or response field names an account, so the contract version and
+the schema fingerprint are the default's. Clients name an alias's tools
+`mcp__telegram_search_<alias>__<tool>`: **a client allowlist, permission rule or hook keyed on
+`mcp__telegram_search__*` does not cover alias servers**; add `mcp__telegram_search_<alias>__*` for each
+alias you use.
+
+A handle minted by one account (any draft, a send status, an artifact ID, also through the transfer
+helper's `download`, an upload ID, authority or result token, a retained selection, a verified target, a
+cursor or a discovery `scan_` continuation) is refused by another account's server exactly like an
+unknown handle of the same kind.
+
+**The account pin.** Once a registry exists, each account's broker pins the Telegram user it first finds
+authorized (the default's too), and `connect`, `wait`, `setup` and `resume` apply the same rule after a
+login and before the handoff. Codes and next actions (the same in the connect status, `wait`, the inline
+result and `setup`):
+
+| Code | Meaning | `next_action` |
+| --- | --- | --- |
+| `account_mismatch` | The authorized user is not the one this account was first connected with. | `review_enrollment_binding_without_resetting` |
+| `account_duplicate` | The authorized user is already pinned under another alias, the default account included. | `review_enrollment_binding_without_resetting` |
+| `alias_unavailable` | The alias was removed from the registry meanwhile, or the registry cannot be read. | `stop_and_report` |
+| `dependency_unavailable` | The registry was busy. | `run_connect_again` (`setup` and `resume`: `resume_in_foreground_native_terminal`) |
+
+On a refusal nothing is handed to the broker, the enrollment stays pending and the authorized session
+stays on disk; it is never logged out or deleted. The pin's user id is compared and dropped, never
+printed, logged or returned. A broker that later finds another user answers `check` with `blocked` and every other
+operation with the existing `unavailable`, and `status` reports `authorized: false`; no wire code or
+field is added. Without a registry the default account reads no user for the pin (0.54).
 
 ### Capability profiles
 
@@ -1440,8 +1557,10 @@ Supported text, PDF, DOCX, image, XLSX and PPTX readers can use the artifact wit
 their separate limits and capabilities. Unsupported formats remain unsupported.
 Metadata is memory-only: a broker restart can leave retained bytes without reader
 metadata. Upload and artifact grants are client/session/incarnation scoped; same-UID
-filesystem export is a distinct trusted-local operation. Account registry support and
-selected Telegram XLSX/PPTX transfer are not added by this helper.
+filesystem export is a distinct trusted-local operation. Selected Telegram XLSX/PPTX transfer is not
+added by this helper. With `--account <alias>` (0.55 candidate) it uploads to that account alias's broker
+instead of the default account's; a name the registry does not list refuses `alias_unavailable` before
+anything is dispatched.
 
 ## Save a selected artifact locally
 
@@ -1459,7 +1578,9 @@ owner, and not be writable by group or others. Paths cannot contain symlinks,
 or directory; there is no overwrite option. The artifact cache and its quarantine
 are not valid destinations. A filename suffix does not convert the file format.
 
-Download reads only the selected snapshot in the fixed private artifact cache.
+Download reads only the selected snapshot in the fixed private artifact cache: the default account's,
+or with `--account <alias>` that alias's own cache and broker. An artifact ID another account issued is
+refused as `artifact_unverified`, exactly like an unknown one.
 It requires a canonical artifact ID, owner-only file, one hard link, matching size
 and SHA-256, and an unexpired 12-hour cache lifetime. The cache ceiling is 256 MiB;
 individual upload and reader limits still apply separately. Lookup is read-only:
@@ -2330,8 +2451,9 @@ A new client, release/reuse or broker restart cannot adopt a prior artifact/toke
 even when bytes still exist in the private cache; retrieve, create or upload again.
 Local create/upload/read can run offline. Provider-bound artifacts additionally
 require their separately observed account context; observed drift revokes them.
-The trusted broker generation represents one fixed default-session namespace,
-not a selectable numeric account or multi-account support. Public schemas and
+The trusted broker generation represents one account's fixed session namespace (the
+default account's, or one account alias's own broker since the 0.55 candidate), never a selectable
+numeric account inside one broker. Public schemas and
 artifact/upload ID formats are unchanged.
 
 For an approved artifact draft, release or observed account drift before the
