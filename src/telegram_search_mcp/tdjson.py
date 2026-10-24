@@ -61,12 +61,16 @@ _ALLOWED_REQUEST_TYPES = frozenset(
         "editMessageCaption",
         "pinChatMessage",
         "unpinChatMessage",
+        "deleteMessages",
     }
 )
 
-# State changes travel only through the dedicated one-attempt transport, never `_call`.
+# State changes travel only through the dedicated one-attempt transports, never `_call`.
 _CHANGE_REQUEST_TYPES = frozenset({"addChatToList", "editMessageText", "editMessageCaption", "pinChatMessage",
-                                   "unpinChatMessage"})
+                                   "unpinChatMessage", "deleteMessages"})
+# A deletion has its own transport and evidence rule (0.57): TDLib deletes the local copy before the server answers,
+# so the change transport's "4xx proves no change" rule never applies to it.
+_DELETE_REQUEST_TYPES = frozenset({"deleteMessages"})
 # Only the dedicated forward and album transports may send a forward or an album; `_call` refuses them in any shape.
 _CALL_REFUSED_TYPES = _CHANGE_REQUEST_TYPES | {"forwardMessages", "sendMessageAlbum"}
 
@@ -558,6 +562,16 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
         or not _is_integer_in_range(payload.get("message_id"), 1, 2**53 - 1)
     ):
         raise ForbiddenTDLibRequest("TDLib unpin request shape is not allowed")
+    if request_type == "deleteMessages" and (
+        # Exactly one message, deleted for every participant (0.57); never several ids or a deletion for self only.
+        set(payload) != {"@type", "chat_id", "message_ids", "revoke"}
+        or not _is_forum_chat_id(payload.get("chat_id"))
+        or type(payload.get("message_ids")) is not list
+        or len(payload["message_ids"]) != 1
+        or not _is_integer_in_range(payload["message_ids"][0], 1, 2**53 - 1)
+        or payload.get("revoke") is not True
+    ):
+        raise ForbiddenTDLibRequest("TDLib delete request shape is not allowed")
     if request_type in {"downloadFile", "getFile", "cancelDownloadFile"}:
         file_id = payload.get("file_id")
         if not _is_strict_integer(file_id) or not 0 < file_id <= (1 << 31) - 1:
@@ -2143,11 +2157,86 @@ class TDLibClient:
             time.sleep(self.CHANGE_POLL_SECONDS)
         return observed
 
+    def read_delete_message(self, chat_id: int, message_id: int):
+        """One serialized read of chat identity, the own message's projection, its deletion permissions and the
+        account (Saved Messages is the account's own chat) (0.57)."""
+        from .delete_drafts import DeleteSnapshot
+        if not _is_forum_chat_id(chat_id) or not _is_integer_in_range(message_id, 1, 2**53 - 1):
+            raise ValueError("delete message is unavailable")
+        with self._serialized_provider_call(getattr(self._request_context, "deadline", None)):
+            chat = self.resolve_target(chat_id)
+            message = self.get_message(chat_id, message_id)
+            properties = self._call({"@type": "getMessageProperties", "chat_id": chat_id, "message_id": message_id})
+            return DeleteSnapshot.create(chat, chat_id, message, message_id, properties, self.get_account_id())
+
+    def delete_own_message(self, chat_id: int, message_id: int, *, expected, expected_account_id: int,
+                           pre_send_guard: Callable[[], bool]) -> None:
+        """Revalidate the reviewed own message and its deletion for everyone under the provider lock, then make one
+        deleteMessages attempt there; returns only after the server confirmed it (`ok`).
+
+        The getMessage of that revalidation is the evidence `ok` needs: TDLib answers `ok` without any server request
+        for a message it does not hold, and the attempt follows a successful read under the same lock. Every refusal
+        before the raw send is no-attempt evidence. TDLib deletes the local copy first and answers a later getMessage
+        from it, so only `ok` is evidence of a deletion. After a 4xx TDLib fetches the message from the server again;
+        one read-back that finds it raises the rejection (`failed`), anything else is unknown. Every other error, a
+        lost or late answer and any other result are unknown. Nothing is retried."""
+        from .delete_drafts import DeleteSnapshot, MessageDeleteSpec, delete_request, message_present
+        with self._serialized_reply_call():
+            def current_authority():
+                if (not isinstance(expected, DeleteSnapshot) or expected.anchor != (chat_id, message_id) or
+                        type(expected_account_id) is not int or not 0 < expected_account_id < 2**53 or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                MessageDeleteSpec(snapshot=expected)  # still an own message deletable for everyone
+                return (self.read_delete_message(chat_id, message_id) == expected and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                if not current_authority():
+                    raise ValueError("delete authority changed")
+            except Exception as error:
+                raise MessageSendNotAttempted("delete revalidation failed") from error
+            response = self._delete_transport(delete_request(chat_id, message_id), pre_transport_guard=pre_send_guard)
+            if response.get("@type") == "error":
+                code = response.get("code")
+                if type(code) is int and 400 <= code <= 499:
+                    try:
+                        found = message_present(self.get_message(chat_id, message_id), chat_id, message_id)
+                    except Exception:
+                        found = False
+                    if found:
+                        raise MessageSendFailed("TDLib rejected the deletion", provider_error={"code": code})
+                    raise MessageSendOutcomeUnknown("TDLib rejected the deletion; the message was not found again")
+                raise MessageSendOutcomeUnknown("TDLib deletion error does not prove rejection")
+            if response.get("@type") != "ok" or set(response) - {"@type", "@extra"}:
+                raise MessageSendOutcomeUnknown("TDLib returned an invalid deletion result")
+
     def _change_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:
-        """One raw state-change request and its direct result; no send observation is involved."""
+        """One raw state-change request and its direct result; no send observation is involved. Only a 4xx provider
+        rejection proves no change; a deletion never comes here (`_delete_transport`)."""
+        response = self._change_exchange(payload, pre_transport_guard=pre_transport_guard,
+                                         allowed=_CHANGE_REQUEST_TYPES - _DELETE_REQUEST_TYPES)
+        if response.get("@type") == "error":
+            # Only a 4xx provider rejection proves no change; 5xx, negative or malformed
+            # codes may follow an applied change.
+            code = response.get("code")
+            if type(code) is int and 400 <= code <= 499:
+                raise MessageSendFailed("TDLib rejected the change", provider_error=response)
+            raise MessageSendOutcomeUnknown("TDLib change error does not prove rejection")
+        return response
+
+    def _delete_transport(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool]) -> dict[str, Any]:
+        """One raw deleteMessages request and its direct result, an error answer included: the caller classifies it,
+        since TDLib deletes the local copy before the server answers and a 4xx proves nothing alone (0.57)."""
+        return self._change_exchange(payload, pre_transport_guard=pre_transport_guard, allowed=_DELETE_REQUEST_TYPES)
+
+    def _change_exchange(self, payload: dict[str, Any], *, pre_transport_guard: Callable[[], bool],
+                         allowed: frozenset) -> dict[str, Any]:
+        """One raw request of an `allowed` change type and its direct answer; a refusal before the raw send is
+        no-attempt evidence, a lost or late answer is unknown."""
         try:
             _validate_bounded_request(payload, self._staging_root)
-            if payload.get("@type") not in _CHANGE_REQUEST_TYPES:
+            if payload.get("@type") not in allowed or payload.get("@type") not in _CHANGE_REQUEST_TYPES:
                 raise ForbiddenTDLibRequest("TDLib change request is not allowed")
         except ForbiddenTDLibRequest as error:
             raise MessageSendNotAttempted("change request shape is not allowed") from error
@@ -2182,13 +2271,6 @@ class TDLibClient:
                     raise MessageSendOutcomeUnknown("authorization changed before the change result")
                 if response.get("@extra") != extra:
                     continue
-                if response.get("@type") == "error":
-                    # Only a 4xx provider rejection proves no change; 5xx, negative or malformed
-                    # codes may follow an applied change.
-                    code = response.get("code")
-                    if type(code) is int and 400 <= code <= 499:
-                        raise MessageSendFailed("TDLib rejected the change", provider_error=response)
-                    raise MessageSendOutcomeUnknown("TDLib change error does not prove rejection")
                 return response
             raise MessageSendOutcomeUnknown("TDLib change result timed out")
 

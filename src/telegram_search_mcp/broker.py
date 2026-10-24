@@ -115,12 +115,18 @@ from .pin_drafts import (ApplyPreparedPinChangeRequest, ApplyPreparedPinChangeRe
     PinChangeSpec, PinRefusal, PreparePinChangeRequest, PreparePinChangeResponse, IN_TARGET_EVIDENCE,
     ALREADY_PINNED as PIN_ALREADY_PINNED, NOT_PINNED as PIN_NOT_PINNED, PREPARED as PIN_PREPARED,
     REFUSED as PIN_REFUSED, UNAVAILABLE as PIN_UNAVAILABLE)
+from .delete_drafts import (ApplyPreparedMessageDeleteRequest, ApplyPreparedMessageDeleteResponse, DeleteRefusal,
+    MessageDeleteDraftPreview, MessageDeleteSpec, PrepareMessageDeleteRequest, PrepareMessageDeleteResponse,
+    APPLIED as DELETE_APPLIED, AUTHORITY_UNKNOWN as DELETE_AUTHORITY_UNKNOWN, FOUND_AGAIN as DELETE_FOUND_AGAIN,
+    PREPARED as DELETE_PREPARED, REFUSED as DELETE_REFUSED, REPLAYED as DELETE_REPLAYED,
+    REPLAYED_UNKNOWN as DELETE_REPLAYED_UNKNOWN, UNAVAILABLE as DELETE_UNAVAILABLE, UNKNOWN as DELETE_UNKNOWN)
 
 RECEIPT_AUTHORITY_UNAVAILABLE = 'current receipt authority is unavailable; do not retry automatically'
 # The operations that may reach the provider after the owner's approval: counted in flight while they are handled.
 SEND_OPERATIONS = frozenset({'send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward',
                              'send_prepared_video', 'apply_prepared_archive', 'apply_prepared_text_edit',
-                             'send_prepared_album', 'apply_prepared_caption_edit', 'apply_prepared_pin_change'})
+                             'send_prepared_album', 'apply_prepared_caption_edit', 'apply_prepared_pin_change',
+                             'apply_prepared_message_delete'})
 # The 0.56 album operations. The contract row (album_send, then send) is checked with every other operation's; the
 # broker also checks the album policy itself (`_require_album_policy`) before admission, and the per-draft video
 # conjunction (video_send for a video item) wherever a draft is read.
@@ -1013,6 +1019,14 @@ class Broker(SelectionBrokerMixin):
             model = ApplyPreparedPinChangeRequest.model_validate(payload)
             return self._apply_prepared_pin_change(model, client_id=client_id,
                                                    deadline=request["deadline"]).model_dump(mode="json")
+        if operation == "prepare_message_delete":
+            model = PrepareMessageDeleteRequest.model_validate(payload)
+            with self._shared_client().request_budget(min(request["deadline"], time.monotonic() + 30)):
+                return self._prepare_message_delete(model, client_id=client_id).model_dump(mode="json")
+        if operation == "apply_prepared_message_delete":
+            model = ApplyPreparedMessageDeleteRequest.model_validate(payload)
+            return self._apply_prepared_message_delete(model, client_id=client_id,
+                                                       deadline=request["deadline"]).model_dump(mode="json")
         if operation == "prepare_text_send":
             model = PrepareTextSendRequest.model_validate(payload)
             return self._prepare_text_send(model, client_id=client_id, deadline=request['deadline']).model_dump(mode="json")
@@ -2885,14 +2899,15 @@ class Broker(SelectionBrokerMixin):
         self._require_change_policy(capability)
         return owner
 
-    def _change_attempted(self, draft_id: str, client_id: str, kind: str, result):
+    def _change_attempted(self, draft_id: str, client_id: str, kind: str, result,
+                          unknown: str = RECEIPT_AUTHORITY_UNAVAILABLE):
         """A consumed claim never reads as expired after a lost authority (attempt_outcome): the call cannot name
         the owner that held the claim, so its client decides."""
         outcome = self._drafts.attempt_outcome(draft_id, client_id=client_id, owner=None, kinds=frozenset({kind}))
         if outcome == 'local_failed':
             return result('local_failed', 'local revalidation failed; no provider change was attempted')
         if outcome == 'attempted':
-            return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
+            return result('outcome_unknown', unknown)
         return result('expired', 'draft is unavailable or no longer valid')
 
     def _archive_preview(self, draft, owner: DraftOwner) -> ArchiveDraftPreview:
@@ -3591,6 +3606,161 @@ class Broker(SelectionBrokerMixin):
         if receipt.status == 'failed':
             return result('failed', failure_detail, **changed)
         return result('outcome_unknown', 'the pin state was not observed; do not retry automatically', **changed)
+
+    # 0.57 deletion of one own message for everyone: the pin skeleton (re-read, one dialog, one claim, one attempt
+    # in the provider lock right after a successful getMessage), with the delete evidence order: ok is applied, a 4xx
+    # read back with the message found is failed, anything else unknown with TDLib's logged deletion disclosed.
+    def _message_delete_preview(self, draft, owner: DraftOwner) -> MessageDeleteDraftPreview:
+        spec = draft.message_delete
+        if draft.kind != 'message_delete' or type(spec) is not MessageDeleteSpec:
+            raise DraftError(DELETE_UNAVAILABLE)
+        self._require_change_policy('delete_own_message')
+        return MessageDeleteDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
+            expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
+            chat=EditChat(chat_id=draft.recipient, title=draft.recipient_title, kind=spec.snapshot.chat_kind),
+            spec=spec)
+
+    def _prepare_message_delete(self, request: PrepareMessageDeleteRequest, *,
+                                client_id: str) -> PrepareMessageDeleteResponse:
+        try:
+            owner = self._change_owner(client_id, 'delete_own_message')
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            snapshot = provider.read_delete_message(request.chat, request.message_id)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'delete_own_message') != owner or self._shared_client() is not provider
+                    or provider.send_observation_epoch is not epoch):
+                raise DraftError(DELETE_UNAVAILABLE)
+            refusal = snapshot.refusal()
+            if refusal is not None:
+                raise DeleteRefusal(refusal)
+            spec = MessageDeleteSpec(snapshot=snapshot)
+            previews = []
+            draft = self._drafts.prepare_change(owner=owner, chat_id=request.chat, chat_title=snapshot.chat_title,
+                change=spec, evidence=lambda candidate: previews.append(self._message_delete_preview(candidate, owner)))
+            [preview] = previews
+            self._remember_draft_title(draft)
+            return PrepareMessageDeleteResponse(status='prepared', message_delete=preview, detail=DELETE_PREPARED)
+        except DeleteRefusal as refusal:
+            return PrepareMessageDeleteResponse(status='refused', refusal=refusal.code, detail=DELETE_REFUSED)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
+            return PrepareMessageDeleteResponse(status='unavailable', detail=DELETE_UNAVAILABLE)
+
+    def _apply_prepared_message_delete(self, request: ApplyPreparedMessageDeleteRequest, *, client_id: str,
+                                       deadline: float | None = None) -> ApplyPreparedMessageDeleteResponse:
+        if request.approved is not True:
+            return ApplyPreparedMessageDeleteResponse(status='declined', draft_id=request.draft_id, detail=NOT_GIVEN)
+        # Capture once: account reads, owner confirmation, the attempt and its read-back share one budget.
+        bounded = min(deadline if deadline is not None else float('inf'), time.monotonic() + 330)
+        with self._shared_client().request_budget(bounded):
+            return self._apply_prepared_message_delete_impl(request, client_id=client_id)
+
+    def _apply_prepared_message_delete_impl(self, request: ApplyPreparedMessageDeleteRequest, *,
+                                            client_id: str) -> ApplyPreparedMessageDeleteResponse:
+        draft_id = request.draft_id
+        def result(status, detail, **values):
+            return ApplyPreparedMessageDeleteResponse(status=status, draft_id=draft_id, detail=detail, **values)
+        try:
+            owner = self._change_owner(client_id, 'delete_own_message')
+            if self._drafts.kind(draft_id, owner=owner) != 'message_delete':
+                return result('error', 'draft kind does not match apply tool')
+            previous = self._drafts.receipt(draft_id, owner=owner)
+            if previous is not None:
+                return self._message_delete_receipt(previous, result, replay=True)
+            with self._state_lock:
+                expected_title = self._draft_recipient_titles.get(draft_id)
+            if expected_title is None:
+                return result('expired', 'draft is unavailable after expiry or restart')
+            entry = self._drafts.peek(draft_id, owner=owner)
+            spec = entry.message_delete
+            if entry.kind != 'message_delete' or type(spec) is not MessageDeleteSpec:
+                return result('error', 'draft kind does not match apply tool')
+            chat_id, message_id = spec.snapshot.anchor
+            changed = dict(chat_id=chat_id, message_id=message_id)
+            provider = self._shared_client()
+            epoch = provider.send_observation_epoch
+            try:
+                current = provider.read_delete_message(chat_id, message_id)
+            except (DeleteRefusal, MessageNotFound, SecretChatRejected, ValueError):
+                return result('message_changed', 'message changed or is gone; no deletion was attempted', **changed)
+            reviewed = spec.snapshot
+            if (current.source != reviewed.source or current.chat_identity != reviewed.chat_identity or
+                    current.chat_kind != reviewed.chat_kind or current.chat_title != reviewed.chat_title or
+                    current.chat_title != expected_title):
+                return result('message_changed', 'message changed or is gone; no deletion was attempted', **changed)
+            if not current.can_be_deleted_for_all_users:
+                return result('message_changed', 'message can no longer be deleted for everyone; no deletion was '
+                              'attempted', **changed)
+            self._reply_budget_check(provider)
+            if (self._change_owner(client_id, 'delete_own_message') != owner or self._shared_client() is not provider
+                    or provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
+                raise DraftError(DELETE_UNAVAILABLE)
+            preview = self._message_delete_preview(entry, owner).model_dump(mode='json')
+            decision = approval_outcome(self._owner_dialog(recipient_title=expected_title,
+                    recipient=entry.recipient, display_name=entry.display_name, size_bytes=entry.size_bytes,
+                    sha256=entry.sha256, caption='', kind='message_delete', message_delete_preview=preview))
+            if decision != 'approved':  # Fail closed: declined, timeout or dialog_unavailable.
+                return result(decision, APPROVAL_DETAILS[decision])
+            # The local dialog may remain open while account, policy or provider change.
+            if self._change_owner(client_id, 'delete_own_message') != owner:
+                raise DraftError(DELETE_UNAVAILABLE)
+            if self._shared_client() is not provider or provider.send_observation_epoch is not epoch:
+                raise DraftError(DELETE_UNAVAILABLE)
+            self._reply_budget_check(provider)
+            claim = self._drafts.claim(draft_id, owner=owner, approved=True, provider=provider,
+                                       provider_epoch=provider.send_observation_epoch)
+            def delete_guard():
+                require_current(self._policy)
+                return (set(required_capabilities('delete_own_message')) <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch
+                    and self._drafts.change_claim_current(draft_id, owner=owner, kind='message_delete',
+                                                          provider=provider, provider_epoch=epoch))
+            failure_detail = 'TDLib rejected the deletion'
+            try:
+                deleter = getattr(provider, 'delete_own_message', None)
+                if not callable(deleter):
+                    raise MessageSendNotAttempted('delete provider is unavailable')
+                deleter(chat_id, message_id, expected=reviewed, expected_account_id=owner.account_id,
+                        pre_send_guard=delete_guard)
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='applied', observed='deleted')
+            except MessageSendNotAttempted:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')
+            except MessageSendFailed as error:
+                # A 4xx whose read-back found the message on the server: nothing was deleted.
+                code = error.provider_code
+                failure_detail = ('TDLib rejected the deletion' if code is None else
+                                  f'TDLib rejected the deletion (code {code})')
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed')
+            except Exception:
+                receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='outcome_unknown')
+            if receipt.evidence == 'local_failed':
+                return result('local_failed', 'local revalidation failed; no provider change was attempted')
+            try:
+                # Disclose observed evidence only to the same current account and policy.
+                if self._change_owner(client_id, 'delete_own_message') != owner:
+                    raise DraftError(DELETE_UNAVAILABLE)
+            except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                return result('outcome_unknown', DELETE_AUTHORITY_UNKNOWN)
+            return self._message_delete_receipt(receipt, result, failure_detail=failure_detail, **changed)
+        except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, AttributeError):
+            return self._change_attempted(draft_id, client_id, 'message_delete', result,
+                                          unknown=DELETE_AUTHORITY_UNKNOWN)
+
+    @staticmethod
+    def _message_delete_receipt(receipt, result, *, replay: bool = False,
+                                failure_detail: str = 'TDLib rejected the deletion', **changed):
+        """A receipt read back: applied (the server confirmed), failed (a rejection read back with the message still
+        there), or unknown with TDLib's logged deletion disclosed, fresh and on every replay."""
+        if receipt.evidence == 'local_failed':
+            return result('local_failed', 'previous local failure receipt; no provider change was attempted')
+        if replay:
+            return result(receipt.status, DELETE_REPLAYED_UNKNOWN if receipt.status == 'outcome_unknown'
+                          else DELETE_REPLAYED)
+        if receipt.status == 'applied':
+            return result('applied', DELETE_APPLIED, **changed)
+        if receipt.status == 'failed':
+            return result('failed', f'{failure_detail}; {DELETE_FOUND_AGAIN}', **changed)
+        return result('outcome_unknown', DELETE_UNKNOWN, **changed)
 
     @staticmethod
     def _error_code(error: BaseException) -> str:

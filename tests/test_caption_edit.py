@@ -37,7 +37,8 @@ from telegram_search_mcp.draft_kinds import DRAFT_KINDS
 from telegram_search_mcp.edit_drafts import EditChat
 from telegram_search_mcp.outgoing_drafts import DraftOwner, OutgoingDraftRegistry
 from telegram_search_mcp.tdjson import (ForbiddenTDLibRequest, MessageSendNotAttempted, TDLibClient,
-    _ALLOWED_REQUEST_TYPES, _CALL_REFUSED_TYPES, _CHANGE_REQUEST_TYPES, _validate_bounded_request)
+    _ALLOWED_REQUEST_TYPES, _CALL_REFUSED_TYPES, _CHANGE_REQUEST_TYPES, _DELETE_REQUEST_TYPES,
+    _validate_bounded_request)
 
 TOOLS = ('prepare_caption_edit', 'apply_prepared_caption_edit')
 CAPTION = RuntimePolicy(enabled_capabilities=('send', 'read', 'edit_own_caption'))
@@ -62,14 +63,19 @@ ALLOWED = {'getAuthorizationState', 'setTdlibParameters', 'checkDatabaseEncrypti
            'searchMessages', 'searchChatMessages', 'getMessage', 'getMessageProperties', 'getChatHistory',
            'getMessageLink', 'getUser', 'downloadFile', 'getFile', 'cancelDownloadFile', 'sendMessage',
            'sendMessageAlbum', 'forwardMessages', 'addChatToList', 'editMessageText', 'editMessageCaption',
-           'pinChatMessage', 'unpinChatMessage'}
-CHANGES = {'addChatToList', 'editMessageText', 'editMessageCaption', 'pinChatMessage', 'unpinChatMessage'}
+           'pinChatMessage', 'unpinChatMessage', 'deleteMessages'}
+CHANGES = {'addChatToList', 'editMessageText', 'editMessageCaption', 'pinChatMessage', 'unpinChatMessage',
+           'deleteMessages'}
+# 0.57 part 3: only the dedicated delete transport sends deleteMessages (exactly one id, revoke true); the change
+# transport refuses it (tests/test_message_delete.py).
+DELETES = {'deleteMessages'}
 CALL_REFUSED = CHANGES | {'forwardMessages', 'sendMessageAlbum'}
 # Requests no tool may reach, whatever their shape.
 UNREACHABLE = ('editMessageMedia', 'editMessageReplyMarkup', 'editMessageLiveLocation', 'editMessageChecklist',
-               'editMessageSchedulingState', 'editInlineMessageCaption', 'deleteMessages', 'deleteChatHistory',
-               'deleteChatMessagesBySender', 'deleteChatMessagesByDate', 'deleteChat', 'unpinAllChatMessages',
-               'unpinAllForumTopicMessages', 'unpinAllDirectMessagesChatTopicMessages', 'setMessageReactions')
+               'editMessageSchedulingState', 'editInlineMessageCaption', 'deleteChatHistory',
+               'deleteChatMessagesBySender', 'deleteChatMessagesByDate', 'deleteChat', 'deleteSavedMessagesTopicHistory',
+               'deleteForumTopic', 'unpinAllChatMessages', 'unpinAllForumTopicMessages',
+               'unpinAllDirectMessagesChatTopicMessages', 'setMessageReactions')
 
 
 def remote_file(size=4096, unique='unique-1'):
@@ -934,6 +940,7 @@ class TransportShapeTests(unittest.TestCase):
         self.assertEqual(set(_ALLOWED_REQUEST_TYPES), ALLOWED)
         self.assertEqual(set(_CHANGE_REQUEST_TYPES), CHANGES)
         self.assertEqual(set(_CALL_REFUSED_TYPES), CALL_REFUSED)
+        self.assertEqual(set(_DELETE_REQUEST_TYPES), DELETES)
         self.assertFalse(set(UNREACHABLE) & ALLOWED)
 
     def test_edit_message_caption_has_one_closed_shape(self):

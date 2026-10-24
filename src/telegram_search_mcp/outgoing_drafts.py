@@ -116,7 +116,7 @@ class OutgoingDraft:
     recipient_title: str = ""
     approval_required: bool = True
     kind: Literal["document", "photo", "voice_note", "text", "forward", "video", "archive", "text_edit",
-                  "caption_edit", "pin_change", "album"] = "document"
+                  "caption_edit", "pin_change", "message_delete", "album"] = "document"
     text: str = ""
     duration_seconds: int | None = None
     waveform_base64: str | None = None
@@ -136,6 +136,7 @@ class OutgoingDraft:
     text_edit: object | None = None  # edit_drafts.TextEditSpec; never artifact-backed
     caption_edit: object | None = None  # caption_edit_drafts.CaptionEditSpec; never artifact-backed
     pin_change: object | None = None  # pin_drafts.PinChangeSpec; never artifact-backed
+    message_delete: object | None = None  # delete_drafts.MessageDeleteSpec; never artifact-backed
     album: object | None = None  # album_drafts.AlbumSpec; every item artifact-backed
 
 

@@ -65,6 +65,8 @@ from .caption_edit_drafts import (ApplyPreparedCaptionEditRequest, ApplyPrepared
     PrepareCaptionEditRequest, PrepareCaptionEditResponse)
 from .pin_drafts import (Action as PinAction, ApplyPreparedPinChangeRequest, ApplyPreparedPinChangeResponse,
     PreparePinChangeRequest, PreparePinChangeResponse)
+from .delete_drafts import (ApplyPreparedMessageDeleteRequest, ApplyPreparedMessageDeleteResponse,
+    PrepareMessageDeleteRequest, PrepareMessageDeleteResponse)
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftId, DraftLimit,
                            UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, DraftText, DraftCaption)
@@ -176,6 +178,8 @@ _TOOL_NAMES = [
     "apply_prepared_caption_edit",
     "prepare_pin_change",
     "apply_prepared_pin_change",
+    "prepare_message_delete",
+    "apply_prepared_message_delete",
 ]
 # Each tool's full capability requirement, the guard's own rule; `_manifest` needs none.
 _TOOL_CAPABILITIES = {name: required_capabilities(OPERATION_CAPABILITIES[TOOL_OPERATIONS[name]])
@@ -559,6 +563,17 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "for up to 10 seconds.",
         "applied means the new state was observed; already_pinned or not_pinned mean it already held; "
         "message_changed means no attempt. " + _approval("changes")),
+    "prepare_message_delete": ("Prepare deleting own message",
+        "Prepare deleting one of your own messages for everyone in the chat; the deletion is irreversible.",
+        "Incoming messages, Saved Messages, messages Telegram lets you delete only for yourself, service messages, "
+        "content the preview cannot show and scheduled or sending messages are refused. Nothing changes; show the "
+        "preview and ask first. Preparing again supersedes. " + _UNTRUSTED),
+    "apply_prepared_message_delete": ("Apply a prepared deletion",
+        "Revalidate the message, then make exactly one irreversible deletion attempt for everyone; it also unpins "
+        "the message.",
+        "applied means Telegram confirmed it; failed means the message is still there; message_changed means no "
+        "attempt. " + _approval("deletes", "outcome_unknown means it may still complete later, even after a restart: "
+                                "call get_send_status and never resend.")),
 }
 
 
@@ -625,6 +640,7 @@ _FIELD_DOCS = {
                      "edit_own_styled_text.",
     "pin_message_id": "ID of the message to pin or unpin, from returned evidence; it may be anyone's.",
     "pin_action": "pin or unpin.",
+    "delete_message_id": "ID of your own message to delete for everyone, from returned evidence.",
 }
 
 
@@ -893,7 +909,7 @@ _READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempoten
 _READ_ONLY_STATEFUL = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False,
                                       openWorldHint=True)
 _TRANSFER = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
-# Replacing an own message's text overwrites provider state the tool cannot restore.
+# Replacing an own message's text or caption, or deleting an own message, changes provider state no tool restores.
 _OVERWRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 # SDK 2.2.0 masks every exception except ToolError as "Error executing tool <name>".
 # Guard refusals are anticipated, so they carry this fixed text: the code and, for
@@ -1143,8 +1159,9 @@ def build_server(
                 "global public search and searchPublicChats",
                 "raw execute or bridge calls",
                 "mutations other than one approved Main/Archive move, one approved text or caption edit of an own "
-                "message, or one approved pin or unpin of one message, including other people's edits, deletes, bulk "
-                "unpins, reactions, folders, bulk and moderation operations",
+                "message, one approved pin or unpin of one message, or one approved deletion of one own message for "
+                "everyone, including other people's edits, deletions for yourself only, deletions of other people's, "
+                "several or all messages, bulk unpins, reactions, folders, bulk and moderation operations",
                 "unapproved sends and automatic send retries",
                 "multi-message, album, topic, scheduled, protected-content and secret-chat forwards or copies",
                 "video replies, topics, thumbnails, covers, spoilers, self-destruct, transcoding and videos over 64 MiB",
@@ -1935,6 +1952,19 @@ def build_server(
         return get_service().apply_prepared_pin_change(ApplyPreparedPinChangeRequest(draft_id=draft_id,
                                                                                      approved=approved))
 
+    @server.tool(name="prepare_message_delete", annotations=_READ_ONLY_STATEFUL, structured_output=True)
+    def prepare_message_delete(chat: Annotated[ChatId, _about("chat")],
+                               message_id: Annotated[PositiveMessageId, _about("delete_message_id")],
+                               ) -> PrepareMessageDeleteResponse:
+        return get_service().prepare_message_delete(PrepareMessageDeleteRequest(chat=chat, message_id=message_id))
+
+    @server.tool(name="apply_prepared_message_delete", annotations=_OVERWRITE, structured_output=True)
+    def apply_prepared_message_delete(draft_id: Annotated[DraftId, _about("draft_id")],
+                                      approved: Annotated[bool, Field(strict=True), _about("approved")],
+                                      ) -> ApplyPreparedMessageDeleteResponse:
+        return get_service().apply_prepared_message_delete(ApplyPreparedMessageDeleteRequest(draft_id=draft_id,
+                                                                                             approved=approved))
+
     for name, request_model in (("prepare_reply_artifact_send",PrepareReplyArtifactSendRequest),
             ("get_reply_artifact_draft",GetReplyArtifactDraftRequest),("update_reply_artifact_draft",UpdateReplyArtifactDraftRequest),
             ("refresh_reply_artifact_draft",RefreshReplyArtifactDraftRequest),("prepare_reply_text_send",PrepareReplyTextSendRequest),
@@ -1946,7 +1976,9 @@ def build_server(
             ("apply_prepared_text_edit",ApplyPreparedTextEditRequest),("prepare_album_send",PrepareAlbumSendRequest),
             ("send_prepared_album",SendPreparedAlbumRequest),("get_album_send_status",GetAlbumSendStatusRequest),
             ("prepare_caption_edit",PrepareCaptionEditRequest),("apply_prepared_caption_edit",ApplyPreparedCaptionEditRequest),
-            ("prepare_pin_change",PreparePinChangeRequest),("apply_prepared_pin_change",ApplyPreparedPinChangeRequest)):
+            ("prepare_pin_change",PreparePinChangeRequest),("apply_prepared_pin_change",ApplyPreparedPinChangeRequest),
+            ("prepare_message_delete",PrepareMessageDeleteRequest),
+            ("apply_prepared_message_delete",ApplyPreparedMessageDeleteRequest)):
         registered=server._tool_manager.get_tool(name)
         def reply_metadata(model):
             class StrictReplyMetadata(metadata_type):

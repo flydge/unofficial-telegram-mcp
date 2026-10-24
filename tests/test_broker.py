@@ -499,6 +499,8 @@ client.close()
             "apply_prepared_caption_edit",
             "prepare_pin_change",
             "apply_prepared_pin_change",
+            "prepare_message_delete",
+            "apply_prepared_message_delete",
         ]
         # Registration order, filtered by the loaded policy (tools/list lists only usable tools).
         usable = set(available_tools(RuntimePolicy().enabled_capabilities))

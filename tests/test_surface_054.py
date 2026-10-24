@@ -28,15 +28,17 @@ from tool_listing import FULL_POLICY, full_listing
 # The 0.54 budget: 1,500 characters per tool and 30,000 in total for its 55 tools. Each later tool grows the total by
 # at most 600 characters, recorded here: 0.56 albums add prepare_album_send, send_prepared_album and
 # get_album_send_status (+1,800); 0.57 caption edits add prepare_caption_edit and apply_prepared_caption_edit (+1,200);
-# 0.57 pins add prepare_pin_change and apply_prepared_pin_change (+1,200).
+# 0.57 pins add prepare_pin_change and apply_prepared_pin_change (+1,200); 0.57 deletions add prepare_message_delete
+# and apply_prepared_message_delete (+1,200).
 PER_TOOL, TOTAL_054, PER_ADDED_TOOL = 1500, 30000, 600
 ADDED_SINCE_054 = ('prepare_album_send', 'send_prepared_album', 'get_album_send_status', 'prepare_caption_edit',
-                   'apply_prepared_caption_edit', 'prepare_pin_change', 'apply_prepared_pin_change')
+                   'apply_prepared_caption_edit', 'prepare_pin_change', 'apply_prepared_pin_change',
+                   'prepare_message_delete', 'apply_prepared_message_delete')
 TOTAL = TOTAL_054 + PER_ADDED_TOOL * len(ADDED_SINCE_054)
 JARGON = re.compile(r"private v\d|\bv\d{1,2}\b|\bipc ?2\b|canonical|prewire|contract ?1\b|display bytes", re.I)
 SEND_APPLY = ('send_prepared_text', 'send_prepared_artifact', 'send_prepared_forward', 'send_prepared_video',
               'apply_prepared_archive', 'apply_prepared_text_edit', 'apply_prepared_caption_edit',
-              'apply_prepared_pin_change')
+              'apply_prepared_pin_change', 'apply_prepared_message_delete')
 MANDATORY = ('local dialog', 'outcome_unknown', 'get_send_status', 'never resend')
 # An album has its own status tool; get_send_status knows no album.
 ALBUM_MANDATORY = ('local dialog', 'outcome_unknown', 'partial', 'get_album_send_status', 'never resend')
@@ -233,9 +235,10 @@ class AnnotationAndFieldTests(unittest.IsolatedAsyncioTestCase):
             read_only = name.startswith(READ_ONLY_PREFIXES)
             with self.subTest(tool=name):
                 self.assertEqual(hints.read_only_hint, read_only)
-                # An edit overwrites provider state no tool restores (0.57: the caption edit too).
+                # An edit overwrites provider state no tool restores (0.57: the caption edit too, and a deletion).
                 self.assertEqual(hints.destructive_hint, name in ('apply_prepared_text_edit',
-                                                                  'apply_prepared_caption_edit'))
+                                                                  'apply_prepared_caption_edit',
+                                                                  'apply_prepared_message_delete'))
                 self.assertTrue(hints.open_world_hint)
                 if not read_only or name.startswith('prepare_'):
                     self.assertFalse(hints.idempotent_hint)

@@ -131,8 +131,9 @@ class SerializedDialogTests(unittest.TestCase):
 
     def test_every_send_and_apply_opens_the_dialog_through_the_one_serialized_gate(self):
         source = inspect.getsource(broker_module.Broker)
-        # Artifact/text, forward, video, archive, text edit, (0.56) album sends, (0.57) caption edits and pin changes.
-        self.assertEqual(len(re.findall(r"approval_outcome\(self\._owner_dialog\(", source)), 8)
+        # Artifact/text, forward, video, archive, text edit, (0.56) album sends, (0.57) caption edits, pin changes and
+        # message deletions.
+        self.assertEqual(len(re.findall(r"approval_outcome\(self\._owner_dialog\(", source)), 9)
         # The one raw dialog call sits in _prompt_approval (counted as an open dialog for the installer's gate),
         # and only the serialized _owner_dialog calls that.
         self.assertEqual(re.findall(r"self\._approval_prompt\(", source), ["self._approval_prompt("])

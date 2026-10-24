@@ -32,14 +32,15 @@ UNBACKED_056 = {'text', 'forward', 'archive', 'text_edit'}
 DEDICATED_056 = {'forward', 'video', 'album', 'archive', 'text_edit'}
 STATUS_056 = {'forward': 'forward_send', 'video': 'video_send', 'archive': 'archive_chats',
               'text_edit': 'edit_own_text', 'album': 'refused'}
-# 0.57 adds two rows, each a dedicated unbacked change: the caption edit (part 1, bound to edit_own_caption) and the
-# pin change (part 2, bound to pin_messages). A styled text edit is a text_edit row whose payload names
-# edit_own_styled_text as an extra capability.
-NEW_057 = {'caption_edit', 'pin_change'}
+# 0.57 adds three rows, each a dedicated unbacked change: the caption edit (part 1, bound to edit_own_caption), the
+# pin change (part 2, bound to pin_messages) and the message deletion (part 3, bound to delete_own_message). A styled
+# text edit is a text_edit row whose payload names edit_own_styled_text as an extra capability.
+NEW_057 = {'caption_edit', 'pin_change', 'message_delete'}
 CHANGE_057, UNBACKED_057, DEDICATED_057 = CHANGE_056 | NEW_057, UNBACKED_056 | NEW_057, DEDICATED_056 | NEW_057
-STATUS_057 = {**STATUS_056, 'caption_edit': 'edit_own_caption', 'pin_change': 'pin_messages'}
+STATUS_057 = {**STATUS_056, 'caption_edit': 'edit_own_caption', 'pin_change': 'pin_messages',
+              'message_delete': 'delete_own_message'}
 ALL = ('document', 'photo', 'voice_note', 'text', 'forward', 'video', 'archive', 'text_edit', 'caption_edit',
-       'pin_change', 'album')
+       'pin_change', 'message_delete', 'album')
 
 
 def insert(registry, kind, owner=OWNER, state='pending', payload=False):
@@ -72,7 +73,7 @@ class TableTests(unittest.TestCase):
         self.assertEqual({name: row.status for name, row in DRAFT_KINDS.items() if row.status is not None}, STATUS_057)
         self.assertEqual(draft_kinds.GENERIC_ARTIFACT_KINDS, {'document', 'photo', 'voice_note'})
         self.assertEqual(draft_kinds.CHANGE_CAPABILITIES, {'archive_chats', 'edit_own_text', 'edit_own_caption',
-                                                           'pin_messages'})
+                                                           'pin_messages', 'delete_own_message'})
 
     def test_every_kind_literal_follows_the_table(self):
         self.assertEqual(set(typing.get_args(OutgoingDraft.__dataclass_fields__['kind'].type

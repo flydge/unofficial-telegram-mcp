@@ -178,9 +178,8 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(TOOL_OPERATIONS[name], name)
                 self.assertIn(name, OPERATIONS)
                 self.assertEqual(_TOOL_CAPABILITIES[name], ('pin_messages', 'send', 'read'))
-        self.assertEqual(len(_TOOL_NAMES), 62)
-        self.assertEqual(len(set(_TOOL_NAMES)), 62)
-        self.assertEqual(tuple(_TOOL_NAMES[60:62]), TOOLS)
+        self.assertEqual(len(set(_TOOL_NAMES)), len(_TOOL_NAMES))
+        self.assertEqual(tuple(_TOOL_NAMES[60:62]), TOOLS)  # fixed positions; the census is the latest slice's pin
         listed = json.loads((SCHEMA_CHANGES / '0.57-pin-tools.json').read_text(encoding='utf-8'))
         self.assertEqual(set(listed), {'structure'})
         self.assertEqual(set(listed['structure']), set(TOOLS))

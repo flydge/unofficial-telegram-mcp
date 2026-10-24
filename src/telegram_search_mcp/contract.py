@@ -23,6 +23,7 @@ OPERATION_CAPABILITIES = {
     # 0.57: a styled caption also needs edit_own_styled_text; that per-draft conjunction is the broker's.
     **{name: "edit_own_caption" for name in ("prepare_caption_edit", "apply_prepared_caption_edit")},
     **{name: "pin_messages" for name in ("prepare_pin_change", "apply_prepared_pin_change")},
+    **{name: "delete_own_message" for name in ("prepare_message_delete", "apply_prepared_message_delete")},
     **{name: "reply_artifact_send" for name in ("prepare_reply_artifact_send", "get_reply_artifact_draft", "update_reply_artifact_draft", "refresh_reply_artifact_draft")},
     **{name: "reply_text_send" for name in ("prepare_reply_text_send", "get_reply_draft", "update_reply_draft", "refresh_reply_draft")},
     "read_presentation": "presentations",

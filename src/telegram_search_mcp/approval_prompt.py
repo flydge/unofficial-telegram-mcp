@@ -7,8 +7,9 @@ One renderer turns every bound preview into one document, in a fixed order:
 - a technical block with the draft id and hashes.
 
 One native dialog shows it: an NSAlert through `osascript -l JavaScript` with a fixed-size scrolling view,
-Cancel as the default and a timer that ends it as `timeout`. Only an explicit click on Send/Apply
-approves; anything else is `declined`, `timeout` or `dialog_unavailable`, and never a send or change.
+Cancel as the default and a timer that ends it as `timeout`. Only an explicit click on Send, Apply or (0.57, the
+deletion of an own message) Delete approves; anything else is `declined`, `timeout` or `dialog_unavailable`, and
+never a send, change or deletion.
 
 Once an alias registry exists (0.55 spec 3C) the broker names its account alias: the heading says which alias
 asks, and the summary's account line carries the alias and a masked account (the last two digits of the user
@@ -136,6 +137,11 @@ _SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'send').replace('@@VERB@@', 'Send').r
 # Archive moves and own text edits change Telegram state without sending: same default and timer.
 _CHANGE_SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'change').replace('@@VERB@@', 'Apply')
                   .replace('@@EFFECT@@', 'changed'))
+# An irreversible deletion (0.57) names itself on its button: same default and timer.
+_DELETE_SCRIPT = (_TEMPLATE.replace('@@ACTION@@', 'deletion').replace('@@VERB@@', 'Delete')
+                  .replace('@@EFFECT@@', 'deleted'))
+# The closed dialog verbs a rendered document names.
+_SCRIPTS = MappingProxyType({'send': _SCRIPT, 'change': _CHANGE_SCRIPT, 'delete': _DELETE_SCRIPT})
 _TOKENS = {b'APPROVED': APPROVED, b'DECLINED': DECLINED, b'TIMEOUT': TIMEOUT}
 
 
@@ -147,14 +153,14 @@ def _dialog_script(template, alias=None):
             .replace('@@ACCOUNT@@', account))
 
 
-def _dialog(document: str, *, change: bool, seconds: int, alias: str | None = None) -> ApprovalDecision:
+def _dialog(document: str, *, verb: str, seconds: int, alias: str | None = None) -> ApprovalDecision:
     if (type(seconds) is not int or not 1 <= seconds <= DIALOG_SECONDS or type(document) is not str
-            or not _valid_alias(alias)):
+            or not _valid_alias(alias) or type(verb) is not str or verb not in _SCRIPTS):
         return UNAVAILABLE
     try:
         result = subprocess.run(
             ['/usr/bin/osascript', '-l', 'JavaScript', '-e',
-             _dialog_script(_CHANGE_SCRIPT if change else _SCRIPT, alias),
+             _dialog_script(_SCRIPTS[verb], alias),
              '--', str(seconds), document],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=seconds + 5, check=False,
@@ -402,9 +408,9 @@ def _reply_artifact_document(validated, alias) -> str:
 
 def _message_lines(source, account_id: int, *, remove_caption: bool = False,
                    forward_note: str = 'Source is itself a forward: the copy carries no original attribution') -> list:
-    """One projected message (a forward source; 0.57: a message to pin or unpin): the text or caption is an exact
-    gutter payload; entity covered spans, link-preview URLs, file facts and the author signature are « » spans, all
-    under the readable rule."""
+    """One projected message (a forward source; 0.57: a message to pin, unpin or delete): the text or caption is an
+    exact gutter payload; entity covered spans, link-preview URLs, file facts and the author signature are « » spans,
+    all under the readable rule."""
     from .forward_drafts import unescaped
     label = 'Text' if source.content_kind == 'text' else 'Caption'
 
@@ -615,6 +621,24 @@ def _pin_change_document(validated, alias) -> str:
         f'one {validated.action} attempt and report the pin state it observes right after.')
 
 
+def _message_delete_document(validated, alias) -> str:
+    """The own message to delete and the deletion's effects stated plainly: irreversible, for every participant, and
+    unpinning a pinned message (0.57)."""
+    chat, message, account = validated.chat, validated.message, validated.account_id
+    effects = ['The deletion is irreversible: nobody can restore the message, not even you.',
+               'The message is removed for every participant of the chat, not only for you.',
+               'If the message is pinned, deleting it also unpins it.']
+    return _document(
+        _head(f'Delete your message {message.message_id} in {_span(chat.title)} ({_chat(chat.chat_id, account)}, '
+              f'{_EDIT_CHAT_KINDS[chat.kind]}) for everyone', account, validated.expires_at, alias),
+        [*_message_lines(message, account, forward_note='The message is itself a forward; its original sender is '
+                                                        'not shown'), '', *effects],
+        [f'Draft: {validated.draft_id}', f'Source SHA-256: {message.source_sha256}',
+         f'Preview SHA-256: {validated.preview_sha256}'],
+        f'{identity.DISPLAY_NAME} will revalidate the account, the chat, the message and its permission to delete it '
+        'for everyone, then make one deletion attempt; a deletion is never retried.')
+
+
 _ALBUM_GROUPS = {'media': 'media (photos and videos)', 'documents': 'documents'}
 
 
@@ -655,19 +679,29 @@ def _text_only(display_name, caption, duration_seconds, source_sha256, source_di
 def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, caption, kind, text,
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
-            draft_preview, account_alias, album_preview, caption_edit_preview, pin_change_preview) -> tuple[str, bool]:
-    """(document, is a change) for exactly one preview bound to the broker's own arguments."""
+            draft_preview, account_alias, album_preview, caption_edit_preview, pin_change_preview,
+            message_delete_preview) -> tuple[str, str]:
+    """(document, its verb: send, change or delete) for exactly one preview bound to the broker's own arguments."""
     _require(_valid_alias(account_alias))
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
                 archive_preview, text_edit_preview, draft_preview, album_preview, caption_edit_preview,
-                pin_change_preview)
+                pin_change_preview, message_delete_preview)
     _require(sum(value is not None for value in previews) == 1)
     _require((kind == 'forward') == (forward_preview is not None) and (kind == 'video') == (video_preview is not None)
              and (kind == 'archive') == (archive_preview is not None) and
              (kind == 'text_edit') == (text_edit_preview is not None) and (kind == 'album') == (album_preview is not None)
              and (kind == 'caption_edit') == (caption_edit_preview is not None)
-             and (kind == 'pin_change') == (pin_change_preview is not None))
+             and (kind == 'pin_change') == (pin_change_preview is not None)
+             and (kind == 'message_delete') == (message_delete_preview is not None))
+    if message_delete_preview is not None:
+        # An irreversible deletion bound to the chat, its title and the hashed message projection (0.57).
+        from .delete_drafts import MessageDeleteDraftPreview
+        validated = MessageDeleteDraftPreview.model_validate(message_delete_preview)
+        _require(validated.chat.chat_id == recipient and validated.chat.title == recipient_title and
+                 sha256 == validated.message.source_sha256 and text in ('', None) and caption in ('', None) and
+                 duration_seconds is None and source_sha256 is None and source_display_name is None)
+        return _message_delete_document(validated, alias), 'delete'
     if pin_change_preview is not None:
         # A change bound to the chat, its title and the hashed message projection (0.57).
         from .pin_drafts import PinChangeDraftPreview
@@ -675,7 +709,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(validated.chat.chat_id == recipient and validated.chat.title == recipient_title and
                  sha256 == validated.message.source_sha256 and text in ('', None) and caption in ('', None) and
                  duration_seconds is None and source_sha256 is None and source_display_name is None)
-        return _pin_change_document(validated, alias), True
+        return _pin_change_document(validated, alias), 'change'
     if caption_edit_preview is not None:
         # A change bound like a text edit: the chat, its title and the hashed source projection (0.57).
         from .caption_edit_drafts import CaptionEditDraftPreview
@@ -683,7 +717,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(validated.chat.chat_id == recipient and validated.chat.title == recipient_title and
                  sha256 == validated.source_sha256 and text in ('', None) and caption in ('', None) and
                  duration_seconds is None and source_sha256 is None and source_display_name is None)
-        return _caption_edit_document(validated, alias), True
+        return _caption_edit_document(validated, alias), 'change'
     if album_preview is not None:
         # The broker passes the album digest as sha256, the total as size_bytes and the fixed name "Album".
         from .album_drafts import AlbumDraftPreview
@@ -692,7 +726,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  validated.album_sha256 == sha256 and validated.total_size_bytes == size_bytes and
                  display_name == 'Album' and caption in ('', None) and text in ('', None) and
                  duration_seconds is None and source_sha256 is None and source_display_name is None)
-        return _album_document(validated, alias), False
+        return _album_document(validated, alias), 'send'
     if archive_preview is not None or text_edit_preview is not None:
         if archive_preview is not None:
             from .archive_drafts import ArchiveDraftPreview, archive_digest
@@ -708,7 +742,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  text in ('', None) and caption in ('', None) and duration_seconds is None and
                  source_sha256 is None and source_display_name is None)
         return (_archive_document(validated, alias) if archive_preview is not None
-                else _text_edit_document(validated, alias)), True
+                else _text_edit_document(validated, alias)), 'change'
     if video_preview is not None:
         from .video_drafts import VideoDraftPreview
         validated = VideoDraftPreview.model_validate(video_preview)
@@ -717,14 +751,14 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  validated.raw_display_name == display_name and validated.raw_caption == (caption or '') and
                  text in ('', None) and duration_seconds is None and source_sha256 is None and
                  source_display_name is None)
-        return _video_document(validated, alias), False
+        return _video_document(validated, alias), 'send'
     if forward_preview is not None:
         from .forward_drafts import ForwardDraftPreview
         validated = ForwardDraftPreview.model_validate(forward_preview)
         _require(validated.recipient.chat_id == recipient and validated.recipient.title == recipient_title and
                  validated.source.source_sha256 == sha256 and text in ('', None) and caption in ('', None) and
                  duration_seconds is None and source_sha256 is None and source_display_name is None)
-        return _forward_document(validated, alias), False
+        return _forward_document(validated, alias), 'send'
     if topic_preview is not None:
         from .draft_models import DraftPreview
         validated = DraftPreview.model_validate(topic_preview)
@@ -733,7 +767,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
                  validated.text == text and validated.sha256 == sha256 and validated.size_bytes == size_bytes)
         if validated.outgoing_entities:
             _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
-        return _topic_document(validated, alias), False
+        return _topic_document(validated, alias), 'send'
     if reply_artifact_preview is not None:
         from .reply_artifact_drafts import ReplyArtifactDraftPreview
         validated = ReplyArtifactDraftPreview.model_validate(reply_artifact_preview)
@@ -741,7 +775,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == draft.kind and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.sha256 == sha256 and draft.size_bytes == size_bytes and draft.display_name == display_name and
                  draft.caption == (caption or '') and text in ('', None))
-        return _reply_artifact_document(validated, alias), False
+        return _reply_artifact_document(validated, alias), 'send'
     if reply_preview is not None:
         from .reply_drafts import ReplyDraftPreview
         validated = ReplyDraftPreview.model_validate(reply_preview)
@@ -749,7 +783,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == 'text' and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.text == text and draft.sha256 == sha256 and draft.size_bytes == size_bytes)
         _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
-        return _reply_document(validated, alias), False
+        return _reply_document(validated, alias), 'send'
     from .draft_models import DraftPreview
     validated = DraftPreview.model_validate(draft_preview)
     _require(validated.topic is None and not validated.outgoing_entities and validated.kind == kind and
@@ -762,11 +796,11 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(validated.display_name == display_name and validated.caption == (caption or '') and
                  text in ('', None) and validated.duration_seconds == duration_seconds and
                  validated.source_sha256 == source_sha256 and validated.source_display_name == source_display_name)
-    return _plain_document(validated, alias), False
+    return _plain_document(validated, alias), 'send'
 
 
-def render_approval(**arguments) -> tuple[str, bool] | None:
-    """The exact dialog document and whether it is a change, or None when no dialog may be shown."""
+def render_approval(**arguments) -> tuple[str, str] | None:
+    """The exact dialog document and its verb (send, change or delete), or None when no dialog may be shown."""
     try:
         return _render(**{**_DEFAULTS, **arguments})
     except (_Refused, ValueError, TypeError, KeyError, AttributeError):
@@ -776,7 +810,8 @@ def render_approval(**arguments) -> tuple[str, bool] | None:
 _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=None, source_display_name=None,
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
                  video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
-                 account_alias=None, album_preview=None, caption_edit_preview=None, pin_change_preview=None)
+                 account_alias=None, album_preview=None, caption_edit_preview=None, pin_change_preview=None,
+                 message_delete_preview=None)
 
 
 def decide_approved_send(
@@ -797,10 +832,11 @@ def decide_approved_send(
     album_preview: dict | None = None,
     caption_edit_preview: dict | None = None,
     pin_change_preview: dict | None = None,
+    message_delete_preview: dict | None = None,
 ) -> ApprovalDecision:
-    """Ask the signed-in macOS user. Only an explicit Send/Apply click approves; a decline, the
-    timer, or any failure to render or show the dialog means no send or change. `account_alias` (only once an
-    alias registry exists) names the asking account in the heading and the masked account line."""
+    """Ask the signed-in macOS user. Only an explicit Send/Apply/Delete click approves; a decline, the
+    timer, or any failure to render or show the dialog means no send, change or deletion. `account_alias` (only once
+    an alias registry exists) names the asking account in the heading and the masked account line."""
     rendered = render_approval(
         recipient_title=recipient_title, recipient=recipient, display_name=display_name, size_bytes=size_bytes,
         sha256=sha256, caption=caption, kind=kind, text=text, duration_seconds=duration_seconds,
@@ -808,11 +844,12 @@ def decide_approved_send(
         reply_artifact_preview=reply_artifact_preview, topic_preview=topic_preview, forward_preview=forward_preview,
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
         draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview,
-        caption_edit_preview=caption_edit_preview, pin_change_preview=pin_change_preview)
+        caption_edit_preview=caption_edit_preview, pin_change_preview=pin_change_preview,
+        message_delete_preview=message_delete_preview)
     if rendered is None:
         return UNAVAILABLE
-    document, change = rendered
-    return _dialog(document, change=change, seconds=timeout_seconds, alias=account_alias)
+    document, verb = rendered
+    return _dialog(document, verb=verb, seconds=timeout_seconds, alias=account_alias)
 
 
 def confirm_approved_send(**arguments) -> bool:
