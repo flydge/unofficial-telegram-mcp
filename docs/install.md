@@ -1078,8 +1078,9 @@ fixed in the entry, never a tool argument, an environment variable or a path a c
 The Claude Code plugin stays default-only; in `plugin` mode an alias gets a user-scope entry under its own
 name, so no tool set is listed twice. A Codex alias entry is not required, so an alias that is not
 connected yet never keeps Codex from starting. Each alias's server announces the alias in its MCP
-`serverInfo.name` (`telegram-search-mcp-<alias>`) and one instructions line; its tools and schema
-fingerprint are the default's.
+`serverInfo.name` (`telegram-search-mcp-<alias>`) and one instructions line, which also tells the model
+to run `telegram-search-transfer` (source mode) with `--account <alias>` for that account's files; its
+tools and schema fingerprint are the default's.
 
 **Allowlists and hooks.** Clients name an alias's tools `mcp__telegram_search_<alias>__<tool>`. A
 permission allowlist or a hook keyed on `mcp__telegram_search__*` does not cover them: add each alias's

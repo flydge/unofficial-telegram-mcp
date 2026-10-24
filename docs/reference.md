@@ -774,9 +774,9 @@ carries one (`check_connection`, `connect_account`, `update_installation`, `enab
 `selection_unavailable` and an unavailable broker. The paired `telegram-search` skill gives the same answer rules
 (numbered sources, one coverage line) and the same preview floor, with per-tool detail on top. A server
 started for an account alias (0.55 candidate, `--account <alias>`) appends one line,
-`This server serves the account alias «<alias>».`, and names itself `telegram-search-mcp-<alias>` in
-`serverInfo.name`; the default account's server keeps both exactly (`telegram-search-mcp`, no extra
-line). Neither enters the schema fingerprint.
+`This server serves the account alias «<alias>». Run telegram-search-transfer with --account <alias> for its artifacts and uploads.`
+(the transfer helper otherwise reaches the default account's broker and cache), and names itself `telegram-search-mcp-<alias>` in `serverInfo.name`; the default account's server
+keeps both exactly (`telegram-search-mcp`, no extra line). Neither enters the schema fingerprint.
 
 ### Account aliases (0.55 candidate)
 
