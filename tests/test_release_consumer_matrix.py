@@ -765,10 +765,14 @@ class InspectorTests(unittest.TestCase):
                 with self.subTest(code=code), contextlib.redirect_stderr(io.StringIO()) as err:
                     self.assertEqual(matrix.main(argv), 2)
                 self.assertEqual(err.getvalue().strip(), code)
-            with contextlib.redirect_stderr(io.StringIO()) as err:  # The fake npm fails the online fetch.
+            # The fake npm fails the online fetch; the tree need not be a git checkout (the gate runs the sdist's).
+            fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: ROOT)
+            with contextlib.redirect_stderr(io.StringIO()) as err, \
+                    mock.patch.object(matrix, "load_gate", return_value=fake):
                 self.assertEqual(matrix.main(["inspector-fetch", "--node", str(node), "--cache",
-                                              str(Path(directory) / "cache"), "--repo", str(ROOT)]), 2)
+                                              str(Path(directory) / "cache")]), 2)
             self.assertEqual(err.getvalue().strip(), "fetch_failed")
+            self.assertTrue((Path(directory) / "cache").is_dir())
 
     def test_the_session_script_loads_only_the_request_paths(self):
         imports = [line for line in matrix.INSPECTOR_SESSION_SCRIPT.splitlines() if "import" in line]
