@@ -1,4 +1,8 @@
-"""Closed stable media evidence; parsing never reads paths or fetches provider data."""
+"""Closed stable media evidence; parsing never reads paths or fetches provider data.
+
+Which caption entity families are admitted comes from the reply-source ladder; the keyword
+functions are shims over the admission-taking `*_for` functions.
+"""
 from __future__ import annotations
 
 import base64
@@ -6,6 +10,7 @@ import hashlib
 import json
 import unicodedata
 
+from .reply_source_ladder import Admission, STYLED, present
 from .sanitize import sanitize_telegram_text
 
 
@@ -75,35 +80,27 @@ def _thumbnail(value):
         and _number(value['width'],16384,1) and _number(value['height'],16384,1) and _file(value['file']))
 
 
-def _caption(value, *, styled=None, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+def caption_for(value, admission: Admission):
+    """Validate a bounded caption against an admission and return its canonical shape."""
     if not (_shape(value,'formattedText',('text','entities')) and type(value['text']) is str
             and len(value['text'])<=1024 and type(value['entities']) is list
             and not any(unicodedata.category(c).startswith('C') and c not in '\n\t' for c in value['text'])):
         raise ValueError('reply caption is unavailable')
-    if styled is not None and bool(value['entities'])!=styled:
-        raise ValueError('reply caption version disagrees with styles')
     value['text'].encode('utf-8')
     if value['entities']:
-        from .reply_formatted_sources import formatted_text, LEXICAL, IDENTITY, DATETIME, URL, EMAIL, PHONE, BANK_CARD
-        result=formatted_text(value,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
-        if lexical and not any(e['type']['@type'] in LEXICAL for e in result['entities']):
-            raise ValueError('reply caption version disagrees with lexical entities')
-        if identity and not any(e['type']['@type'] in IDENTITY for e in result['entities']):
-            raise ValueError('reply caption version disagrees with identity entities')
-        if datetime and not any(e['type']['@type'] in DATETIME for e in result['entities']):
-            raise ValueError('reply caption version disagrees with date time entities')
-        if url and not any(e['type']['@type'] in URL for e in result['entities']):
-            raise ValueError('reply caption version disagrees with URL entities')
-        if email and not any(e['type']['@type'] in EMAIL for e in result['entities']):
-            raise ValueError('reply caption version disagrees with EmailAddress entities')
-        if phone and not any(e['type']['@type'] in PHONE for e in result['entities']):
-            raise ValueError('reply caption version disagrees with PhoneNumber entities')
-        if bank_card and not any(e['type']['@type'] in BANK_CARD for e in result['entities']):
-            raise ValueError('reply caption version disagrees with BankCardNumber entities')
-        return result
-    if lexical or identity or datetime or url or email or phone or bank_card:
-        raise ValueError('reply caption version disagrees with entities')
+        from .reply_formatted_sources import formatted_text_for
+        return formatted_text_for(value,admission)
     return {'@type':'formattedText','text':value['text'],'entities':[]}
+
+
+def _asserted(caption, admission: Admission, styled):
+    """The keyword shims' 0.57 contract: `styled`, when given, says whether any entity exists, and every flagged
+    family except a datetime level must be present. Stored versions use version equality instead."""
+    if styled is not None and bool(caption['entities'])!=styled:
+        raise ValueError('reply caption version disagrees with styles')
+    found=present(caption['entities'])
+    if any(f is not STYLED and f.formatting is None and f not in found for f in admission.families):
+        raise ValueError('reply caption version disagrees with entities')
 
 
 def _identity(value):
@@ -116,11 +113,11 @@ def _variant_key(value):
     return value['type'],value['width'],value['height'],value['unique_id_sha256']
 
 
-def media_content(content, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+def media_content_for(content, admission: Admission):
     """Validate bounded pinned provider shapes and return only stable fresh facts."""
     if type(content) is not dict:
         raise ValueError('reply media is unavailable')
-    caption = _caption(content.get('caption'),lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    caption = caption_for(content.get('caption'),admission)
     kind = content.get('@type')
     if kind == 'messageDocument':
         doc = content.get('document')
@@ -162,7 +159,7 @@ def media_content(content, *, lexical=False, identity=False, datetime=False, dat
     else:
         raise ValueError('reply media kind is unavailable')
     result={'kind':source_kind,'caption':caption,'media':media}
-    validate_content(result,styled=bool(caption['entities']),lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    validate_content_for(result,admission)
     return result
 
 
@@ -172,11 +169,11 @@ def _stable_identity(value):
             and all(c in '0123456789abcdef' for c in sha))
 
 
-def validate_content(content, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
-    """Strictly validate stored v2/v4/v6/v8/v10/v12/v14/v16/v18/v20/v22 facts and their caption-version boundary."""
+def validate_content_for(content, admission: Admission):
+    """Strictly validate stored media facts and a caption canonical under the admission."""
     if type(content) is not dict or set(content)!={'kind','caption','media'}:
         raise ValueError('invalid media projection')
-    if _caption(content['caption'],styled=styled or lexical or identity or datetime or url or email or phone or bank_card,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)!=content['caption']:
+    if caption_for(content['caption'],admission)!=content['caption']:
         raise ValueError('noncanonical reply caption entities')
     kind,media=content['kind'],content['media']
     if type(kind) is not str or type(media) is not dict:
@@ -200,8 +197,7 @@ def validate_content(content, *, styled=False, lexical=False, identity=False, da
         raise ValueError('invalid media projection')
 
 
-def render_content(content, marker, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
-    validate_content(content,styled=styled,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+def _render(content, marker, admission: Admission):
     changed=False
     def safe(value):
         nonlocal changed
@@ -215,11 +211,46 @@ def render_content(content, marker, *, styled=False, lexical=False, identity=Fal
             return [safe(v) for v in value]
         return value
     caption=content['caption']['text']
-    if styled or lexical or identity or datetime or url or email or phone or bank_card:
-        from .reply_formatted_sources import render_formatted_text
-        caption,changed=render_formatted_text(content['caption'],lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    # Fail closed until media captions get the whole-record inert display: safe() would rewrite hidden payloads.
+    if any(family.inert for family in present(content['caption']['entities'])):
+        raise ValueError('reply media evidence is unavailable')
+    if content['caption']['entities']:
+        from .reply_formatted_sources import render_formatted_text_for
+        caption,changed=render_formatted_text_for(content['caption'],admission)
     record=safe({'kind':content['kind'],'caption':caption,'media':content['media']})
     display=marker+'Media target: '+json.dumps(record,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
     if len(display)>4096 or sanitize_telegram_text(display,max_length=4097)!=display:
         raise ValueError('reply evidence exceeds preview bound')
     return display,changed
+
+
+def render_content_for(content, marker, admission: Admission):
+    validate_content_for(content,admission)
+    return _render(content,marker,admission)
+
+
+# Keyword shims: the 0.57 contract (styles always; each truthy flag admits its family and, see _asserted,
+# requires it present). Media captions have no TextUrl keyword.
+
+def media_content(content, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+    """Validate bounded pinned provider shapes and return only stable fresh facts."""
+    admission=Admission.of(lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,
+        datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    result=media_content_for(content,admission)
+    _asserted(result['caption'],admission,None)
+    return result
+
+
+def validate_content(content, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+    """Strictly validate stored media facts and their caption-version boundary."""
+    admission=Admission.of(lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,
+        datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    validate_content_for(content,admission)
+    _asserted(content['caption'],admission,styled or lexical or identity or datetime or url or email or phone or bank_card)
+
+
+def render_content(content, marker, *, styled=False, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False):
+    validate_content(content,styled=styled,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card)
+    return _render(content,marker,Admission.of(lexical=lexical,identity=identity,datetime=datetime,
+        datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,
+        bank_card=bank_card))

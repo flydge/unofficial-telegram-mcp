@@ -2,36 +2,30 @@
 
 Entity semantics use the pinned TDLib UTF-16 coordinate basis. Display sanitation
 never supplies coordinates for validation or changes the raw source identity.
+Which entity families are admitted comes from the reply-source ladder; the keyword
+functions are shims over the admission-taking `*_for` functions.
 """
 from __future__ import annotations
 
 import json
 import unicodedata
 
+from .reply_source_ladder import (Admission, EXCLUSIVE_TYPES, present, STYLED, LEXICAL as _LEXICAL,
+    IDENTITY as _IDENTITY, DATETIME as _DATETIME, URL as _URL, TEXT_URL as _TEXT_URL, EMAIL as _EMAIL,
+    PHONE as _PHONE, BANK_CARD as _BANK_CARD)
 from .sanitize import sanitize_telegram_text
 
 OFFSET_BASIS = 'original source UTF-16 code units'
-STYLES = {
-    'textEntityTypeBold':'bold', 'textEntityTypeItalic':'italic',
-    'textEntityTypeUnderline':'underline', 'textEntityTypeStrikethrough':'strikethrough',
-    'textEntityTypeSpoiler':'spoiler', 'textEntityTypeCode':'code',
-    'textEntityTypePre':'pre', 'textEntityTypePreCode':'pre_code',
-    'textEntityTypeBlockQuote':'block_quote',
-    'textEntityTypeExpandableBlockQuote':'expandable_block_quote',
-}
-LEXICAL = {
-    'textEntityTypeHashtag':'hashtag', 'textEntityTypeCashtag':'cashtag',
-    'textEntityTypeBotCommand':'bot_command',
-}
-IDENTITY = {
-    'textEntityTypeMention':'mention', 'textEntityTypeMentionName':'mention_name',
-}
-DATETIME = {'textEntityTypeDateTime':'date_time'}
-URL = {'textEntityTypeUrl':'url'}
-TEXT_URL = {'textEntityTypeTextUrl':'text_url'}
-EMAIL = {'textEntityTypeEmailAddress':'email_address'}
-PHONE = {'textEntityTypePhoneNumber':'phone_number'}
-BANK_CARD = {'textEntityTypeBankCardNumber':'bank_card_number'}
+STYLES = STYLED.entities
+LEXICAL = _LEXICAL.entities
+IDENTITY = _IDENTITY.entities
+DATETIME = _DATETIME.entities
+URL = _URL.entities
+TEXT_URL = _TEXT_URL.entities
+EMAIL = _EMAIL.entities
+PHONE = _PHONE.entities
+BANK_CARD = _BANK_CARD.entities
+_PROVIDER_TYPED = frozenset((*URL, *TEXT_URL, *EMAIL, *PHONE, *BANK_CARD))
 _PRECISIONS = frozenset(('dateTimePartPrecisionNone','dateTimePartPrecisionShort','dateTimePartPrecisionLong'))
 _CODE = frozenset(('textEntityTypeCode','textEntityTypePre','textEntityTypePreCode'))
 _QUOTES = frozenset(('textEntityTypeBlockQuote','textEntityTypeExpandableBlockQuote'))
@@ -58,7 +52,7 @@ def _inert_json_string(value):
 
 
 def _inert_json(value):
-    """Encode only the closed v23 display record, keeping fixed keys ordinary."""
+    """Encode only the closed inert display record, keeping fixed keys ordinary."""
     if type(value) is str:
         return _inert_json_string(value)
     if type(value) is dict:
@@ -121,14 +115,13 @@ def _datetime_formatting(value, *, relative=False, absolute=False):
     raise ValueError('invalid formatted reply date time')
 
 
-def formatted_text(value, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
-    """Validate exact TDLib entities and return a fresh canonically ordered shape."""
+def formatted_text_for(value, admission: Admission):
+    """Validate exact TDLib entities of the admitted families and return a fresh canonically ordered shape."""
     if (type(value) is not dict or set(value)!={'@type','text','entities'} or
             value['@type']!='formattedText' or type(value['entities']) is not list or
             not 1<=len(value['entities'])<=32):
         raise ValueError('invalid formatted reply source')
-    allowed={**STYLES,**(LEXICAL if lexical else {}),**(IDENTITY if identity else {}),
-        **(DATETIME if datetime else {}),**(URL if url else {}),**(EMAIL if email else {}),**(PHONE if phone else {}),**(BANK_CARD if bank_card else {}),**(TEXT_URL if text_url else {})}
+    allowed=admission.entities
     text=_text(value['text']);boundaries=_boundaries(text);entities=[];seen=set()
     for entity in value['entities']:
         if type(entity) is not dict or set(entity)!={'@type','offset','length','type'} or entity['@type']!='textEntity':
@@ -148,7 +141,7 @@ def formatted_text(value, *, lexical=False, identity=False, datetime=False, date
             if type(unix_time) is not int or not -(2**31)<=unix_time<2**31:
                 raise ValueError('invalid formatted reply date time')
             formatting_type=_datetime_formatting(typ.get('formatting_type'),
-                relative=datetime_relative,absolute=datetime_absolute)
+                relative=admission.relative,absolute=admission.absolute)
         elif set(typ)!=keys:
             raise ValueError('invalid formatted reply entity')
         if kind=='textEntityTypePreCode':language=_text(typ['language'],language=True)
@@ -166,7 +159,7 @@ def formatted_text(value, *, lexical=False, identity=False, datetime=False, date
                     **({'url':provider_url} if kind in TEXT_URL else {}),
                     **({'unix_time':unix_time,'formatting_type':formatting_type} if kind in DATETIME else {})}})
     entities.sort(key=lambda e:(e['offset'],-e['length'],e['type']['@type'],e['type'].get('language',''),e['type'].get('user_id',0)))
-    exclusive={*LEXICAL,*IDENTITY,*URL,*TEXT_URL,*EMAIL,*PHONE,*BANK_CARD}
+    exclusive=EXCLUSIVE_TYPES
     for index,left in enumerate(entities):
         start=left['offset'];end=start+left['length'];kind=left['type']['@type']
         for right in entities[index+1:]:
@@ -181,23 +174,22 @@ def formatted_text(value, *, lexical=False, identity=False, datetime=False, date
     return {'@type':'formattedText','text':text,'entities':entities}
 
 
-def validate_content(value, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+def validate_content_for(value, admission: Admission):
     if (type(value) is not dict or set(value)!={'@type','text','link_preview','link_preview_options'} or
             value['@type']!='messageText' or value['link_preview'] is not None):
         raise ValueError('invalid formatted reply content')
     # Link option validation belongs to the unchanged message shell parser.
-    if formatted_text(value['text'],lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card,text_url=text_url)!=value['text']:
+    if formatted_text_for(value['text'],admission)!=value['text']:
         raise ValueError('noncanonical formatted reply entities')
 
 
-def render_formatted_text(formatted, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+def render_formatted_text_for(formatted, admission: Admission):
     """Complete span evidence, deriving covered text before display sanitation."""
-    if formatted_text(formatted,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card,text_url=text_url)!=formatted:
+    if formatted_text_for(formatted,admission)!=formatted:
         raise ValueError('noncanonical formatted reply entities')
-    labels={**STYLES,**(LEXICAL if lexical else {}),**(IDENTITY if identity else {}),
-        **(DATETIME if datetime else {}),**(URL if url else {}),**(EMAIL if email else {}),**(PHONE if phone else {}),**(BANK_CARD if bank_card else {}),**(TEXT_URL if text_url else {})}
+    labels=admission.entities
     text=formatted['text'];boundaries=_boundaries(text)
-    inert=any(entity['type']['@type'] in TEXT_URL for entity in formatted['entities'])
+    inert=any(family.inert for family in present(formatted['entities']))
     safe=text if inert else sanitize_telegram_text(text,max_length=65537)
     changed=_inert_json_string(text)!=_json(text) if inert else safe!=text;entities=[]
     for entity in formatted['entities']:
@@ -210,23 +202,51 @@ def render_formatted_text(formatted, *, lexical=False, identity=False, datetime=
             language=typ['language'] if inert else sanitize_telegram_text(typ['language'],max_length=65537)
             changed|=_inert_json_string(typ['language'])!=_json(typ['language']) if inert else language!=typ['language'];record['language']=language
         if typ['@type']=='textEntityTypeMentionName':record['user_id']=typ['user_id']
-        if typ['@type'] in {*URL,*TEXT_URL,*EMAIL,*PHONE,*BANK_CARD}:record['provider_type']=typ['@type']
+        if typ['@type'] in _PROVIDER_TYPED:record['provider_type']=typ['@type']
         if typ['@type'] in TEXT_URL:
             record['provider_url']=typ['url']
             changed|=_inert_json_string(typ['url'])!=_json(typ['url'])
         if typ['@type'] in DATETIME:
             record.update(provider_type=typ['@type'],unix_time=typ['unix_time'],
                 formatting_type=_datetime_formatting(typ['formatting_type'],
-                    relative=datetime_relative,absolute=datetime_absolute))
+                    relative=admission.relative,absolute=admission.absolute))
         entities.append(record)
     return {'text':safe,'offset_basis':OFFSET_BASIS,'entities':entities},changed
 
 
-def render_content(value, marker, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
-    validate_content(value,lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card,text_url=text_url)
-    record,changed=render_formatted_text(value['text'],lexical=lexical,identity=identity,datetime=datetime,datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,bank_card=bank_card,text_url=text_url)
-    inert=any(entity['type']['@type'] in TEXT_URL for entity in value['text']['entities'])
+def render_content_for(value, marker, admission: Admission):
+    validate_content_for(value,admission)
+    record,changed=render_formatted_text_for(value['text'],admission)
+    inert=any(family.inert for family in present(value['text']['entities']))
     display=marker+'Formatted target: '+(_inert_json(record) if inert else _json(record))
     if len(display)>4096 or sanitize_telegram_text(display,max_length=4097)!=display:
         raise ValueError('formatted reply evidence exceeds preview bound')
     return display,changed
+
+
+# Keyword shims: the 0.57 admission contract (styles always; each truthy flag adds its family).
+
+def formatted_text(value, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+    """Validate exact TDLib entities and return a fresh canonically ordered shape."""
+    return formatted_text_for(value,Admission.of(lexical=lexical,identity=identity,datetime=datetime,
+        datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,
+        bank_card=bank_card,text_url=text_url))
+
+
+def validate_content(value, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+    validate_content_for(value,Admission.of(lexical=lexical,identity=identity,datetime=datetime,
+        datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,
+        bank_card=bank_card,text_url=text_url))
+
+
+def render_formatted_text(formatted, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+    """Complete span evidence, deriving covered text before display sanitation."""
+    return render_formatted_text_for(formatted,Admission.of(lexical=lexical,identity=identity,datetime=datetime,
+        datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,
+        bank_card=bank_card,text_url=text_url))
+
+
+def render_content(value, marker, *, lexical=False, identity=False, datetime=False, datetime_relative=False, datetime_absolute=False, url=False, email=False, phone=False, bank_card=False, text_url=False):
+    return render_content_for(value,marker,Admission.of(lexical=lexical,identity=identity,datetime=datetime,
+        datetime_relative=datetime_relative,datetime_absolute=datetime_absolute,url=url,email=email,phone=phone,
+        bank_card=bank_card,text_url=text_url))
