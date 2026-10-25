@@ -1,6 +1,6 @@
 {
   "name": "telegram-local",
-  "version": "0.57.0.dev0",
+  "version": "0.57.0rc1",
   "description": "Search, read and, with approval on this Mac, send in Telegram through the locally installed Unofficial Telegram MCP runtime.",
   "author": {
     "name": "Unofficial Telegram MCP Contributors"

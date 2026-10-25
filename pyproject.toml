@@ -40,7 +40,7 @@ version = {attr = "telegram_search_mcp.__version__"}
 
 [tool.setuptools.data-files]
 "share/telegram-search-mcp" = ["README.md", "LICENSE", "NOTICE"]
-"share/telegram-search-mcp/docs" = ["docs/security.md", "docs/release-preflight.md", "docs/install.md", "docs/reference.md", "docs/release-notes-0.51.0.md", "docs/release-notes-0.52.0.md", "docs/release-notes-0.53.0rc1.md", "docs/release-notes-0.53.0rc2.md", "docs/release-notes-0.54.0rc1.md", "docs/release-notes-0.55.0rc1.md", "docs/release-notes-0.56.0rc1.md", "docs/third-party-notices.md", "docs/licensing.md", "docs/roadmap.md", "docs/releasing.md"]
+"share/telegram-search-mcp/docs" = ["docs/security.md", "docs/release-preflight.md", "docs/install.md", "docs/reference.md", "docs/release-notes-0.51.0.md", "docs/release-notes-0.52.0.md", "docs/release-notes-0.53.0rc1.md", "docs/release-notes-0.53.0rc2.md", "docs/release-notes-0.54.0rc1.md", "docs/release-notes-0.55.0rc1.md", "docs/release-notes-0.56.0rc1.md", "docs/release-notes-0.57.0rc1.md", "docs/third-party-notices.md", "docs/licensing.md", "docs/roadmap.md", "docs/releasing.md"]
 "share/telegram-search-mcp/docs/plans" = ["docs/plans/initial-roadmap.md"]
 "share/telegram-search-mcp/docs/licenses" = ["docs/licenses/mcp-MIT.txt", "docs/licenses/python-docx-MIT.txt", "docs/licenses/Pillow.txt", "docs/licenses/PyMuPDF-COPYING.txt", "docs/licenses/segno-BSD.txt"]
 "share/telegram-search-mcp/docs/assets" = ["docs/assets/unofficial-telegram-mcp-header.png"]

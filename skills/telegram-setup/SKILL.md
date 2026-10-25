@@ -5,7 +5,7 @@ description: Install the local Unofficial Telegram MCP bundle and connect the us
 
 # Telegram setup
 
-Paired with candidate `0.57.0.dev0`, contract 1. Needs Apple Silicon macOS 26+
+Paired with candidate `0.57.0rc1`, contract 1. Needs Apple Silicon macOS 26+
 and Claude Code, Codex or Claude Desktop running on the same Mac as the user's browser and Telegram
 phone app. The signed DMG and the public release assets do not exist yet, so the routes below
 describe what the installer does; confirm with the user which kit they have.
