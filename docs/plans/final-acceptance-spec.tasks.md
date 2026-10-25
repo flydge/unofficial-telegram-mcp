@@ -6,8 +6,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 - [ ] Criterion 2: Every synthetic and agent matrix cell PASS with a bound receipt; a deliberate schema change fails it (harness).
 - [x] Criterion 3: TDLib procedure written; rehearsal reproduces d1085f9 natives and lock byte-identically (rehearsal record).
       The procedure is [`docs/tdlib-upgrade.md`](../tdlib-upgrade.md); the rebuild route is
-      `packaging/build_tdlib_source.py` (c14e37d, 4fffce5). The [rehearsal record](final-tdlib-rehearsal.md)
-      shows two clean builds at two build paths, 25.10.2026: the natives (libtdjson
+      `packaging/build_tdlib_source.py` (c14e37d, 4fffce5, 76d6bc5). The [rehearsal record](final-tdlib-rehearsal.md)
+      shows clean builds at three build paths, 25.10.2026: the natives (libtdjson
       `46e04c99…60a7`) and the lock-shaped document (`72b8e0cf…33cf`) are byte-identical, and every output
       is equal. `prepare_native.py` still reproduces the shipped lock (`489b8ea9…c1ab`). The source-built
       libtdjson differs from the Homebrew-derived pin, which is recorded as information. Not exercised,

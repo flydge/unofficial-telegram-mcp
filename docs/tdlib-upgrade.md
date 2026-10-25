@@ -63,8 +63,9 @@ PYTHONPATH=src .venv/bin/python packaging/build_tdlib_source.py facts --source-a
 
 `facts` prints the `tdlib_source` record (the commit from the archive's pax comment, the URL, bytes, sha256,
 member count and unpacked size), plus the `td_api.tl` sha256, TDLib version and commit time that the archive
-implies. It refuses an archive whose members are not all regular files under `td-<commit>/` with one shared
-mtime. The candidate commit is the commit the archive names, not a branch name.
+implies. It refuses the archive unless every member other than a directory is a regular file under
+`td-<commit>/` and all members share one mtime. The candidate commit is the commit the archive names, not a
+branch name.
 
 In one reviewed commit on the upgrade branch:
 

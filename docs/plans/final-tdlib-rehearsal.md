@@ -64,9 +64,11 @@ files and 8 directories has the same name, mode and bytes. Both builds passed `v
 | `notices/tdlib/LICENSE_1_0.txt` | 1,338 | `c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566` |
 | `notices/openssl-3.6.4/LICENSE.txt`, `AUTHORS.md`, `README.md` | 10,175, 1,022, 8,519 | equal to the `native_notices` hashes in `packaging/payload-lock.json` |
 
-Two earlier builds in build A's path were identical to these as well: one from the working tree before
-c14e37d, which differed only in a path-grammar check, and one from c14e37d. They were made while the tool
-was being finished. With the paths normalised, the two build logs differ only in timings and in the order
+A third clean build was made at a third path (56 characters) with the final tool, 76d6bc5. That commit
+changes, after 4fffce5, only how the summary reads the committed lock and how a tree left behind is
+reported, and its outputs are identical too (`compare` exits 0). Two earlier builds in build A's path were
+also identical: one from the working tree before c14e37d, which differed only in a path-grammar check, and
+one from c14e37d. They were made while the tool was being finished. With the paths normalised, the two build logs differ only in timings and in the order
 of parallel jobs. In the rebuilt `libtdjson`, 558 strings carry the mapped prefix `/tdlib-rebuild/`, and
 none contains the build root or a home-directory path.
 
