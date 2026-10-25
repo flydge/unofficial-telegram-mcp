@@ -854,8 +854,10 @@ whole-file comparison. Each [account alias](#accounts-055-candidate) is checked 
 own `enrollment.json` and `runtime.toml`; an alias added after the upgrade refuses `rollback_refused`
 until it is removed, and a rollback to a release older than 0.55 refuses `accounts_present` while any
 alias exists ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)). A rollback does not undo a
-send, move or edit that already happened. Going back to a 0.51 install is a manual procedure; see
-[rollback](security.md#rollback).
+send, move or edit that already happened, nor a TDLib session database that a newer TDLib pin migrated;
+an upgrade that changes the pin saves and restores the session by hand
+([TDLib session backup and restore](security.md#tdlib-session-backup-and-restore)). Going back to a 0.51
+install is a manual procedure; see [rollback](security.md#rollback).
 
 ### Owned client entries
 

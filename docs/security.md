@@ -384,6 +384,70 @@ An installed 0.53 bundle has its own `rollback` action, which returns to the rel
 
 Do not delete historical custom-index or TDLib session data as part of rollback. Historical index cleanup remains separately authorized and recoverable; session revocation is an explicit owner action if authority must be withdrawn.
 
+### TDLib session backup and restore
+
+**A launcher rollback alone does not undo a TDLib database migration**, and neither does the manual procedure
+above: both restore the release, never `tdlib/db`. A release with a newer TDLib pin may migrate the session
+database when it first opens it, and an older TDLib is not guaranteed to open the migrated copy. The
+rollback guard does not notice, because it compares only `enrollment.json` and `runtime.toml`, which TDLib
+never writes. So an upgrade that changes the TDLib pin saves every account's session before the candidate's
+first start, and a rollback across that change restores it
+([upgrade procedure](tdlib-upgrade.md#7-a-real-read-only-check-on-the-owners-account), steps 7 and 8).
+
+**Before the upgrade.** Quit the MCP clients, let any approval dialog close and leave no `connect` screen
+open; stopping a broker by hand skips the installer's pending-send gate. Then, for the default account and
+again for each alias (`S` is then `$HOME/Library/Application Support/TelegramSearchMCP-accounts/<alias>` and
+`LABEL` is `com.$(basename "$HOME").telegram-search-mcp.a.<alias>.broker`):
+
+```bash
+S="$HOME/Library/Application Support/TelegramSearchMCP"
+LABEL="com.$(basename "$HOME").telegram-search-mcp.broker"
+STAMP=<yyyymmdd of the upgrade>
+launchctl bootout "gui/$(id -u)/$LABEL"
+launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 && echo "still loaded: do not copy"
+mkdir -m 700 "$S/tdlib-backup-$STAMP"
+cp -pR "$S/tdlib/" "$S/tdlib-backup-$STAMP/"
+diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "copy complete"
+plutil -extract key_account raw -o - "$S/enrollment.json"
+```
+
+The copy only reads the original, sits next to it on the same volume and is owner-only (`files` holds
+downloaded attachments unencrypted). Nothing of the Keychain is copied: the database, and so the copy, is
+encrypted with the random key under the `key_account` that `enrollment.json` names
+(`database_key_<enrollment-id>`), which `enrollment.json` and the `.managed-enrollment` marker bind to this
+session directory by path and by the device and inode of `tdlib/` and the session root. Upgrades and
+rollbacks never write the key, `enrollment.json` or the marker, so the copy opens with the key that stays in
+the Keychain. Record the `key_account` value with the backup's path in the private record, and never delete
+or regenerate that item while the copy may be needed. After the upgrade, which restarts only a broker that
+was running, start each broker with `launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"`
+and confirm it with `connect` (`already_connected`).
+
+**After a failed upgrade,** for the default account and each alias:
+
+1. Quit the MCP clients and stop the broker before the rollback, so the old TDLib never opens the migrated
+   database: `launchctl bootout "gui/$(id -u)/$LABEL"`.
+2. Roll the release back: the current release's `launcher.py rollback`, or the manual procedure above up
+   to, not including, its bootstrap.
+3. Move the migrated session aside (never delete it) and restore the copy. The enrollment binds `tdlib/` by
+   its inode, so its contents are replaced, never the directory itself:
+
+   ```bash
+   mkdir -m 700 "$S/tdlib-migrated-$STAMP"
+   mv "$S/tdlib/db" "$S/tdlib/files" "$S/tdlib-migrated-$STAMP/"
+   cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/"
+   diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
+   ```
+4. Start the broker with the `launchctl bootstrap` command above, then run the restored release's
+   `connect`: it answers `already_connected` with no new login, or runs the QR flow on the existing
+   enrollment if the session is no longer authorized. Reconnect the clients and make one bounded read.
+
+The backup and the moved-aside copy stay until the owner decides otherwise; deleting either is a separate
+owner decision. No installer guard is added for this (decision of 25.10.2026, recorded in the
+[upgrade procedure](tdlib-upgrade.md#8-rollback-path-to-the-old-pin)): a hash of `tdlib/db` changes on every
+start, the database version is readable only with the Keychain key, which the installer never reads, and a
+guard on the releases' TDLib pins must ship with the first release that changes the pin, whose spec decides
+it.
+
 ## Optional local media prerequisites
 
 Media analysis uses `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe`, and `/opt/homebrew/bin/whisper-cli`. Its default multilingual model is `~/Library/Application Support/TelegramSearchMCP/models/ggml-small.bin`. Verify the model against its distributor’s checksum during trusted provisioning. The runtime checks that it is a nonempty, owner-owned regular file; it does not recheck a model digest on each call. Provision binaries and model only through a trusted local setup; do not place private media or model downloads in the public repository. A missing dependency does not enable a cloud fallback.
