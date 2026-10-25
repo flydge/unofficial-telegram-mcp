@@ -349,15 +349,15 @@ candidate is accepted and no rollback can be needed; deleting it is a separate o
   the [manual procedure](security.md#rollback) and relinks the kept old kegs. **Neither undoes a database
   migration.** The launcher's rollback guard compares only `enrollment.json` and `runtime.toml`, which TDLib
   never writes, so it does not notice a migrated `tdlib/db`. Once the candidate has started, restore the
-  session saved at step 7, for the default account and each alias, with `S`, `LABEL` and `STAMP` as there:
+  session saved at step 7, with `S`, `LABEL` and `STAMP` as there:
 
-  1. Quit the MCP clients and stop the broker first, so the old TDLib never opens the migrated database
-     (a rollback restarts only a broker that was running):
-     `launchctl bootout "gui/$(id -u)/$LABEL"`.
-  2. Roll the release back: the current release's `launcher.py rollback`, or the manual procedure up to,
-     not including, its bootstrap.
-  3. Move the migrated session aside, never delete it, and restore the copy. The enrollment binds `tdlib/`
-     by its inode, so its contents are replaced, never the directory itself:
+  1. Quit the MCP clients and stop every broker, the default account's and each alias's, before the
+     rollback: a rollback restarts each broker that was running, and the old TDLib would open the migrated
+     database. `launchctl bootout "gui/$(id -u)/$LABEL"` for each `LABEL`.
+  2. Roll the release back once: the current release's `launcher.py rollback`, which covers every account,
+     or the manual procedure up to, not including, its bootstrap.
+  3. For each account, move the migrated session aside (never delete it) and restore the copy. The
+     enrollment binds `tdlib/` by its inode, so its contents are replaced, never the directory itself:
 
      ```bash
      mkdir -m 700 "$S/tdlib-migrated-$STAMP"
@@ -365,10 +365,10 @@ candidate is accepted and no rollback can be needed; deleting it is a separate o
      cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/"
      diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
      ```
-  4. Start the broker (`launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"`),
-     then run the restored release's `connect`: it answers `already_connected` with no new login. If the
-     session is no longer authorized, `connect` runs the QR flow on the existing enrollment. Reconnect the
-     clients, call `_manifest` with `check_broker=true` and make one bounded read.
+  4. Start each broker (`launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"`),
+     then run the restored release's `connect` for that account: it answers `already_connected` with no new
+     login. If the session is no longer authorized, `connect` runs the QR flow on the existing enrollment.
+     Reconnect the clients, call `_manifest` with `check_broker=true` and make one bounded read.
 
   Restoring by copy keeps the backup for a second attempt. TDLib fetches from the server what it had cached
   after the copy was made.

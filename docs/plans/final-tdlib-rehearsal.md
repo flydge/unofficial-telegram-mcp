@@ -156,10 +156,11 @@ above stand, and no build was repeated.
    [TDLib session backup and restore](../security.md#tdlib-session-backup-and-restore). Saving stops each
    broker with `launchctl bootout`, then copies each account's `tdlib/` to an owner-only
    `tdlib-backup-<date>` next to it without changing the original, and records the `key_account` the
-   enrollment names. The Keychain key is not copied; the copy opens with it. Restoring stops the broker
-   before the rollback, so the old TDLib never opens the migrated database, then rolls the release back,
-   moves `db` and `files` aside (never deleted) and copies the saved ones back into the same `tdlib/`,
-   whose inode the enrollment binds. Then it starts the broker and runs `connect`. Both documents, and the
+   enrollment names. The Keychain key is not copied; the copy opens with it. Restoring stops every broker
+   before one rollback, which restarts only brokers that were running, so the old TDLib never opens a
+   migrated database. It then rolls the release back, and for each account moves `db` and `files` aside
+   (never deleted) and copies the saved ones back into the same `tdlib/`, whose inode the enrollment
+   binds. Then it starts each broker and runs `connect`. Both documents, and the
    install guide's rollback, state that a launcher rollback alone does not undo a database migration.
    **Decision: no installer guard now.** A hash of `tdlib/db` changes whenever TDLib runs, the database
    version is readable only with the Keychain key, which the installer never reads, and a guard on the

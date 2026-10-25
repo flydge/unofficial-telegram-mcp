@@ -422,14 +422,15 @@ or regenerate that item while the copy may be needed. After the upgrade, which r
 was running, start each broker with `launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"`
 and confirm it with `connect` (`already_connected`).
 
-**After a failed upgrade,** for the default account and each alias:
+**After a failed upgrade:**
 
-1. Quit the MCP clients and stop the broker before the rollback, so the old TDLib never opens the migrated
-   database: `launchctl bootout "gui/$(id -u)/$LABEL"`.
-2. Roll the release back: the current release's `launcher.py rollback`, or the manual procedure above up
-   to, not including, its bootstrap.
-3. Move the migrated session aside (never delete it) and restore the copy. The enrollment binds `tdlib/` by
-   its inode, so its contents are replaced, never the directory itself:
+1. Quit the MCP clients and stop every broker, the default account's and each alias's, before the
+   rollback: a rollback restarts each broker that was running, and the old TDLib would open the migrated
+   database. `launchctl bootout "gui/$(id -u)/$LABEL"` for each `LABEL`.
+2. Roll the release back once: the current release's `launcher.py rollback`, which covers every account, or
+   the manual procedure above up to, not including, its bootstrap.
+3. For each account, move the migrated session aside (never delete it) and restore the copy. The
+   enrollment binds `tdlib/` by its inode, so its contents are replaced, never the directory itself:
 
    ```bash
    mkdir -m 700 "$S/tdlib-migrated-$STAMP"
@@ -437,9 +438,10 @@ and confirm it with `connect` (`already_connected`).
    cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/"
    diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
    ```
-4. Start the broker with the `launchctl bootstrap` command above, then run the restored release's
-   `connect`: it answers `already_connected` with no new login, or runs the QR flow on the existing
-   enrollment if the session is no longer authorized. Reconnect the clients and make one bounded read.
+4. Start each broker with the `launchctl bootstrap` command above, then run the restored release's
+   `connect` for that account: it answers `already_connected` with no new login, or runs the QR flow on
+   the existing enrollment if the session is no longer authorized. Reconnect the clients and make one
+   bounded read.
 
 The backup and the moved-aside copy stay until the owner decides otherwise; deleting either is a separate
 owner decision. No installer guard is added for this (decision of 25.10.2026, recorded in the
