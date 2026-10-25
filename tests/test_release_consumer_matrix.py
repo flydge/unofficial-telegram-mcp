@@ -18,6 +18,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import shutil
 import signal
 import stat
@@ -1219,8 +1220,10 @@ class AgentTableTests(unittest.TestCase):
             "claude_code", Path("/c"), None, "request", server="telegram_search_work", workdir=Path("/w"),
             answer=Path("/a"), mcp_config=Path("/m.json"))]
         self.assertEqual(claude, ["/c", "-p", "request", "--output-format", "stream-json", "--verbose", "--max-turns",
-                                  "40", "--strict-mcp-config", "--mcp-config", "/m.json", "--tools", "",
-                                  "--allowedTools", "mcp__telegram_search_work", "--no-session-persistence"])
+                                  "40", "--setting-sources", "", "--settings", '{"autoMemoryEnabled":false}',
+                                  "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", "/m.json",
+                                  "--tools", "", "--allowedTools", "mcp__telegram_search_work",
+                                  "--no-session-persistence"])
 
     def test_the_agent_environment_passes_nothing_else_of_the_callers(self):
         host = {"CLAUDE_CODE_SESSION_ID": "s", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "OPENAI_API_KEY": "k",
@@ -1230,9 +1233,10 @@ class AgentTableTests(unittest.TestCase):
             claude = matrix.agent_environment("claude_code", home=Path("/h"), config=Path("/c"), tmp=Path("/t"))
         self.assertEqual(codex, {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
                                  "CODEX_HOME": "/c", "HTTPS_PROXY": "http://proxy.test:3128"})
-        self.assertEqual(claude, {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
-                                  "CLAUDE_CONFIG_DIR": "/c", "HTTPS_PROXY": "http://proxy.test:3128",
-                                  "ANTHROPIC_API_KEY": "k"})
+        self.assertEqual(claude, {"HOME": str(Path.home()), "USER": pwd.getpwuid(os.getuid()).pw_name,
+                                  "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
+                                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1",
+                                  "HTTPS_PROXY": "http://proxy.test:3128", "ANTHROPIC_API_KEY": "k"})
 
     def test_refreshed_codex_credentials_go_back_only_onto_an_unchanged_file(self):
         refreshed = CODEX_AUTH.replace(b"synthetic-r", b"synthetic-r2").replace(b"synthetic-a", b"synthetic-a2")
@@ -1784,18 +1788,49 @@ class AgentBehaviourTests(unittest.TestCase):
                                                  self.base, bindings_for(census)),
                          {"status": "unavailable", "reason": "cli_not_given"})
 
-    def test_claude_code_runs_with_a_strict_temporary_mcp_config_and_an_empty_config_dir(self):
-        section, evidence, _ = run_column(self.base, "claude_code", cells=("agent.census", "agent.alias_server"))
+    @staticmethod
+    def caller_home(base: Path) -> Path:
+        """A synthetic caller home with a Claude Code configuration, as claude_login_home answers it."""
+        home = base / "caller-home"
+        (home / ".claude" / "projects" / "-some-project").mkdir(parents=True)
+        (home / ".claude.json").write_text('{"synthetic": "global configuration"}\n')
+        (home / ".claude" / "settings.json").write_text('{"enabledPlugins": {"synthetic@market": true}}\n')
+        return home
+
+    def test_claude_code_logs_in_through_the_default_configuration_and_loads_nothing_else_of_it(self):
+        home = self.caller_home(self.base)
+        before = matrix.claude_configuration(home)
+        with mock.patch.object(matrix, "claude_login_home", return_value=home):
+            section, evidence, _ = run_column(self.base, "claude_code", cells=("agent.census", "agent.alias_server"))
         self.assertEqual([cell["status"] for cell in section["cells"]], ["pass", "pass"])
         self.assertEqual(section["cli"], "2.1.304 (Claude Code)")
         seen = isolation(evidence, "claude_code", "agent.alias_server")
-        self.assertEqual((seen["config"], seen["home"], seen["cwd"], seen["auth_sha256"]), ([], [], [], None))
+        self.assertEqual((seen["config"], seen["home_path"], seen["cwd"], seen["auth_sha256"]),
+                         (None, str(home), [], None))
         self.assertEqual(seen["servers"], [f"{SERVER}_{matrix.ALIAS}"])
-        self.assertIn("--strict-mcp-config", seen["argv"])
-        self.assertEqual(seen["argv"][seen["argv"].index("--allowedTools") + 1], f"mcp__{SERVER}_{matrix.ALIAS}")
-        self.assertEqual(seen["argv"][seen["argv"].index("--tools") + 1], "")
+        argv = seen["argv"]
+        for flag in ("--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "")
+        self.assertEqual(json.loads(argv[argv.index("--settings") + 1]), {"autoMemoryEnabled": False})
+        self.assertEqual(argv[argv.index("--allowedTools") + 1], f"mcp__{SERVER}_{matrix.ALIAS}")
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
         self.assertLessEqual(set(seen["environment"]) - SHELL_VARIABLES,
-                             {"HOME", "PATH", "TMPDIR", "LANG", "CLAUDE_CONFIG_DIR"})
+                             {"HOME", "USER", "PATH", "TMPDIR", "LANG", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                              "DISABLE_AUTOUPDATER"})
+        self.assertEqual(matrix.claude_configuration(home), before)
+
+    def test_a_claude_code_run_that_changes_the_callers_configuration_is_refused(self):
+        for behaviour in ("touch_config", "new_project"):
+            with self.subTest(behaviour=behaviour), tempfile.TemporaryDirectory(dir=self.base) as directory:
+                base = Path(directory)
+                with mock.patch.object(matrix, "claude_login_home", return_value=self.caller_home(base)):
+                    self.assertEqual(refusal(run_column, base, "claude_code", behaviour, cells=("agent.census",)),
+                                     "client_config_changed")
+                self.assertFalse((base / f"scratch-claude_code-{behaviour}").exists())
+        snapshot = matrix.claude_configuration(self.base / "nowhere")
+        self.assertEqual(snapshot, {".claude.json": None, ".claude/settings.json": None,
+                                    ".claude/settings.local.json": None, "projects": None})
 
 
 if __name__ == "__main__":

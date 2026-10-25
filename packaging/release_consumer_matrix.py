@@ -4,7 +4,7 @@
 
   python packaging/release_consumer_matrix.py run --commit <sha> --receipt <path> [--wheelhouse <dir>]
       [--toolhouse <dir>] [--node <path> --inspector-cache <dir>] [--workdir <dir>] [--real-dialog]
-      [--codex <path> [--codex-home <dir>] [--codex-model <model>]] [--claude <path> [--claude-model <model>]]
+      [--codex <path> --codex-home <dir> [--codex-model <model>]] [--claude <path> [--claude-model <model>]]
       [--agent-evidence <dir>]
   python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>]
       [--agent-evidence <dir>]
@@ -15,11 +15,13 @@ acceptance is always false: the harness runs only synthetic cells and never mark
 passed.
 
 The agent columns (--codex, --claude) give a real agent CLI one fixed request per cell (AGENT_CELLS) with a private
-HOME and configuration home whose only MCP server is the installed proxy (Codex: a temporary CODEX_HOME holding its
-config.toml and a copy of auth.json, nothing else; Claude Code: an empty CLAUDE_CONFIG_DIR, a temporary --mcp-config
-and --strict-mcp-config), each cell against its own synthetic broker, which records its own transcript of every
-frame, operation, payload, result and owner dialog. A cell is decided on that transcript, the agent's exit, its
-completed turn and the tools it used; the answer's wording is advisory. The evidence (the broker's transcript, the
+configuration whose only MCP server is the installed proxy (Codex: a temporary HOME and CODEX_HOME holding its
+config.toml and a copy of auth.json, nothing else; Claude Code: the default configuration location for its login
+only, with no setting source, auto memory, skill, built-in tool or transcript, a temporary --mcp-config with
+--strict-mcp-config, and the caller's Claude Code configuration verified unchanged), each cell against its own
+synthetic broker, which records its own transcript of every frame, operation, payload, result and owner dialog. A
+cell is decided on that transcript, the agent's exit, its completed turn and the tools it used; the answer's wording
+is advisory. The evidence (the broker's transcript, the
 agent's event stream, its answer and a run record bound to the commit, wheel and fingerprint) is kept in
 --agent-evidence and bound into the receipt by digest; check re-reads it and judges every cell again. The private
 homes are deleted afterwards; when Codex refreshed its tokens meanwhile, the refreshed auth.json goes back to the
@@ -67,6 +69,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import signal
@@ -232,7 +235,7 @@ CODES = frozenset({
     "schema_mismatch", "tools_mismatch", "version_mismatch", "workdir_invalid", "wheelhouse_invalid",
     "harness_mismatch", "gate_mismatch", "tree_mismatch", "field_mismatch", "checks_mismatch", "toolhouse_invalid",
     "installer_failed", "inspector_invalid", "cache_invalid", "node_invalid", "fetch_failed", "agent_invalid",
-    "agent_failed", "evidence_invalid", "evidence_missing", "evidence_mismatch"})
+    "agent_failed", "evidence_invalid", "evidence_missing", "evidence_mismatch", "client_config_changed"})
 RECEIPT_KEYS = frozenset({"schema", "acceptance", "harness", "gate", "commit", "tree", "version", "wheel", "build",
                           "install", "installer", "sdk", "schema_fingerprint", "census", "surface", "approval",
                           "cells", "inspector", "agents", "owner_cells", "summary"})
@@ -519,6 +522,12 @@ CODEX_QUIET_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list
 # operator exports for the run; nothing else of the caller's environment does.
 AGENT_NETWORK_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
 CLAUDE_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+# Claude Code keeps the default configuration location only for its login (on macOS the Keychain, found through the
+# caller's HOME and USER): no setting source, no auto memory, no skills or commands, only the --mcp-config server,
+# no built-in tool, no transcript, no telemetry or auto-update; claude_configuration proves nothing of it changed.
+CLAUDE_SETTINGS = '{"autoMemoryEnabled":false}'
+CLAUDE_QUIET_ENV = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1"}
+CLAUDE_GUARDED = (".claude.json", ".claude/settings.json", ".claude/settings.local.json")
 
 
 class MatrixRefusal(Exception):
@@ -3064,18 +3073,46 @@ def bounded(command: list, *, cwd: Path, env: dict, timeout: float, stdout: Path
                 _AGENT_GROUPS.discard(process.pid)
 
 
+def claude_login_home() -> Path:
+    """The caller's home, through which Claude Code finds its login (the default configuration location)."""
+    return Path.home()
+
+
+def claude_configuration(home: Path) -> dict:
+    """What the Claude Code column must leave as it found it in the caller's home: size, mtime and sha256 of the
+    global configuration and the user's settings files (None when absent), and the names of the project folders,
+    where a transcript or an auto-memory folder would appear. Held in memory only, never printed or kept."""
+    state = {}
+    for name in CLAUDE_GUARDED:
+        try:
+            metadata = (home / name).lstat()
+            state[name] = [metadata.st_size, metadata.st_mtime_ns,
+                           _sha((home / name).read_bytes()) if stat.S_ISREG(metadata.st_mode) else None]
+        except OSError:
+            state[name] = None
+    try:
+        state["projects"] = sorted(os.listdir(home / ".claude" / "projects"))
+    except OSError:
+        state["projects"] = None
+    return state
+
+
 def agent_environment(column: str, *, home: Path, config: Path, tmp: Path) -> dict:
-    """Only what the agent needs: its private HOME and configuration home, the system PATH, its TMPDIR, the network
-    proxy settings and, for Claude Code, a credential the operator exported for the run."""
-    passed = AGENT_NETWORK_ENV + (CLAUDE_CREDENTIAL_ENV if column == "claude_code" else ())
-    return {"HOME": str(home), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
-            ("CODEX_HOME" if column == "codex" else "CLAUDE_CONFIG_DIR"): str(config),
-            **{name: os.environ[name] for name in passed if os.environ.get(name)}}
+    """Only what the agent needs: the system PATH, its TMPDIR, the network proxy settings and, for Codex, its private
+    HOME and configuration home; for Claude Code the caller's HOME and USER (its login, nothing else: see
+    CLAUDE_SETTINGS), no telemetry or auto-update, and a credential the operator exported for the run."""
+    network = {name: os.environ[name] for name in AGENT_NETWORK_ENV if os.environ.get(name)}
+    if column == "codex":
+        return {"HOME": str(home), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+                "CODEX_HOME": str(config), **network}
+    return {"HOME": str(claude_login_home()), "USER": pwd.getpwuid(os.getuid()).pw_name, "PATH": SYSTEM_PATH,
+            "TMPDIR": str(tmp), "LANG": "en_US.UTF-8", **CLAUDE_QUIET_ENV, **network,
+            **{name: os.environ[name] for name in CLAUDE_CREDENTIAL_ENV if os.environ.get(name)}}
 
 
 def agent_version(column: str, binary: Path, env: dict) -> str | None:
     try:
-        done = subprocess.run([str(binary), "--version"], env=env, cwd=env["HOME"], stdin=subprocess.DEVNULL,
+        done = subprocess.run([str(binary), "--version"], env=env, cwd=env["TMPDIR"], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3109,6 +3146,7 @@ def agent_command(column: str, binary: Path, model: str | None, request: str, *,
                 *(("--model", model) if model else ()), request]
     # The request goes first: --mcp-config, --tools and --allowedTools take several values.
     return [binary, "-p", request, "--output-format", "stream-json", "--verbose", "--max-turns", "40",
+            "--setting-sources", "", "--settings", CLAUDE_SETTINGS, "--disable-slash-commands",
             "--strict-mcp-config", "--mcp-config", mcp_config, "--tools", "", "--allowedTools", f"mcp__{server}",
             "--no-session-persistence", *(("--model", model) if model else ())]
 
@@ -3556,18 +3594,25 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
 def run_agent_column(column: str, binary: Path | None, model: str | None, runtime: "Runtime", census: dict,
                      scratch: Path, evidence: Path | None, bindings: dict, *, codex_home: Path | None = None,
                      cells: tuple = AGENT_IDS) -> dict:
-    """Every agent cell of one column, in AGENT_IDS order, with one private HOME and configuration home for the
-    column (Codex: a config.toml naming only the matrix proxy and a copy of auth.json, nothing else; Claude Code: an
-    empty CLAUDE_CONFIG_DIR and a temporary --mcp-config with --strict-mcp-config), deleted afterwards; or why the
-    column is unavailable (AGENT_UNAVAILABLE)."""
+    """Every agent cell of one column, in AGENT_IDS order, with private homes for the column, deleted afterwards
+    (Codex: a HOME and a CODEX_HOME whose config.toml names only the matrix proxy, with a copy of auth.json, nothing
+    else; Claude Code: the default configuration location for its login only, no setting source, a temporary
+    --mcp-config with --strict-mcp-config, and the caller's Claude Code configuration unchanged after the version
+    check and after every cell, or the run is refused with client_config_changed); or why the column is unavailable
+    (AGENT_UNAVAILABLE)."""
     if binary is None or evidence is None:
         return {"status": "unavailable", "reason": "cli_not_given"}
     _fresh(scratch)
     home, config, tmp = (_fresh(scratch / name) for name in ("agent-home", "agent-config", "agent-tmp"))
     env = agent_environment(column, home=home, config=config, tmp=tmp)
+    guarded = claude_configuration(claude_login_home()) if column == "claude_code" else None
+
+    def unchanged() -> None:
+        need(guarded is None or claude_configuration(claude_login_home()) == guarded, "client_config_changed")
     auth = None
     try:
         version = agent_version(column, binary, env)
+        unchanged()
         if version is None:
             return {"status": "unavailable", "reason": "cli_unusable"}
         if column == "codex":
@@ -3584,6 +3629,7 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
             result, login_failed = run_agent_cell(column, cell_id, binary=binary, model=model, version=version,
                                                   runtime=runtime, census=census, scratch=scratch, env=env,
                                                   config=config, folder=folder / cell_id, bindings=bindings)
+            unchanged()
             if login_failed and not results:  # The column's first cell, before any tool reached the broker.
                 return {"status": "unavailable", "reason": "not_logged_in"}
             results.append(result)

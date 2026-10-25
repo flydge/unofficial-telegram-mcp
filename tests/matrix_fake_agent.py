@@ -13,7 +13,8 @@ later cell as not_logged_in: a login lost mid-column); transient (the first atte
 before any tool call); prose (no tool call; the model's own words name login and capacity problems, which are
 no provider failure); refresh (Codex rewrites auth.json as a token refresh does); hang (Codex refreshes auth.json,
 reports its pid and its broker's HOME to --report, then sleeps far past the test, like an agent that would outlive
-an interrupted harness); bad_version.
+an interrupted harness); touch_config and new_project (Claude Code changes the caller's ~/.claude.json, or adds a
+project folder, as a run that loaded or wrote the user's configuration would); bad_version.
 """
 from __future__ import annotations
 
@@ -129,20 +130,25 @@ def main() -> int:
         request, answer_path = rest[-1], Path(rest[rest.index("--output-last-message") + 1])
         config_home = Path(os.environ["CODEX_HOME"])
         servers = tomllib.loads((config_home / "config.toml").read_text())["mcp_servers"]
-    else:
+    else:  # The default configuration location (the caller's HOME), for the login only.
         request, answer_path = rest[rest.index("-p") + 1], None
-        config_home = Path(os.environ["CLAUDE_CONFIG_DIR"])
+        config_home = Path(os.environ["CLAUDE_CONFIG_DIR"]) if "CLAUDE_CONFIG_DIR" in os.environ else None
         servers = json.loads(Path(rest[rest.index("--mcp-config") + 1]).read_text())["mcpServers"]
     [configured] = servers  # the default's name, or an alias's `<server>_<alias>`
     bases = (configured, configured.removesuffix(f"_{matrix.ALIAS}"))
     cell = next(cell for cell in matrix.AGENT_IDS for base in bases if matrix.agent_request(cell, base) == request)
-    auth = config_home / "auth.json"
-    emit({"type": "fake.isolation", "home": sorted(os.listdir(os.environ["HOME"])),
-          "config": sorted(os.listdir(config_home)), "cwd": sorted(os.listdir(os.getcwd())),
+    auth = config_home / "auth.json" if config_home else Path(os.devnull, "absent")
+    emit({"type": "fake.isolation", "home": sorted(os.listdir(os.environ["HOME"])), "home_path": os.environ["HOME"],
+          "config": sorted(os.listdir(config_home)) if config_home else None, "cwd": sorted(os.listdir(os.getcwd())),
           "servers": sorted(servers), "environment": sorted(os.environ),
           "auth_sha256": hashlib.sha256(auth.read_bytes()).hexdigest() if auth.exists() else None,
           "argv": rest[:-1] if args.role == "codex" else [part for part in rest if part != request]})
     [(name, server)] = servers.items()
+    if args.behaviour == "touch_config" and args.role == "claude":
+        with open(Path(os.environ["HOME"]) / ".claude.json", "a") as stream:
+            stream.write("\n")
+    if args.behaviour == "new_project" and args.role == "claude":
+        (Path(os.environ["HOME"]) / ".claude" / "projects" / "-matrix-cell" / "memory").mkdir(parents=True)
     if args.behaviour == "logout_after_census":
         args.behaviour = "shell" if cell == "agent.census" else "not_logged_in"
     if args.behaviour == "not_logged_in":
