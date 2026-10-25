@@ -1758,7 +1758,8 @@ only the five caller styles on a document, photo, voice-note or video caption th
 stores: input that normalization or Telegram's rewrite would change is refused, never rewritten, so a span can
 never shift onto other text. The frozen styles are bound into the artifact preview digest (reply-artifact v2,
 video v2) and to the provider and epoch they were reviewed under; the capability is rechecked at every step up to
-the raw send, and for status and receipt replay. The TDLib guard admits only canonical frozen styles over a
+the raw send, and with that provider and epoch before the owner dialog, for status and receipt replay, and before a
+send's result is disclosed, for every file kind including video. The TDLib guard admits only canonical frozen styles over a
 stored-form caption, and only plain captions on album items. The read-back is exact: the caption's digest, and
 only the frozen styles (TDLib's split pieces joined) plus the entities Telegram itself detects. A missing, added or
 shifted style leaves the send `outcome_unknown`, which is never retried. Plain captions now take the same rule with
