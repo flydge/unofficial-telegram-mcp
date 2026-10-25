@@ -1580,6 +1580,9 @@ class AgentColumnTests(unittest.TestCase):
                 self.assertEqual((code, err.getvalue().strip()), expected)
                 if code == 0:
                     self.assertIn(f"Codex {len(matrix.AGENT_IDS)}/{len(matrix.AGENT_IDS)} cells", out.getvalue())
+                    self.assertTrue(out.getvalue().startswith("consumer matrix receipt verified: "))
+                    self.assertTrue(out.getvalue().endswith(f" owner cells pending (commit {COMMIT}, wheel sha256 "
+                                                            f"{WHEEL})\n"), out.getvalue())
 
 
 class InterruptTests(unittest.TestCase):

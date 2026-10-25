@@ -3982,7 +3982,8 @@ def check(args: argparse.Namespace) -> int:
                       committed=committed, derived={"install": installed, "listing_sha256": listing})
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    print("consumer matrix receipt verified: " + summary_line(receipt).split(": ", 1)[1])
+    print("consumer matrix receipt verified: " + summary_line(receipt).split(": ", 1)[1]
+          + f" (commit {receipt['commit']}, wheel sha256 {receipt['wheel']['sha256']})")
     return 0
 
 
