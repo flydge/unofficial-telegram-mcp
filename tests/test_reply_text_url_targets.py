@@ -409,8 +409,9 @@ class TextUrlSourceTests(unittest.TestCase):
         self.assertEqual(render_content(content, '[untrusted Telegram evidence] ', text_url=True),
                          (PREFIX + EXACT_BODY, True))
 
-    def test_texturl_captions_refuse_even_with_every_other_family_optin(self):
-        # Break: messageText admission silently extends to captions or media helper defaults.
+    def test_texturl_captions_select_v24_but_the_media_keyword_shims_stay_closed(self):
+        # Break: 0.58 media TextUrl (v24, criterion 4's listed flip) stays refused, or the 0.57 media helper keywords
+        # silently admit it.
         from telegram_search_mcp.reply_media_sources import media_content, validate_content as validate_media, render_content as render_media
         self.accepted()
         for kind in ('document', 'photo', 'voice_note'):
@@ -425,10 +426,12 @@ class TextUrlSourceTests(unittest.TestCase):
                 self.assertEqual(media_content(without['content'], **flags), canonical)
                 validate_media(canonical, **flags)
                 render_media(canonical, '[untrusted Telegram evidence] ', **flags)
-                closed = copy.deepcopy(canonical)
-                closed['caption']['entities'].insert(0, copy.deepcopy(caption['entities'][0]))
-                for operation in (lambda: source_from_message(raw, CHAT, MESSAGE),
-                                  lambda: media_content(raw['content'], **flags),
+                admitted = source_from_message(raw, CHAT, MESSAGE)
+                self.assertEqual(json.loads(admitted.projection_json)['version'], 24)
+                self.assertEqual(admitted.required_capabilities[:3],
+                                 ('reply_media_targets', 'reply_formatted_targets', 'reply_text_url_targets'))
+                closed = json.loads(admitted.projection_json)['message']['content']
+                for operation in (lambda: media_content(raw['content'], **flags),
                                   lambda: validate_media(closed, **flags),
                                   lambda: render_media(closed, '[untrusted Telegram evidence] ', **flags)):
                     with self.subTest(kind=kind), self.assertRaises(ValueError): operation()
@@ -833,7 +836,10 @@ class TextUrlLifecycleTests(unittest.TestCase):
                 if mutation == 'extra': raw['content']['text']['entities'][0]['type']['extra'] = None
                 elif mutation == 'bad_hidden': raw['content']['text']['entities'][0]['type']['url'] = False
                 elif mutation == 'bad_offset': raw['content']['text']['entities'][0]['offset'] = 6
-                elif mutation == 'caption': raw['content'] = media('document', raw['content']['text'])
+                elif mutation == 'caption':
+                    # 0.58 admits a TextUrl caption (v24); one past the complete display bound stays closed.
+                    raw['content'] = media('document', raw['content']['text'])
+                    raw['content']['caption']['entities'][0]['type']['url'] = 'x' * 4096
                 else: raw['content']['text']['entities'][0]['type']['url'] = 'x' * 4096
                 self.raw.source = raw; before = list(self.registrations)
                 self.assertEqual(self.prepare(family)['status'], 'unavailable')

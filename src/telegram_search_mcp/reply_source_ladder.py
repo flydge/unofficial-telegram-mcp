@@ -5,6 +5,11 @@ covers with their display labels, its rank, and the projection version it select
 odd for messageText, even for a media caption, so parity alone decides `is_media`. A family without a version for a
 source kind is refused there. The two datetime levels refine DateTime by formatting type and share its capability.
 
+0.58 adds media TextUrl (v24), CustomEmoji (v25/v26) and MediaTimestamp (v28, captions only, so v27 is reserved:
+no row claims it and it stays refused). A MediaTimestamp is further bounded by the source's own media duration,
+which only a voice note has, so documents and photos refuse it in the parser (reply_formatted_sources). Families
+added after the 0.57 keyword shims froze have no keyword: only the admission-taking `*_for` functions reach them.
+
 Everything else derives from the table: the version of a parsed source, its capability tuple (media, formatted,
 the top family's, then every other present family in LISTING_ORDER), the families a stored version admits for
 validation and rendering, and the keyword admission of the public shims. No other module lists versions.
@@ -24,7 +29,7 @@ DATETIME_TYPE = 'textEntityTypeDateTime'
 class Family:
     """One closed ladder row; identity equality, so rows are unique members of frozensets."""
     name: str
-    kwarg: str
+    kwarg: str | None  # the 0.57 shim keyword; None for a family added after the shims froze
     capability: str
     entities: Mapping[str, str]
     rank: int
@@ -68,14 +73,21 @@ EMAIL = Family('email', 'email', 'reply_email_targets', _map(EmailAddress='email
 PHONE = Family('phone', 'phone', 'reply_phone_targets', _map(PhoneNumber='phone_number'), 9, 19, 20, exclusive=True)
 BANK_CARD = Family('bank_card', 'bank_card', 'reply_bank_card_targets', _map(BankCardNumber='bank_card_number'),
                    10, 21, 22, exclusive=True)
-TEXT_URL = Family('text_url', 'text_url', 'reply_text_url_targets', _map(TextUrl='text_url'), 11, 23, None,
+TEXT_URL = Family('text_url', 'text_url', 'reply_text_url_targets', _map(TextUrl='text_url'), 11, 23, 24,
                   exclusive=True, inert=True)
+CUSTOM_EMOJI = Family('custom_emoji', None, 'reply_custom_emoji_targets', _map(CustomEmoji='custom_emoji'), 12, 25,
+                      26, exclusive=True)
+MEDIA_TIMESTAMP = Family('media_timestamp', None, 'reply_media_timestamp_targets',
+                         _map(MediaTimestamp='media_timestamp'), 13, None, 28, exclusive=True)
 
 LADDER: tuple[Family, ...] = (STYLED, LEXICAL, IDENTITY, DATETIME, DATETIME_RELATIVE, DATETIME_ABSOLUTE, URL, EMAIL,
-                              PHONE, BANK_CARD, TEXT_URL)
+                              PHONE, BANK_CARD, TEXT_URL, CUSTOM_EMOJI, MEDIA_TIMESTAMP)
 # After `formatted` and the top family's capability, the other present families are listed in this fixed order
-# (not by rank: identity precedes lexical only as a top). A new family extends it at the front.
-LISTING_ORDER: tuple[Family, ...] = (TEXT_URL, BANK_CARD, PHONE, EMAIL, URL, DATETIME, LEXICAL, IDENTITY)
+# (not by rank: identity precedes lexical only as a top). A new family extends it at the front, so no v1-v23 tuple
+# moves.
+LISTING_ORDER: tuple[Family, ...] = (MEDIA_TIMESTAMP, CUSTOM_EMOJI, TEXT_URL, BANK_CARD, PHONE, EMAIL, URL, DATETIME,
+                                     LEXICAL, IDENTITY)
+SHIM_FAMILIES: tuple[Family, ...] = tuple(f for f in LADDER if f.kwarg is not None)
 TEXT_VERSIONS = frozenset((PLAIN_TEXT_VERSION, *(f.text_version for f in LADDER if f.text_version is not None)))
 MEDIA_VERSIONS = frozenset((PLAIN_MEDIA_VERSION, *(f.media_version for f in LADDER if f.media_version is not None)))
 EXCLUSIVE_TYPES = frozenset(kind for f in LADDER if f.exclusive for kind in f.entities)
@@ -118,10 +130,10 @@ class Admission:
 
     @classmethod
     def of(cls, **flags: object) -> 'Admission':
-        """The public shims' keyword contract: styles plus each truthy family keyword."""
-        if set(flags) - {f.kwarg for f in LADDER}:
+        """The public shims' keyword contract (0.57): styles plus each truthy family keyword."""
+        if set(flags) - {f.kwarg for f in SHIM_FAMILIES}:
             raise TypeError('unknown reply family keyword')
-        return cls(frozenset((STYLED, *(f for f in LADDER if flags.get(f.kwarg)))))
+        return cls(frozenset((STYLED, *(f for f in SHIM_FAMILIES if flags.get(f.kwarg)))))
 
 
 TEXT_ADMISSION = Admission(frozenset((STYLED, *(f for f in LADDER if f.text_version is not None))))

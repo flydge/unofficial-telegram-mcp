@@ -155,8 +155,11 @@ class PhoneMediaSourceTests(unittest.TestCase):
                     {'@type':'textEntityTypePhoneNumber','url':'tel:+123'},
                     {'@type':['textEntityTypePhoneNumber']},{'@type':True},None,'textEntityTypePhoneNumber'):
                 raw=media_message(kind);raw['content']['caption']['entities'][0]['type']=typ;self.reject(raw)
-            for typ,fields in (('TextUrl',{'url':'tel:+123'}),('CustomEmoji',{'custom_emoji_id':1}),('MediaTimestamp',{'media_timestamp':1})):
+            for typ,fields in (('CustomEmoji',{'custom_emoji_id':1}),('MediaTimestamp',{'media_timestamp':1})):
                 self.reject(media_message(kind,message(entities=[entity(typ,**fields)])))
+            # 0.58 criterion 4: the TextUrl probe is a listed flip (v24 media TextUrl); the other two stay refused.
+            flipped=source_from_message(media_message(kind,message(entities=[entity('TextUrl',url='tel:+123')])),CHAT,MESSAGE)
+            self.assertEqual(json.loads(flipped.projection_json)['version'],24)
             for offset,length in ((0,1),(1,1),(True,2),(-1,2),(0,False),(0,99),(2**31,2)):
                 self.reject(media_message(kind,message('😀abc',[entity(offset=offset,length=length)])))
             for level in ('content','caption','entity'):

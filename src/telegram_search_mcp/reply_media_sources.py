@@ -1,7 +1,9 @@
 """Closed stable media evidence; parsing never reads paths or fetches provider data.
 
 Which caption entity families are admitted comes from the reply-source ladder; the keyword
-functions are shims over the admission-taking `*_for` functions.
+functions are shims over the admission-taking `*_for` functions. A caption with an inert family
+(TextUrl, v24) renders the whole record through one inert JSON layer, never the sanitizer; a
+voice note's own duration bounds its caption's media timestamps (v28).
 """
 from __future__ import annotations
 
@@ -80,8 +82,9 @@ def _thumbnail(value):
         and _number(value['width'],16384,1) and _number(value['height'],16384,1) and _file(value['file']))
 
 
-def caption_for(value, admission: Admission):
-    """Validate a bounded caption against an admission and return its canonical shape."""
+def caption_for(value, admission: Admission, *, max_media_timestamp=None):
+    """Validate a bounded caption against an admission and return its canonical shape; `max_media_timestamp` is the
+    media's own duration (a voice note's), without which a media timestamp is refused."""
     if not (_shape(value,'formattedText',('text','entities')) and type(value['text']) is str
             and len(value['text'])<=1024 and type(value['entities']) is list
             and not any(unicodedata.category(c).startswith('C') and c not in '\n\t' for c in value['text'])):
@@ -89,7 +92,7 @@ def caption_for(value, admission: Admission):
     value['text'].encode('utf-8')
     if value['entities']:
         from .reply_formatted_sources import formatted_text_for
-        return formatted_text_for(value,admission)
+        return formatted_text_for(value,admission,max_media_timestamp=max_media_timestamp)
     return {'@type':'formattedText','text':value['text'],'entities':[]}
 
 
@@ -117,7 +120,6 @@ def media_content_for(content, admission: Admission):
     """Validate bounded pinned provider shapes and return only stable fresh facts."""
     if type(content) is not dict:
         raise ValueError('reply media is unavailable')
-    caption = caption_for(content.get('caption'),admission)
     kind = content.get('@type')
     if kind == 'messageDocument':
         doc = content.get('document')
@@ -158,6 +160,7 @@ def media_content_for(content, admission: Admission):
         media={'duration':voice['duration'],'mime_type':'audio/ogg',**_identity(voice['voice'])};source_kind='voice_note'
     else:
         raise ValueError('reply media kind is unavailable')
+    caption=caption_for(content.get('caption'),admission,max_media_timestamp=_duration(source_kind,media))
     result={'kind':source_kind,'caption':caption,'media':media}
     validate_content_for(result,admission)
     return result
@@ -169,12 +172,15 @@ def _stable_identity(value):
             and all(c in '0123456789abcdef' for c in sha))
 
 
+def _duration(kind, media):
+    """The media's own duration, the only bound of a caption's media timestamps: a voice note's; none otherwise."""
+    return media['duration'] if kind=='voice_note' else None
+
+
 def validate_content_for(content, admission: Admission):
     """Strictly validate stored media facts and a caption canonical under the admission."""
     if type(content) is not dict or set(content)!={'kind','caption','media'}:
         raise ValueError('invalid media projection')
-    if caption_for(content['caption'],admission)!=content['caption']:
-        raise ValueError('noncanonical reply caption entities')
     kind,media=content['kind'],content['media']
     if type(kind) is not str or type(media) is not dict:
         raise ValueError('invalid media projection')
@@ -195,6 +201,20 @@ def validate_content_for(content, admission: Admission):
                 valid=all(_variant_key(a)<_variant_key(b) for a,b in zip(variants,variants[1:]))
     if not valid:
         raise ValueError('invalid media projection')
+    if caption_for(content['caption'],admission,max_media_timestamp=_duration(kind,media))!=content['caption']:
+        raise ValueError('noncanonical reply caption entities')
+
+
+def _strings(value):
+    """Every string value of the stored media facts, for the inert record's `sanitized` comparison."""
+    if type(value) is str:
+        yield value
+    elif type(value) is dict:
+        for item in value.values():
+            yield from _strings(item)
+    elif type(value) is list:
+        for item in value:
+            yield from _strings(item)
 
 
 def _render(content, marker, admission: Admission):
@@ -211,14 +231,20 @@ def _render(content, marker, admission: Admission):
             return [safe(v) for v in value]
         return value
     caption=content['caption']['text']
-    # Fail closed until media captions get the whole-record inert display: safe() would rewrite hidden payloads.
+    bound=_duration(content['kind'],content['media'])
     if any(family.inert for family in present(content['caption']['entities'])):
-        raise ValueError('reply media evidence is unavailable')
-    if content['caption']['entities']:
-        from .reply_formatted_sources import render_formatted_text_for
-        caption,changed=render_formatted_text_for(content['caption'],admission)
-    record=safe({'kind':content['kind'],'caption':caption,'media':content['media']})
-    display=marker+'Media target: '+json.dumps(record,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
+        # The whole record in one reversible inert JSON layer, as v23 text: safe() would rewrite hidden payloads.
+        # `sanitized` compares that layer with ordinary JSON for every provider string; fixed labels are excluded.
+        from .reply_formatted_sources import _inert_json, _inert_json_string, _json, render_formatted_text_for
+        caption,changed=render_formatted_text_for(content['caption'],admission,max_media_timestamp=bound)
+        changed|=any(_inert_json_string(value)!=_json(value) for value in _strings(content['media']))
+        display=marker+'Media target: '+_inert_json({'kind':content['kind'],'caption':caption,'media':content['media']})
+    else:
+        if content['caption']['entities']:
+            from .reply_formatted_sources import render_formatted_text_for
+            caption,changed=render_formatted_text_for(content['caption'],admission,max_media_timestamp=bound)
+        record=safe({'kind':content['kind'],'caption':caption,'media':content['media']})
+        display=marker+'Media target: '+json.dumps(record,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False)
     if len(display)>4096 or sanitize_telegram_text(display,max_length=4097)!=display:
         raise ValueError('reply evidence exceeds preview bound')
     return display,changed

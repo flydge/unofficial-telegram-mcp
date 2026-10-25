@@ -155,8 +155,11 @@ class UrlMediaSourceTests(unittest.TestCase):
     def test_fieldless_shapes_closed_families_and_utf16_refuse(self):
         # Break: open fields, hidden targets, coercion or split-scalar spans.
         for kind in KINDS:
-            for typ,fields in (('Url',{'url':'hidden'}),('Url',{'extra':None}),('TextUrl',{'url':'https://example.invalid'}),('PhoneNumber',{'phone':'hidden'}),('CustomEmoji',{'custom_emoji_id':1}),('MediaTimestamp',{'media_timestamp':1})):
+            for typ,fields in (('Url',{'url':'hidden'}),('Url',{'extra':None}),('PhoneNumber',{'phone':'hidden'}),('CustomEmoji',{'custom_emoji_id':1}),('MediaTimestamp',{'media_timestamp':1})):
                 self.reject(media_message(kind,message(entities=[entity(typ,**fields)])))
+            # 0.58 criterion 4: the TextUrl probe is a listed flip (v24 media TextUrl); the others stay refused.
+            flipped=source_from_message(media_message(kind,message(entities=[entity('TextUrl',url='https://example.invalid')])),CHAT,MESSAGE)
+            self.assertEqual(json.loads(flipped.projection_json)['version'],24)
             for offset,length in ((0,1),(1,1),(True,2),(-1,2),(0,False),(0,99),(2**31,2)):
                 self.reject(media_message(kind,message('😀abc',[entity(offset=offset,length=length)])))
             for level in ('content','caption','entity'):

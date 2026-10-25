@@ -131,9 +131,11 @@ class CaptionSourceTests(unittest.TestCase):
         self.accepted(raw_caption())
         bad=[span(offset=o,length=n) for o,n in [(2,1),(1,1),(0,2),(-1,1),(0,0),(4,2),(0,2**31),(2**31,1),(True,1),(0,True),(0,1.0)]]
         bad += [{},dict(span(),extra=1),span('PreCode',language='x\n'),span('PreCode',language='a'*65),span('PreCode',language='😀'*33)]
-        hidden=span();hidden['type']={'@type':'textEntityTypeTextUrl','url':'https://example.invalid'};bad.append(hidden)
         for entity in bad:
             with self.subTest(entity=repr(entity)[:80]),self.assertRaises(ValueError):source_from_message(raw_caption(entities=[entity]),123,55)
+        # 0.58 criterion 4: a TextUrl caption is a listed flip (v24 media TextUrl), no longer a closed entity.
+        hidden=span();hidden['type']={'@type':'textEntityTypeTextUrl','url':'https://example.invalid'}
+        self.assertEqual(json.loads(self.accepted(raw_caption(entities=[hidden])).projection_json)['version'],24)
         excluded=[[span(),span()],[span('Bold',0,4),span('Italic',1,4)]]
         excluded += [[span(c),span('Bold')] for c in ('Code','Pre','PreCode')]
         excluded += [[span(a),span(b,1,2)] for a in ('BlockQuote','ExpandableBlockQuote') for b in ('BlockQuote','ExpandableBlockQuote')]
