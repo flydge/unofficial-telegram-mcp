@@ -396,8 +396,8 @@ Release evidence is never edited: a corrected release is a new commit, a new `ru
     --wheelhouse <gate dir>/wheelhouse --toolhouse <gate dir>/toolhouse --node <node> --inspector-cache <dir> \
     --codex <codex> --codex-home <Codex home> [--codex-model <model>] --claude <claude> \
     --agent-evidence <new owner-only dir>
-.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> --wheelhouse <gate dir>/wheelhouse \
-    --agent-evidence <the same dir>
+.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> --commit <release sha> \
+    --wheelhouse <gate dir>/wheelhouse --agent-evidence <the same dir>
 ```
 
 `run` installs the wheel built from `git archive <sha>` with the pinned closure in a fresh venv and drives
@@ -407,13 +407,27 @@ synthetic home, the MCP Inspector CLI column (the pinned `packaging/inspector` l
 the cache `inspector-fetch` filled once) and the Codex and Claude Code columns: each agent cell gives the real
 CLI one fixed request with a temporary configuration home whose only MCP server is the installed proxy, against a
 synthetic broker of its own, and keeps the broker's transcript, the agent's events, its answer and a run record in
-`--agent-evidence`. An agent run uses the agent's account and costs its usage; it never changes the user's
-client configuration (Codex reads a copy of `auth.json`, Claude Code an empty configuration directory). It
-refuses a schema the cells were not written for and writes the receipt only when every cell passed; without
-Node or the cache the receipt records the Inspector column `unavailable` with its reason, and without the CLI, a
-login or the Codex `auth.json` an agent column likewise. `check` rebuilds the wheel and the schema census of the
-recorded commit, judges every passed agent cell again from the kept evidence and refuses any difference. The
-receipt is `acceptance: false`: owner and real-account cells stay `pending` and need their own records.
+`--agent-evidence`. An agent run uses the agent's account and costs its usage. The receipt, `--workdir` and
+`--agent-evidence` must lie outside the repository and any git work tree. Codex reads a copy of `auth.json` from
+the Codex home `--codex-home` names (required with `--codex`). The one write outside the run's own directories:
+when Codex refreshed its tokens during the run, the harness puts the refreshed `auth.json` back into that home
+(atomically, owner-only), and only when the file there is still byte-identical to the copy and the refreshed file
+is a JSON object with the same keys whose token fields are still non-empty; otherwise the file there stays as it
+was. Either way a fixed line names the outcome (`returned`, `kept`, `invalid` or `failed`); the credential is never
+printed. Claude Code logs in through its default configuration location (on macOS the Keychain, found through
+`HOME` and `USER`) and loads nothing else of it: no setting source (user, project or local settings, hooks,
+plugins), no auto memory, skill or command, only the temporary `--mcp-config` server (`--strict-mcp-config`), no
+built-in tool and no transcript, from an empty working directory. The harness refuses the run
+(`client_config_changed`) when the size, mtime or sha256 of `~/.claude.json`, `~/.claude/settings.json` or
+`~/.claude/settings.local.json`, or the names in `~/.claude/projects`, differ after the version check or after any
+cell. SIGTERM, SIGHUP and Ctrl-C stop the agent and the brokers and remove the temporary homes before the harness
+exits. It refuses a schema the cells were not written for and writes the receipt only when every cell passed;
+without Node or the cache the receipt records the Inspector column `unavailable` with its reason, and without the
+CLI, a login or the Codex `auth.json` an agent column likewise (a login lost after a column's first cell fails the
+run instead). `check --commit <release sha>` (the full sha) refuses a receipt of any other commit, rebuilds the
+wheel and the schema census of the recorded commit, judges every passed agent cell again from the kept evidence
+and refuses any difference; its verified line names the receipt's commit and wheel sha256. The receipt is
+`acceptance: false`: owner and real-account cells stay `pending` and need their own records.
 
 ## Checklist
 
@@ -426,7 +440,7 @@ receipt is `acceptance: false`: owner and real-account cells stay `pending` and 
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |
 | Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` (with the bundle stage for a release with assets) |
-| Consumer matrix (synthetic, Inspector and agent cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
+| Consumer matrix (synthetic, Inspector and agent cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check --commit <release sha>` |
 | Assets: dry run, signed build, release commit, its gate | section 4; [owner checklist](plans/0.53-signing-owner-checklist.md) |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
 | History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |

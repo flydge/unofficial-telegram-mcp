@@ -24,7 +24,7 @@ cells, the digests of the evidence `check` judges again. The owner cells stay ou
 | Official MCP SDK (`mcp` 2.2.0) | every synthetic cell of section 5 | harness | receipt `cells` |
 | MCP Inspector CLI (`@modelcontextprotocol/inspector-cli` 1.0.2) | the four cells of section 7 | harness | receipt `inspector` |
 | Codex (`codex exec`) | the nine agent cells of section 7a | harness (part 2) | receipt `agents.codex` and the kept evidence |
-| Claude Code (`claude -p`) | the same cells, when the CLI is logged in | harness (part 2) | receipt `agents.claude_code` and the kept evidence |
+| Claude Code (`claude -p`) | the same cells, when the CLI is logged in (its default configuration, for the login only) | harness (part 2) | receipt `agents.claude_code` and the kept evidence |
 | Claude Desktop, Claude Code plugin | not applicable (registration; the bundle session covers Desktop's entry) | owner | owner record |
 
 The receipt's `owner_cells` drop `inspector_cli.synthetic` (part 1) and `codex.synthetic` and
@@ -188,24 +188,45 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   header (`version`, `schema_fingerprint`, `alias`), each frame a connection received (numbered by connection) and
   each dispatched operation with its payload and result or fixed error code. The alias cell adds the harness's
   registry postscript (alias names and which are pinned, never a user id). Decisions rest on this record.
-- **Isolation.** Codex: a temporary `CODEX_HOME` holding a `config.toml` whose only MCP server is the installed
-  proxy (`approval_policy = "never"`, `cli_auth_credentials_store = "file"`, features `shell_tool`, `browser_use`,
-  `computer_use`, `apps`, `multi_agent`, `image_generation` and `plugins` off, `default_tools_approval_mode =
-  "approve"`), run with `--strict-config --ephemeral --skip-git-repo-check --sandbox read-only` in an empty
-  directory; the only file copied in is the caller's `auth.json`. Claude Code: an empty `CLAUDE_CONFIG_DIR`,
-  `--strict-mcp-config` with a temporary `--mcp-config` outside the working directory, `--tools ""`,
-  `--allowedTools mcp__<server>` and `--no-session-persistence`. Both get a temporary empty HOME and only `PATH`,
+- **Isolation.** Codex: a temporary HOME and a temporary `CODEX_HOME` holding a `config.toml` whose only MCP server
+  is the installed proxy (`approval_policy = "never"`, `cli_auth_credentials_store = "file"`, features
+  `shell_tool`, `browser_use`, `computer_use`, `apps`, `multi_agent`, `image_generation` and `plugins` off,
+  `default_tools_approval_mode = "approve"`), run with `--strict-config --ephemeral --skip-git-repo-check --sandbox
+  read-only` in an empty directory; the only file copied in is `auth.json` from the Codex home `--codex-home` names
+  (required with `--codex`, never derived from `CODEX_HOME` or `~/.codex`). **Credential write-back**, the only
+  write outside the run's own directories: when Codex refreshed its tokens in the private home, the refreshed
+  `auth.json` replaces the one in that Codex home (atomically, owner-only) only when the file there is still
+  byte-identical to the copy and the refreshed file is a JSON object with the same top-level keys (and the same
+  `tokens` keys) whose non-empty string fields are still non-empty strings (`returned`); otherwise that file stays as
+  it was (`kept` when it changed meanwhile, `invalid`, or `failed` when the write fails, with no temporary file
+  left). A fixed line names any outcome but `unchanged`; the credential is never printed or kept elsewhere.
+  Claude Code: the default configuration location for its login only (on macOS the Keychain, which Claude Code finds
+  through `HOME` and `USER`, so these two are the caller's), with `--setting-sources ""` (no user, project or local
+  settings: no hooks, plugins or settings-defined servers), `--settings '{"autoMemoryEnabled":false}'`,
+  `--disable-slash-commands` (no skills or commands), `--strict-mcp-config` with a temporary `--mcp-config` outside
+  the working directory, `--tools ""`, `--allowedTools mcp__<server>`, `--no-session-persistence`,
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`, in an empty working directory. The
+  harness takes the size, mtime and sha256 of `~/.claude.json`, `~/.claude/settings.json` and
+  `~/.claude/settings.local.json` and the names in `~/.claude/projects` before the column and refuses the run
+  (`client_config_changed`) when any differs after the version check or after a cell. Both get besides only `PATH`,
   `TMPDIR`, `LANG`, the network proxy variables and, for Claude Code, `ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN` when the operator exported one. The homes are deleted afterwards.
-- **Retries and unavailability.** A failure before any frame reached the broker is retried (three attempts) when
-  the stream shows a provider failure (`at capacity`, a rate limit, …); a login failure there makes the column
-  `unavailable` with `not_logged_in`, and the column stops. The other fixed reasons: `cli_not_given`,
-  `cli_unusable` (no `--version` of the CLI's form) and `auth_missing` (no regular `auth.json` in the Codex home).
-- **Evidence.** `--agent-evidence <dir>` (new or empty, owner-only) keeps `<column>/<cell>/server.jsonl`,
-  `events.jsonl`, `answer.txt` and `run.json` (commit, wheel sha256, version, fingerprint, the commit's MCP server
-  name, column, cell, CLI version, model, exit, timeout, attempt) owner-only, beside the agent's `stderr.txt`
-  (diagnostic, unbound). The receipt binds the four by sha256; `check --agent-evidence` re-reads them, compares the
-  run record's bindings and judges every cell again with the same function.
+  `CLAUDE_CODE_OAUTH_TOKEN` when the operator exported one. The temporary homes are deleted afterwards, also when
+  the run is interrupted (section 8).
+- **Retries and unavailability.** Only what the CLI itself reports as failing is classified: its stderr and its
+  provider error events (Codex `error` events, `turn.failed` errors and `error` items; Claude Code API error
+  messages and failed results), never the model's own messages or reasoning. A failure before any frame reached the
+  broker is retried (three attempts) when those show a provider failure (`at capacity`, a rate limit, …). A login
+  failure there on the column's first cell makes the column `unavailable` with `not_logged_in`; on a later cell it
+  fails the column (the run refuses `agent_failed`), keeps every result so far and says so in a fixed line. The
+  other fixed reasons: `cli_not_given`, `cli_unusable` (no `--version` of the CLI's form) and `auth_missing` (no
+  regular `auth.json` in the Codex home).
+- **Evidence.** `--agent-evidence <dir>` (new or empty, owner-only, outside any git work tree) keeps every attempt
+  of a cell in `<column>/<cell>/attempt-<n>/`: `server.jsonl`, `events.jsonl`, `answer.txt` and `run.json`
+  (commit, wheel sha256, version, fingerprint, the commit's MCP server name, column, cell, CLI version, model, exit,
+  timeout, attempt) owner-only, beside the agent's `stderr.txt` (diagnostic, unbound). The receipt cell records its
+  attempt count and binds the last attempt's four files by sha256; `check --agent-evidence` re-reads them, compares
+  the run record's bindings (the attempt included), requires each earlier attempt kept, numbered and without any
+  frame at its broker, and judges every cell again with the same function.
 
 ## 8. Receipt v4 and harness contract
 
@@ -213,17 +234,25 @@ its hash, checked, extracted and put on the session's path. The receipt records 
 .venv/bin/python packaging/release_consumer_matrix.py inspector-fetch --node <node> --cache <dir>
 .venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path> \
     [--wheelhouse <dir>] [--toolhouse <dir>] [--node <node> --inspector-cache <dir>] [--workdir <dir>] [--real-dialog] \
-    [--codex <path> [--codex-home <dir>] [--codex-model <model>]] [--claude <path> [--claude-model <model>]] \
+    [--codex <path> --codex-home <dir> [--codex-model <model>]] [--claude <path> [--claude-model <model>]] \
     [--agent-evidence <dir>]
 .venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>] \
     [--agent-evidence <dir>]
 ```
 
 - v4 adds `agents`: per column either `{"status": "unavailable", "reason": …}` or the CLI's version, the model
-  (`default` when none was given) and each cell as `{id, status, checks, advisory_failed, evidence}`, with
+  (`default` when none was given) and each cell as `{id, status, checks, advisory_failed, evidence, attempts}`, with
   `codex`, `codex_cells`, `claude_code` and `claude_code_cells` in the summary. A failed agent cell refuses the
   run (`agent_failed`), as a failed Inspector cell does. New fixed codes: `agent_invalid`, `agent_failed`,
-  `evidence_invalid`, `evidence_missing`, `evidence_mismatch`. A v3 receipt is refused.
+  `evidence_invalid`, `evidence_missing`, `evidence_mismatch`, `client_config_changed`. A v3 receipt is refused.
+- The F18 review fixes amended v4 before any release: the cell's `attempts`, `client_config_changed`, `run`'s
+  refusal of `--codex` without `--codex-home` (`agent_invalid`) and of a receipt (`usage`), `--workdir`
+  (`workdir_invalid`) or `--agent-evidence` (`evidence_invalid`) inside the repository or any git work tree, and
+  interrupts: under `run` and `check`, SIGTERM and SIGHUP kill every running agent's session and raise through every
+  cleanup (brokers and drivers stopped, temporary homes and the copied credential removed, a refreshed credential
+  still returned), a repeat signal never cuts the cleanup short, and the command prints `interrupted` and exits
+  with 128 + the signal. `check`'s verified line names the receipt's commit and wheel sha256; the release recipe
+  passes `check --commit <release sha>` (a full sha), which refuses a receipt of any other commit.
 
 - v3 adds `installer` (distribution, version, sha256 as the commit's gate pins it, toolhouse provided or
   downloaded) and `inspector` (the pass or unavailable form), adds `inspector` and `inspector_cells` to the
@@ -249,10 +278,32 @@ Part 2 (agent columns):
   (owner-only) only when the caller's file is still the one it copied, and never prints or keeps it elsewhere.
   Rejected: a symlinked `auth.json` (Codex may replace it by rename) and refusing to run when a refresh might be
   due (Codex's refresh schedule is not documented).
-- **Claude Code login only through an exported credential.** On macOS Claude Code keeps its login in the
-  Keychain under a name tied to the default configuration directory; an empty `CLAUDE_CONFIG_DIR` cannot reach it,
-  and the harness never touches the Keychain or the user's configuration. Without `ANTHROPIC_API_KEY` or
-  `CLAUDE_CODE_OAUTH_TOKEN` the column is `unavailable` (`not_logged_in`).
+- **Claude Code logs in through its default configuration and loads none of it** (F18 review; it replaces part
+  2's "login only through an exported credential", under which the column never ran on a machine where `claude` is
+  logged in). On macOS Claude Code keeps its login in the Keychain and finds it through `HOME` and `USER`; the
+  harness never reads the Keychain itself. Checked on the release machine before the run: with an empty `HOME`
+  (with or without `CLAUDE_CONFIG_DIR`) or without `USER`, `claude auth status` reports no login; with the caller's
+  `HOME` and `USER` it reports the claude.ai login. A `claude -p` probe with the flags of section 7a reported no
+  built-in tool, no MCP server, no skill or command, no memory path and only Claude Code's built-in plugins,
+  answered that no CLAUDE.md, AGENTS.md or memory file was in its context, and left the guarded files and the
+  project list unchanged; without `autoMemoryEnabled: false` it had created an empty auto-memory folder under
+  `~/.claude/projects` (removed). Claude Code registers a running session in `~/.claude/sessions` and removes the
+  entry when it exits; that runtime registry is not configuration and is not guarded. Rejected: `--bare` (never
+  reads OAuth or the Keychain), a temporary HOME (the Keychain is not found), a copy of `~/.claude.json` (it loads
+  the user's configuration) and an exported credential as the only way in (each run would need a long-lived token
+  minted for it). An exported `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` still takes precedence.
+- **The Codex home is named** (`--codex-home` required with `--codex`), so the operator names the file that may be
+  written back; rejected: a default from `CODEX_HOME` or `~/.codex`. The write-back is validated and
+  exception-safe (section 7a); rejected: writing back any changed bytes, which let a truncated file replace a
+  working credential.
+- **A login lost after the first cell fails the column** instead of making it `unavailable`: an unavailable column
+  is an accepted release state, so it must never hide a failed cell or discard results.
+- **Retry decisions read provider errors only, and every attempt is kept:** matching the model's own words could
+  retry a cell or end its column on prose, and a retry used to delete the attempt it replaced.
+- **Interrupts raise** (a handler that kills the agents' sessions, then raises once): rejected, killing the process
+  groups alone, which leaves the temporary homes, the copied credential and an unreturned refresh behind.
+- **Run outputs stay out of git work trees:** evidence and receipts carry machine paths, and an agent working
+  directory inside a checkout would load its CLAUDE.md or AGENTS.md.
 - **The broker records the transcript, not the proxy:** the installed proxy runs unchanged; every tool call that
   reaches the account passes the broker, and a refusal before it (an argument or guard refusal) leaves no draft.
 - **The MCP server name is read from the commit's `product_identity.py`** (never imported, never a literal in
