@@ -1,0 +1,20 @@
+{
+  "structure": {
+    "get_reply_artifact_draft": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened",
+    "get_reply_draft": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened",
+    "prepare_album_send": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed)",
+    "prepare_artifact_send": "input: optional outgoing_entities, the five caption styles behind formatted_caption_send over a caption already in its stored form; output: a styled caption's outgoing_entities and preview_sha256; description: caption styles replace the plain-caption rule",
+    "prepare_caption_edit": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed)",
+    "prepare_reply_artifact_send": "input: optional outgoing_entities (caption styles, formatted_caption_send); output: the closed missing_capabilities enum gains formatted_caption_send; description: caption styles replace the plain-caption rule and the shared reply text is shortened",
+    "prepare_reply_text_send": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened",
+    "prepare_text_edit": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed)",
+    "prepare_video_send": "input: optional outgoing_entities (caption styles, formatted_caption_send); output: the video preview's outgoing_entities of a styled caption; description: caption styles replace the plain-caption rule",
+    "refresh_reply_artifact_draft": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened",
+    "refresh_reply_draft": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened",
+    "update_reply_artifact_draft": "input: optional outgoing_entities of the replacement caption (formatted_caption_send); output: the closed missing_capabilities enum gains formatted_caption_send; description: the caption may be styled and the shared reply text is shortened",
+    "update_reply_draft": "output: the closed missing_capabilities enum gains formatted_caption_send (one more item allowed); description: the shared reply text is shortened"
+  },
+  "descriptions": {
+    "update_draft": "description and the outgoing_entities field description: a caption revision's styles need formatted_caption_send"
+  }
+}

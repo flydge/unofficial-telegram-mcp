@@ -352,7 +352,7 @@ def _homebrew_tdlib() -> Path:
 # Trusted local policy is independent of the MCP consumer's tool allowlist.
 RUNTIME_POLICY_PATH = DEFAULT_ACCOUNT_PATHS.policy
 LEGACY_CAPABILITIES = ("artifacts", "read", "send")
-KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "reply_custom_emoji_targets", "reply_media_timestamp_targets", "forward_send", "video_send", "archive_chats", "edit_own_text", "album_send", "edit_own_caption", "edit_own_styled_text", "pin_messages", "delete_own_message"))
+KNOWN_CAPABILITIES = frozenset((*LEGACY_CAPABILITIES, "retained_selections", "formatted_text_send", "topic_text_send", "read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history", "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages", "spreadsheets", "presentations", "reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets", "reply_lexical_targets", "reply_identity_targets", "reply_datetime_targets", "reply_url_targets", "reply_email_targets", "reply_phone_targets", "reply_bank_card_targets", "reply_text_url_targets", "reply_custom_emoji_targets", "reply_media_timestamp_targets", "forward_send", "video_send", "archive_chats", "edit_own_text", "album_send", "edit_own_caption", "edit_own_styled_text", "pin_messages", "delete_own_message", "formatted_caption_send"))
 # Owner-facing capability profiles: every optional capability belongs to exactly one profile; the base
 # (read, artifacts) is not a profile. Enabling a profile also enables the profiles it depends on, and
 # disabling one also disables the profiles that depend on it.
@@ -361,7 +361,8 @@ CAPABILITY_PROFILES: dict[str, tuple[str, ...]] = {
     "readers": ("read_messages", "read_history", "read_reply_chain", "list_topics", "read_topic_history",
                 "search_messages", "list_chats", "search_chats", "verified_targets", "attachment_pages",
                 "spreadsheets", "presentations", "retained_selections"),
-    "send": ("send", "formatted_text_send", "topic_text_send"),
+    # 0.58: styled document, photo, voice-note and video captions join the outgoing styles of text.
+    "send": ("send", "formatted_text_send", "topic_text_send", "formatted_caption_send"),
     # Every reply-source family capability too (0.58: custom emoji and voice-note timestamps), so one profile unlocks
     # any reply; none of them is an operation gate.
     "replies": ("reply_text_send", "reply_artifact_send", "reply_media_targets", "reply_formatted_targets",

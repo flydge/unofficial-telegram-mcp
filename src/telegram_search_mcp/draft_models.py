@@ -8,7 +8,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 from .schemas import ArtifactId, ChatId
 from .topic_models import TopicSnapshot, topic_preview_digest
-from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entities, caller_outgoing_entities
+from .outgoing_entity_models import (OutgoingEntityList, canonical_caption_entities, canonical_outgoing_entities,
+                                     caller_outgoing_entities)
 
 DraftId = Annotated[str, Field(strict=True, pattern=r'^draft_[0-9a-f]{32}$', min_length=38, max_length=38)]
 DraftLimit = Annotated[int, Field(strict=True, ge=1, le=50)]
@@ -43,9 +44,12 @@ class UpdateDraftRequest(GetDraftRequest):
             raise ValueError('exactly one of text or caption is required')
         if self.outgoing_entities:
             if self.text is None:
-                raise ValueError('outgoing styles require text')
-            from .outgoing_drafts import _safe_message_text
-            self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text), self.outgoing_entities)
+                # 0.58: a file draft's caption styles; the caption must already be the text Telegram stores.
+                self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+            else:
+                from .outgoing_drafts import _safe_message_text
+                self.outgoing_entities = canonical_outgoing_entities(_safe_message_text(self.text),
+                                                                     self.outgoing_entities)
         return self
 
     @model_serializer(mode='wrap')
@@ -114,6 +118,47 @@ class DraftSummary(_Closed):
             raise ValueError('draft always requires approval')
         return value
 
+ARTIFACT_PREVIEW_DOMAIN = 'telegram-search-mcp.artifact'
+
+
+def artifact_preview_digest(*, draft_id: str, account_id: int, recipient: int, recipient_title: str,
+                            expires_at: datetime | str, kind: str, artifact_id: str, sha256: str, size_bytes: int,
+                            display_name: str, mime_type: str, caption: str, outgoing_entities: list[dict],
+                            duration_seconds: int | None = None, waveform_base64: str | None = None,
+                            source_sha256: str | None = None, source_display_name: str | None = None,
+                            converted: bool = False) -> str:
+    """The digest of a file draft with a styled caption (0.58): every shown fact, the caption with its native styles
+    and the fixed shape of the one sendMessage the draft makes (no topic, reply or markup; the fixed send and content
+    options). A plain file draft has no digest, so its wire is unchanged."""
+    from .outgoing_formatting import native_outgoing_entities
+    from .outgoing_drafts import styled_caption_entities
+    from .reply_drafts import SEND_OPTIONS, digest
+    if type(expires_at) is str:
+        expires_at = datetime.fromisoformat(expires_at)
+    if (not isinstance(expires_at, datetime) or expires_at.tzinfo is None or kind not in ('document', 'photo',
+            'voice_note') or type(caption) is not str or type(outgoing_entities) is not list):
+        raise ValueError('artifact preview facts disagree')
+    entities = native_outgoing_entities(styled_caption_entities(caption, outgoing_entities))
+    if not entities:
+        raise ValueError('an artifact preview digest binds a styled caption')
+    content = ({'thumbnail': None, 'disable_content_type_detection': True} if kind == 'document' else
+               {'thumbnail': None, 'video': None, 'added_sticker_file_ids': [], 'width': 0, 'height': 0,
+                'show_caption_above_media': False, 'self_destruct_type': None, 'has_spoiler': False}
+               if kind == 'photo' else
+               {'duration': duration_seconds, 'waveform': waveform_base64, 'self_destruct_type': None})
+    voice = ({'duration_seconds': duration_seconds, 'waveform_base64': waveform_base64,
+              'source_sha256': source_sha256, 'source_display_name': source_display_name, 'converted': converted}
+             if kind == 'voice_note' else None)
+    return digest({'domain': ARTIFACT_PREVIEW_DOMAIN, 'version': 1, 'draft_id': draft_id, 'account_id': account_id,
+                   'recipient': recipient, 'recipient_title': recipient_title,
+                   'expires_at': expires_at.astimezone(timezone.utc).isoformat(), 'kind': kind,
+                   'approval_required': True, 'artifact_id': artifact_id, 'sha256': sha256,
+                   'size_bytes': size_bytes, 'display_name': display_name, 'mime_type': mime_type,
+                   'caption': {'@type': 'formattedText', 'text': caption, 'entities': entities}, 'voice': voice,
+                   'topic_id': None, 'reply_to': None, 'reply_markup': None, 'send_options': dict(SEND_OPTIONS),
+                   'content_options': content})
+
+
 class DraftPreview(DraftSummary):
     outgoing_entities: OutgoingEntityList = Field(default_factory=list)
     sha256: Hash
@@ -133,13 +178,30 @@ class DraftPreview(DraftSummary):
     @model_validator(mode='after')
     def exact_content(self):
         if self.outgoing_entities:
-            from .outgoing_drafts import _safe_message_text
-            if self.kind != 'text' or self.text is None or _safe_message_text(self.text) != self.text:
-                raise ValueError('outgoing styles require final normalized text')
-            self.outgoing_entities = canonical_outgoing_entities(self.text, self.outgoing_entities)
+            if self.kind != 'text':
+                # 0.58: a styled caption, already the text Telegram stores, bound by the artifact preview digest.
+                if self.caption is None:
+                    raise ValueError('caption styles require a caption')
+                self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+            else:
+                from .outgoing_drafts import _safe_message_text
+                if self.text is None or _safe_message_text(self.text) != self.text:
+                    raise ValueError('outgoing styles require final normalized text')
+                self.outgoing_entities = canonical_outgoing_entities(self.text, self.outgoing_entities)
         if self.topic is None and not self.outgoing_entities:
             if self.preview_sha256 is not None:
                 raise ValueError('plain draft contains a topic digest')
+        elif self.kind != 'text':
+            expected = artifact_preview_digest(draft_id=self.draft_id, account_id=self.account_id,
+                recipient=self.recipient, recipient_title=self.recipient_title, expires_at=self.expires_at,
+                kind=self.kind, artifact_id=self.artifact_id, sha256=self.sha256, size_bytes=self.size_bytes,
+                display_name=self.display_name, mime_type=self.mime_type, caption=self.caption,
+                outgoing_entities=caller_outgoing_entities(self.outgoing_entities),
+                duration_seconds=self.duration_seconds, waveform_base64=self.waveform_base64,
+                source_sha256=self.source_sha256, source_display_name=self.source_display_name,
+                converted=self.converted)
+            if self.preview_sha256 != expected:
+                raise ValueError('artifact preview digest disagrees')
         else:
             expected = topic_preview_digest(draft_id=self.draft_id, account_id=self.account_id,
                 recipient=self.recipient, recipient_title=self.recipient_title,

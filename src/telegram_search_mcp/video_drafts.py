@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .draft_models import _Closed, AccountId, DraftId, Hash
 from .forward_drafts import _Frozen, _utc, escaped, unescaped
@@ -15,6 +15,8 @@ from .sanitize import sanitize_telegram_text
 from .schemas import ArtifactId, ChatId
 from .video_probe import MAX_ASPECT, MAX_FILE_BYTES, MAX_SECONDS, MAX_SIDE, MIN_SIDE, VideoFacts
 from .next_actions import NextAction, NextActionHint, next_action_field
+from .outgoing_entity_models import OutgoingEntityList, canonical_caption_entities, caller_outgoing_entities
+from .outgoing_formatting import freeze_outgoing_entities, native_outgoing_entities
 
 PREPARED = 'immutable video draft prepared; inspect full evidence and obtain fresh approval'
 REFUSED = 'artifact is not an eligible native video; no draft was created'
@@ -74,9 +76,14 @@ class VideoRecipient(_Frozen):
 def preview_facts(*, draft_id: str, account_id: int, expires_at: datetime, recipient: VideoRecipient,
                   artifact_id: str, display_name: str, size_bytes: int, sha256: str, duration_seconds: int,
                   width: int, height: int, codec: str, has_audio: bool, supports_streaming: bool,
-                  caption: str | None) -> dict:
-    """Bind the displayed evidence to the exact closed sendMessage(inputMessageVideo) request."""
-    return {'domain': 'telegram-search-mcp.video', 'version': PREVIEW_VERSION, 'draft_id': draft_id,
+                  caption: str | None, outgoing_entities: list | None = None) -> dict:
+    """Bind the displayed evidence to the exact closed sendMessage(inputMessageVideo) request. A styled caption
+    (0.58) is version 2 and its native styles fill the request's caption entities; a plain one keeps version 1."""
+    entities = (native_outgoing_entities(freeze_outgoing_entities(unescaped(caption), outgoing_entities))
+                if outgoing_entities and caption is not None else [])
+    if outgoing_entities and not entities:
+        raise ValueError('video caption styles need a caption')
+    return {'domain': 'telegram-search-mcp.video', 'version': 2 if entities else PREVIEW_VERSION, 'draft_id': draft_id,
             'account_id': account_id, 'expires_at': _utc(expires_at).isoformat(), 'approval_required': True,
             'recipient': recipient.model_dump(mode='json'), 'artifact_id': artifact_id,
             'display_name': display_name, 'size_bytes': size_bytes, 'sha256': sha256,
@@ -90,7 +97,8 @@ def preview_facts(*, draft_id: str, account_id: int, expires_at: datetime, recip
                                       'added_sticker_file_ids': [], 'duration': duration_seconds, 'width': width,
                                       'height': height, 'supports_streaming': supports_streaming},
                             'caption': {'@type': 'formattedText',
-                                        'text': unescaped(caption) if caption is not None else '', 'entities': []},
+                                        'text': unescaped(caption) if caption is not None else '',
+                                        'entities': entities},
                             'show_caption_above_media': False, 'self_destruct_type': None, 'has_spoiler': False}}}
 
 
@@ -114,6 +122,8 @@ class VideoDraftPreview(_Frozen):
     has_audio: StrictBool
     supports_streaming: StrictBool
     caption: EscapedCaption | None = None
+    # 0.58: the caption's canonical styles (formatted_caption_send); offsets address the raw caption.
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
     preview_sha256: Hash
 
     @field_validator('expires_at', mode='before')
@@ -121,14 +131,24 @@ class VideoDraftPreview(_Frozen):
     def utc_expiry(cls, value):
         return _utc(value)
 
+    @model_serializer(mode='wrap')
+    def omit_plain_caption_styles(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
+
     @model_validator(mode='after')
     def exact(self):
         from .outgoing_drafts import _safe_caption, _safe_display_name
         name, caption = self.raw_display_name, self.raw_caption
         _, _, artifact_hash, artifact_size = self.artifact_id.split('_', 3)
+        if self.outgoing_entities:  # frozen: the canonical order is installed once, here
+            object.__setattr__(self, 'outgoing_entities', canonical_caption_entities(caption, self.outgoing_entities))
         facts = preview_facts(**{key: getattr(self, key) for key in (
             'draft_id', 'account_id', 'expires_at', 'recipient', 'artifact_id', 'display_name', 'size_bytes',
-            'sha256', 'duration_seconds', 'width', 'height', 'codec', 'has_audio', 'supports_streaming', 'caption')})
+            'sha256', 'duration_seconds', 'width', 'height', 'codec', 'has_audio', 'supports_streaming', 'caption')},
+            outgoing_entities=caller_outgoing_entities(self.outgoing_entities))
         if (self.approval_required is not True or _safe_display_name(name) != name or
                 (self.caption is not None and (not caption or _safe_caption(caption) != caption)) or
                 artifact_hash != self.sha256 or int(artifact_size) != self.size_bytes or
@@ -148,7 +168,7 @@ class VideoDraftPreview(_Frozen):
     @classmethod
     def create(cls, *, draft_id: str, account_id: int, expires_at: datetime, recipient: VideoRecipient,
                artifact_id: str, display_name: str, size_bytes: int, sha256: str, facts: VideoFacts,
-               caption: str) -> 'VideoDraftPreview':
+               caption: str, outgoing_entities: list | None = None) -> 'VideoDraftPreview':
         if not _valid_facts(facts):
             raise ValueError('video facts are unavailable')
         values = dict(draft_id=draft_id, account_id=account_id, expires_at=_utc(expires_at), recipient=recipient,
@@ -156,7 +176,9 @@ class VideoDraftPreview(_Frozen):
                       sha256=sha256, duration_seconds=facts.duration_seconds, width=facts.width,
                       height=facts.height, codec=facts.codec, has_audio=facts.has_audio,
                       supports_streaming=facts.supports_streaming, caption=escaped(caption) if caption else None)
-        return cls(**values, preview_sha256=digest(preview_facts(**values)))
+        styles = list(outgoing_entities or [])
+        return cls(**values, **({'outgoing_entities': styles} if styles else {}),
+                   preview_sha256=digest(preview_facts(**values, outgoing_entities=styles)))
 
 
 @dataclass(frozen=True)
@@ -180,6 +202,21 @@ class PrepareVideoSendRequest(_Closed):
     artifact_id: ArtifactId
     recipient: ChatId
     caption: Annotated[str, Field(strict=True, max_length=MAX_CAPTION)] = ''
+    # 0.58: optional caption styles (formatted_caption_send); a styled caption must be the text Telegram stores.
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def exact_caption_entities(self):
+        if self.outgoing_entities:
+            self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
 
 
 class PrepareVideoSendResponse(_Closed):

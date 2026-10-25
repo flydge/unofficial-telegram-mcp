@@ -248,8 +248,8 @@ def _approval(effect: str, unknown: str = "outcome_unknown means it may have rea
 _REPLY_FAMILIES = (
     ("bank cards", "reply_bank_card_targets"), ("phones", "reply_phone_targets"), ("emails", "reply_email_targets"),
     ("URLs", "reply_url_targets"), ("dates", "reply_datetime_targets"),
-    ("hashtags, cashtags, bot commands", "reply_lexical_targets"), ("mentions", "reply_identity_targets"),
-    ("hidden text links", "reply_text_url_targets"), ("custom emoji", "reply_custom_emoji_targets"),
+    ("hashtags, cashtags, commands", "reply_lexical_targets"), ("mentions", "reply_identity_targets"),
+    ("text links", "reply_text_url_targets"), ("custom emoji", "reply_custom_emoji_targets"),
     ("voice-note timestamps", "reply_media_timestamp_targets"),
 )
 _REPLY = (
@@ -257,7 +257,7 @@ _REPLY = (
     "or reply_selection_id). The source may need default-off capabilities: a document, static photo or OGG "
     "voice note reply_media_targets; styles reply_formatted_targets plus one per entity family ("
     + "; ".join(f"{family} {capability}" for family, capability in _REPLY_FAMILIES)
-    + "); a forum topic topic_text_send. Otherwise the result is capability_disabled, naming only "
+    + "); a forum topic topic_text_send. Otherwise: capability_disabled, naming only "
     "missing_capabilities, no source content. " + _UNTRUSTED
 )
 # Follows the generated exactly-one source rule (_source_rule) on every tool that accepts a retained selection.
@@ -352,7 +352,8 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
     "prepare_artifact_send": ("Prepare a file send",
         "Prepare sending one owned artifact as a document, photo or voice note, as an immutable draft.",
         "artifact_id comes from get_attachment, create_local_artifact or an upload; display_name and mime_type "
-        "label it; the caption is plain. " + _PREVIEW + " Then call send_prepared_artifact. " + _UNTRUSTED),
+        "label it. Optional outgoing_entities (as in prepare_text_send) need formatted_caption_send and a caption "
+        "already in the form Telegram stores. " + _PREVIEW + " Then call send_prepared_artifact. " + _UNTRUSTED),
     "send_prepared_artifact": ("Send a prepared file",
         "Make one upload and send attempt for a prepared file or file-reply draft whose artifact is unchanged.",
         _approval("sends")),
@@ -416,13 +417,13 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "speaker notes. An oversized selection returns limit_reached: pick fewer slides. " + _UNTRUSTED),
     "prepare_reply_artifact_send": ("Prepare a file reply",
         "Prepare one document, photo or voice-note reply from an owned artifact as an immutable draft.",
-        "Nothing is sent; after the user approves the preview, call send_prepared_artifact. The caption stays "
-        "plain; no topics. " + _REPLY),
+        "Nothing is sent; after the user approves the preview, call send_prepared_artifact. Caption styles work "
+        "as in prepare_artifact_send; no topics. " + _REPLY),
     "get_reply_artifact_draft": ("Show a pending file reply",
         "Show your pending file-reply draft: frozen source evidence, artifact facts and preview.",
         "Inspection is not approval. " + _REPLY),
     "update_reply_artifact_draft": ("Edit a pending file reply",
-        "Replace only the plain caption of your pending file reply; the artifact and source stay fixed.",
+        "Replace the caption and styles of your pending file reply; the artifact and source stay fixed.",
         "It returns a new draft_id; show the new preview and ask again. " + _REPLY),
     "refresh_reply_artifact_draft": ("Refresh a pending file reply",
         "Re-read the source and recipient of your pending file reply and re-verify the artifact bytes.",
@@ -461,8 +462,8 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         "Replace the text of your pending text draft or the caption of your pending file draft; recipient, kind "
         "and artifact stay fixed.",
         "It returns a new draft_id; the old one and its approval stop working, so show the new preview and ask "
-        "again. Optional outgoing_entities (as in prepare_text_send) need formatted_text_send and replacement "
-        "text; an empty list clears styles. " + _UNTRUSTED),
+        "again. Optional outgoing_entities need formatted_text_send with text, or formatted_caption_send with a "
+        "caption (as in prepare_artifact_send); an empty list clears styles. " + _UNTRUSTED),
     "refresh_draft": ("Refresh a pending draft",
         "Re-verify the artifact and resolve the recipient of your pending draft again, keeping its content.",
         "It returns a new draft_id with renewed expiry (capped by policy and the artifact); the old one and its "
@@ -488,8 +489,8 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
         + _approval("sends")),
     "prepare_video_send": ("Prepare a video send",
         "Prepare sending one owned MP4 or MOV artifact (at most 64 MiB, H.264 or HEVC) as a native video.",
-        "Facts are read from the file without decoding; unusual files are refused as unsupported_video. caption "
-        "is plain text. " + _PREVIEW + " Preparing again for the same artifact and recipient supersedes the "
+        "Facts are read from the file without decoding; unusual files are refused as unsupported_video. Caption "
+        "styles work as in prepare_artifact_send. " + _PREVIEW + " Preparing again for the same artifact and recipient supersedes the "
         "earlier one. Video " + _OWN_DRAFTS + ". " + _UNTRUSTED),
     "send_prepared_video": ("Send a prepared video",
         "Revalidate the account, recipient and artifact bytes, then make exactly one native video send attempt.",
@@ -606,6 +607,10 @@ _FIELD_DOCS = {
     "recipient": "Numeric chat_id of the recipient the user chose.",
     "text": "The exact text to send.",
     "outgoing_entities": "Optional bold, italic, underline, strikethrough or spoiler spans; needs formatted_text_send.",
+    "caption_entities": "Optional bold, italic, underline, strikethrough or spoiler caption spans; needs "
+                        "formatted_caption_send.",
+    "draft_entities": "Optional style spans of the replacement text (formatted_text_send) or caption "
+                      "(formatted_caption_send).",
     "draft_id": "draft_id from the latest prepare, update or refresh result.",
     "approved": "true only after the user said yes to this exact preview.",
     "reply_to": "{chat_id, message_id} of the message to answer, in the recipient chat.",
@@ -697,6 +702,11 @@ _RULE_PARAMETERS: dict[str, tuple[str, ...]] = {
     "UpdateReplyDraftRequest": ("outgoing_entities",),
     "UpdateDraftRequest": ("outgoing_entities",),
     "PrepareAlbumSendRequest": ("items",),
+    # 0.58: caption styles address a caption already in its stored form.
+    "PrepareArtifactSendRequest": ("outgoing_entities",),
+    "PrepareReplyArtifactSendRequest": ("outgoing_entities",),
+    "UpdateReplyArtifactDraftRequest": ("outgoing_entities",),
+    "PrepareVideoSendRequest": ("outgoing_entities",),
 }
 
 
@@ -1420,10 +1430,11 @@ def build_server(
         selection_id: Annotated[SelectionId | None, _about("selection_id")] = None,
         caption: Annotated[str, Field(strict=True, max_length=1024)] = "",
         kind: Annotated[str, Field(strict=True, pattern=r"^(document|photo|voice_note)$"), _about("kind")] = "document",
+        outgoing_entities: Annotated[OutgoingEntityList, _about("caption_entities")] = [],
     ) -> PrepareArtifactSendResponse | SelectionRefusal:
         return get_service().prepare_artifact_send(PrepareArtifactSendRequest(
             artifact_id=artifact_id,selection_id=selection_id, recipient=recipient, display_name=display_name,
-            mime_type=mime_type, caption=caption, kind=kind,
+            mime_type=mime_type, caption=caption, kind=kind, outgoing_entities=outgoing_entities,
         ))
 
     @server.tool(
@@ -1739,9 +1750,11 @@ def build_server(
             reply_selection_id: Annotated[SelectionId | None, _about("reply_selection_id")] = None,
             caption: DraftCaption="",
             kind: Annotated[Literal["document","photo","voice_note"], _about("kind")]="document",
+            outgoing_entities: Annotated[OutgoingEntityList, _about("caption_entities")] = [],
             ) -> PrepareReplyArtifactSendResponse | SelectionRefusal:
         return get_service().prepare_reply_artifact_send(PrepareReplyArtifactSendRequest(artifact_id=artifact_id,selection_id=selection_id,
-            recipient=recipient,display_name=display_name,mime_type=mime_type,caption=caption,kind=kind,reply_to=reply_to,reply_selection_id=reply_selection_id))
+            recipient=recipient,display_name=display_name,mime_type=mime_type,caption=caption,kind=kind,reply_to=reply_to,reply_selection_id=reply_selection_id,
+            outgoing_entities=outgoing_entities))
 
     @server.tool(name="get_reply_artifact_draft",
         annotations=_READ_ONLY,structured_output=True)
@@ -1750,8 +1763,11 @@ def build_server(
 
     @server.tool(name="update_reply_artifact_draft",
         annotations=_TRANSFER,structured_output=True)
-    def update_reply_artifact_draft(draft_id: Annotated[DraftId, _about("draft_id")],caption: DraftCaption) -> ReviseReplyArtifactDraftResponse:
-        return get_service().update_reply_artifact_draft(UpdateReplyArtifactDraftRequest(draft_id=draft_id,caption=caption))
+    def update_reply_artifact_draft(draft_id: Annotated[DraftId, _about("draft_id")],caption: DraftCaption,
+            outgoing_entities: Annotated[OutgoingEntityList, _about("caption_entities")] = [],
+            ) -> ReviseReplyArtifactDraftResponse:
+        return get_service().update_reply_artifact_draft(UpdateReplyArtifactDraftRequest(draft_id=draft_id,caption=caption,
+            outgoing_entities=outgoing_entities))
 
     @server.tool(name="refresh_reply_artifact_draft",
         annotations=_TRANSFER,structured_output=True)
@@ -1836,7 +1852,7 @@ def build_server(
     def update_draft(draft_id: Annotated[DraftId, _about("draft_id")],
                      text: Annotated[DraftText | None, _about("draft_text")] = None,
                      caption: Annotated[DraftCaption | None, _about("draft_caption")] = None,
-                     outgoing_entities: Annotated[OutgoingEntityList, _about("outgoing_entities")] = [],
+                     outgoing_entities: Annotated[OutgoingEntityList, _about("draft_entities")] = [],
                      ) -> ReviseDraftResponse:
         return get_service().update_draft(UpdateDraftRequest(draft_id=draft_id, text=text, caption=caption,
             outgoing_entities=outgoing_entities))
@@ -1870,9 +1886,11 @@ def build_server(
     @server.tool(name="prepare_video_send", annotations=_READ_ONLY_STATEFUL, structured_output=True)
     def prepare_video_send(artifact_id: Annotated[ArtifactId, _about("artifact_id")],
                            recipient: Annotated[ChatId, _about("recipient")],
-                           caption: Annotated[str, Field(strict=True, max_length=1024)] = "") -> PrepareVideoSendResponse:
+                           caption: Annotated[str, Field(strict=True, max_length=1024)] = "",
+                           outgoing_entities: Annotated[OutgoingEntityList, _about("caption_entities")] = [],
+                           ) -> PrepareVideoSendResponse:
         return get_service().prepare_video_send(PrepareVideoSendRequest(artifact_id=artifact_id,
-            recipient=recipient, caption=caption))
+            recipient=recipient, caption=caption, outgoing_entities=outgoing_entities))
 
     @server.tool(name="send_prepared_video", annotations=_TRANSFER, structured_output=True)
     def send_prepared_video(draft_id: Annotated[DraftId, _about("draft_id")],

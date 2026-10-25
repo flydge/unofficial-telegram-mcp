@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from .topic_models import ForumTopicReference, TopicSnapshot, topic_preview_digest
-from .outgoing_entity_models import OutgoingEntityList, canonical_outgoing_entities, caller_outgoing_entities
+from .outgoing_entity_models import (OutgoingEntityList, canonical_caption_entities, canonical_outgoing_entities,
+                                     caller_outgoing_entities)
 
 import unicodedata
 from datetime import datetime, timezone
@@ -470,6 +471,24 @@ class PrepareArtifactSendRequest(SelectedInput):
     mime_type: Annotated[str, Field(strict=True, min_length=3, max_length=127)]
     caption: Annotated[str, Field(strict=True, max_length=1024)] = ""
     kind: Literal["document", "photo", "voice_note"] = "document"
+    # 0.58: optional caption styles (formatted_caption_send); a styled caption must be the text Telegram stores.
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def exact_caption_entities(self):
+        if self.outgoing_entities:
+            self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_sources(self, handler):
+        result = handler(self)
+        for key in ("artifact_id", "anchor", "anchors", "selection_id", "reply_to", "reply_selection_id"):
+            if result.get(key) is None:
+                result.pop(key, None)
+        if not self.outgoing_entities:
+            result.pop("outgoing_entities", None)
+        return result
 
 
 class PrepareArtifactSendResponse(NextActionHint):
@@ -491,7 +510,28 @@ class PrepareArtifactSendResponse(NextActionHint):
     expires_at: datetime | None = None
     approval_required: bool = True
     detail: str
+    # 0.58: a styled caption's canonical styles and the digest of its draft (get_draft shows the same preview).
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+    preview_sha256: Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{64}$")] | None = None
     next_action: NextAction | None = next_action_field()
+
+    @model_validator(mode="after")
+    def styled_caption_preview(self):
+        if self.outgoing_entities:
+            if self.status != "prepared" or self.preview_sha256 is None or self.caption is None:
+                raise ValueError("styled caption preview is incomplete")
+            self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+        elif self.preview_sha256 is not None:
+            raise ValueError("plain artifact draft contains a preview digest")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_plain_caption_facts(self, handler):
+        result = handler(self)
+        if not self.outgoing_entities:
+            result.pop("outgoing_entities", None)
+            result.pop("preview_sha256", None)
+        return result
 
 
 class SendPreparedArtifactRequest(BaseModel):

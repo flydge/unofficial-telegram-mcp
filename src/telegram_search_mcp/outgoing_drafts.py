@@ -78,6 +78,32 @@ def _safe_caption(value: str) -> str:
     return result
 
 
+def styled_caption_entities(caption: object, entities) -> FrozenOutgoingEntities:
+    """Caller styles over the caption of a send (0.58): none for a plain caption. A styled caption must already be
+    the text Telegram stores (caption_edit_drafts.normalized_caption leaves it unchanged), never a rewrite, so the
+    spans address it as given; the five styles are then frozen in canonical order."""
+    if type(entities) not in (list, tuple):
+        raise ValueError("outgoing styles must be a list")
+    if not entities:
+        return ()
+    from .caption_edit_drafts import normalized_caption
+    if type(caption) is not str or not caption or normalized_caption(caption) != caption:
+        raise ValueError("a styled caption must be the text Telegram stores")
+    return freeze_outgoing_entities(caption, list(entities))
+
+
+def _caption_entities(caption: str, outgoing_entities, provider: object | None,
+                      epoch: object | None) -> FrozenOutgoingEntities:
+    """A caption's frozen styles and the authority rule they share with formatted text: styles need the provider
+    and epoch they were reviewed under, and a plain caption carries no formatting authority."""
+    entities = styled_caption_entities(caption, [] if outgoing_entities is None else outgoing_entities)
+    if entities and (provider is None or epoch is None):
+        raise DraftError('formatting authority is unavailable')
+    if not entities and (provider is not None or epoch is not None):
+        raise DraftError('plain caption contains formatting authority')
+    return entities
+
+
 def _safe_message_text(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("text must be a string")
@@ -259,8 +285,12 @@ class OutgoingDraftRegistry:
         converted: bool = False,
         reply_source: ReplySource | None = None,
         local_admission_guard: Callable[[], None] | None = None,
+        outgoing_entities: list | None = None,
+        formatting_provider: object | None = None,
+        formatting_provider_epoch: object | None = None,
     ) -> OutgoingDraft:
-        """Record the exact server-issued artifact and proposed send details."""
+        """Record the exact server-issued artifact and proposed send details. Caption styles (0.58) need a caption
+        already in its stored form and the provider authority they were reviewed under."""
         self._validate_owner(owner)
         if type(recipient) is not int or recipient == 0:
             raise ValueError("recipient must be a nonzero numeric chat ID")
@@ -274,6 +304,7 @@ class OutgoingDraftRegistry:
         if not isinstance(caption, str) or len(caption) > 1024 or "\x00" in caption:
             raise ValueError("caption must be text of at most 1024 characters")
         safe_caption = _safe_caption(caption)
+        entities = _caption_entities(caption, outgoing_entities, formatting_provider, formatting_provider_epoch)
         if reply_source is not None and (not isinstance(reply_source, ReplySource) or
                 reply_source.anchor[0] != recipient or reply_source.forum_topic_id is not None):
             raise DraftError("draft is unavailable")
@@ -318,6 +349,9 @@ class OutgoingDraftRegistry:
                 source_sha256=source_sha256,
                 source_display_name=source_display_name,
                 converted=converted, reply_source=reply_source,
+                outgoing_entities=entities,
+                formatting_provider=formatting_provider if entities else None,
+                formatting_provider_epoch=formatting_provider_epoch if entities else None,
             )
             self._entries[draft_id] = _Entry(draft=draft, owner=owner,
                                             artifact_expires_at=artifact.expires_at,
@@ -418,7 +452,9 @@ class OutgoingDraftRegistry:
     def prepare_video(self, *, owner: DraftOwner, artifact_id: str, recipient: int, recipient_title: str,
                       display_name: str, caption: str, video: object,
                       local_admission_guard: Callable[[], None] | None = None,
-                      evidence: Callable[[OutgoingDraft], None] | None = None) -> OutgoingDraft:
+                      evidence: Callable[[OutgoingDraft], None] | None = None,
+                      outgoing_entities: list | None = None, formatting_provider: object | None = None,
+                      formatting_provider_epoch: object | None = None) -> OutgoingDraft:
         """Record one native video bound to the exact probed artifact bytes.
 
         `evidence` builds and validates the public preview of the exact candidate outside the
@@ -433,6 +469,7 @@ class OutgoingDraftRegistry:
             raise DraftError("video draft is unavailable")
         safe_name = _safe_display_name(display_name)
         safe_caption = _safe_caption(caption)
+        entities = _caption_entities(caption, outgoing_entities, formatting_provider, formatting_provider_epoch)
         mime_type = "video/quicktime" if safe_name.casefold().endswith(".mov") else "video/mp4"
         try:
             artifact = self._store.lookup(artifact_id)
@@ -449,6 +486,8 @@ class OutgoingDraftRegistry:
             draft_id=f"draft_{uuid.uuid4().hex}", artifact_id=artifact_id, sha256=artifact.sha256,
             size_bytes=artifact.size_bytes, display_name=safe_name, mime_type=mime_type, caption=safe_caption,
             recipient=recipient, expires_at=expires_at, recipient_title=recipient_title, kind="video", video=video,
+            outgoing_entities=entities, formatting_provider=formatting_provider if entities else None,
+            formatting_provider_epoch=formatting_provider_epoch if entities else None,
         )
         if evidence is not None:
             evidence(draft)
@@ -611,12 +650,24 @@ class OutgoingDraftRegistry:
                 changes.update(outgoing_entities=entities,
                     formatting_provider=formatting_provider if entities else None,
                     formatting_provider_epoch=formatting_provider_epoch if entities else None)
-            elif outgoing_entities is not None:
+            elif outgoing_entities is not None and caption is None:
                 raise DraftError('formatting revision requires complete text')
             if caption is not None:
                 if old.kind == "text" or not isinstance(caption, str) or len(caption) > 1024 or "\x00" in caption:
                     raise DraftError("draft is unavailable")
                 changes["caption"] = _safe_caption(caption)
+                # 0.58: a caption revision states its styles; none (or []) leaves the new caption plain.
+                try:
+                    entities = _caption_entities(caption, outgoing_entities, formatting_provider,
+                                                 formatting_provider_epoch)
+                except ValueError as error:
+                    raise DraftError("draft is unavailable") from error
+                if entities and old.outgoing_entities and (old.formatting_provider is not formatting_provider or
+                        old.formatting_provider_epoch is not formatting_provider_epoch):
+                    raise DraftError('formatting authority changed')
+                changes.update(outgoing_entities=entities,
+                    formatting_provider=formatting_provider if entities else None,
+                    formatting_provider_epoch=formatting_provider_epoch if entities else None)
             artifact = self._artifact_locked(entry) if old.kind != "text" else None
             # Hashing may have crossed the deadline while the lock was held.
             if local_admission_guard is not None:
@@ -851,8 +902,11 @@ class OutgoingDraftRegistry:
             else:
                 capabilities = source.required_capabilities if source is not None else ()
             if entry.draft.outgoing_entities:
-                capabilities = tuple(dict.fromkeys(('formatted_text_send',
-                    *(('reply_text_send',) if source is not None else ()), *capabilities)))
+                # The draft's own style option: text styles, or (0.58) the styles of a caption.
+                text = entry.draft.kind == 'text'
+                capabilities = tuple(dict.fromkeys(('formatted_text_send' if text else 'formatted_caption_send',
+                    *((('reply_text_send' if text else 'reply_artifact_send'),) if source is not None else ()),
+                    *capabilities)))
                 if (provider is not None or provider_epoch is not None) and (
                         entry.draft.formatting_provider is not provider or
                         entry.draft.formatting_provider_epoch is not provider_epoch):

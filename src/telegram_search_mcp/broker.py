@@ -1373,6 +1373,22 @@ class Broker(SelectionBrokerMixin):
     def _require_formatting_capability(self):
         self._require_capabilities('send', 'formatted_text_send')
 
+    def _require_caption_style_capability(self):
+        """Caption styles (0.58): send, then formatted_caption_send, whose own requirements come from
+        required_capabilities(), the single source."""
+        self._require_capabilities('send', *required_capabilities('formatted_caption_send'))
+
+    def _require_style_capability(self, kind: str):
+        """The style option of a draft kind: text styles for text, caption styles (0.58) for every file kind."""
+        if kind == 'text':
+            self._require_formatting_capability()
+        else:
+            self._require_caption_style_capability()
+
+    @staticmethod
+    def _style_capability(kind: str) -> str:
+        return 'formatted_text_send' if kind == 'text' else 'formatted_caption_send'
+
     @staticmethod
     def _reply_options(*, formatted: bool, topic: bool) -> tuple[str, ...]:
         """A text reply's own options in the documented order: outgoing styles, then a selected topic."""
@@ -1395,11 +1411,12 @@ class Broker(SelectionBrokerMixin):
         if old.topic is not None:
             required.add('topic_text_send')
         if old.outgoing_entities or new_formatted:
-            required.add('formatted_text_send')
+            required.update(required_capabilities(Broker._style_capability(old.kind)))
         # The source the revision installs: a refresh replaces the stored one, which is never shown again.
         installed = old.reply_source if source is None else source
         if installed is not None:
-            required.update(('reply_text_send', *installed.required_capabilities))
+            required.update(('reply_text_send' if old.kind == 'text' else 'reply_artifact_send',
+                             *installed.required_capabilities))
         def guard():
             # Called under registry lock: captured immutable/local facts only.
             require_current(self._policy)
@@ -1454,6 +1471,18 @@ class Broker(SelectionBrokerMixin):
                            duration_seconds=draft.duration_seconds, waveform_base64=draft.waveform_base64,
                            source_sha256=draft.source_sha256, source_display_name=draft.source_display_name,
                            converted=draft.converted)
+            if draft.outgoing_entities:
+                # 0.58: a styled caption and the artifact preview digest that binds it with every shown fact.
+                from .draft_models import artifact_preview_digest
+                rows = self._draft_entity_rows(draft)
+                content.update(outgoing_entities=rows, preview_sha256=artifact_preview_digest(
+                    draft_id=draft.draft_id, account_id=owner.account_id, recipient=draft.recipient,
+                    recipient_title=draft.recipient_title, expires_at=datetime.fromtimestamp(draft.expires_at,
+                    timezone.utc), kind=draft.kind, artifact_id=draft.artifact_id, sha256=draft.sha256,
+                    size_bytes=draft.size_bytes, display_name=draft.display_name, mime_type=draft.mime_type,
+                    caption=draft.caption, outgoing_entities=rows, duration_seconds=draft.duration_seconds,
+                    waveform_base64=draft.waveform_base64, source_sha256=draft.source_sha256,
+                    source_display_name=draft.source_display_name, converted=draft.converted))
         return DraftPreview(**self._draft_summary(draft, owner).model_dump(), **content)
 
     def _get_send_status(self, request: GetSendStatusRequest, *, client_id: str,
@@ -1530,8 +1559,10 @@ class Broker(SelectionBrokerMixin):
                       *, client_id: str) -> ReviseDraftResponse:
         try:
             from .outgoing_entity_models import caller_outgoing_entities
-            if isinstance(request, UpdateDraftRequest) and request.outgoing_entities:
-                self._require_formatting_capability()
+            update = isinstance(request, UpdateDraftRequest)
+            if update and request.outgoing_entities:
+                # The request's own option names itself: text styles, or (0.58) caption styles.
+                self._require_style_capability('text' if request.text is not None else 'document')
             owner = self._draft_owner(client_id)
             old = self._drafts.peek(request.draft_id, owner=owner)
             self._draft_preview(old, owner)
@@ -1545,17 +1576,22 @@ class Broker(SelectionBrokerMixin):
                 raise DraftError('topic recipient changed; prepare a fresh topic draft')
             if self._draft_owner(client_id) != owner:
                 raise DraftError("draft is unavailable")
-            rows = (caller_outgoing_entities(request.outgoing_entities) if isinstance(request, UpdateDraftRequest)
+            rows = (caller_outgoing_entities(request.outgoing_entities) if update
                     else self._draft_entity_rows(old))
             if rows:
-                self._require_formatting_capability()
+                self._require_style_capability(old.kind)
             self._require_topic_policy(old.draft_id, owner)
             guard = self._text_revision_guard(old, provider, epoch, new_formatted=bool(rows))
+            text_draft = old.kind == 'text'
+            # A text revision restates its styles; so does a caption revision (0.58), and a styled draft's refresh
+            # restates both under the same provider authority.
             revised = self._drafts.revise(
                 request.draft_id, owner=owner, recipient_title=title,
-                text=request.text if isinstance(request, UpdateDraftRequest) else old.text if old.outgoing_entities else None,
-                caption=request.caption if isinstance(request, UpdateDraftRequest) else None,
-                outgoing_entities=rows if (isinstance(request, UpdateDraftRequest) and request.text is not None) or old.outgoing_entities else None,
+                text=(request.text if update else old.text if old.outgoing_entities and text_draft else None),
+                caption=(request.caption if update else old.caption if old.outgoing_entities and not text_draft
+                         else None),
+                outgoing_entities=(rows if (update and (request.text is not None or request.caption is not None))
+                                   or old.outgoing_entities else None),
                 formatting_provider=provider if rows else None,
                 formatting_provider_epoch=epoch if rows else None,
                 local_admission_guard=guard,
@@ -1586,8 +1622,13 @@ class Broker(SelectionBrokerMixin):
 
     def _prepare_artifact_send(self, request: PrepareArtifactSendRequest, *, client_id: str) -> PrepareArtifactSendResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            styled = bool(request.outgoing_entities)
+            if styled:
+                self._require_caption_style_capability()  # The request's own option, before Telegram is read.
             owner = self._draft_owner(client_id)
             client = self._shared_client()
+            epoch = client.send_observation_epoch if styled else None
             chat = client.resolve_target(request.recipient)
             title = sanitize_telegram_text(chat.get("title"), max_length=255) or str(request.recipient)
             if request.kind == "photo":
@@ -1620,14 +1661,27 @@ class Broker(SelectionBrokerMixin):
                 source_sha256 = voice.source_sha256
                 source_display_name = request.display_name
                 converted = voice.converted
+            if styled:
+                # A styled caption is bound to the provider authority it was reviewed under (0.58).
+                if (self._draft_owner(client_id) != owner or self._shared_client() is not client or
+                        client.send_observation_epoch is not epoch):
+                    raise DraftError('formatting authority changed')
+                self._require_caption_style_capability()
             draft = self._drafts.prepare(
                 owner=owner, artifact_id=artifact_id, recipient=request.recipient, recipient_title=title,
                 display_name=display_name, mime_type=mime_type,
                 caption=request.caption, kind=request.kind,
                 duration_seconds=duration_seconds, waveform_base64=waveform_base64,
                 source_sha256=source_sha256, source_display_name=source_display_name,
-                converted=converted,
+                converted=converted, outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                formatting_provider=client if styled else None, formatting_provider_epoch=epoch,
             )
+            styled_preview = {}
+            if styled:
+                self._require_topic_policy(draft.draft_id, owner)
+                preview = self._plain_draft_preview(draft, owner)
+                styled_preview = dict(outgoing_entities=caller_outgoing_entities(preview.outgoing_entities),
+                                      preview_sha256=preview.preview_sha256)
             known = self._drafts.known_ids()
             with self._state_lock:
                 for old_id in list(self._draft_recipient_titles):
@@ -1646,6 +1700,7 @@ class Broker(SelectionBrokerMixin):
                 sha256=draft.sha256, size_bytes=draft.size_bytes,
                 expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
                 detail="immutable local draft prepared; explicit approval is required before sending",
+                **styled_preview,
             )
         except AuthorizationBlocked:
             return PrepareArtifactSendResponse(status="blocked", detail="TDLib authorization is not ready")
@@ -1668,8 +1723,12 @@ class Broker(SelectionBrokerMixin):
 
     def _reply_artifact_preview(self,draft,owner):
         if draft.reply_source is None or draft.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
-        self._require_capabilities('reply_artifact_send','send')
+        # The documented order: the tool, send, the draft's own option (0.58 caption styles), then source families.
+        self._require_capabilities('reply_artifact_send','send',
+            *(required_capabilities('formatted_caption_send') if draft.outgoing_entities else ()))
         self._require_reply_source_policy(draft.reply_source)
+        if draft.outgoing_entities:
+            self._require_topic_policy(draft.draft_id,owner)
         return ReplyArtifactDraftPreview.create(self._plain_draft_preview(draft,owner),draft.reply_source)
 
     @staticmethod
@@ -1681,7 +1740,13 @@ class Broker(SelectionBrokerMixin):
         from .outgoing_voice import prepare_reply_voice_note
         from .outgoing_drafts import _safe_display_name
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            styled=bool(request.outgoing_entities)
+            if styled:
+                # The request's own option, checked with the tool and send before Telegram is read.
+                self._require_capabilities('reply_artifact_send','send',*required_capabilities('formatted_caption_send'))
             owner=self._reply_artifact_owner(client_id);provider=self._shared_client()
+            epoch=provider.send_observation_epoch if styled else None
             request.caption.encode('utf-8');request.display_name.encode('utf-8')
             if request.reply_to.chat_id!=request.recipient:raise DraftError(REPLY_UNAVAILABLE)
             chat=provider.resolve_target(request.recipient)
@@ -1703,9 +1768,14 @@ class Broker(SelectionBrokerMixin):
             self._reply_budget_check(provider)
             if self._reply_artifact_owner(client_id)!=owner or self._shared_client() is not provider:raise DraftError(REPLY_UNAVAILABLE)
             self._require_reply_source_policy(source)
+            if styled:
+                if provider.send_observation_epoch is not epoch:raise DraftError(REPLY_UNAVAILABLE)
+                self._require_caption_style_capability()
             draft=self._drafts.prepare(owner=owner,recipient=request.recipient,recipient_title=title,
                 caption=request.caption,kind=request.kind,reply_source=source,
-                local_admission_guard=lambda:self._reply_budget_check(provider),**kwargs)
+                local_admission_guard=lambda:self._reply_budget_check(provider),
+                outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                formatting_provider=provider if styled else None,formatting_provider_epoch=epoch,**kwargs)
             preview=self._reply_artifact_preview(draft,owner);self._remember_draft_title(draft)
             return PrepareReplyArtifactSendResponse(status='prepared',reply=preview,detail=REPLY_PREPARED)
         except CapabilityDisabled as error:
@@ -1726,24 +1796,42 @@ class Broker(SelectionBrokerMixin):
 
     def _revise_reply_artifact_draft(self,request,*,client_id: str):
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            update=isinstance(request,UpdateReplyArtifactDraftRequest)
+            if update and request.outgoing_entities:
+                # The request's own option (0.58), before the draft is looked up: the same for any draft ID.
+                self._require_capabilities('reply_artifact_send','send',*required_capabilities('formatted_caption_send'))
             owner=self._reply_artifact_owner(client_id);old=self._drafts.peek(request.draft_id,owner=owner)
             if isinstance(request,RefreshReplyArtifactDraftRequest):
                 # A refresh names what the newly read source needs; the stored source it replaces is not asked.
                 if old.reply_source is None or old.kind=='text':raise DraftError(REPLY_UNAVAILABLE)
-                self._require_capabilities('reply_artifact_send','send')
+                self._require_capabilities('reply_artifact_send','send',
+                    *(required_capabilities('formatted_caption_send') if old.outgoing_entities else ()))
+                if old.outgoing_entities:
+                    self._require_topic_policy(old.draft_id,owner,stored_source=False)
             else:self._reply_artifact_preview(old,owner)
             provider=self._shared_client()
+            epoch=provider.send_observation_epoch
             if isinstance(request,RefreshReplyArtifactDraftRequest):
                 chat=provider.resolve_target(old.recipient)
                 title=sanitize_telegram_text(chat.get('title'),max_length=255) or str(old.recipient)
+                if old.outgoing_entities and title!=old.recipient_title:raise DraftError(REPLY_UNAVAILABLE)
                 source=provider.read_reply_source(*old.reply_source.anchor)
             else:title=old.recipient_title;source=old.reply_source
             self._reply_budget_check(provider)
             if self._reply_artifact_owner(client_id)!=owner or self._shared_client() is not provider:raise DraftError(REPLY_UNAVAILABLE)
             self._require_reply_source_policy(source)
+            rows=caller_outgoing_entities(request.outgoing_entities) if update else self._draft_entity_rows(old)
+            if rows:self._require_caption_style_capability()
+            style_guard=self._text_revision_guard(old,provider,epoch,new_formatted=bool(rows),source=source)
+            def admission():
+                self._reply_budget_check(provider)
+                if style_guard is not None:style_guard()
             revised=self._drafts.revise(request.draft_id,owner=owner,recipient_title=title,reply=True,
-                reply_source=source,caption=request.caption if isinstance(request,UpdateReplyArtifactDraftRequest) else None,
-                local_admission_guard=lambda:self._reply_budget_check(provider))
+                reply_source=source,caption=request.caption if update else old.caption if old.outgoing_entities else None,
+                outgoing_entities=rows if update or old.outgoing_entities else None,
+                formatting_provider=provider if rows else None,formatting_provider_epoch=epoch if rows else None,
+                local_admission_guard=admission)
             self._remember_draft_title(revised)
             return ReviseReplyArtifactDraftResponse(status='revised',previous_draft_id=request.draft_id,
                 reply=self._reply_artifact_preview(revised,owner),detail=REPLY_REVISED)
@@ -1967,7 +2055,8 @@ class Broker(SelectionBrokerMixin):
     def _send_prepared_artifact(self, request: SendPreparedArtifactRequest, *, client_id: str, text_only: bool = False, deadline: float | None = None) -> SendPreparedArtifactResponse:
         # Budget routing takes the DraftOwner: only this client's draft of the account last observed is routed.
         owner = self._observed_owner(client_id)
-        if owner is not None and ((not text_only and self._drafts.is_owned_artifact_reply(request.draft_id, owner=owner))
+        if owner is not None and ((not text_only and (self._drafts.is_owned_artifact_reply(request.draft_id, owner=owner)
+                    or self._drafts.is_owned_formatted(request.draft_id, owner=owner)))
                 or (text_only and (self._drafts.is_owned_topic(request.draft_id, owner=owner) or
                     self._drafts.is_owned_formatted(request.draft_id, owner=owner)))):
             provider=self._shared_client()
@@ -2085,7 +2174,9 @@ class Broker(SelectionBrokerMixin):
             reply_preview=((self._reply_preview if text_only else self._reply_artifact_preview)(entry,owner).model_dump(mode="json") if entry.reply_source is not None else None)
             reply_confirmation={("reply_preview" if text_only else "reply_artifact_preview"):reply_preview} if reply_preview is not None else {}
             if entry.reply_source is None:
-                reply_confirmation[('topic_preview' if entry.topic is not None or entry.outgoing_entities
+                # A styled caption (0.58) keeps the file draft's own preview, now with its styles and digest.
+                reply_confirmation[('topic_preview' if entry.topic is not None or
+                                    (entry.outgoing_entities and entry.kind == 'text')
                                     else 'draft_preview')] = self._plain_draft_preview(entry, owner).model_dump(mode='json')
             reservation = self._drafts.reserve(request.draft_id, owner=owner, draft=entry)
             decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
@@ -2208,6 +2299,18 @@ class Broker(SelectionBrokerMixin):
                 return SendPreparedArtifactResponse(status="failed", draft_id=request.draft_id,
                                                     recipient=claim.draft.recipient,
                                                     detail="local staged file could not be prepared; no provider send was attempted")
+            caption_styles = claim.draft.outgoing_entities
+            def caption_style_guard():
+                # 0.58: a styled caption needs its option, the same provider and epoch, and the one current claim.
+                require_current(self._policy)
+                return (not caption_styles or (
+                    set(required_capabilities('formatted_caption_send')) <= set(self._policy.enabled_capabilities)
+                    and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog
+                    and self._drafts.formatting_claim_current(request.draft_id, owner=owner, provider=provider,
+                                                              provider_epoch=epoch_before_dialog)))
+            styled_kwargs = ({'outgoing_entities': caption_styles, 'expected_account_id': owner.account_id,
+                              'expected_recipient_title': expected_title, 'pre_send_guard': caption_style_guard}
+                             if caption_styles else {})
             try:
                 # Recheck after potentially long staging, before provider entry.
                 if send_fence is not None:
@@ -2218,29 +2321,31 @@ class Broker(SelectionBrokerMixin):
                         require_current(self._policy)
                         return ("send" in self._policy.enabled_capabilities and "reply_artifact_send" in self._policy.enabled_capabilities
                             and all(capability in self._policy.enabled_capabilities for capability in claim.draft.reply_source.required_capabilities)
-                            and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog)
+                            and self._shared_client() is provider and provider.send_observation_epoch is epoch_before_dialog
+                            and caption_style_guard())
                     sender=getattr(provider,"send_reply_artifact_message",None)
                     if not callable(sender):raise MessageSendNotAttempted("reply provider is unavailable")
                     with provider.request_budget(min(deadline if deadline is not None else float("inf"),time.monotonic()+330)):
                         message_id=sender(claim.draft.recipient,staged_path,claim.draft.caption,kind=claim.draft.kind,
                             duration_seconds=claim.draft.duration_seconds,waveform_base64=claim.draft.waveform_base64,
                             reply_source=claim.draft.reply_source,expected_account_id=owner.account_id,
-                            expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=artifact_reply_guard,**fence_kwargs)
+                            expected_recipient_title=expected_title,attempt_id=request.draft_id,pre_send_guard=artifact_reply_guard,
+                            **({'outgoing_entities': caption_styles} if caption_styles else {}),**fence_kwargs)
                 elif claim.draft.kind == "photo":
                     message_id = provider.send_photo_message(
                         claim.draft.recipient, staged_path, claim.draft.caption, attempt_id=request.draft_id,
-                        **fence_kwargs,
+                        **fence_kwargs, **styled_kwargs,
                     )
                 elif claim.draft.kind == "voice_note":
                     message_id = provider.send_voice_note_message(
                         claim.draft.recipient, staged_path, claim.draft.caption,
                         claim.draft.duration_seconds, claim.draft.waveform_base64, attempt_id=request.draft_id,
-                        **fence_kwargs,
+                        **fence_kwargs, **styled_kwargs,
                     )
                 else:
                     message_id = provider.send_document_message(
                         claim.draft.recipient, staged_path, claim.draft.caption, attempt_id=request.draft_id,
-                        **fence_kwargs,
+                        **fence_kwargs, **styled_kwargs,
                     )
                 receipt = self._drafts.finish(request.draft_id, owner=owner, claim=claim, status="sent", message_id=message_id)
             except MessageSendNotAttempted:
@@ -2256,6 +2361,16 @@ class Broker(SelectionBrokerMixin):
                     retire_staged_document(staged_path, **self._staging)
                 except (OSError, ValueError):
                     pass  # The receipt still owns the provider outcome; staging is TTL-bounded.
+            if caption_styles and receipt.evidence != 'local_failed':
+                # As for formatted text: observed evidence of a styled caption is disclosed only to the same current
+                # account, client and enabled policy.
+                try:
+                    if self._draft_owner(client_id) != owner:
+                        raise DraftError('styled caption receipt owner changed')
+                    self._require_topic_policy(request.draft_id, owner)
+                except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError):
+                    return SendPreparedArtifactResponse(status='outcome_unknown', draft_id=request.draft_id,
+                        detail='current receipt authority is unavailable; do not retry automatically')
             return SendPreparedArtifactResponse(
                 status=receipt.status, draft_id=receipt.draft_id,
                 recipient=claim.draft.recipient, message_id=receipt.message_id,
@@ -2466,14 +2581,21 @@ class Broker(SelectionBrokerMixin):
         if draft.kind != 'video' or not isinstance(spec, VideoSpec):
             raise DraftError(VIDEO_UNAVAILABLE)
         self._require_video_policy()
+        if draft.outgoing_entities:
+            self._require_caption_style_capability()  # 0.58: a styled caption's own option.
         return VideoDraftPreview.create(draft_id=draft.draft_id, account_id=owner.account_id,
             expires_at=datetime.fromtimestamp(draft.expires_at, tz=timezone.utc),
             recipient=VideoRecipient(chat_id=draft.recipient, title=draft.recipient_title),
             artifact_id=draft.artifact_id, display_name=draft.display_name, size_bytes=draft.size_bytes,
-            sha256=draft.sha256, facts=spec.facts, caption=draft.caption)
+            sha256=draft.sha256, facts=spec.facts, caption=draft.caption,
+            outgoing_entities=self._draft_entity_rows(draft))
 
     def _prepare_video_send(self, request: PrepareVideoSendRequest, *, client_id: str) -> PrepareVideoSendResponse:
         try:
+            from .outgoing_entity_models import caller_outgoing_entities
+            styled = bool(request.outgoing_entities)
+            if styled:
+                self._require_caption_style_capability()  # The request's own option, before any other work.
             owner = self._video_owner(client_id)
             provider = self._shared_client()
             epoch = provider.send_observation_epoch
@@ -2499,9 +2621,13 @@ class Broker(SelectionBrokerMixin):
             previews = []
             # The preview is built and validated before insertion: a refused preview leaves
             # no orphan draft and supersedes nothing.
+            if styled:
+                self._require_caption_style_capability()
             draft = self._drafts.prepare_video(owner=owner, artifact_id=request.artifact_id, recipient=request.recipient,
                 recipient_title=recipient_title, display_name=display_name, caption=request.caption, video=spec,
-                evidence=lambda candidate: previews.append(self._video_preview(candidate, owner)))
+                evidence=lambda candidate: previews.append(self._video_preview(candidate, owner)),
+                outgoing_entities=caller_outgoing_entities(request.outgoing_entities),
+                formatting_provider=provider if styled else None, formatting_provider_epoch=epoch if styled else None)
             [preview] = previews
             self._remember_draft_title(draft)
             return PrepareVideoSendResponse(status='prepared', video=preview, detail=VIDEO_PREPARED)
@@ -2531,6 +2657,8 @@ class Broker(SelectionBrokerMixin):
             if self._drafts.kind(draft_id, owner=owner) != 'video':
                 return result('error', 'draft kind does not match send tool')
             held = True  # The current owner and artifact lifecycle hold this draft.
+            if self._drafts.is_formatted(draft_id, owner=owner):
+                self._require_caption_style_capability()  # 0.58: a styled caption's receipt and send need its option.
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
                 if previous.evidence == 'local_failed':
@@ -2580,7 +2708,11 @@ class Broker(SelectionBrokerMixin):
                 return ({'send', 'video_send'} <= set(self._policy.enabled_capabilities)
                     and self._shared_client() is provider and provider.send_observation_epoch is epoch
                     and self._drafts.video_claim_current(draft_id, owner=owner, provider=provider,
-                                                         provider_epoch=epoch))
+                                                         provider_epoch=epoch)
+                    and (not claim.draft.outgoing_entities or (
+                        set(required_capabilities('formatted_caption_send')) <= set(self._policy.enabled_capabilities)
+                        and self._drafts.formatting_claim_current(draft_id, owner=owner, provider=provider,
+                                                                  provider_epoch=epoch))))
             failure_detail = 'TDLib rejected the send'
             try:
                 staged_path = stage_approved_document(claim, **self._staging)
@@ -2601,7 +2733,8 @@ class Broker(SelectionBrokerMixin):
                     supports_streaming=facts.supports_streaming, size_bytes=claim.draft.size_bytes,
                     expected_account_id=owner.account_id, expected_recipient_title=expected_title,
                     expected_recipient_identity=spec.recipient_identity, attempt_id=draft_id,
-                    pre_send_guard=video_guard, pre_send_fence=send_fence)
+                    pre_send_guard=video_guard, pre_send_fence=send_fence,
+                    **({'outgoing_entities': claim.draft.outgoing_entities} if claim.draft.outgoing_entities else {}))
                 receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='sent', message_id=message_id)
             except MessageSendNotAttempted:
                 receipt = self._drafts.finish(draft_id, owner=owner, claim=claim, status='failed', evidence='local_failed')

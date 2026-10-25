@@ -321,8 +321,23 @@ def _entity_rows(heading: str, rows) -> list[str]:
              for kind, offset, length, covered in rows]) if rows else []
 
 
+def _caption_styles(caption: str, entities) -> list[str]:
+    """A styled caption's caller styles (0.58) with their covered text; nothing for a plain caption."""
+    if not entities:
+        return []
+    from .outgoing_drafts import styled_caption_entities
+    from .outgoing_entity_models import caller_outgoing_entities
+    return _new_styles('Caption styles (exact caption; UTF-16 code units):', caption,
+                       styled_caption_entities(caption, caller_outgoing_entities(entities)))
+
+
+def _caption_lines(caption: str, entities) -> list:
+    return (['Caption (exact):', _Payload(caption), *_caption_styles(caption, entities)] if caption
+            else ['Caption: (none)'])
+
+
 def _plain_document(draft, alias) -> str:
-    """Ordinary text or file send without a topic, styles or reply."""
+    """Ordinary text or file send without a topic, text styles or reply; a file's caption may be styled (0.58)."""
     where = f'{_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})'
     if draft.kind == 'text':
         return _document(
@@ -333,12 +348,15 @@ def _plain_document(draft, alias) -> str:
     voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
               f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
     voice_technical = ([f'Source SHA-256: {draft.source_sha256}'] if draft.kind == 'voice_note' else [])
+    styled = bool(draft.outgoing_entities)
     return _document(
         _head(f'Send a {_KIND_WORDS[draft.kind]} to {where}', draft.account_id, draft.expires_at, alias),
         [f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}', f'Bytes: {draft.size_bytes}', *voice,
-         *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
-        [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical],
-        f'{identity.DISPLAY_NAME} will make one upload/send attempt.')
+         *_caption_lines(draft.caption, draft.outgoing_entities)],
+        [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical,
+         *([f'Preview SHA-256: {draft.preview_sha256}'] if styled else [])],
+        f'{identity.DISPLAY_NAME} will revalidate this account and recipient, then make one upload/send attempt.'
+        if styled else f'{identity.DISPLAY_NAME} will make one upload/send attempt.')
 
 
 def _topic_document(draft, alias) -> str:
@@ -399,8 +417,7 @@ def _reply_artifact_document(validated, alias) -> str:
         _head(f'Send a {_KIND_WORDS[draft.kind]} reply to {_span(draft.recipient_title)} '
               f'({_chat(draft.recipient, draft.account_id)})', draft.account_id, draft.expires_at, alias),
         [*target, '', f'File: {_span(draft.display_name)}', f'MIME: {draft.mime_type}',
-         f'Bytes: {draft.size_bytes}', *voice,
-         *(['Caption (exact):', _Payload(draft.caption)] if draft.caption else ['Caption: (none)'])],
+         f'Bytes: {draft.size_bytes}', *voice, *_caption_lines(draft.caption, draft.outgoing_entities)],
         [f'Draft: {draft.draft_id}', f'SHA-256: {draft.sha256}', *voice_technical, *target_technical,
          f'Preview SHA-256: {validated.preview_sha256}'],
         f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
@@ -474,7 +491,8 @@ def _forward_document(validated, alias) -> str:
 def _video_document(validated, alias) -> str:
     """The probed facts are what the container boxes declare; nothing is decoded."""
     recipient = validated.recipient
-    caption = (['Caption [untrusted] (exact):', _Payload(validated.raw_caption)] if validated.caption is not None
+    caption = (['Caption [untrusted] (exact):', _Payload(validated.raw_caption),
+                *_caption_styles(validated.raw_caption, validated.outgoing_entities)] if validated.caption is not None
                else ['Caption: (none)'])
     return _document(
         _head(f'Send a native video to {_span(recipient.title)} ({_chat(recipient.chat_id, validated.account_id)})',
@@ -786,7 +804,8 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         return _reply_document(validated, alias), 'send'
     from .draft_models import DraftPreview
     validated = DraftPreview.model_validate(draft_preview)
-    _require(validated.topic is None and not validated.outgoing_entities and validated.kind == kind and
+    # Text styles have their own document (topic_preview); a file's caption styles (0.58) stay on this one.
+    _require(validated.topic is None and (not validated.outgoing_entities or kind != 'text') and validated.kind == kind and
              validated.recipient == recipient and validated.recipient_title == recipient_title and
              validated.sha256 == sha256 and validated.size_bytes == size_bytes)
     if kind == 'text':

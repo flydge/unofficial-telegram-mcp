@@ -259,18 +259,41 @@ def _exact_caption(formatted) -> bool:
         return False
 
 
+def _validated_caption_entities(caption, entities):
+    """A styled caption's frozen styles (0.58): canonical, non-empty, over a caption already in its stored form."""
+    if (type(entities) is not tuple or not entities or len(entities) > 32 or
+            any(type(row) is not tuple or len(row) != 3 for row in entities)):
+        raise ValueError('invalid frozen caption styles')
+    from .outgoing_drafts import styled_caption_entities
+    frozen = styled_caption_entities(caption, [{'offset': offset, 'length': length, 'type': {'@type': kind}}
+                                               for offset, length, kind in entities])
+    if frozen != entities:
+        raise ValueError('caption styles are not canonical')
+    return frozen
+
+
 # Closed per-kind media contents, shared by sendMessage and sendMessageAlbum.
-def _plain_caption(caption: object) -> bool:
-    return (
-        isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
-        and caption.get("@type") == "formattedText"
-        and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024
-        and _normalized_caption(caption["text"])
-        and caption.get("entities") == []
-    )
+def _plain_caption(caption: object, *, styled: bool = False) -> bool:
+    """A send's caption: plain (no entities, in the shared normalized form) or, only where styles are admitted (0.58:
+    a single send, never an album item), a caption already in its stored form with canonical frozen caller styles."""
+    if not (isinstance(caption, dict) and set(caption) == {"@type", "text", "entities"}
+            and caption.get("@type") == "formattedText"
+            and isinstance(caption.get("text"), str) and len(caption["text"]) <= 1024):
+        return False
+    if caption.get("entities") == []:
+        return _normalized_caption(caption["text"])
+    if not styled:
+        return False
+    try:
+        from .caption_edit_drafts import normalized_caption
+        text, entities = caption["text"], caption["entities"]
+        return (type(entities) is list and normalized_caption(text) == text and
+                native_outgoing_entities(_native_outgoing_entity_expectation(text, entities)) == entities)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        return False
 
 
-def _valid_document_content(content: object, staging: Path) -> bool:
+def _valid_document_content(content: object, staging: Path, *, styled: bool = False) -> bool:
     document = content.get("document") if isinstance(content, dict) else None
     return (
         isinstance(content, dict) and set(content) == {"@type", "document", "caption"}
@@ -281,11 +304,11 @@ def _valid_document_content(content: object, staging: Path) -> bool:
         and document.get("thumbnail") is None
         and document.get("disable_content_type_detection") is True
         and _valid_staged_input_file(document.get("document"), staging)
-        and _plain_caption(content.get("caption"))
+        and _plain_caption(content.get("caption"), styled=styled)
     )
 
 
-def _valid_photo_content(content: object, staging: Path) -> bool:
+def _valid_photo_content(content: object, staging: Path, *, styled: bool = False) -> bool:
     photo = content.get("photo") if isinstance(content, dict) else None
     return (
         isinstance(content, dict)
@@ -300,11 +323,11 @@ def _valid_photo_content(content: object, staging: Path) -> bool:
         and photo.get("width") == 0 and photo.get("height") == 0
         and content.get("show_caption_above_media") is False
         and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
-        and _plain_caption(content.get("caption"))
+        and _plain_caption(content.get("caption"), styled=styled)
     )
 
 
-def _valid_voice_content(content: object, staging: Path) -> bool:
+def _valid_voice_content(content: object, staging: Path, *, styled: bool = False) -> bool:
     voice = content.get("voice_note") if isinstance(content, dict) else None
     return (
         isinstance(content, dict)
@@ -316,11 +339,11 @@ def _valid_voice_content(content: object, staging: Path) -> bool:
         and type(voice.get("duration")) is int and 1 <= voice["duration"] <= 600
         and _valid_voice_waveform(voice.get("waveform"))
         and content.get("self_destruct_type") is None
-        and _plain_caption(content.get("caption"))
+        and _plain_caption(content.get("caption"), styled=styled)
     )
 
 
-def _valid_video_content(content: object, staging: Path) -> bool:
+def _valid_video_content(content: object, staging: Path, *, styled: bool = False) -> bool:
     video = content.get("video") if isinstance(content, dict) else None
     sides = (video.get("width"), video.get("height")) if isinstance(video, dict) else (None, None)
     return (
@@ -341,7 +364,7 @@ def _valid_video_content(content: object, staging: Path) -> bool:
         and type(video.get("supports_streaming")) is bool
         and content.get("show_caption_above_media") is False
         and content.get("self_destruct_type") is None and content.get("has_spoiler") is False
-        and _plain_caption(content.get("caption"))
+        and _plain_caption(content.get("caption"), styled=styled)
     )
 
 
@@ -436,13 +459,14 @@ def _validate_bounded_request(payload: dict[str, Any], staging_root: Path | None
             and strict_shape(reply_to,{"@type":"inputMessageReplyToMessage",
                 "message_id":reply_to.get("message_id"),"quote":None,"checklist_task_id":0,"poll_option_id":""})
             and _is_integer_in_range(reply_to.get("message_id"),1,2**53-1)))
-        valid_document = _valid_document_content(content, staging)
+        # A single send's caption may carry canonical caller styles (0.58); album items stay plain.
+        valid_document = _valid_document_content(content, staging, styled=True)
         photo = content.get("photo") if isinstance(content, dict) else None
-        valid_photo = _valid_photo_content(content, staging)
-        valid_voice = _valid_voice_content(content, staging)
+        valid_photo = _valid_photo_content(content, staging, styled=True)
+        valid_voice = _valid_voice_content(content, staging, styled=True)
         if reply_to is not None and valid_photo and (type(photo.get('width')) is not int or type(photo.get('height')) is not int):
             valid_photo=False
-        valid_video = reply_to is None and _valid_video_content(content, staging)
+        valid_video = reply_to is None and _valid_video_content(content, staging, styled=True)
         if (
             set(payload) != {"@type", "chat_id", "topic_id", "reply_to", "options", "reply_markup", "input_message_content"}
             or not _is_strict_nonzero_integer(payload.get("chat_id"))
@@ -1693,18 +1717,57 @@ class TDLibClient:
             raise TDLibError("TDLib returned an invalid message")
         return message
 
-    def send_document_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
-        """Make one provider attempt and wait for a matching delivery update."""
-        content = {
-            "@type": "inputMessageDocument",
-            "document": {
-                "@type": "inputDocument",
-                "document": {"@type": "inputFileLocal", "path": str(path)},
-                "thumbnail": None, "disable_content_type_detection": True,
-            },
-            "caption": {"@type": "formattedText", "text": caption, "entities": []},
-        }
-        return self._send_message_content(chat_id, content, "messageDocument", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
+    def send_document_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None,
+                              pre_send_fence=None, outgoing_entities: FrozenOutgoingEntities = (),
+                              expected_account_id=None, expected_recipient_title=None, pre_send_guard=None) -> int:
+        """Make one provider attempt and wait for a matching delivery update; a styled caption (0.58) first
+        revalidates the reviewed account and recipient title."""
+        def content(formatted):
+            return {
+                "@type": "inputMessageDocument",
+                "document": {
+                    "@type": "inputDocument",
+                    "document": {"@type": "inputFileLocal", "path": str(path)},
+                    "thumbnail": None, "disable_content_type_detection": True,
+                },
+                "caption": formatted,
+            }
+        if outgoing_entities != ():
+            return self._styled_caption_message(chat_id, caption, outgoing_entities, content, "messageDocument",
+                attempt_id=attempt_id, expected_account_id=expected_account_id,
+                expected_recipient_title=expected_recipient_title, pre_send_guard=pre_send_guard,
+                pre_send_fence=pre_send_fence)
+        return self._send_message_content(chat_id, content({"@type": "formattedText", "text": caption, "entities": []}),
+                                          "messageDocument", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
+
+    def _styled_caption_message(self, chat_id: int, caption: str, outgoing_entities: FrozenOutgoingEntities,
+                                build: Callable[[dict], dict], expected_type: str, *, attempt_id, expected_account_id,
+                                expected_recipient_title, pre_send_guard, pre_send_fence) -> int:
+        """One styled caption attempt (0.58), revalidated like formatted text under the serialized provider lock: the
+        frozen styles against the caption Telegram stores, then the reviewed account, recipient title and guard."""
+        from .sanitize import sanitize_telegram_text
+        with self._serialized_reply_call():
+            def current_authority():
+                if (type(expected_account_id) is not int or expected_account_id <= 0 or
+                        type(expected_recipient_title) is not str or
+                        type(attempt_id) is not str or not attempt_id or
+                        not callable(pre_send_guard) or pre_send_guard() is not True or
+                        self.get_account_id() != expected_account_id):
+                    return False
+                chat = self.resolve_target(chat_id)
+                title = sanitize_telegram_text(chat.get('title'), max_length=255) or str(chat_id)
+                return (title == expected_recipient_title and
+                        self.get_account_id() == expected_account_id and pre_send_guard() is True)
+            try:
+                frozen = _validated_caption_entities(caption, outgoing_entities)
+                if not current_authority():
+                    raise ValueError('styled caption authority changed')
+                content = build({'@type': 'formattedText', 'text': caption,
+                                 'entities': native_outgoing_entities(frozen)})
+            except Exception as error:
+                raise MessageSendNotAttempted('styled caption revalidation failed') from error
+            return self._send_message_content(chat_id, content, expected_type, attempt_id=attempt_id,
+                outgoing_entities=frozen, pre_transport_guard=current_authority, pre_transport_fence=pre_send_fence)
 
     def send_text_message(self, chat_id: int, text: str, *, attempt_id: str | None = None,
                           outgoing_entities: FrozenOutgoingEntities = (),
@@ -2455,7 +2518,8 @@ class TDLibClient:
     def send_reply_artifact_message(self,chat_id: int,path: Path,caption: str,*,kind: str,
             reply_source: ReplySource,expected_account_id: int,expected_recipient_title: str,
             attempt_id: str,pre_send_guard: Callable[[],bool],duration_seconds: int | None=None,
-            waveform_base64: str | None=None,pre_send_fence=None) -> int:
+            waveform_base64: str | None=None,pre_send_fence=None,
+            outgoing_entities: FrozenOutgoingEntities=()) -> int:
         from .sanitize import sanitize_telegram_text
         self._request_context.artifact_transport_attempted=False
         try:
@@ -2473,7 +2537,9 @@ class TDLibClient:
                     raise ValueError('reply eligibility changed')
                 if self.get_account_id()!=expected_account_id or pre_send_guard() is not True:
                     raise ValueError('reply scope changed')
-                formatted={'@type':'formattedText','text':caption,'entities':[]}
+                # 0.58: a styled caption's frozen styles, revalidated against the caption Telegram stores.
+                frozen=_validated_caption_entities(caption,outgoing_entities) if outgoing_entities!=() else ()
+                formatted={'@type':'formattedText','text':caption,'entities':native_outgoing_entities(frozen)}
                 local={'@type':'inputFileLocal','path':str(path)}
                 if kind=='document':
                     content={'@type':'inputMessageDocument','document':{'@type':'inputDocument','document':local,
@@ -2490,7 +2556,8 @@ class TDLibClient:
                     expected='messageVoiceNote'
                 else:raise ValueError('unsupported reply kind')
                 return self._send_message_content(chat_id,content,expected,attempt_id=attempt_id,
-                    reply_anchor=reply_source.anchor,artifact_reply=True,pre_transport_guard=pre_send_guard,pre_transport_fence=pre_send_fence)
+                    reply_anchor=reply_source.anchor,artifact_reply=True,pre_transport_guard=pre_send_guard,pre_transport_fence=pre_send_fence,
+                    outgoing_entities=frozen)
         except (MessageSendOutcomeUnknown,MessageSendFailed):
             raise
         except Exception as error:
@@ -2499,35 +2566,53 @@ class TDLibClient:
             self._send_observations.discard_unattempted(attempt_id)
             raise MessageSendNotAttempted('artifact reply was refused before transport') from error
 
-    def send_photo_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
-        content = {
-            "@type": "inputMessagePhoto",
-            "photo": {
-                "@type": "inputPhoto", "photo": {"@type": "inputFileLocal", "path": str(path)},
-                "thumbnail": None, "video": None, "added_sticker_file_ids": [], "width": 0, "height": 0,
-            },
-            "caption": {"@type": "formattedText", "text": caption, "entities": []},
-            "show_caption_above_media": False, "self_destruct_type": None, "has_spoiler": False,
-        }
-        return self._send_message_content(chat_id, content, "messagePhoto", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
+    def send_photo_message(self, chat_id: int, path: Path, caption: str, *, attempt_id: str | None = None,
+                           pre_send_fence=None, outgoing_entities: FrozenOutgoingEntities = (),
+                           expected_account_id=None, expected_recipient_title=None, pre_send_guard=None) -> int:
+        def content(formatted):
+            return {
+                "@type": "inputMessagePhoto",
+                "photo": {
+                    "@type": "inputPhoto", "photo": {"@type": "inputFileLocal", "path": str(path)},
+                    "thumbnail": None, "video": None, "added_sticker_file_ids": [], "width": 0, "height": 0,
+                },
+                "caption": formatted,
+                "show_caption_above_media": False, "self_destruct_type": None, "has_spoiler": False,
+            }
+        if outgoing_entities != ():
+            return self._styled_caption_message(chat_id, caption, outgoing_entities, content, "messagePhoto",
+                attempt_id=attempt_id, expected_account_id=expected_account_id,
+                expected_recipient_title=expected_recipient_title, pre_send_guard=pre_send_guard,
+                pre_send_fence=pre_send_fence)
+        return self._send_message_content(chat_id, content({"@type": "formattedText", "text": caption, "entities": []}),
+                                          "messagePhoto", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
     def send_voice_note_message(self, chat_id: int, path: Path, caption: str,
-                                duration_seconds: int, waveform_base64: str, *, attempt_id: str | None = None, pre_send_fence=None) -> int:
-        content = {
-            "@type": "inputMessageVoiceNote",
-            "voice_note": {
-                "@type": "inputVoiceNote",
-                "voice_note": {"@type": "inputFileLocal", "path": str(path)},
-                "duration": duration_seconds, "waveform": waveform_base64,
-            },
-            "caption": {"@type": "formattedText", "text": caption, "entities": []},
-            "self_destruct_type": None,
-        }
-        return self._send_message_content(chat_id, content, "messageVoiceNote", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
+                                duration_seconds: int, waveform_base64: str, *, attempt_id: str | None = None,
+                                pre_send_fence=None, outgoing_entities: FrozenOutgoingEntities = (),
+                                expected_account_id=None, expected_recipient_title=None, pre_send_guard=None) -> int:
+        def content(formatted):
+            return {
+                "@type": "inputMessageVoiceNote",
+                "voice_note": {
+                    "@type": "inputVoiceNote",
+                    "voice_note": {"@type": "inputFileLocal", "path": str(path)},
+                    "duration": duration_seconds, "waveform": waveform_base64,
+                },
+                "caption": formatted,
+                "self_destruct_type": None,
+            }
+        if outgoing_entities != ():
+            return self._styled_caption_message(chat_id, caption, outgoing_entities, content, "messageVoiceNote",
+                attempt_id=attempt_id, expected_account_id=expected_account_id,
+                expected_recipient_title=expected_recipient_title, pre_send_guard=pre_send_guard,
+                pre_send_fence=pre_send_fence)
+        return self._send_message_content(chat_id, content({"@type": "formattedText", "text": caption, "entities": []}),
+                                          "messageVoiceNote", attempt_id=attempt_id, pre_transport_fence=pre_send_fence)
 
     @staticmethod
     def _video_content(path: Path, caption: str, *, duration_seconds: int, width: int, height: int,
-                       supports_streaming: bool) -> dict[str, Any]:
+                       supports_streaming: bool, entities: list | None = None) -> dict[str, Any]:
         return {
             "@type": "inputMessageVideo",
             "video": {
@@ -2536,15 +2621,17 @@ class TDLibClient:
                 "duration": duration_seconds, "width": width, "height": height,
                 "supports_streaming": supports_streaming,
             },
-            "caption": {"@type": "formattedText", "text": caption, "entities": []},
+            "caption": {"@type": "formattedText", "text": caption, "entities": list(entities or [])},
             "show_caption_above_media": False, "self_destruct_type": None, "has_spoiler": False,
         }
 
     def send_video_message(self, chat_id: int, path: Path, caption: str, *, duration_seconds: int, width: int,
                            height: int, supports_streaming: bool, size_bytes: int, expected_account_id: int,
                            expected_recipient_title: str, expected_recipient_identity: tuple, attempt_id: str,
-                           pre_send_guard: Callable[[], bool], pre_send_fence=None) -> int:
-        """Revalidate account and recipient under the provider lock, then make one native video attempt.
+                           pre_send_guard: Callable[[], bool], pre_send_fence=None,
+                           outgoing_entities: FrozenOutgoingEntities = ()) -> int:
+        """Revalidate account and recipient under the provider lock, then make one native video attempt; a styled
+        caption's frozen styles (0.58) are revalidated against the caption Telegram stores first.
 
         Every refusal before the raw send is no-attempt evidence; nothing is ever retried.
         """
@@ -2561,13 +2648,15 @@ class TDLibClient:
                     identity, title = chat_identity(self.resolve_target(chat_id), chat_id)
                     return (identity == expected_recipient_identity and title == expected_recipient_title and
                             self.get_account_id() == expected_account_id and pre_send_guard() is True)
+                frozen = _validated_caption_entities(caption, outgoing_entities) if outgoing_entities != () else ()
                 if not current_authority():
                     raise ValueError("video authority changed")
                 content = self._video_content(path, caption, duration_seconds=duration_seconds, width=width,
-                                              height=height, supports_streaming=supports_streaming)
+                                              height=height, supports_streaming=supports_streaming,
+                                              entities=native_outgoing_entities(frozen))
                 return self._send_message_content(chat_id, content, "messageVideo", attempt_id=attempt_id,
                     pre_transport_guard=pre_send_guard, pre_transport_fence=pre_send_fence,
-                    video=(duration_seconds, width, height, size_bytes))
+                    video=(duration_seconds, width, height, size_bytes), outgoing_entities=frozen)
         except (MessageSendOutcomeUnknown, MessageSendFailed):
             raise
         except Exception as error:

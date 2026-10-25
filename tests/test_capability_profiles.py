@@ -113,7 +113,9 @@ class ApplyTests(unittest.TestCase):
         self.assertNotIn('restart_command', result)
         self.assertEqual(result['profiles']['forward'], 'on')
         self.assertEqual(load_runtime_policy(self.path).enabled_capabilities,
-                         ('artifacts', 'formatted_text_send', 'forward_send', 'read', 'send', 'topic_text_send'))
+                         # 0.58: the send profile also holds formatted_caption_send.
+                         ('artifacts', 'formatted_caption_send', 'formatted_text_send', 'forward_send', 'read', 'send',
+                          'topic_text_send'))
         data = self.path.read_bytes()
         self.assertEqual(data.replace(data.splitlines()[2], b''), POLICY.replace(POLICY.splitlines()[2], b''))
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)

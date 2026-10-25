@@ -7,6 +7,9 @@ from .schemas import PrepareArtifactSendRequest, SelectedMessageAnchor
 from .reply_drafts import (ReplySource, ReplyTarget, digest, SEND_OPTIONS, PREPARED, PENDING, REVISED, UNAVAILABLE,
     MissingCapabilities, ReplyRefusal)
 from .next_actions import NextAction, next_action_field, optional_field
+from .outgoing_entity_models import OutgoingEntityList, canonical_caption_entities, caller_outgoing_entities
+from .outgoing_formatting import freeze_outgoing_entities, native_outgoing_entities
+from pydantic import Field, model_serializer
 
 
 def content_options(draft):
@@ -19,9 +22,12 @@ def content_options(draft):
 
 
 def preview_facts(draft: DraftPreview, target: ReplyTarget):
-    return {'domain':'telegram-search-mcp.reply-artifact','version':1,'kind':draft.kind,
+    # v2 (0.58) fills the outgoing_entities slot with a styled caption's native styles; a plain caption stays v1.
+    entities=(native_outgoing_entities(freeze_outgoing_entities(draft.caption,caller_outgoing_entities(draft.outgoing_entities)))
+              if draft.outgoing_entities else [])
+    return {'domain':'telegram-search-mcp.reply-artifact','version':2 if entities else 1,'kind':draft.kind,
         'draft':draft.model_dump(mode='json'),'reply_target':target.model_dump(mode='json'),
-        'topic_id':None,'outgoing_entities':[],'send_options':dict(SEND_OPTIONS),'reply_markup':None,
+        'topic_id':None,'outgoing_entities':entities,'send_options':dict(SEND_OPTIONS),'reply_markup':None,
         'reply_to':{'@type':'inputMessageReplyToMessage','message_id':target.anchor.message_id,
             'quote':None,'checklist_task_id':0,'poll_option_id':''},'content_options':content_options(draft)}
 
@@ -73,6 +79,21 @@ class GetReplyArtifactDraftRequest(_Closed):
 
 class UpdateReplyArtifactDraftRequest(GetReplyArtifactDraftRequest):
     caption: DraftCaption
+    # 0.58: the replacement caption's styles; an empty list leaves it plain.
+    outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def exact_caption_entities(self):
+        if self.outgoing_entities:
+            self.outgoing_entities = canonical_caption_entities(self.caption, self.outgoing_entities)
+        return self
+
+    @model_serializer(mode='wrap')
+    def omit_empty_entities(self, handler):
+        value = handler(self)
+        if not self.outgoing_entities:
+            value.pop('outgoing_entities', None)
+        return value
 
 class RefreshReplyArtifactDraftRequest(GetReplyArtifactDraftRequest):
     pass

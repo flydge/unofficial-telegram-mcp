@@ -49,10 +49,12 @@ OPERATION_CAPABILITIES = {
     "prepare_artifact_send": "send", "send_prepared_artifact": "send",
 }
 # Default-off capabilities that change Telegram state; each also requires `send`.
-# The 0.57 own-message actions (edit_own_caption, edit_own_styled_text, pin_messages, delete_own_message) too.
+# The 0.57 own-message actions (edit_own_caption, edit_own_styled_text, pin_messages, delete_own_message) too, and
+# 0.58's styled captions (formatted_caption_send), an option of every caption send rather than an operation gate.
 OWN_MESSAGE_ACTIONS = frozenset({"edit_own_caption", "edit_own_styled_text", "pin_messages", "delete_own_message"})
 SEND_DEPENDENT_CAPABILITIES = frozenset({"reply_text_send", "reply_artifact_send", "forward_send", "video_send",
-                                         "archive_chats", "edit_own_text", "album_send"}) | OWN_MESSAGE_ACTIONS
+                                         "archive_chats", "edit_own_text", "album_send",
+                                         "formatted_caption_send"}) | OWN_MESSAGE_ACTIONS
 # Their prepare step reveals content (an own message's text, a chat's title and list); owner decision 20.10.2026.
 # 0.57: an own message's caption and text, or a message to pin, are revealed the same way.
 READ_DEPENDENT_CAPABILITIES = frozenset({"archive_chats", "edit_own_text"}) | OWN_MESSAGE_ACTIONS

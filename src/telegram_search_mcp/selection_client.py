@@ -172,8 +172,11 @@ class SelectionClientMixin:
             if operation=='prepare_artifact_send' and response.status=='prepared':
                 from .outgoing_drafts import _safe_display_name, _safe_caption
                 file=next(state.response.file for state in states if state.response.kind=='file')
+                from .broker_client import _matching_caption_entities
                 if (response.recipient!=request.recipient or response.kind!=request.kind or
-                        response.caption!=_safe_caption(request.caption)):raise ProxySelectionRefusal()
+                        response.caption!=_safe_caption(request.caption) or
+                        not _matching_caption_entities(request.caption,request.outgoing_entities,
+                                                       response.outgoing_entities)):raise ProxySelectionRefusal()
                 if request.kind=='voice_note':
                     if response.source_sha256!=file.sha256 or response.source_display_name!=_safe_display_name(request.display_name):raise ProxySelectionRefusal()
                 elif (response.sha256!=file.sha256 or response.size_bytes!=file.size_bytes or

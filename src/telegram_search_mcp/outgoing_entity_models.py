@@ -33,3 +33,11 @@ def canonical_outgoing_entities(final_text: str, entities: list[OutgoingEntity])
     frozen = freeze_outgoing_entities(final_text, caller_outgoing_entities(entities))
     return [OutgoingEntity(offset=offset, length=length,
         type={'@type': kind}) for offset, length, kind in frozen]
+
+
+def canonical_caption_entities(caption: str, entities: list[OutgoingEntity]) -> list[OutgoingEntity]:
+    """Caller styles over a send's caption (0.58), which must already be the text Telegram stores."""
+    from .outgoing_drafts import styled_caption_entities
+    frozen = styled_caption_entities(caption, caller_outgoing_entities(entities))
+    return [OutgoingEntity(offset=offset, length=length,
+        type={'@type': kind}) for offset, length, kind in frozen]

@@ -154,6 +154,16 @@ def _matching_outgoing_entities(text, expected, actual):
             freeze_outgoing_entities(final_text, caller_outgoing_entities(actual)))
 
 
+def _matching_caption_entities(caption, expected, actual):
+    """Caption styles (0.58) derived from the request independently of the broker's digest."""
+    if not expected and not actual:
+        return True
+    from .outgoing_drafts import styled_caption_entities
+    from .outgoing_entity_models import caller_outgoing_entities
+    return (styled_caption_entities(caption, caller_outgoing_entities(expected)) ==
+            styled_caption_entities(caption, caller_outgoing_entities(actual)))
+
+
 class BrokerUnavailable(RuntimeError):
     """Raised when the local broker cannot safely complete a request."""
 
@@ -1553,8 +1563,11 @@ class BrokerClient(SelectionClientMixin):
                 from .outgoing_drafts import _safe_caption, _safe_message_text
                 if ((request.text is not None and response.draft.text != _safe_message_text(request.text)) or
                         (request.caption is not None and response.draft.caption != _safe_caption(request.caption)) or
-                        not _matching_outgoing_entities(request.text, request.outgoing_entities,
-                            response.draft.outgoing_entities)):
+                        not (_matching_outgoing_entities(request.text, request.outgoing_entities,
+                                                         response.draft.outgoing_entities)
+                             if request.text is not None else
+                             _matching_caption_entities(request.caption, request.outgoing_entities,
+                                                        response.draft.outgoing_entities))):
                     raise BrokerUnavailable('revision formatting differs from request')
             return response
         except (BrokerUnavailable, ValidationError, ValueError):
@@ -1613,7 +1626,9 @@ class BrokerClient(SelectionClientMixin):
         try:
             response = PrepareArtifactSendResponse.model_validate(self._request("prepare_artifact_send", request.model_dump(mode="json")))
             if response.status == "prepared" and (response.recipient != request.recipient or response.kind != request.kind
-                                                  or response.caption != _safe_caption(request.caption)):
+                                                  or response.caption != _safe_caption(request.caption)
+                                                  or not _matching_caption_entities(request.caption,
+                                                      request.outgoing_entities, response.outgoing_entities)):
                 raise BrokerUnavailable("artifact draft differs from request")
             return response
         except (BrokerUnavailable, ValidationError, ValueError):
@@ -1627,7 +1642,8 @@ class BrokerClient(SelectionClientMixin):
             if response.reply is not None:
                 draft=response.reply.draft
                 if (draft.recipient!=request.recipient or response.reply.reply_target.anchor!=request.reply_to
-                    or draft.kind!=request.kind or draft.caption!=_safe_caption(request.caption)):
+                    or draft.kind!=request.kind or draft.caption!=_safe_caption(request.caption)
+                    or not _matching_caption_entities(request.caption,request.outgoing_entities,draft.outgoing_entities)):
                     raise BrokerUnavailable('artifact reply scope differs')
                 if request.kind=='voice_note':
                     if draft.source_sha256!=request.artifact_id.split('_')[2] or draft.source_display_name!=_safe_display_name(request.display_name):
@@ -1655,7 +1671,10 @@ class BrokerClient(SelectionClientMixin):
             if response.reply is not None:
                 if response.previous_draft_id!=request.draft_id:
                     raise BrokerUnavailable('artifact reply revision differs')
-                if isinstance(request,UpdateReplyArtifactDraftRequest) and response.reply.draft.caption!=_safe_caption(request.caption):
+                if isinstance(request,UpdateReplyArtifactDraftRequest) and (
+                        response.reply.draft.caption!=_safe_caption(request.caption) or
+                        not _matching_caption_entities(request.caption,request.outgoing_entities,
+                                                       response.reply.draft.outgoing_entities)):
                     raise BrokerUnavailable('artifact reply caption differs')
             return response
         except (BrokerUnavailable,ValueError,CompatibilityError):
@@ -1789,7 +1808,9 @@ class BrokerClient(SelectionClientMixin):
             if response.video is not None:
                 preview = response.video
                 if (preview.artifact_id != request.artifact_id or preview.recipient.chat_id != request.recipient or
-                        preview.raw_caption != _safe_caption(request.caption)):
+                        preview.raw_caption != _safe_caption(request.caption) or
+                        not _matching_caption_entities(request.caption, request.outgoing_entities,
+                                                       preview.outgoing_entities)):
                     raise BrokerUnavailable("video preview does not match the request")
             return response
         except (BrokerUnavailable, ValidationError, ValueError):
