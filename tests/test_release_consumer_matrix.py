@@ -1323,14 +1323,43 @@ class AgentTableTests(unittest.TestCase):
             full = Path(directory) / "full"
             full.mkdir()
             (full / "kept").write_text("x")
+            linked = Path(directory) / "linked-work-tree"
+            linked.mkdir()
+            (linked / ".git").write_text("gitdir: /elsewhere\n")  # what `git worktree add` leaves
+            codex = ["--codex", "/bin/codex", "--codex-home", "/h"]
             for extra, code in ((["--codex", "relative/codex"], "agent_invalid"),
                                 (["--claude", "/bin/claude", "--claude-model", "a model"], "agent_invalid"),
-                                (["--codex", "/bin/codex"], "evidence_invalid"),
-                                (["--codex", "/bin/codex", "--agent-evidence", "relative"], "evidence_invalid"),
-                                (["--codex", "/bin/codex", "--agent-evidence", str(full)], "evidence_invalid")):
+                                (["--codex", "/bin/codex"], "agent_invalid"),  # the Codex home is named explicitly
+                                (["--codex", "/bin/codex", "--codex-home", "relative"], "agent_invalid"),
+                                (codex, "evidence_invalid"),
+                                ([*codex, "--agent-evidence", "relative"], "evidence_invalid"),
+                                ([*codex, "--agent-evidence", str(full)], "evidence_invalid"),
+                                ([*codex, "--agent-evidence", str(ROOT / "matrix-evidence")], "evidence_invalid"),
+                                ([*codex, "--agent-evidence", str(linked / "a" / "evidence")], "evidence_invalid")):
                 with self.subTest(extra=extra):  # Refused before the gate is even loaded (fake gate: None).
                     code_seen, err, _ = run_command(None, directory, extra=extra)
                     self.assertEqual((code_seen, err), (2, code))
+            self.assertFalse((ROOT / "matrix-evidence").exists())
+            self.assertEqual(sorted(path.name for path in linked.iterdir()), [".git"])
+
+    def test_run_keeps_its_receipt_work_directory_and_evidence_out_of_every_git_work_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            linked = Path(directory) / "linked-work-tree"
+            linked.mkdir()
+            (linked / ".git").write_text("gitdir: /elsewhere\n")
+            for parent in (ROOT, linked, ROOT / "docs"):
+                with self.subTest(parent=str(parent)), contextlib.redirect_stderr(io.StringIO()) as err, \
+                        mock.patch.object(matrix, "load_gate", side_effect=AssertionError("gate")):
+                    code = matrix.main(["run", "--commit", COMMIT, "--receipt", str(parent / "r.json"),
+                                        "--repo", directory])
+                    self.assertEqual((code, err.getvalue().strip()), (2, "usage"))
+                    for path, function, expected in ((parent / "matrix-work", matrix._workdir, "workdir_invalid"),
+                                                     (parent / "matrix-evidence", matrix.evidence_directory,
+                                                      "evidence_invalid")):
+                        self.assertEqual(refusal(function, str(path)), expected)
+                        self.assertFalse(path.exists())
+            self.assertTrue(matrix.inside_work_tree(ROOT / "missing" / "deeper"))
+            self.assertFalse(matrix.inside_work_tree(Path(directory) / "outside"))
 
 
 class AgentColumnTests(unittest.TestCase):

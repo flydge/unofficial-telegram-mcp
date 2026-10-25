@@ -3811,11 +3811,19 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
 
 # --- commands ------------------------------------------------------------------------------------------
 
+def inside_work_tree(path: Path) -> bool:
+    """Whether a path (while it does not exist, the existing directories above it) lies inside a git work tree: a
+    `.git` entry in it or any parent. Receipts, work directories and agent evidence carry machine paths, and an
+    agent's working directory there would load the checkout's instructions; none of them belongs in a checkout."""
+    real = Path(os.path.realpath(path))
+    return any(os.path.lexists(directory / ".git") for directory in (real, *real.parents))
+
+
 def _workdir(value: str | None) -> tuple[Path, bool]:
     if value is None:
         return Path(tempfile.mkdtemp(prefix="tgmcp-matrix-")).resolve(), True
     path = Path(value)
-    need(path.is_absolute(), "workdir_invalid")
+    need(path.is_absolute() and not inside_work_tree(path), "workdir_invalid")
     if path.exists():
         need(path.is_dir() and not path.is_symlink() and not any(path.iterdir()), "workdir_invalid")
     else:
@@ -3827,10 +3835,11 @@ def _workdir(value: str | None) -> tuple[Path, bool]:
 
 
 def evidence_directory(value: str | None) -> Path:
-    """Where the agent cells' evidence is kept: an absolute, empty (or new) owner-only directory, never a symlink."""
+    """Where the agent cells' evidence is kept: an absolute, empty (or new) owner-only directory, never a symlink and
+    never inside a git work tree."""
     need(value is not None, "evidence_invalid")
     path = Path(value)
-    need(path.is_absolute(), "evidence_invalid")
+    need(path.is_absolute() and not inside_work_tree(path), "evidence_invalid")
     try:
         if path.exists() or path.is_symlink():
             need(path.is_dir() and not path.is_symlink() and not any(path.iterdir()), "evidence_invalid")
@@ -3856,7 +3865,8 @@ def summary_line(receipt: dict) -> str:
 
 def run(args: argparse.Namespace) -> int:
     receipt_path = Path(args.receipt)
-    need(receipt_path.is_absolute() and not receipt_path.exists() and receipt_path.parent.is_dir(), "usage")
+    need(receipt_path.is_absolute() and not receipt_path.exists() and receipt_path.parent.is_dir()
+         and not inside_work_tree(receipt_path.parent), "usage")
     wheelhouse = Path(args.wheelhouse).resolve() if args.wheelhouse else None
     need(wheelhouse is None or wheelhouse.is_dir(), "wheelhouse_invalid")
     toolhouse = Path(args.toolhouse).resolve() if args.toolhouse else None
@@ -3870,8 +3880,10 @@ def run(args: argparse.Namespace) -> int:
     need(all(binary is None or binary.is_absolute() for binary in binaries.values()), "agent_invalid")
     need(all(model is None or MODEL_NAME.fullmatch(model) for model in (args.codex_model, args.claude_model)),
          "agent_invalid")
-    codex_home = Path(args.codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    need(codex_home.is_absolute(), "agent_invalid")
+    # The Codex home whose auth.json is copied, and which gets a refreshed one back, is named, never derived.
+    need(args.codex is None or args.codex_home is not None, "agent_invalid")
+    codex_home = Path(args.codex_home) if args.codex_home else None
+    need(codex_home is None or codex_home.is_absolute(), "agent_invalid")
     evidence = evidence_directory(args.agent_evidence) if any(binaries.values()) else None
     gate = load_gate()
     repo = _gate_call(gate, "repo_unavailable", gate.toplevel, args.repo)
