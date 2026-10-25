@@ -75,6 +75,12 @@ preparation commits.
 11. Migration of the owner's daily install, including Claude Desktop and Codex entries the installer does
    not own.
 12. Gpub: an explicit authorization naming the refs and artifacts to publish.
+13. Final acceptance criterion 3 (TDLib procedure): confirm the reading it is marked met under. Independent
+   rebuilds of d1085f9 from source are byte-identical to each other; the shipped, Homebrew-derived natives
+   and lock are reproduced by `prepare_native.py` from the installed keg, not by a rebuild
+   ([rehearsal record](final-tdlib-rehearsal.md#criterion-3-what-is-shown-and-the-reading-the-owner-confirms)).
+   If the criterion means rebuilt natives equal to the shipped ones, it is not met, and meeting it is a
+   change of the shipped build method.
 
 ## Top risks
 

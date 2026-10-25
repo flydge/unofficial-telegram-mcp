@@ -113,6 +113,22 @@ No nondeterminism was found, so the stop log stays empty. These settings made th
   lock stays `homebrew-receipt-relocated` with `reproducibility: unverified`. The rebuild document is refused
   by the v1 grammar and never replaces it.
 
+## Criterion 3: what is shown, and the reading the owner confirms
+
+- **Shown:** independent clean rebuilds of d1085f9 from its pinned source archive are byte-identical to each
+  other: the natives (libtdjson `46e04c99…60a7`, 24,183,984 bytes), the lock-shaped document
+  (`72b8e0cf…33cf`) and every other output, at three build paths, plus the two earlier builds.
+- **Shown:** the shipped, Homebrew-derived pin (libtdjson `65ef0643…a12c`, 17,638,336 bytes; lock
+  `489b8ea9…c1ab`) is reproduced byte for byte by `prepare_native.py` from the installed keg. That is a
+  re-relocation of the same keg, not a rebuild.
+- **Not shown:** a rebuild from source that reproduces the shipped natives or the shipped lock.
+
+The spec's work item says the rehearsal "rebuilds the current pin from source twice … and shows
+byte-identical natives and lock". Criterion 3 is marked met in that reading: the rebuilds are identical
+to each other. Its table row ("reproduces d1085f9 natives and lock byte-identically") can also be read
+as the shipped natives, and this rehearsal does not meet that reading. The owner confirms the reading
+(item 13 of the [owner decision sheet](completion-plan.md#owner-decision-sheet-prepared-for-the-end)).
+
 ## What this does not show
 
 - **No candidate.** There is no candidate commit, so steps 1, 5, 6 and 7 were not exercised on one: pinning
@@ -124,3 +140,59 @@ No nondeterminism was found, so the stop log stays empty. These settings made th
 - **Shipped natives not rebuilt.** The shipped natives still come from the Homebrew keg. Making the source
   rebuild the shipped method would be a reviewed grammar change (the v1 build method literal) and an owner
   decision; it is not proposed here.
+
+## Review fixes (25.10.2026)
+
+An independent review of the procedure and this record found two medium and eight low points. Each is fixed
+as follows; the tool commits after 76d6bc5 are 48600cc, 4783c0b and 0c4d9b8. None of them changes what a
+build writes: the archive check moved earlier, the committed-lock comparison is a summary field, the
+signal handling only ends the step's process group, and row 0 is the only row today. So the outputs
+above stand, and no build was repeated.
+
+1. **Rollback across a session-database migration (medium).** Steps 7 and 8 pointed to a session backup
+   that the security rollback section never described, and the launcher's rollback guard hashes only
+   `enrollment.json` and `runtime.toml`, so it would not notice a migrated `tdlib/db`. The owner procedure
+   is now written in step 7 (save) and step 8 (restore) and in
+   [TDLib session backup and restore](../security.md#tdlib-session-backup-and-restore). Saving stops each
+   broker with `launchctl bootout`, then copies each account's `tdlib/` to an owner-only
+   `tdlib-backup-<date>` next to it without changing the original, and records the `key_account` the
+   enrollment names. The Keychain key is not copied; the copy opens with it. Restoring stops the broker
+   before the rollback, so the old TDLib never opens the migrated database, then rolls the release back,
+   moves `db` and `files` aside (never deleted) and copies the saved ones back into the same `tdlib/`,
+   whose inode the enrollment binds. Then it starts the broker and runs `connect`. Both documents, and the
+   install guide's rollback, state that a launcher rollback alone does not undo a database migration.
+   **Decision: no installer guard now.** A hash of `tdlib/db` changes whenever TDLib runs, the database
+   version is readable only with the Keychain key, which the installer never reads, and a guard on the
+   releases' TDLib pins could not fire before a pin change. It must ship in the launcher of the first
+   release that changes the pin, so that upgrade's spec decides it.
+2. **The OpenSSL pin sites (medium).** "Where the pin lives" now lists `native_notices` in
+   `packaging/payload-lock.json` (the version and the notice hashes that `prepare_payload.native_tree`
+   checks against the lock), `BuildProvenance.openssl_version`, and the wording in `docs/licensing.md` and
+   `docs/third-party-notices.md`. The search is `git grep -n -F -e d1085f9 -e 1.8.67 -e 3.6.4`. Step 1
+   describes an OpenSSL-only advisory, and step 2 refills `native_notices` and keeps the old natives, since
+   the replaced TDLib keg has the same name. An OpenSSL-only candidate row names the same commit as the
+   kept row, which `build_tdlib_source.py` refused (exactly one row of the commit). It now builds row 0,
+   as `prepare_native.py` does (4783c0b).
+3. **The kept `APPROVED_PINS` row (low).** Step 1 now says to rewrite the kept row's commit, schema sha256
+   and license URL as literals before `COMMIT` and `SCHEMA_SHA256` move. It gives a check that the rows
+   stay distinct.
+4. **The committed-lock comparison (low).** A committed lock that the v1 grammar no longer reads, or a
+   missing one, is reported as `"committed_lock": "unreadable"` after a complete build instead of refusing
+   (4783c0b).
+5. **An interrupt left cmake and make running (low).** The step's process group is killed and reaped
+   whenever the wait ends other than by the step's exit. SIGTERM and SIGHUP are caught for the step and
+   refused as `build_interrupted`. A test signals a real tool process whose child group would outlive it
+   (48600cc).
+6. **An empty `TGMCP_TDLIB_HEADER` (low).** An empty value now fails like a missing file instead of reading
+   the linked keg's header (0c4d9b8), and step 4 says so.
+7. **The archive check (low).** `build` checks the archive's length and sha256 before it creates the log,
+   the build root or the output; a test shows that a mismatch leaves nothing behind (4783c0b).
+8. **Doc gaps (low).** Step 8 says to relink the kept old kegs after a revert, since `EXPECTED_TDLIB_KEG` and
+   the schema pins read the linked keg. Step 2 gives the commands that extract a source tree for
+   `prepare_native.py --tdlib-source` and for `requests --old/--new`.
+9. **Evidence format (low).** In the private gate directory, `SHA256SUMS` now has the standard
+   `sha256  name` lines (`shasum -a 256 -c SHA256SUMS`: 88 OK), with the byte counts in
+   `SHA256SUMS.bytes`. All 88 entries were checked against the files before the rewrite, and the listing
+   still equals the files present. `run-a.status` and `run-b.status`, which were empty, now hold `exit=0`
+   from `run-ab.exit`, the one exit status of the chained A and B builds.
+10. **The criterion 3 reading (low).** Stated above, and added to the owner decision sheet.
