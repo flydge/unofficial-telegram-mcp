@@ -1728,7 +1728,7 @@ class Driver:
             cell.expect("receipt", world.receipt().get("schema_version") == 2
                         and world.receipt().get("package_version") == BUNDLE_OLD_VERSION)
             cell.expect("codex", world.codex_command() == command)
-            cell.expect("desktop", world.desktop().get("telegram_search", {}).get("command") == command)
+            cell.expect("desktop", world.entry().get("command") == command)
             cell.expect("neighbours", world.neighbours_kept())
             cell.expect("skills", world.skill() == b"search release-old" and "bootstrap" not in world.launchctl.verbs)
             cell.expect("session", world.session_hashes(policy=True) == before)
@@ -1750,7 +1750,7 @@ class Driver:
             cell.expect("restarted", world.launchctl.loaded is not None and world.launchctl.loaded[0] == command
                         and world.launchctl.verbs.index("bootout") < world.launchctl.verbs.index("bootstrap"))
             cell.expect("clients", world.codex_command() == command
-                        and world.desktop().get("telegram_search", {}).get("command") == command
+                        and world.entry().get("command") == command
                         and world.neighbours_kept())
             cell.expect("pin", world.pin() == current)
             cell.expect("session", world.session_hashes(policy=False) == before)
@@ -1771,7 +1771,7 @@ class Driver:
             cell.expect("definition", world.program() == str(Path(old_root) / "launcher.py")
                         and world.launchctl.loaded is not None and world.launchctl.loaded[0] == command)
             cell.expect("clients", world.codex_command() == command
-                        and world.desktop().get("telegram_search", {}).get("command") == command
+                        and world.entry().get("command") == command
                         and world.neighbours_kept() and world.skill() == b"search release-old")
             cell.expect("pin", world.pin() == BUNDLE_OLD_VERSION)
             cell.expect("session", world.session_hashes(policy=False) == before)
@@ -1790,7 +1790,7 @@ class Driver:
                         and "bootout" in world.launchctl.verbs)
             cell.expect("codex", (world.codex / "config.toml").read_bytes().rstrip(b"\n")
                         == BUNDLE_NEIGHBOUR_CODEX.rstrip(b"\n"))
-            cell.expect("desktop", "telegram_search" not in world.desktop() and world.neighbours_kept())
+            cell.expect("desktop", world.server not in world.desktop() and world.neighbours_kept())
             cell.expect("skills", not world.skills.exists() or not any(world.skills.iterdir()))
             cell.expect("session", world.session_hashes(policy=True) == before)
             with platform, no_other_process():
@@ -1968,8 +1968,9 @@ class BundleWorld:
 
     def __init__(self, base: Path):
         from telegram_search_mcp import bundle_install
-        from telegram_search_mcp.config import _owner_paths
+        from telegram_search_mcp.config import _owner_paths, server_name
         self.module, self.base = bundle_install, base
+        self.server = server_name()  # The client entries' name, read through the product identity.
         self.home = base / "user"
         self.home.mkdir(mode=0o700, parents=True)
         self.runtime, self.codex = self.home / "runtime", self.home / ".codex"
@@ -2107,11 +2108,15 @@ class BundleWorld:
 
     def codex_command(self) -> str | None:
         text = (self.codex / "config.toml").read_text()
-        match = re.search(r'\[mcp_servers\.telegram_search\][^\[]*?command = "([^"]+)"', text, re.S)
+        match = re.search(r"\[mcp_servers\." + re.escape(self.server) + r'\][^\[]*?command = "([^"]+)"', text, re.S)
         return match.group(1) if match else None
 
     def desktop(self) -> dict:
         return json.loads(self.desktop_config.read_text()).get("mcpServers", {})
+
+    def entry(self) -> dict:
+        """This server's Claude Desktop entry, or {}."""
+        return self.desktop().get(self.server) or {}
 
     def neighbours_kept(self) -> bool:
         return ((self.codex / "config.toml").read_bytes().startswith(BUNDLE_NEIGHBOUR_CODEX)
