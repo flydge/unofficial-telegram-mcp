@@ -585,6 +585,68 @@ class VideoTests(VideoFixture, unittest.TestCase):
         self.assertEqual(refused['status'], 'unavailable')
         self.assertEqual(self.broker._drafts.known_ids(), before)
 
+    # Review fixes (058, low): a styled video answers under the stored formatting authority, as a styled document does.
+
+    def test_a_styled_video_receipt_replays_only_under_its_formatting_provider_and_epoch(self):
+        styled = self.prepare(caption=CAPTION, outgoing_entities=STYLES)
+        self.assertEqual(self.send(styled['draft_id'])['message_id'], 701)
+        plain = self.prepare(caption=CAPTION)
+        self.assertEqual(self.send(plain['draft_id'])['message_id'], 701)
+        self.client._invalidate_send_observations()  # a new provider epoch: the reviewed authority is gone
+        replay = self.send(styled['draft_id'])
+        self.assertEqual((replay['status'], replay['message_id'], replay['recipient']),
+                         ('outcome_unknown', None, None), replay)
+        self.assertEqual(self.status(styled['draft_id'])['status'], 'outcome_unknown')
+        kept = self.send(plain['draft_id'])  # a plain video keeps its pre-0.58 replay
+        self.assertEqual((kept['status'], kept['message_id']), ('sent', 701), kept)
+        self.assertEqual(len(self.sends()), 2)
+
+    def revoke_after_send(self, *capabilities):
+        raw_send = self.raw.send
+        def send(request):
+            raw_send(request)
+            if request['@type'] == 'sendMessage':
+                self.broker._policy = RuntimePolicy(enabled_capabilities=capabilities)
+        self.raw.send = send
+
+    def test_a_styled_video_receipt_is_withheld_when_its_option_is_revoked_after_the_send(self):
+        styled = self.prepare(caption=CAPTION, outgoing_entities=STYLES)
+        self.revoke_after_send('artifacts', 'send', 'video_send')
+        result = self.send(styled['draft_id'])
+        self.assertEqual((result['status'], result['message_id'], result['recipient']),
+                         ('outcome_unknown', None, None), result)
+        self.assertEqual(len(self.sends()), 1)
+        self.broker._policy = RuntimePolicy(enabled_capabilities=('artifacts', 'send', 'video_send',
+                                                                  'formatted_caption_send'))
+        plain = self.prepare(caption=CAPTION)  # a plain video never needed the option
+        result = self.send(plain['draft_id'])
+        self.assertEqual((result['status'], result['message_id']), ('sent', 701), result)
+
+    def test_a_styled_video_whose_formatting_epoch_changed_refuses_without_a_dialog(self):
+        styled = self.prepare(caption=CAPTION, outgoing_entities=STYLES)
+        self.client._invalidate_send_observations()
+        for _ in range(2):  # every retry refuses before asking the owner
+            result = self.send(styled['draft_id'])
+            self.assertEqual(result['status'], 'expired', result)
+        self.assertEqual((self.approvals, self.sends()), ([], []))
+        plain = self.prepare(caption=CAPTION)
+        self.assertEqual(self.send(plain['draft_id'])['status'], 'sent')
+        self.assertEqual(len(self.approvals), 1)
+
+    def test_an_epoch_change_after_the_replay_check_still_refuses_before_the_dialog(self):
+        styled = self.prepare(caption=CAPTION, outgoing_entities=STYLES)
+        peek = self.broker._drafts.peek
+        changed = []
+        def peek_then_change(*args, **kwargs):
+            entry = peek(*args, **kwargs)
+            if not changed:  # the first peek follows the receipt check and precedes the send's epoch capture
+                changed.append(self.client._invalidate_send_observations())
+            return entry
+        with patch.object(self.broker._drafts, 'peek', peek_then_change):
+            result = self.send(styled['draft_id'])
+        self.assertEqual((result['status'], len(changed)), ('expired', 1), result)
+        self.assertEqual((self.approvals, self.sends()), ([], []))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2660,7 +2660,8 @@ class Broker(SelectionBrokerMixin):
                 return result('error', 'draft kind does not match send tool')
             held = True  # The current owner and artifact lifecycle hold this draft.
             if self._drafts.is_formatted(draft_id, owner=owner):
-                self._require_caption_style_capability()  # 0.58: a styled caption's receipt and send need its option.
+                self._require_caption_style_capability()  # 0.58: a styled caption's receipt and send need its option,
+                self._require_topic_policy(draft_id, owner)  # and its stored provider and epoch, as for a document.
             previous = self._drafts.receipt(draft_id, owner=owner)
             if previous is not None:
                 if previous.evidence == 'local_failed':
@@ -2687,6 +2688,8 @@ class Broker(SelectionBrokerMixin):
             if (self._video_owner(client_id) != owner or self._shared_client() is not provider or
                     provider.send_observation_epoch is not epoch or self._drafts.peek(draft_id, owner=owner) != entry):
                 raise DraftError(VIDEO_UNAVAILABLE)
+            if entry.outgoing_entities:
+                self._require_topic_policy(draft_id, owner)  # A stale formatting authority refuses before the dialog.
             preview = self._video_preview(entry, owner).model_dump(mode='json')
             reservation = self._drafts.reserve(draft_id, owner=owner, draft=entry)
             decision = 'dialog_unavailable' if reservation is None else approval_outcome(self._owner_dialog(
@@ -2756,6 +2759,8 @@ class Broker(SelectionBrokerMixin):
                 # Disclose observed evidence only to the same current account, client and policy.
                 if self._video_owner(client_id) != owner:
                     raise DraftError(VIDEO_UNAVAILABLE)
+                if claim.draft.outgoing_entities:
+                    self._require_topic_policy(draft_id, owner)  # A styled caption's option, provider and epoch too.
             except (DraftError, TDLibError, ValueError, CompatibilityError, TimeoutError, ArtifactUnavailable):
                 return result('outcome_unknown', RECEIPT_AUTHORITY_UNAVAILABLE)
             return result(receipt.status,
