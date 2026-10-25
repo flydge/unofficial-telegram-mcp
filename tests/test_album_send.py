@@ -1163,11 +1163,8 @@ class TransportSendTests(unittest.TestCase):
 
     def test_matches_the_pinned_tdlib_constructor_fields(self):
         import re
-        from telegram_search_mcp.config import TDLIB_LIBRARY
-        header_path = TDLIB_LIBRARY.resolve().parent.parent / 'include/td/telegram/td_api.h'
-        if not header_path.is_file():
-            self.skipTest('pinned TDLib development header is not installed')
-        header = header_path.read_text()
+        from tdlib_header import pinned_header
+        header = pinned_header(self)
         def fields(class_name):
             declaration = header.split(f'class {class_name} final', 1)[1].split('\n};', 1)[0]
             return {name for _, name in re.findall(r'^\s+([^\n]+?)\s+(\w+)_;$', declaration, re.MULTILINE)}

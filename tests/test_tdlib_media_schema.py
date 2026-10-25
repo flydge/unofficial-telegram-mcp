@@ -7,16 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from telegram_search_mcp.config import TDLIB_LIBRARY
+from tdlib_header import pinned_header
 from telegram_search_mcp.tdjson import ForbiddenTDLibRequest, TDLibClient
 
 
 class PinnedMediaSchemaTests(unittest.TestCase):
     def test_outgoing_media_matches_native_constructor_fields(self) -> None:
-        header_path = TDLIB_LIBRARY.resolve().parent.parent / "include/td/telegram/td_api.h"
-        if not header_path.is_file():
-            self.skipTest("pinned TDLib development header is not installed")
-        header = header_path.read_text()
+        header = pinned_header(self)
 
         def fields(class_name: str) -> dict[str, str]:
             declaration = header.split(f"class {class_name} final", 1)[1].split("\n};", 1)[0]
@@ -44,10 +41,7 @@ class PinnedMediaSchemaTests(unittest.TestCase):
                 self.assertEqual(set(content[field]) - {"@type"}, set(fields(nested_type)))
 
     def test_archive_and_text_edit_requests_match_native_constructor_fields(self) -> None:
-        header_path = TDLIB_LIBRARY.resolve().parent.parent / "include/td/telegram/td_api.h"
-        if not header_path.is_file():
-            self.skipTest("pinned TDLib development header is not installed")
-        header = header_path.read_text()
+        header = pinned_header(self)
 
         def fields(class_name: str) -> dict[str, str]:
             declaration = header.split(f"class {class_name} final", 1)[1].split("\n};", 1)[0]
@@ -93,10 +87,7 @@ class PinnedMediaSchemaTests(unittest.TestCase):
         self.assertEqual(fields("messageProperties")["can_be_edited"], "bool")
 
     def test_chat_list_reads_match_native_constructor_fields(self) -> None:
-        header_path = TDLIB_LIBRARY.resolve().parent.parent / "include/td/telegram/td_api.h"
-        if not header_path.is_file():
-            self.skipTest("pinned TDLib development header is not installed")
-        header = header_path.read_text()
+        header = pinned_header(self)
 
         def fields(class_name: str) -> dict[str, str]:
             declaration = header.split(f"class {class_name} final", 1)[1].split("\n};", 1)[0]
