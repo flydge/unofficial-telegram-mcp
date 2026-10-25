@@ -187,6 +187,22 @@ class PinAndArchiveTests(unittest.TestCase):
         self.assertTrue(os.stat(self.root / 'source/src.sh').st_mode & 0o111)
         self.assertFalse(os.stat(self.root / 'source/CMakeLists.txt').st_mode & 0o111)
 
+    def test_facts_give_the_tdlib_source_record_and_the_row_values_a_candidate_implies(self):
+        data, files = archive()
+        self.assertEqual(B.archive_facts(data), dict(pin_for(data, files), schema_sha256=hashlib.sha256(SCHEMA).hexdigest(),
+                                                     tdlib_version='1.8.67', source_date_epoch=EPOCH))
+        for options, code in ((dict(comment='not-a-commit'), 'archive_mismatch'), (dict(comment='0' * 40), 'source_refused'),
+                              (dict(files={'CMakeLists.txt': b'project(TDLib VERSION 1.8.67 )\n'}), 'schema_mismatch'),
+                              (dict(files={B.native.SCHEMA: SCHEMA}), 'source_refused')):
+            with self.subTest(options=options), self.assertRaises(B.BuildError) as caught:
+                B.archive_facts(archive(**options)[0])
+            self.assertEqual(str(caught.exception), code)
+        stdout = io.StringIO()
+        (self.root / 'td.tar.gz').write_bytes(data)
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(B.main(['facts', '--source-archive', str(self.root / 'td.tar.gz')]), 0)
+        self.assertEqual(json.loads(stdout.getvalue())['sha256'], hashlib.sha256(data).hexdigest())
+
     def refused(self, code, data, pin):
         with tempfile.TemporaryDirectory() as tmp, self.assertRaises(B.BuildError) as caught:
             B.extract_source(data, pin, Path(tmp) / 'source')

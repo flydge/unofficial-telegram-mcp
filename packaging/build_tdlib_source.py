@@ -19,8 +19,10 @@ provenance/ and source-rebuild-lock.json, a document with the v1 lock's keys who
 "source-rebuild" (the v1 grammar refuses it, so it can never stand in for tdlib-lock.json). The build
 root is removed after success and kept after a failure; tool output goes only to the private --log.
 
-`compare` checks two build outputs byte for byte (names, modes and contents). `requests` reports how a
-candidate td_api.tl changes the definition of every request tdjson's allowlist admits.
+`facts` prints a candidate archive's payload-lock.json tdlib_source record and the schema sha256, version and
+commit time it implies (docs/tdlib-upgrade.md, step 1). `compare` checks two build outputs byte for byte
+(names, modes and contents). `requests` reports how a candidate td_api.tl changes the definition of every
+request tdjson's allowlist admits.
 
 Refusals are fixed codes; no path, schema text or tool output is echoed.
 """
@@ -66,6 +68,7 @@ DEVELOPER_DIR = Path('/Applications/Xcode.app/Contents/Developer')
 MAKE = '/usr/bin/make'
 XCRUN = '/usr/bin/xcrun'
 PAYLOAD_LOCK = HERE / 'payload-lock.json'
+CODELOAD = 'https://codeload.github.com/tdlib/td/tar.gz/'
 COMMITTED_LOCK = HERE / 'tdlib-lock.json'
 DOCUMENT = 'source-rebuild-lock.json'
 METHOD = 'source-rebuild'
@@ -79,6 +82,7 @@ TOOL_PATH_GRAMMAR = re.compile(r'(/[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}){1,32}')
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_MEMBER = 16 * 1024 * 1024
 MAX_MEMBERS = 8192
+MAX_UNPACKED = 256 * 1024 * 1024
 MAX_HEADER = 32 * 1024 * 1024
 MAX_LOCK = 65536
 MAX_OUTPUT_FILES = 64
@@ -195,17 +199,17 @@ def _relative(name):
     return all(part not in ('', '.', '..') and '\\' not in part and '\0' not in part for part in parts)
 
 
-def extract_source(archive, pin, destination):
-    """The verified archive's regular files under `destination`; returns its commit time.
-
-    git archive stamps every member with the commit time, so that one shared mtime is the build's
-    SOURCE_DATE_EPOCH."""
-    _need(len(archive) == pin['bytes'] and sha256(archive) == pin['sha256'], 'archive_mismatch')
-    prefix = 'td-' + pin['commit'] + '/'
-    count = total = seen = 0
-    mtimes = set()
+def archive_members(archive, commit=None):
+    """(commit, files, epoch) of a codeload archive: its pax commit comment (equal to `commit` when given), its
+    regular files under td-<commit>/ as (relative name, bytes, executable), and the one mtime every member has,
+    the commit time, which becomes SOURCE_DATE_EPOCH. Bounded; links and every other member kind refuse."""
+    files, total, seen, mtimes = [], 0, 0, set()
     try:
         with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as tar:
+            named = tar.pax_headers.get('comment')
+            _need(type(named) is str and re.fullmatch(r'[0-9a-f]{40}', named) is not None
+                  and commit in (None, named), 'archive_mismatch')
+            prefix = 'td-' + named + '/'
             for member in tar:
                 seen += 1
                 _need(seen <= 2 * MAX_MEMBERS, 'source_refused')
@@ -218,18 +222,44 @@ def extract_source(archive, pin, destination):
                       and member.size <= MAX_MEMBER, 'source_refused')
                 data = tar.extractfile(member).read(member.size + 1)
                 _need(len(data) == member.size, 'source_refused')
-                count, total = count + 1, total + member.size
-                _need(count <= pin['files'] and total <= pin['unpacked_bytes'], 'source_refused')
-                target = destination / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                native._write(target, data, 0o755 if member.mode & 0o111 else 0o644)
-            commit = tar.pax_headers.get('comment')
+                total += member.size
+                files.append((relative, data, bool(member.mode & 0o111)))
+                _need(len(files) <= MAX_MEMBERS and total <= MAX_UNPACKED, 'source_refused')
     except (tarfile.TarError, OSError, EOFError, zlib.error):
         raise BuildError('source_refused') from None
-    _need(commit == pin['commit'], 'archive_mismatch')
-    _need(count == pin['files'] and total == pin['unpacked_bytes'] and len(mtimes) == 1, 'source_refused')
+    _need(len(mtimes) == 1, 'source_refused')
     epoch = mtimes.pop()
     _need(type(epoch) is int and 10 ** 9 < epoch < 4 * 10 ** 9, 'source_refused')
+    return named, files, epoch
+
+
+def archive_facts(archive):
+    """The payload-lock.json tdlib_source record of a candidate archive, with the row values it implies."""
+    commit, files, epoch = archive_members(archive)
+    contents = {name: data for name, data, _ in files}
+    _need(native.SCHEMA in contents, 'schema_mismatch')
+    project = re.search(rb'(?m)^project\(TDLib VERSION ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,4}) ',
+                        contents.get('CMakeLists.txt', b''))
+    _need(project is not None, 'source_refused')
+    return {'commit': commit, 'url': CODELOAD + commit, 'bytes': len(archive), 'sha256': sha256(archive),
+            'files': len(files), 'unpacked_bytes': sum(len(data) for _, data, _ in files),
+            'schema_sha256': sha256(contents[native.SCHEMA]), 'tdlib_version': project.group(1).decode('ascii'),
+            'source_date_epoch': epoch}
+
+
+def extract_source(archive, pin, destination):
+    """The pinned archive's regular files under `destination`, modes kept; returns its commit time."""
+    _need(len(archive) == pin['bytes'] and sha256(archive) == pin['sha256'], 'archive_mismatch')
+    _, files, epoch = archive_members(archive, pin['commit'])
+    _need(len(files) == pin['files'] and sum(len(data) for _, data, _ in files) == pin['unpacked_bytes'],
+          'source_refused')
+    try:
+        for relative, data, executable in files:
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            native._write(target, data, 0o755 if executable else 0o644)
+    except OSError:
+        raise BuildError('source_refused') from None
     return epoch
 
 
@@ -552,6 +582,8 @@ def parser():
     build_parser.add_argument('--developer-dir', default=str(DEVELOPER_DIR))
     build_parser.add_argument('--jobs', type=_jobs, default=8)
     build_parser.add_argument('--keep-build-tree', action='store_true')
+    facts_parser = commands.add_parser('facts', help="a candidate archive's tdlib_source record")
+    facts_parser.add_argument('--source-archive', required=True)
     compare_parser = commands.add_parser('compare', help='two build outputs, byte for byte')
     compare_parser.add_argument('--first', required=True)
     compare_parser.add_argument('--second', required=True)
@@ -569,6 +601,9 @@ def main(argv=None):
                            build_root=Path(args.build_root), log=Path(args.log), openssl_keg=Path(args.openssl_keg),
                            cmake=Path(args.cmake), gperf=Path(args.gperf), developer_dir=Path(args.developer_dir),
                            jobs=args.jobs, keep_build_tree=args.keep_build_tree)
+            status = 0
+        elif args.command == 'facts':
+            result = archive_facts(_read(Path(args.source_archive), MAX_ARCHIVE, 'archive_mismatch'))
             status = 0
         elif args.command == 'compare':
             result = compare_outputs(Path(args.first), Path(args.second))
