@@ -6,16 +6,16 @@
 **Extends:** [`0.54-consumer-matrix-spec.md`](0.54-consumer-matrix-spec.md): its columns, provider modes,
 evidence forms and decisions still hold unless this spec says otherwise. **Tasks and evidence:**
 [`final-acceptance-spec.tasks.md`](final-acceptance-spec.tasks.md).
-**Harness:** `packaging/release_consumer_matrix.py` (receipt `tgmcp-consumer-matrix/v3`).
+**Harness:** `packaging/release_consumer_matrix.py` (receipt `tgmcp-consumer-matrix/v4` since part 2; v3 in part 1).
 
 ## 1. One sentence
 
 The matrix covers every tool through 0.58 (64 tools): the harness drives 48 synthetic cells through the
-official SDK, four cells through the MCP Inspector's scripted CLI mode and the installed bundle installer's
-upgrade, rollback and uninstall paths, all against synthetic brokers and homes from one `git archive` wheel,
-and writes a receipt bound to the commit, the wheel hash, the schema fingerprint the cells were written for,
-the harness and the release gate. The Codex and Claude Code agent cells (part 2) and the owner cells are
-recorded outside the receipt.
+official SDK, four cells through the MCP Inspector's scripted CLI mode, the installed bundle installer's
+upgrade, rollback and uninstall paths and nine cells through each real agent CLI (Codex, Claude Code), all
+against synthetic brokers and homes from one `git archive` wheel, and writes a receipt bound to the commit, the
+wheel hash, the schema fingerprint the cells were written for, the harness, the release gate and, for the agent
+cells, the digests of the evidence `check` judges again. The owner cells stay outside the receipt.
 
 ## 2. Columns
 
@@ -23,12 +23,12 @@ recorded outside the receipt.
 | --- | --- | --- | --- |
 | Official MCP SDK (`mcp` 2.2.0) | every synthetic cell of section 5 | harness | receipt `cells` |
 | MCP Inspector CLI (`@modelcontextprotocol/inspector-cli` 1.0.2) | the four cells of section 7 | harness | receipt `inspector` |
-| Codex (`codex exec`) | agent cells | agent (part 2) | agent record |
-| Claude Code (`claude -p`) | agent cells when logged in | agent (part 2) | agent record |
+| Codex (`codex exec`) | the nine agent cells of section 7a | harness (part 2) | receipt `agents.codex` and the kept evidence |
+| Claude Code (`claude -p`) | the same cells, when the CLI is logged in | harness (part 2) | receipt `agents.claude_code` and the kept evidence |
 | Claude Desktop, Claude Code plugin | not applicable (registration; the bundle session covers Desktop's entry) | owner | owner record |
 
-The receipt's `owner_cells` drop `inspector_cli.synthetic` (now the harness's column) and keep the other
-nine pending.
+The receipt's `owner_cells` drop `inspector_cli.synthetic` (part 1) and `codex.synthetic` and
+`claude_code.synthetic` (part 2), now the harness's columns, and keep the other seven pending.
 
 ## 3. The synthetic account (additions to 0.54)
 
@@ -51,7 +51,8 @@ nine pending.
 
 ## 4. Sessions
 
-Each session has its own short owner-only HOME under `/private/tmp`; the sessions run at once.
+Each session has its own short owner-only HOME under `/private/tmp`; the sessions run at once. The agent cells
+run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short enough for the alias's socket).
 
 | Session | Policy | Broker |
 | --- | --- | --- |
@@ -64,6 +65,9 @@ Each session has its own short owner-only HOME under `/private/tmp`; the session
 | `bundle` | none | none: the installed `bundle_install` module over a synthetic home |
 | `inspector` | every capability | authorized synthetic account, always the scripted owner |
 | `listing` (check only) | every capability | none |
+| agent `full` (one per cell) | every capability | authorized synthetic account, scripted owner |
+| agent `restricted` (the refusal cell) | the restricted policy above | authorized synthetic account, scripted owner |
+| agent `alias` (the alias cell) | every capability, for the default and for alias `work` | the alias's broker (`broker --account work`): the registry and the alias root as `account-add` leaves them |
 
 ## 5. The synthetic cells (48)
 
@@ -158,14 +162,68 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   session, never into the package; census, read and refusal run the CLI binary itself
   (`build/index.js --method …`, from its build directory, where it finds its package.json).
 
-## 8. Receipt v3 and harness contract
+## 7a. The agent columns (part 2)
+
+- **Cells (per column, frozen `AGENT_CHECKS`).** Each cell is one fixed request (`AGENT_CELLS`, after a fixed
+  preamble naming the server) given to the real CLI once:
+
+  | Cell | Session | n | Decisive checks besides the five common ones |
+  | --- | --- | --- | --- |
+  | `agent.census` | full | 7 | a lone-handshake connection (the `_manifest(check_broker=true)` check); nothing changed |
+  | `agent.read` | full | 7 | a read of chat 91001 returned its newest message (57); nothing changed |
+  | `agent.search_cursor` | full | 9 | `search_messages` with `limit` 1 returned one row and a cursor; a later call carried an earlier `next_cursor`; 55, 56 and 57 were returned and a followed page ended without a cursor; nothing changed |
+  | `agent.refusal` | restricted | 8 | a reply to the mention source 61 returned `capability_disabled` with exactly its `missing_capabilities` and `next_action: enable_capability`; no draft or selection of any kind (no workaround); no dispatch, no dialog |
+  | `agent.approval_timeout` | full | 9 | the timeout probe was prepared; its approved send answered `timeout` with the fixed detail; exactly one rendered dialog, which timed out (no retry); no dispatch |
+  | `agent.alias_server` | alias | 8 | the registry lists `work` pinned; the read returned the newest message; nothing changed |
+  | `agent.album_prepare` | full | 8 | two artifacts made; one album of two items prepared for 91001; no approved send or apply, no dialog, no dispatch |
+  | `agent.own_message_prepare` | full | 7 | an edit of own message 56 to the exact text prepared; nothing sent or applied |
+  | `agent.family_reply` | full | 7 | a reply to 61 in 91002 with the exact text prepared; nothing sent |
+
+  The five common checks: the agent exited 0 inside 420 s; its turn completed (Codex `turn.completed` and no
+  `turn.failed`; Claude Code results that all succeeded); it used only the matrix server's tools (no shell, other
+  MCP server or built-in tool; Claude Code's `ToolSearch` only loads a deferred tool's schema); the broker's header
+  names this wheel's version and fingerprint (and the alias); an answer exists. The answer's wording is advisory
+  (`AGENT_ADVISORY`, recorded in `advisory_failed`), as in the 0.54 conversation runner.
+- **The server's transcript.** Every synthetic broker records, beside the provider requests and owner dialogs, a
+  header (`version`, `schema_fingerprint`, `alias`), each frame a connection received (numbered by connection) and
+  each dispatched operation with its payload and result or fixed error code. The alias cell adds the harness's
+  registry postscript (alias names and which are pinned, never a user id). Decisions rest on this record.
+- **Isolation.** Codex: a temporary `CODEX_HOME` holding a `config.toml` whose only MCP server is the installed
+  proxy (`approval_policy = "never"`, `cli_auth_credentials_store = "file"`, features `shell_tool`, `browser_use`,
+  `computer_use`, `apps`, `multi_agent`, `image_generation` and `plugins` off, `default_tools_approval_mode =
+  "approve"`), run with `--strict-config --ephemeral --skip-git-repo-check --sandbox read-only` in an empty
+  directory; the only file copied in is the caller's `auth.json`. Claude Code: an empty `CLAUDE_CONFIG_DIR`,
+  `--strict-mcp-config` with a temporary `--mcp-config` outside the working directory, `--tools ""`,
+  `--allowedTools mcp__<server>` and `--no-session-persistence`. Both get a temporary empty HOME and only `PATH`,
+  `TMPDIR`, `LANG`, the network proxy variables and, for Claude Code, `ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN` when the operator exported one. The homes are deleted afterwards.
+- **Retries and unavailability.** A failure before any frame reached the broker is retried (three attempts) when
+  the stream shows a provider failure (`at capacity`, a rate limit, …); a login failure there makes the column
+  `unavailable` with `not_logged_in`, and the column stops. The other fixed reasons: `cli_not_given`,
+  `cli_unusable` (no `--version` of the CLI's form) and `auth_missing` (no regular `auth.json` in the Codex home).
+- **Evidence.** `--agent-evidence <dir>` (new or empty, owner-only) keeps `<column>/<cell>/server.jsonl`,
+  `events.jsonl`, `answer.txt` and `run.json` (commit, wheel sha256, version, fingerprint, the commit's MCP server
+  name, column, cell, CLI version, model, exit, timeout, attempt) owner-only, beside the agent's `stderr.txt`
+  (diagnostic, unbound). The receipt binds the four by sha256; `check --agent-evidence` re-reads them, compares the
+  run record's bindings and judges every cell again with the same function.
+
+## 8. Receipt v4 and harness contract
 
 ```bash
 .venv/bin/python packaging/release_consumer_matrix.py inspector-fetch --node <node> --cache <dir>
 .venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path> \
-    [--wheelhouse <dir>] [--toolhouse <dir>] [--node <node> --inspector-cache <dir>] [--workdir <dir>] [--real-dialog]
-.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>]
+    [--wheelhouse <dir>] [--toolhouse <dir>] [--node <node> --inspector-cache <dir>] [--workdir <dir>] [--real-dialog] \
+    [--codex <path> [--codex-home <dir>] [--codex-model <model>]] [--claude <path> [--claude-model <model>]] \
+    [--agent-evidence <dir>]
+.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>] \
+    [--agent-evidence <dir>]
 ```
+
+- v4 adds `agents`: per column either `{"status": "unavailable", "reason": …}` or the CLI's version, the model
+  (`default` when none was given) and each cell as `{id, status, checks, advisory_failed, evidence}`, with
+  `codex`, `codex_cells`, `claude_code` and `claude_code_cells` in the summary. A failed agent cell refuses the
+  run (`agent_failed`), as a failed Inspector cell does. New fixed codes: `agent_invalid`, `agent_failed`,
+  `evidence_invalid`, `evidence_missing`, `evidence_mismatch`. A v3 receipt is refused.
 
 - v3 adds `installer` (distribution, version, sha256 as the commit's gate pins it, toolhouse provided or
   downloaded) and `inspector` (the pass or unavailable form), adds `inspector` and `inspector_cells` to the
@@ -180,6 +238,31 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   `cache_invalid`, `node_invalid`, `fetch_failed`.
 
 ## 9. Decisions and rejected options
+
+Part 2 (agent columns):
+
+- **A private Codex home with its own `config.toml`, not `--ignore-user-config` with `-c` overrides** (the
+  conversation runner's form): the configuration home itself then names only the proxy, `--strict-config` refuses
+  any key this Codex does not know, and nothing of the caller's Codex home but `auth.json` is read.
+- **Refreshed Codex credentials go back.** Codex rotates its refresh token on use; a refresh in the private home
+  would leave the caller's `auth.json` with a spent token. The harness returns the refreshed file atomically
+  (owner-only) only when the caller's file is still the one it copied, and never prints or keeps it elsewhere.
+  Rejected: a symlinked `auth.json` (Codex may replace it by rename) and refusing to run when a refresh might be
+  due (Codex's refresh schedule is not documented).
+- **Claude Code login only through an exported credential.** On macOS Claude Code keeps its login in the
+  Keychain under a name tied to the default configuration directory; an empty `CLAUDE_CONFIG_DIR` cannot reach it,
+  and the harness never touches the Keychain or the user's configuration. Without `ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN` the column is `unavailable` (`not_logged_in`).
+- **The broker records the transcript, not the proxy:** the installed proxy runs unchanged; every tool call that
+  reaches the account passes the broker, and a refusal before it (an argument or guard refusal) leaves no draft.
+- **The MCP server name is read from the commit's `product_identity.py`** (never imported, never a literal in
+  `packaging/`, which the product identity guard forbids).
+- **One request per cell, decided on the transcript**; tool choice is free (a read may use `read_history`,
+  `read_messages`, `get_message_context` or a search) as long as the outcome is in the broker's record.
+- **Rejected:** keeping the evidence in the receipt (transcripts are synthetic but large; the receipt stays under
+  1 MiB) and a separate agent receipt (the agent cells would no longer be bound to the same wheel and census).
+
+Part 1:
 
 - **Inspector v1's CLI package, not v2.** Inspector 2.x (current `latest`) bundles a keyring module
   (`@napi-rs/keyring`, a native binary that can reach the Keychain), Vite, React and Ink, requires Node
@@ -215,7 +298,7 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   capability answers `status: error` with `topic draft could not be prepared safely`, where the reply tools
   answer `capability_disabled` with `missing_capabilities`.
 
-## 11. Seams for part 2 (agent cells)
+## 11. Seams for part 2 (agent cells), as they were used
 
 - The synthetic broker is `release_consumer_matrix.py broker --profile authorized --approval scripted
   --package-root <site>` inside the installed venv, with the session HOME's `runtime.toml` from

@@ -3,7 +3,11 @@
 Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 
 - [ ] Criterion 1: Full isolated-HOME suite green with 0 skipped (suite).
-- [ ] Criterion 2: Every synthetic and agent matrix cell PASS with a bound receipt; a deliberate schema change fails it (harness).
+- [x] Criterion 2: Every synthetic and agent matrix cell PASS with a bound receipt; a deliberate schema change fails it (harness).
+      Met for every applicable cell (25.10.2026, part 2 below): 48/48 synthetic, Inspector 4/4 and Codex 9/9 in one
+      receipt verified by `check`; the Claude Code column is not applicable on this machine (`claude -p` is not
+      logged in inside an isolated configuration directory, recorded `unavailable` / `not_logged_in`) and becomes
+      applicable when an operator exports a Claude credential for a run. Lead decision, owner review pending.
       - [x] Part 1, synthetic and Inspector columns (25.10.2026, F18 part 1; spec
         [`final-consumer-matrix-spec.md`](final-consumer-matrix-spec.md)). Harness and tests at 4be1e95 (cb238c6,
         then the bundle cells' server name read through the product identity): 48 synthetic cells (every one of the
@@ -27,7 +31,35 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
         against the patched census and a receipt over the patched schema on its own (the frozen
         `MATRIX_SCHEMA_FINGERPRINT`). The new tests failed first against the 0.58.0rc1 harness (collection error:
         no Inspector, tool tables or v3 receipt).
-      - [ ] Part 2, Codex and Claude Code agent cells (seams in the spec, section 11).
+      - [x] Part 2, Codex and Claude Code agent cells (25.10.2026; spec sections 7a, 8 and 9). Harness and tests
+        at 6f53134: receipt `tgmcp-consumer-matrix/v4` adds `agents`; nine cells per column (census through the
+        model, a read, a search paged by its cursor to the end, a reply refused `capability_disabled` whose
+        `next_action` the model must follow, an approved send whose owner dialog times out, an alias server, a
+        documents album prepare, an own-message edit prepare, a reply to a 0.58 reply-family source), each the real
+        CLI with a private configuration home whose only MCP server is the installed proxy, against its own synthetic
+        broker, decided on the broker's own transcript; evidence kept beside the gate directories and bound by
+        digest, judged again by `check`. The new tests failed first against 6b1b276's harness (collection error: no
+        agent columns); they run both columns from the tree with a stand-in agent (honest and misbehaving).
+        Run once at 6f53134 against the 0.58.0rc1 gate wheelhouse and toolhouse (`rc-0.58.0rc1-6d1680d`), Inspector
+        1.0.2 on Node 22.18.0 from the same offline cache (lock sha256 `b7bcccd6fe10b8c9…`), `codex-cli 0.162.0`
+        with model `gpt-6.1-sol`, Claude Code 2.1.304: `consumer matrix passed: 48/48 synthetic cells; Inspector 4/4
+        cells; Codex 9/9 cells; Claude Code unavailable (not_logged_in); 7 owner cells pending`. Receipt
+        `matrix-final/receipt-0.58.0rc1-6f53134.json`, sha256
+        `ab7d8448e2b6051505e8c335a6fbfbc52899c8743eb09b7d44bfbf4cca672066`: wheel
+        `30da8673990d027fbdf73a9887844749a1b2027cb337db1c9546d481c4fccb69` (2,186,221 bytes), schema fingerprint
+        `6a0b0971d74d988c60399ed4019db7d8ec97c9997ea5713d9074e9713b1bfe7d`, 64 tools, 157 structured results from
+        all 64 tools, installer tomlkit 0.13.3 from the gate toolhouse, scripted approval. Evidence
+        `matrix-final/agents-6f53134/` (owner-only): every Codex cell passed on its first attempt with no advisory
+        failure (12–25 s each); the broker transcripts show, for example, `get_message_context` then the refused
+        `prepare_reply_text_send` and nothing else in the refusal cell, `prepare_text_send` then a `timeout` send in
+        the timeout cell, and three `search_messages` pages in the cursor cell; no provider-changing request in any
+        cell. The Claude Code probe (first cell, not bound) answered `authentication_failed` / "Not logged in ·
+        Please run /login" with no tool call. `check` with the same wheelhouse and evidence rebuilt the wheel,
+        reinstalled the closure, re-listed the tools and judged every agent cell again: `consumer matrix receipt
+        verified: 48/48 synthetic cells; Inspector 4/4 cells; Codex 9/9 cells; Claude Code unavailable
+        (not_logged_in); 7 owner cells pending`. Codex did not refresh its tokens during the run (the caller's
+        `auth.json` is unchanged); the private homes were deleted. The schema-change tests (`SchemaChangeTests`)
+        still fail run and receipt check as required, a receipt with passed agent cells included.
 - [ ] Criterion 3: TDLib procedure written; rehearsal reproduces d1085f9 natives and lock byte-identically (rehearsal record).
 - [x] Criterion 4: F19 transport pins pass (unit tests) — `tests/test_transport_scope.py`, 823ccf7.
 - [ ] Criterion 5: Audit table complete; critic finds no unresolved applicable gap (critic report).
@@ -55,3 +87,4 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 | 1 | F18 part 1 full suite at 754e759 is green | isolated-HOME suite, 25.10 | 16 failed: 15 `No space left on device` (the host disk reached 0 bytes free, other projects) in prepare_payload, release_package, release_pins and repin_native, all passing on rerun; 1 real: `test_product_identity` caught the bundle cells' server-name literal, fixed in 4be1e95 |
 | 2 | the same at 4be1e95 | isolated-HOME suite, 25.10 | `1 failed, 4208 passed, 23171 subtests passed`, 0 skipped; the failure was `test_bundle_kill_sweep` (`OSError(28)` during a low-disk window), passing alone (`1 passed`) |
 | 3 | `test_install_guide_recipe` hangs | sampled the stuck processes during the first suite run (76e04d4, which then ended in disk errors) | a pasted `bash --norc -i` and its writer deadlocked on pipes (the test's 60 s timeout cannot fire while `communicate` is blocked in a write); the next two runs passed it; not caused by F18 |
+| 4 | the recipe run can be made bounded in every case without weakening its checks | ac09c2b: a reproducer runs `run_shell` in a child process under a 45 s guard with a selector that reports the stdin pipe writable while input is left (the sampled host) | on the old run both cases hung past the guard (an interactive bash blocked on its prompts, a shell that never reads): `2 failed` in 90 s; with the shell in its own session, output to files, the paste from a thread and the process group killed at the deadline both pass (`4 passed, 90 subtests passed` for the file) |

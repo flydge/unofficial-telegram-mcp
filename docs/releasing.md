@@ -388,24 +388,32 @@ Open the next development line in one commit by the public identity, on top of t
 
 Release evidence is never edited: a corrected release is a new commit, a new `run` and a new tag.
 
-### Consumer matrix (from the 0.54 candidate; every tool and the Inspector since the final acceptance)
+### Consumer matrix (from the 0.54 candidate; every tool, the Inspector and the agent CLIs since the final acceptance)
 
 ```bash
 .venv/bin/python packaging/release_consumer_matrix.py inspector-fetch --node <node 22 or later> --cache <dir>
 .venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path> \
-    --wheelhouse <gate dir>/wheelhouse --toolhouse <gate dir>/toolhouse --node <node> --inspector-cache <dir>
-.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> --wheelhouse <gate dir>/wheelhouse
+    --wheelhouse <gate dir>/wheelhouse --toolhouse <gate dir>/toolhouse --node <node> --inspector-cache <dir> \
+    --codex <codex> --codex-home <Codex home> [--codex-model <model>] --claude <claude> \
+    --agent-evidence <new owner-only dir>
+.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> --wheelhouse <gate dir>/wheelhouse \
+    --agent-evidence <the same dir>
 ```
 
 `run` installs the wheel built from `git archive <sha>` with the pinned closure in a fresh venv and drives
 every synthetic cell of the [consumer matrix](plans/final-consumer-matrix-spec.md) through the official SDK
 against synthetic brokers, the installed bundle installer's install, upgrade, rollback and uninstall over a
-synthetic home, and the MCP Inspector CLI column (the pinned `packaging/inspector` lock, installed offline from
-the cache `inspector-fetch` filled once). It refuses a schema the cells were not written for and writes the
-receipt only when every cell passed; without Node or the cache the receipt records the Inspector column
-`unavailable` with its reason. `check` rebuilds the wheel and the schema census of the recorded commit and
-refuses any difference. The receipt is `acceptance: false`: agent, owner and real-account cells stay `pending`
-and need their own records.
+synthetic home, the MCP Inspector CLI column (the pinned `packaging/inspector` lock, installed offline from
+the cache `inspector-fetch` filled once) and the Codex and Claude Code columns: each agent cell gives the real
+CLI one fixed request with a temporary configuration home whose only MCP server is the installed proxy, against a
+synthetic broker of its own, and keeps the broker's transcript, the agent's events, its answer and a run record in
+`--agent-evidence`. An agent run uses the agent's account and costs its usage; it never changes the user's
+client configuration (Codex reads a copy of `auth.json`, Claude Code an empty configuration directory). It
+refuses a schema the cells were not written for and writes the receipt only when every cell passed; without
+Node or the cache the receipt records the Inspector column `unavailable` with its reason, and without the CLI, a
+login or the Codex `auth.json` an agent column likewise. `check` rebuilds the wheel and the schema census of the
+recorded commit, judges every passed agent cell again from the kept evidence and refuses any difference. The
+receipt is `acceptance: false`: owner and real-account cells stay `pending` and need their own records.
 
 ## Checklist
 
@@ -418,7 +426,7 @@ and need their own records.
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |
 | Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` (with the bundle stage for a release with assets) |
-| Consumer matrix (synthetic and Inspector cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
+| Consumer matrix (synthetic, Inspector and agent cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
 | Assets: dry run, signed build, release commit, its gate | section 4; [owner checklist](plans/0.53-signing-owner-checklist.md) |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
 | History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |
