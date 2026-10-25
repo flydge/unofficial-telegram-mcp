@@ -48,6 +48,7 @@ version = {attr = "telegram_search_mcp.__version__"}
 "share/telegram-search-mcp/skills/telegram-search" = ["skills/telegram-search/SKILL.md"]
 "share/telegram-search-mcp/skills/telegram-setup" = ["skills/telegram-setup/SKILL.md"]
 "share/telegram-search-mcp/packaging" = ["packaging/bootstrap.sh", "packaging/bootstrap_verifier.c", "packaging/build_bootstrap_seed.sh", "packaging/launcher.py", "packaging/assemble_bundle.py", "packaging/tdlib-lock.json", "packaging/release_gate.py", "packaging/constraints-0.58.0.txt"]
+"share/telegram-search-mcp/packaging/inspector" = ["packaging/inspector/package.json", "packaging/inspector/package-lock.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

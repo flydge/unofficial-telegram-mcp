@@ -1,0 +1,8 @@
+{
+  "name": "tgmcp-matrix-inspector",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/inspector-cli": "1.0.2"
+  }
+}
