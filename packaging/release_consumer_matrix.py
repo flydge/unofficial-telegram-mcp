@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -529,6 +530,64 @@ class MatrixRefusal(Exception):
         super().__init__(code)
         self.code = code
         self.detail = detail
+
+
+class MatrixInterrupted(BaseException):
+    """SIGTERM or SIGHUP during run or check, raised so that every finally block runs: agents killed, brokers and
+    drivers stopped, the temporary homes and the copied Codex credential removed, refreshed credentials returned."""
+
+    def __init__(self, signum: int):
+        super().__init__(signum)
+        self.signum = signum
+
+
+_AGENT_GROUPS: set = set()  # the process groups (own sessions) of the agents running now
+_INTERRUPT = {"deferred": 0, "pending": None, "raised": None}
+
+
+def _interrupt(signum, frame) -> None:
+    """Kill every running agent's session, then raise MatrixInterrupted, once: a repeat signal never cuts the
+    cleanup short. While a child is being started and registered (deferred_interrupts) the raise waits."""
+    if _INTERRUPT["raised"] is not None:
+        return
+    for group in list(_AGENT_GROUPS):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if _INTERRUPT["deferred"]:
+        _INTERRUPT["pending"] = signum
+        return
+    _INTERRUPT["raised"] = signum
+    raise MatrixInterrupted(signum)
+
+
+@contextlib.contextmanager
+def deferred_interrupts():
+    """Around starting a child and handing it to the code whose finally stops it: an interrupt raises afterwards."""
+    _INTERRUPT["deferred"] += 1
+    try:
+        yield
+    finally:
+        _INTERRUPT["deferred"] -= 1
+        if not _INTERRUPT["deferred"] and _INTERRUPT["pending"] is not None:
+            signum, _INTERRUPT["pending"] = _INTERRUPT["pending"], None
+            _interrupt(signum, None)
+
+
+@contextlib.contextmanager
+def interrupt_handlers():
+    """SIGTERM and SIGHUP raise MatrixInterrupted for the duration (the main thread's run and check)."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {number: signal.signal(number, _interrupt) for number in (signal.SIGTERM, signal.SIGHUP)}
+    _INTERRUPT.update(deferred=0, pending=None, raised=None)
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 def need(condition: object, code: str, detail: object = None) -> None:
@@ -2983,21 +3042,26 @@ def bounded(command: list, *, cwd: Path, env: dict, timeout: float, stdout: Path
     deadline or once it exits."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
     with os.fdopen(os.open(stdout, flags, 0o600), "wb") as out, os.fdopen(os.open(stderr, flags, 0o600), "wb") as err:
+        process = None
         try:
-            process = subprocess.Popen([str(part) for part in command], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                       stdout=out, stderr=err, start_new_session=True)
-        except OSError:
-            return None, False
-        try:
+            with deferred_interrupts():
+                try:
+                    process = subprocess.Popen([str(part) for part in command], cwd=cwd, env=env,
+                                               stdin=subprocess.DEVNULL, stdout=out, stderr=err, start_new_session=True)
+                except OSError:
+                    return None, False
+                _AGENT_GROUPS.add(process.pid)
             return process.wait(timeout=timeout), False
         except subprocess.TimeoutExpired:
             return None, True
         finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            process.wait()
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                process.wait()
+                _AGENT_GROUPS.discard(process.pid)
 
 
 def agent_environment(column: str, *, home: Path, config: Path, tmp: Path) -> dict:
@@ -3411,8 +3475,9 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
         broker, started, code, timed_out = None, time.monotonic(), None, False
         try:
             write_policy(home, list(RESTRICTED_CAPABILITIES) if session == "restricted" else list(census["capabilities"]))
-            broker = start_broker(runtime, home, tmp, "authorized", "scripted",
-                                  scratch / f"broker-{cell_id}-{attempt}.log", account=account)
+            with deferred_interrupts():
+                broker = start_broker(runtime, home, tmp, "authorized", "scripted",
+                                      scratch / f"broker-{cell_id}-{attempt}.log", account=account)
             proxy = [*runtime.proxy, *(("--account", account) if account else ())]
             mcp = scratch / f"mcp-{cell_id}-{attempt}.json"
             if column == "codex":
@@ -3670,7 +3735,8 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
             write_policy(home, capabilities, stale=stale)
             mode = "scripted" if name == "inspector" else approval  # The real dialog is the SDK denial probe's.
             if profile is not None:
-                brokers.append(start_broker(runtime, home, tmp, profile, mode, work / f"broker-{name}.log"))
+                with deferred_interrupts():
+                    brokers.append(start_broker(runtime, home, tmp, profile, mode, work / f"broker-{name}.log"))
             plan = {"session": name, "home": str(home), "tmp": str(tmp), "proxy": [str(p) for p in runtime.proxy],
                     "pythonpath": runtime.pythonpath, "census": census, "approval": mode,
                     "broker_log": str(home / "matrix-broker.jsonl") if profile is not None else None,
@@ -3681,9 +3747,10 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
             outputs.append(out)
             log = open(work / f"drive-{name}.log", "wb")
             try:
-                drivers.append((subprocess.Popen(runtime.command("drive", "--plan", plan_path, "--out", out),
-                                                 env=runtime.env(tmp, tmp), cwd=tmp, stdin=subprocess.DEVNULL,
-                                                 stdout=log, stderr=log), log))
+                with deferred_interrupts():
+                    drivers.append((subprocess.Popen(runtime.command("drive", "--plan", plan_path, "--out", out),
+                                                     env=runtime.env(tmp, tmp), cwd=tmp, stdin=subprocess.DEVNULL,
+                                                     stdout=log, stderr=log), log))
             except OSError:
                 log.close()
                 raise MatrixRefusal("drive_failed") from None
@@ -3924,10 +3991,16 @@ def main(argv: list[str] | None = None) -> int:
         args = parser().parse_args(argv)
         handler = {"run": run, "check": check, "inspector-fetch": inspector_fetch, "broker": broker_main,
                    "drive": drive_main}[args.command]
-        return handler(args)
+        if args.command not in ("run", "check"):
+            return handler(args)
+        with interrupt_handlers():
+            return handler(args)
     except MatrixRefusal as refusal:
         print(refusal.code, file=sys.stderr)
         return 2
+    except MatrixInterrupted as interrupted:  # Every finally has run; a fixed line, the shell's 128 + signal.
+        print("interrupted", file=sys.stderr)
+        return 128 + interrupted.signum
 
 
 if __name__ == "__main__":

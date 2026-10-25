@@ -11,7 +11,9 @@ Behaviours: honest; workaround (after the refusal, prepares a plain text send in
 command); not_logged_in (the CLI's login failure, no tool call); logout_after_census (agent.census as shell, every
 later cell as not_logged_in: a login lost mid-column); transient (the first attempt of each cell fails at capacity
 before any tool call); prose (no tool call; the model's own words name login and capacity problems, which are
-no provider failure); refresh (Codex rewrites auth.json as a token refresh does); bad_version.
+no provider failure); refresh (Codex rewrites auth.json as a token refresh does); hang (Codex refreshes auth.json,
+reports its pid and its broker's HOME to --report, then sleeps far past the test, like an agent that would outlive
+an interrupted harness); bad_version.
 """
 from __future__ import annotations
 
@@ -23,12 +25,20 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import tomllib
 
 
 def emit(event: dict) -> None:
     sys.stdout.write(json.dumps(event) + "\n")
     sys.stdout.flush()
+
+
+def refresh(auth: Path) -> None:
+    """What a token refresh leaves in auth.json: the same keys, new token values."""
+    value = json.loads(auth.read_text())
+    value["tokens"] = {key: f"{token}-refreshed" for key, token in value["tokens"].items()}
+    auth.write_text(json.dumps(value) + "\n")
 
 
 def unwrap(value):
@@ -102,6 +112,7 @@ def main() -> int:
     parser.add_argument("--as", dest="role", choices=("codex", "claude"), required=True)
     parser.add_argument("--behaviour", default="honest")
     parser.add_argument("--harness", required=True)
+    parser.add_argument("--report")
     parser.add_argument("rest", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     rest = args.rest[1:] if args.rest[:1] == ["--"] else args.rest
@@ -167,8 +178,14 @@ def main() -> int:
             emit({"type": "error", "message": "We're currently experiencing high demand: model at capacity"})
             emit({"type": "turn.failed", "error": {"message": "at capacity"}})
             return 1
-    if args.behaviour == "refresh" and args.role == "codex":
-        auth.write_text('{"refreshed": true}\n')
+    if args.behaviour in ("refresh", "hang") and args.role == "codex":
+        refresh(auth)
+    if args.behaviour == "hang":
+        report = Path(args.report)
+        report.with_suffix(".tmp").write_text(json.dumps({"pid": os.getpid(), "broker_home": server["env"]["HOME"]}))
+        report.with_suffix(".tmp").rename(report)
+        time.sleep(300)
+        return 1
     calls = []
     answer = asyncio.run(drive(matrix, cell, server, args.behaviour, lambda tool, arguments: calls.append(
         (tool, arguments))))

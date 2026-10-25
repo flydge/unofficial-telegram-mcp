@@ -19,9 +19,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -1106,13 +1110,18 @@ def source_runtime():
                           package_root=SOURCE, sdk_root=None, pythonpath=str(SOURCE))
 
 
-def fake_cli(directory: Path, role: str, behaviour: str = "honest") -> Path:
+def fake_cli(directory: Path, role: str, behaviour: str = "honest", *, report: Path | None = None) -> Path:
     """A wrapper named like the CLI that runs the stand-in agent with this interpreter."""
     path = directory / f"{role}-{behaviour}"
     path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{FAKE_AGENT}" --as {role} --behaviour {behaviour} '
-                    f'--harness "{matrix.HARNESS}" -- "$@"\n')
+                    f'--harness "{matrix.HARNESS}"' + (f' --report "{report}"' if report else "") + ' -- "$@"\n')
     path.chmod(0o700)
     return path
+
+
+# A Codex auth.json of the shape Codex writes (synthetic values only).
+CODEX_AUTH = (b'{"OPENAI_API_KEY": null, "last_refresh": "2026-10-25T00:00:00Z", "tokens": {"access_token": "synthetic-a", '
+              b'"account_id": "synthetic-account", "id_token": "synthetic-i", "refresh_token": "synthetic-r"}}\n')
 
 
 def bindings_for(census: dict) -> dict:
@@ -1489,6 +1498,57 @@ class AgentColumnTests(unittest.TestCase):
                     self.assertIn(f"Codex {len(matrix.AGENT_IDS)}/{len(matrix.AGENT_IDS)} cells", out.getvalue())
 
 
+class InterruptTests(unittest.TestCase):
+    def test_an_interrupt_waits_for_a_child_handover_and_a_repeat_never_cuts_the_cleanup_short(self):
+        previous = signal.getsignal(signal.SIGTERM)
+        events = []
+        with self.assertRaises(matrix.MatrixInterrupted) as caught:
+            with matrix.interrupt_handlers():
+                with matrix.deferred_interrupts():
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(0.05)
+                    events.append("handed over")
+                events.append("not reached")
+        self.assertEqual((caught.exception.signum, events), (signal.SIGTERM, ["handed over"]))
+        with self.assertRaises(matrix.MatrixInterrupted) as caught:
+            with matrix.interrupt_handlers():
+                try:
+                    os.kill(os.getpid(), signal.SIGHUP)
+                    time.sleep(0.05)
+                finally:
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(0.05)
+                    events.append("cleaned up")
+        self.assertEqual((caught.exception.signum, events[-1]), (signal.SIGHUP, "cleaned up"))
+        self.assertIs(signal.getsignal(signal.SIGTERM), previous)
+
+    def test_main_answers_an_interrupt_with_a_fixed_line_and_the_shells_status(self):
+        for command in ("run", "check"):
+            with self.subTest(command=command), \
+                    mock.patch.object(matrix, command, side_effect=matrix.MatrixInterrupted(signal.SIGHUP)), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                arguments = ["--commit", COMMIT] if command == "run" else []
+                code = matrix.main([command, "--receipt", "/r.json", *arguments])
+            self.assertEqual((code, err.getvalue()), (128 + signal.SIGHUP, "interrupted\n"))
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_quietly(*pids: int) -> None:
+    for pid in pids:
+        for kill in (os.killpg, os.kill):
+            try:
+                kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
 class AgentBehaviourTests(unittest.TestCase):
     """Misbehaving or unavailable agents, one or two cells each."""
 
@@ -1564,10 +1624,65 @@ class AgentBehaviourTests(unittest.TestCase):
 
     def test_refreshed_codex_credentials_return_to_the_callers_codex_home(self):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            section, _, codex_home = run_column(self.base, "codex", "refresh", cells=("agent.census",))
+            section, _, codex_home = run_column(self.base, "codex", "refresh", cells=("agent.census",),
+                                                auth=CODEX_AUTH)
         self.assertEqual(section["status"], "pass")
-        self.assertEqual((codex_home / "auth.json").read_text(), '{"refreshed": true}\n')
+        returned = json.loads((codex_home / "auth.json").read_text())
+        self.assertEqual(returned["tokens"]["refresh_token"], "synthetic-r-refreshed")
         self.assertEqual(err.getvalue().strip(), "codex credentials refreshed during the run: returned")
+
+    def test_sigterm_or_sighup_during_an_agent_cell_leaves_nothing_behind(self):
+        """A real harness process is interrupted while a real child agent (which would sleep far past the test)
+        runs: the agent and the cell's broker are gone, the temporary homes and the copied credential are removed
+        and the refreshed credential went back."""
+        script = self.base / "interrupted.py"
+        script.write_text(textwrap.dedent(f"""\
+            import contextlib, importlib.util, sys
+            from pathlib import Path
+            spec = importlib.util.spec_from_file_location("matrix_tests", {str(Path(__file__).resolve())!r})
+            tests = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(tests)
+            matrix, base, report = tests.matrix, Path(sys.argv[1]), Path(sys.argv[2])
+            original = matrix.start_broker
+            def recording(*args, **kwargs):
+                broker = original(*args, **kwargs)
+                (base / "broker.pid").write_text(str(broker[0].pid))
+                return broker
+            matrix.start_broker = recording
+            binary = tests.fake_cli(base, "codex", "hang", report=report)
+            try:
+                with getattr(matrix, "interrupt_handlers", contextlib.nullcontext)():
+                    tests.run_column(base, "codex", "hang", cells=("agent.census",), auth=tests.CODEX_AUTH,
+                                     binary=binary)
+            except getattr(matrix, "MatrixInterrupted", ()) as interrupted:
+                sys.exit(128 + interrupted.signum)
+            """))
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=number.name):
+                base = self.base / number.name
+                base.mkdir()
+                report = base / "agent.json"
+                env = {**os.environ, "PYTHONPATH": str(SOURCE)}
+                with open(base / "child.log", "wb") as log:
+                    child = subprocess.Popen([sys.executable, str(script), str(base), str(report)], env=env,
+                                             stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+                self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
+                deadline = time.monotonic() + 90
+                while not report.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertTrue(report.exists(), (base / "child.log").read_text()[-2000:])
+                agent = json.loads(report.read_text())
+                broker = int((base / "broker.pid").read_text())
+                self.addCleanup(_kill_quietly, agent["pid"], broker)
+                child.send_signal(number)
+                code = child.wait(timeout=60)
+                time.sleep(0.5)
+                self.assertEqual([_alive(agent["pid"]), _alive(broker), os.path.lexists(agent["broker_home"]),
+                                  (base / "scratch-codex-hang").exists()], [False, False, False, False])
+                self.assertEqual(code, 128 + number, (base / "child.log").read_text()[-2000:])
+                returned = json.loads((base / "codex-home" / "auth.json").read_text())
+                self.assertEqual(returned["tokens"]["refresh_token"], "synthetic-r-refreshed")
+                self.assertEqual(sorted(path.name for path in (base / "codex-home").iterdir()), ["auth.json"])
 
     def test_each_unavailable_reason_is_fixed(self):
         cases = (("cli_unusable", {"binary": fake_cli(self.base, "codex", "bad_version")}),
