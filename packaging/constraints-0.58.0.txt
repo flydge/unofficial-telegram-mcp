@@ -19,10 +19,10 @@
 #
 # Hash-checked wheel install (pip cannot hash an unlisted requirement):
 #   printf 'telegram-search-mcp @ file://%s --hash=sha256:%s\n' "$WHEEL" "$WHEEL_SHA256" > wheel.txt
-#   python -m pip install --require-hashes -c packaging/constraints-0.57.0.txt -r wheel.txt
+#   python -m pip install --require-hashes -c packaging/constraints-0.58.0.txt -r wheel.txt
 # Source checkout install (pip cannot hash a directory, so install the pinned
 # closure first, then the project without dependency resolution):
-#   python -m pip install --require-hashes -r packaging/constraints-0.57.0.txt
+#   python -m pip install --require-hashes -r packaging/constraints-0.58.0.txt
 #   python -m pip install --no-deps .
 #   python -m pip check
 

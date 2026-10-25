@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.58.0.dev0 — unreleased
+
+Development of 0.58.0, reply-source families and formatted captions, F13 rest
+([spec](docs/plans/0.58-reply-sources-and-captions-spec.md)). Part 1 freezes the 0.57 reply-source ladder in a
+pinned hash matrix of 6,098 sources and consolidates it into one family table, with no behaviour change. Part 2
+admits media TextUrl (v24), CustomEmoji (v25/v26: a decimal int64 id over exactly one emoji) and voice-note
+MediaTimestamp (v28) reply sources behind `reply_text_url_targets` and the new default-off
+`reply_custom_emoji_targets` and `reply_media_timestamp_targets` (a listed schema change). Part 3 adds styled
+document, photo, voice-note and video captions: the five caller styles behind the new default-off
+`formatted_caption_send` (in the `send` profile), on a caption already in the form Telegram stores, through an
+optional `outgoing_entities` on `prepare_artifact_send`, `prepare_reply_artifact_send`,
+`update_reply_artifact_draft` and `prepare_video_send` (a listed schema change), with an artifact preview digest,
+reply-artifact and video preview facts v2, TDLib caption guards that admit only the frozen styles (album items stay
+plain) and an exact read-back. It fixes a defect older than 0.58: a document, photo or voice-note reply whose
+caption held a link, mention or hashtag never confirmed and stayed `outcome_unknown`; plain caption sends now
+register their caption digest and tolerate exactly the entities Telegram detects. The owner dialog lists every
+style and hidden payload of a reply target (a text link's URL, a custom emoji's id, a media timestamp, a mention, a
+date) and every caption style. Technical evidence only; the independent critic and the owner session are pending.
+
 ## 0.57.0rc1 — release candidate, 2026-10-25 (not published)
 
 Release candidate of 0.57.0, own-message actions ([release notes](docs/release-notes-0.57.0rc1.md)), F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
@@ -31,23 +50,6 @@ confirms with the links, mentions or hashtags Telegram detects in it (a defect o
 whitespace is documented as kept; the skill again forbids re-sending a download as a work-around; a deletion's
 `applied` detail says TDLib answered `ok` after a local read, and the window in which that follows a server-side
 no-op is recorded. Technical evidence only; the owner session is pending.
-
-0.58 development on this unreleased line, reply-source families and formatted captions, F13 rest
-([spec](docs/plans/0.58-reply-sources-and-captions-spec.md)). Part 1 freezes the 0.57 reply-source ladder in a
-pinned hash matrix of 6,098 sources and consolidates it into one family table, with no behaviour change. Part 2
-admits media TextUrl (v24), CustomEmoji (v25/v26: a decimal int64 id over exactly one emoji) and voice-note
-MediaTimestamp (v28) reply sources behind `reply_text_url_targets` and the new default-off
-`reply_custom_emoji_targets` and `reply_media_timestamp_targets` (a listed schema change). Part 3 adds styled
-document, photo, voice-note and video captions: the five caller styles behind the new default-off
-`formatted_caption_send` (in the `send` profile), on a caption already in the form Telegram stores, through an
-optional `outgoing_entities` on `prepare_artifact_send`, `prepare_reply_artifact_send`,
-`update_reply_artifact_draft` and `prepare_video_send` (a listed schema change), with an artifact preview digest,
-reply-artifact and video preview facts v2, TDLib caption guards that admit only the frozen styles (album items stay
-plain) and an exact read-back. It fixes a defect older than 0.58: a document, photo or voice-note reply whose
-caption held a link, mention or hashtag never confirmed and stayed `outcome_unknown`; plain caption sends now
-register their caption digest and tolerate exactly the entities Telegram detects. The owner dialog lists every
-style and hidden payload of a reply target (a text link's URL, a custom emoji's id, a media timestamp, a mention, a
-date) and every caption style. Technical evidence only; the independent critic and the owner session are pending.
 
 ## 0.56.0rc1 — release candidate, 2026-10-24 (not published)
 

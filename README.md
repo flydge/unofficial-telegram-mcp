@@ -87,7 +87,7 @@ Ask your assistant:
 # Private bundle (not distributed)
 
 Version 0.52.0 also has a private authenticated bundle (not distributed); its current development
-candidate is 0.57.0rc1. It supplies standalone Python, the pinned dependencies and TDLib, and a
+candidate is 0.58.0.dev0. It supplies standalone Python, the pinned dependencies and TDLib, and a
 recoverable first installation on Apple Silicon macOS 26+, with no Homebrew, Git or compiler needed.
 See [installation](docs/install.md).
 
@@ -109,5 +109,5 @@ of `plugins/telegram-local/release-pins.json` at the release tag and with the DM
 - **Open beyond 0.52.0:** public hosting, the Developer ID signed and notarized build, and complete
   source/redistribution review.
 
-Details of the 0.57.0rc1 candidate and the shared-API-identity risk:
-[the private bundle](docs/install.md#private-bundle-0570rc1).
+Details of the 0.58.0.dev0 candidate and the shared-API-identity risk:
+[the private bundle](docs/install.md#private-bundle-0580dev0).

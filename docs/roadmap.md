@@ -7,6 +7,11 @@ Updated **2026-10-25**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
+## In development — **0.58.0.dev0**
+
+Reply-source families and formatted captions: [spec](plans/0.58-reply-sources-and-captions-spec.md) and its
+[task record](plans/0.58-reply-sources-and-captions-spec.tasks.md).
+
 ## Release candidate — **0.57.0rc1**
 
 Own-message actions: [spec](plans/0.57-own-message-actions-spec.md), its
