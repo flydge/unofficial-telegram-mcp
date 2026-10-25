@@ -46,5 +46,6 @@ include docs/third-party-notices.md
 include docs/licensing.md
 include docs/roadmap.md
 include docs/releasing.md
+include docs/tdlib-upgrade.md
 include docs/plans/initial-roadmap.md
 recursive-include docs/licenses *.txt
