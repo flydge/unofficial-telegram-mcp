@@ -1497,6 +1497,21 @@ class AgentBehaviourTests(unittest.TestCase):
                 self.assertEqual(section, {"status": "unavailable", "reason": "not_logged_in"})
                 self.assertEqual(sorted(path.name for path in (evidence / column).iterdir()), ["agent.census"])
 
+    def test_a_login_failure_after_the_first_cell_fails_the_column_and_keeps_every_result(self):
+        expected = {"codex": [("agent.census", "fail", "only_matrix_tools"), ("agent.read", "fail", "agent_exited")],
+                    "claude_code": [("agent.census", "pass", None), ("agent.read", "fail", "agent_exited")]}
+        for column, cells in expected.items():
+            with self.subTest(column=column), contextlib.redirect_stderr(io.StringIO()) as err:
+                section, evidence, _ = run_column(self.base, column, "logout_after_census",
+                                                  cells=("agent.census", "agent.read"))
+                self.assertEqual(section["status"], "fail")
+                self.assertEqual([(cell["id"], cell["status"], cell.get("failed_check")) for cell in section["cells"]],
+                                 cells)
+                self.assertEqual(sorted(path.name for path in (evidence / column).iterdir()),
+                                 ["agent.census", "agent.read"])
+                self.assertEqual(err.getvalue().strip(), f"{column}: login failed after the column's first cell")
+                self.assertEqual(refusal(matrix.check_agent_section, column, section), "agent_invalid")
+
     def test_a_provider_failure_before_any_tool_is_retried(self):
         section, evidence, _ = run_column(self.base, "codex", "transient", cells=("agent.census",))
         self.assertEqual(section["status"], "pass")

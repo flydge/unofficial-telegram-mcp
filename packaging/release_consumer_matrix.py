@@ -3362,9 +3362,10 @@ def sync_codex_auth(source: Path, copied: str, private: Path) -> str:
 
 
 def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None, version: str, runtime: "Runtime",
-                   census: dict, scratch: Path, env: dict, config: Path, folder: Path, bindings: dict) -> dict | str:
+                   census: dict, scratch: Path, env: dict, config: Path, folder: Path, bindings: dict) -> tuple:
     """One cell (retried when a provider failure stopped it before any tool reached the broker): its evidence in
-    `folder`, then its judged result with the evidence digests; or "not_logged_in"."""
+    `folder`, then (its judged result with the evidence digests, whether a login failure stopped it before any tool
+    reached the broker)."""
     _, session, _, _ = agent_cell(cell_id)
     server = agent_server(session, bindings["server_name"])
     account = ALIAS if session == "alias" else None
@@ -3408,15 +3409,17 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
             **bindings, "column": column, "cell": cell_id, "cli": version, "model": model or "default",
             "exit": code, "timed_out": timed_out, "attempt": attempt, "seconds": round(time.monotonic() - started, 1)}))
         stream = (events + (folder / "stderr.txt").read_bytes()).decode("utf-8", "replace").casefold()
+        login_failed = False
         if Transcript(_jsonl(server_log)).reached():
             break
         if any(marker in stream for marker in LOGIN_MARKERS):
-            return "not_logged_in"
+            login_failed = True
+            break
         if attempt == AGENT_ATTEMPTS or not any(marker in stream for marker in TRANSIENT_MARKERS):
             break
         time.sleep(AGENT_RETRY_SECONDS * attempt)
     files = read_evidence(folder)
-    return {**judge_evidence(column, cell_id, files, bindings), "evidence": evidence_digests(files)}
+    return {**judge_evidence(column, cell_id, files, bindings), "evidence": evidence_digests(files)}, login_failed
 
 
 def run_agent_column(column: str, binary: Path | None, model: str | None, runtime: "Runtime", census: dict,
@@ -3445,16 +3448,20 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
             auth = (source, _sha(data))
             del data
         folder = _fresh(evidence / column)
-        results = []
+        results, lost = [], False
         for cell_id in cells:
-            result = run_agent_cell(column, cell_id, binary=binary, model=model, version=version, runtime=runtime,
-                                    census=census, scratch=scratch, env=env, config=config, folder=folder / cell_id,
-                                    bindings=bindings)
-            if result == "not_logged_in":
+            result, login_failed = run_agent_cell(column, cell_id, binary=binary, model=model, version=version,
+                                                  runtime=runtime, census=census, scratch=scratch, env=env,
+                                                  config=config, folder=folder / cell_id, bindings=bindings)
+            if login_failed and not results:  # The column's first cell, before any tool reached the broker.
                 return {"status": "unavailable", "reason": "not_logged_in"}
             results.append(result)
-        return {"status": "pass" if all(cell["status"] == "pass" for cell in results) else "fail", "cli": version,
-                "model": model or "default", "cells": results}
+            if login_failed:  # A login lost once a cell ran: the column fails and keeps every result so far.
+                print(f"{column}: login failed after the column's first cell", file=sys.stderr)
+                lost = True
+                break
+        return {"status": "pass" if not lost and all(cell["status"] == "pass" for cell in results) else "fail",
+                "cli": version, "model": model or "default", "cells": results}
     finally:
         if auth is not None:
             outcome = sync_codex_auth(*auth, config / "auth.json")

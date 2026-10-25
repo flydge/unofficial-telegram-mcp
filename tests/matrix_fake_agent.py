@@ -8,8 +8,9 @@ Its first event reports what it could see of its isolation (HOME, the configurat
 configured servers and the environment's names), which the tests read from the kept evidence.
 
 Behaviours: honest; workaround (after the refusal, prepares a plain text send instead); shell (Codex reports a shell
-command); not_logged_in (the CLI's login failure, no tool call); transient (the first attempt of each cell fails at
-capacity before any tool call); refresh (Codex rewrites auth.json as a token refresh does); bad_version.
+command); not_logged_in (the CLI's login failure, no tool call); logout_after_census (agent.census as shell, every
+later cell as not_logged_in: a login lost mid-column); transient (the first attempt of each cell fails at capacity
+before any tool call); refresh (Codex rewrites auth.json as a token refresh does); bad_version.
 """
 from __future__ import annotations
 
@@ -130,6 +131,8 @@ def main() -> int:
           "auth_sha256": hashlib.sha256(auth.read_bytes()).hexdigest() if auth.exists() else None,
           "argv": rest[:-1] if args.role == "codex" else [part for part in rest if part != request]})
     [(name, server)] = servers.items()
+    if args.behaviour == "logout_after_census":
+        args.behaviour = "shell" if cell == "agent.census" else "not_logged_in"
     if args.behaviour == "not_logged_in":
         if args.role == "codex":
             emit({"type": "turn.started"})
