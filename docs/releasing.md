@@ -388,18 +388,24 @@ Open the next development line in one commit by the public identity, on top of t
 
 Release evidence is never edited: a corrected release is a new commit, a new `run` and a new tag.
 
-### Consumer matrix (from the 0.54 candidate)
+### Consumer matrix (from the 0.54 candidate; every tool and the Inspector since the final acceptance)
 
 ```bash
-.venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path>
-.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path>
+.venv/bin/python packaging/release_consumer_matrix.py inspector-fetch --node <node 22 or later> --cache <dir>
+.venv/bin/python packaging/release_consumer_matrix.py run --commit <sha> --receipt <absolute path> \
+    --wheelhouse <gate dir>/wheelhouse --toolhouse <gate dir>/toolhouse --node <node> --inspector-cache <dir>
+.venv/bin/python packaging/release_consumer_matrix.py check --receipt <path> --wheelhouse <gate dir>/wheelhouse
 ```
 
 `run` installs the wheel built from `git archive <sha>` with the pinned closure in a fresh venv and drives
-every synthetic cell of the [consumer matrix](plans/0.54-consumer-matrix-spec.md) through the official SDK
-against synthetic brokers; it writes the receipt only when every cell passed. `check` rebuilds the wheel
-and the schema census of the recorded commit and refuses any difference. The receipt is `acceptance:
-false`: owner and real-account cells stay `pending` and need their own records.
+every synthetic cell of the [consumer matrix](plans/final-consumer-matrix-spec.md) through the official SDK
+against synthetic brokers, the installed bundle installer's install, upgrade, rollback and uninstall over a
+synthetic home, and the MCP Inspector CLI column (the pinned `packaging/inspector` lock, installed offline from
+the cache `inspector-fetch` filled once). It refuses a schema the cells were not written for and writes the
+receipt only when every cell passed; without Node or the cache the receipt records the Inspector column
+`unavailable` with its reason. `check` rebuilds the wheel and the schema census of the recorded commit and
+refuses any difference. The receipt is `acceptance: false`: agent, owner and real-account cells stay `pending`
+and need their own records.
 
 ## Checklist
 
@@ -412,7 +418,7 @@ false`: owner and real-account cells stay `pending` and need their own records.
 | Changelog, notes, roadmap | `CHANGELOG.md`, `docs/release-notes-<version>.md`, `docs/roadmap.md` |
 | Package data | `pyproject.toml`, `MANIFEST.in` |
 | Gate | `.venv/bin/python packaging/release_gate.py run`, then `verify` (with the bundle stage for a release with assets) |
-| Consumer matrix (synthetic cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
+| Consumer matrix (synthetic and Inspector cells) | `.venv/bin/python packaging/release_consumer_matrix.py run`, then `check` |
 | Assets: dry run, signed build, release commit, its gate | section 4; [owner checklist](plans/0.53-signing-owner-checklist.md) |
 | Identity report (not a pre-cut condition) | `identities` in `evidence.json`; owner decision before Gpub |
 | History report (not a pre-cut condition) | `history_findings.total` in `evidence.json` is 0 or the owner's acceptance is recorded before Gpub |
