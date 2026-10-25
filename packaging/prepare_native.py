@@ -82,23 +82,31 @@ def _redacted(receipt):
     return record
 
 
+def check_openssl_keg(openssl_keg, row):
+    """The exact approved OpenSSL keg: name, receipt and the pinned dylib file names."""
+    openssl_keg = Path(openssl_keg)
+    openssl = _receipt(openssl_keg)
+    if (openssl_keg.name != row.openssl_version or openssl_keg.parent.name != 'openssl@3'
+            or type(openssl['source'].get('versions')) is not dict
+            or openssl['source']['versions'].get('stable') != row.openssl_version or openssl.get('arch') != 'arm64'):
+        raise NativePreparationError('keg_mismatch')
+    return openssl, {'libssl.3.dylib': openssl_keg / 'lib/libssl.3.dylib',
+                     'libcrypto.3.dylib': openssl_keg / 'lib/libcrypto.3.dylib'}
+
+
 def check_kegs(tdlib_keg, openssl_keg, row):
     """The exact approved kegs: names, receipts and the pinned dylib file names."""
-    tdlib_keg, openssl_keg = Path(tdlib_keg), Path(openssl_keg)
-    tdlib, openssl = _receipt(tdlib_keg), _receipt(openssl_keg)
+    tdlib_keg = Path(tdlib_keg)
+    tdlib = _receipt(tdlib_keg)
+    openssl, inputs = check_openssl_keg(openssl_keg, row)
     source, versions = tdlib['source'], tdlib['source'].get('versions')
     dependency = [d for d in tdlib.get('runtime_dependencies') or () if type(d) is dict and d.get('full_name') == 'openssl@3']
     if (tdlib_keg.name != 'HEAD-' + row.source_commit[:7] or source.get('scm_revision') != row.source_commit
             or type(versions) is not dict or versions.get('head') != tdlib_keg.name
-            or openssl_keg.name != row.openssl_version or openssl_keg.parent.name != 'openssl@3'
-            or type(openssl['source'].get('versions')) is not dict
-            or openssl['source']['versions'].get('stable') != row.openssl_version
             or len(dependency) != 1 or dependency[0].get('version') != row.openssl_version
-            or tdlib.get('arch') != 'arm64' or openssl.get('arch') != 'arm64'):
+            or tdlib.get('arch') != 'arm64'):
         raise NativePreparationError('keg_mismatch')
-    return tdlib, openssl, {'libtdjson.dylib': tdlib_keg / 'lib' / f'libtdjson.{row.tdlib_version}.dylib',
-                            'libssl.3.dylib': openssl_keg / 'lib/libssl.3.dylib',
-                            'libcrypto.3.dylib': openssl_keg / 'lib/libcrypto.3.dylib'}
+    return tdlib, openssl, {'libtdjson.dylib': tdlib_keg / 'lib' / f'libtdjson.{row.tdlib_version}.dylib', **inputs}
 
 
 def check_schema(tdlib_source, row):
@@ -171,6 +179,37 @@ def _digest(path):
     return len(data), hashlib.sha256(data).hexdigest()
 
 
+def relocate(target, name, openssl_keg, row, runner):
+    """One copied dylib rewritten to @loader_path, ad-hoc signed and rechecked; returns its lock artifact."""
+    dependencies, _, _ = _metadata(target)
+    _tool(runner, ['/usr/bin/install_name_tool', '-id', '@loader_path/' + name,
+                   *_changes(dependencies, openssl_keg), str(target)])
+    _tool(runner, ['/usr/bin/codesign', '--force', '--sign', '-', str(target)])
+    dependencies, symbols, minimum = _metadata(target)
+    if ({d for d in dependencies if d.startswith('@loader_path/')} != LOADER[name]
+            or any(d not in SYSTEM_LIBRARIES and not d.startswith('@loader_path/') for d in dependencies)
+            or len(set(dependencies)) != len(dependencies) or minimum != row.minimum_os
+            or name == 'libtdjson.dylib' and not set(REQUIRED_SYMBOLS) <= symbols):
+        raise NativePreparationError('dependency_mismatch')
+    os.chmod(target, 0o500)
+    size, sha256 = _digest(target)
+    return {'name': name, 'bytes': size, 'sha256': sha256, 'dependencies': dependencies}
+
+
+def write_notices(output, row, openssl_keg, tdlib_license):
+    """The OpenSSL keg's notices and TDLib's license under output/notices (directories already exist)."""
+    for name in ('LICENSE.txt', 'AUTHORS.md', 'README.md'):
+        _write(output / 'notices' / ('openssl-' + row.openssl_version) / name, _read(Path(openssl_keg) / name, 1 << 20))
+    _write(output / 'notices/tdlib/LICENSE_1_0.txt', tdlib_license)
+
+
+def provenance_bytes(keg, receipt):
+    """`{input_sha256, record}` of one keg's INSTALL_RECEIPT.json, its private path redacted."""
+    raw = _read(Path(keg) / 'INSTALL_RECEIPT.json', 65536)
+    return (json.dumps({'input_sha256': hashlib.sha256(raw).hexdigest(), 'record': _redacted(receipt)},
+                       sort_keys=True) + '\n').encode()
+
+
 def lock_document(row, artifacts, tdlib_receipt):
     """The v1 lock, key order and formatting exactly as committed."""
     built = tdlib_receipt['built_on']
@@ -233,19 +272,7 @@ def prepare_native(output, *, tdlib_source, tdlib_keg=TDLIB_KEG, openssl_keg=OPE
     for name in NAMES:
         target = output / 'native' / name
         _write(target, _read(inputs[name], MAX_DYLIB), 0o600)
-        dependencies, _, _ = _metadata(target)
-        _tool(runner, ['/usr/bin/install_name_tool', '-id', '@loader_path/' + name,
-                       *_changes(dependencies, openssl_keg), str(target)])
-        _tool(runner, ['/usr/bin/codesign', '--force', '--sign', '-', str(target)])
-        dependencies, symbols, minimum = _metadata(target)
-        if ({d for d in dependencies if d.startswith('@loader_path/')} != LOADER[name]
-                or any(d not in SYSTEM_LIBRARIES and not d.startswith('@loader_path/') for d in dependencies)
-                or len(set(dependencies)) != len(dependencies) or minimum != row.minimum_os
-                or name == 'libtdjson.dylib' and not set(REQUIRED_SYMBOLS) <= symbols):
-            raise NativePreparationError('dependency_mismatch')
-        os.chmod(target, 0o500)
-        size, sha256 = _digest(target)
-        artifacts.append({'name': name, 'bytes': size, 'sha256': sha256, 'dependencies': dependencies})
+        artifacts.append(relocate(target, name, openssl_keg, row, runner))
     document = lock_document(row, artifacts, tdlib_receipt)
     data = lock_bytes(document)
     try:
@@ -253,13 +280,9 @@ def prepare_native(output, *, tdlib_source, tdlib_keg=TDLIB_KEG, openssl_keg=OPE
     except NativeRuntimeError:
         raise NativePreparationError('native_validation_failed') from None
     _write(output / 'tdlib-lock.json', data)
-    for name in ('LICENSE.txt', 'AUTHORS.md', 'README.md'):
-        _write(output / 'notices' / ('openssl-' + row.openssl_version) / name, _read(Path(openssl_keg) / name, 1 << 20))
-    _write(output / 'notices/tdlib/LICENSE_1_0.txt', _read(Path(tdlib_source) / 'LICENSE_1_0.txt', 1 << 20))
+    write_notices(output, row, openssl_keg, _read(Path(tdlib_source) / 'LICENSE_1_0.txt', 1 << 20))
     for label, keg, receipt in (('tdlib', tdlib_keg, tdlib_receipt), ('openssl', openssl_keg, openssl_receipt)):
-        raw = _read(Path(keg) / 'INSTALL_RECEIPT.json', 65536)
-        _write(output / 'provenance' / f'{label}-build.json', (json.dumps(
-            {'input_sha256': hashlib.sha256(raw).hexdigest(), 'record': _redacted(receipt)}, sort_keys=True) + '\n').encode())
+        _write(output / 'provenance' / f'{label}-build.json', provenance_bytes(keg, receipt))
     try:
         validate_native(lock, 'macos-arm64', directory=output / 'native', probe=probe)
     except NativeRuntimeError:

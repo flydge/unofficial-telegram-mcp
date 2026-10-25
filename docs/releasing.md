@@ -1,6 +1,6 @@
 # Releasing
 
-[Overview](../README.md) · [Roadmap](roadmap.md) · [Security and rollback](security.md#rollback) · [Release preparation tools (frozen 0.51.0)](release-preflight.md)
+[Overview](../README.md) · [Roadmap](roadmap.md) · [Security and rollback](security.md#rollback) · [TDLib upgrade](tdlib-upgrade.md) · [Release preparation tools (frozen 0.51.0)](release-preflight.md)
 
 The checklist for cutting a release of this repository, from the pre-cut conditions to the
 post-release version bump. Every step names a command or a file that exists at the release
@@ -103,7 +103,9 @@ gated.
    follow section 6, and every unmet gate bullet is disclosed in the notes.
 7. **Pins reviewed.** If a dependency pin or `packaging/tdlib-lock.json` changed since the
    previous tag, `docs/third-party-notices.md`, `docs/licensing.md` and `docs/licenses/` match, and
-   `packaging/constraints-<version>.txt` pins the tested closure with hashes.
+   `packaging/constraints-<version>.txt` pins the tested closure with hashes. A TDLib pin changes only
+   through the [controlled TDLib upgrade](tdlib-upgrade.md), for one of its triggers, with every step
+   of that procedure recorded.
 
 Author and committer identity and per-commit history findings are not pre-cut conditions: the
 gate reports them (section 5) and publication waits for the owner's history decision when the
@@ -419,5 +421,6 @@ false`: owner and real-account cells stay `pending` and need their own records.
 | Tag | `git tag -a v<version> -m ...` (the release commit for a release with assets) |
 | Gpub with remote pre and post checks | section 8 |
 | Pin note for users | section 9, in the release notes |
+| TDLib pin change (only on a trigger) | [tdlib-upgrade.md](tdlib-upgrade.md) |
 | Rollback | `docs/security.md#rollback` |
 | Dev bump | section 11 |
