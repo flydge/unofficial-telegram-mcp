@@ -3437,10 +3437,30 @@ def codex_auth_source(codex_home: Path | None) -> Path | None:
     return codex_home / "auth.json" if stat.S_ISREG(metadata.st_mode) else None
 
 
+def well_formed_refresh(current: bytes, refreshed: bytes) -> bool:
+    """Whether a refreshed auth.json can replace the caller's: a JSON object with the same top-level keys as the
+    caller's file (and the same keys in its `tokens` object), every field that is a non-empty string there still a
+    non-empty string. A truncated or emptied file (an agent killed while writing it) never qualifies."""
+    try:
+        old, new = json.loads(current), json.loads(refreshed)
+    except (ValueError, RecursionError):
+        return False
+
+    def filled(level: dict) -> set:
+        return {key for key, value in level.items() if isinstance(value, str) and value}
+    if not isinstance(old, dict) or not isinstance(new, dict) or set(old) != set(new) or not filled(old) <= filled(new):
+        return False
+    tokens, renewed = old.get("tokens"), new.get("tokens")
+    return not isinstance(tokens, dict) or (isinstance(renewed, dict) and set(tokens) == set(renewed)
+                                            and filled(tokens) <= filled(renewed))
+
+
 def sync_codex_auth(source: Path, copied: str, private: Path) -> str:
     """When Codex refreshed its tokens in the private home during the run, the caller's auth.json still holds the
-    refresh token it spent; the refreshed file goes back (atomically, owner-only) so the caller's Codex stays signed
-    in, unless the caller's file changed meanwhile ('kept'). Nothing is printed or kept elsewhere."""
+    refresh token it spent; the refreshed file goes back (atomically, owner-only: 'returned') so the caller's Codex
+    stays signed in. The caller's file is kept as it is when it changed meanwhile ('kept'), when the refreshed file is
+    not well formed ('invalid') and when the write fails ('failed', no temporary file left). Nothing is printed or kept
+    elsewhere."""
     try:
         refreshed = private.read_bytes()
     except OSError:
@@ -3453,9 +3473,20 @@ def sync_codex_auth(source: Path, copied: str, private: Path) -> str:
         return "kept"
     if _sha(current) != copied:
         return "kept"
+    if not well_formed_refresh(current, refreshed):
+        return "invalid"
     temporary = source.with_name(f".auth.json.{os.getpid()}.matrix")
-    write_private(temporary, refreshed)
-    os.replace(temporary, source)
+    try:
+        write_private(temporary, refreshed)
+        os.replace(temporary, source)
+    except BaseException as error:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        if isinstance(error, OSError):
+            return "failed"
+        raise
     return "returned"
 
 
@@ -3563,11 +3594,13 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
         return {"status": "pass" if not lost and all(cell["status"] == "pass" for cell in results) else "fail",
                 "cli": version, "model": model or "default", "cells": results}
     finally:
-        if auth is not None:
-            outcome = sync_codex_auth(*auth, config / "auth.json")
-            if outcome != "unchanged":  # A fixed line; never the file or its contents.
-                print(f"codex credentials refreshed during the run: {outcome}", file=sys.stderr)
-        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            if auth is not None:
+                outcome = sync_codex_auth(*auth, config / "auth.json")
+                if outcome != "unchanged":  # A fixed line; never the file or its contents.
+                    print(f"codex credentials refreshed during the run: {outcome}", file=sys.stderr)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def check_agent_section(column: str, section: object) -> None:

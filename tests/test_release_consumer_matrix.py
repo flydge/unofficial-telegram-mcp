@@ -1235,20 +1235,75 @@ class AgentTableTests(unittest.TestCase):
                                   "ANTHROPIC_API_KEY": "k"})
 
     def test_refreshed_codex_credentials_go_back_only_onto_an_unchanged_file(self):
+        refreshed = CODEX_AUTH.replace(b"synthetic-r", b"synthetic-r2").replace(b"synthetic-a", b"synthetic-a2")
         with tempfile.TemporaryDirectory() as directory:
             source, private = Path(directory) / "auth.json", Path(directory) / "private.json"
-            source.write_bytes(b"old")
-            private.write_bytes(b"old")
-            copied = matrix._sha(b"old")
+            source.write_bytes(CODEX_AUTH)
+            private.write_bytes(CODEX_AUTH)
+            copied = matrix._sha(CODEX_AUTH)
             self.assertEqual(matrix.sync_codex_auth(source, copied, private), "unchanged")
-            private.write_bytes(b"refreshed")
+            private.write_bytes(refreshed)
             source.write_bytes(b"changed meanwhile")
             self.assertEqual(matrix.sync_codex_auth(source, copied, private), "kept")
             self.assertEqual(source.read_bytes(), b"changed meanwhile")
-            source.write_bytes(b"old")
+            source.write_bytes(CODEX_AUTH)
             self.assertEqual(matrix.sync_codex_auth(source, copied, private), "returned")
-            self.assertEqual((source.read_bytes(), stat.S_IMODE(source.stat().st_mode)), (b"refreshed", 0o600))
+            self.assertEqual((source.read_bytes(), stat.S_IMODE(source.stat().st_mode)), (refreshed, 0o600))
             self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["auth.json", "private.json"])
+
+    def test_only_a_well_formed_refreshed_credential_goes_back(self):
+        value = json.loads(CODEX_AUTH)
+        bad = [b"", CODEX_AUTH[:40], b"[]", b"null", json.dumps({**value, "extra": 1}).encode(),
+               json.dumps({key: item for key, item in value.items() if key != "last_refresh"}).encode(),
+               json.dumps({**value, "tokens": {**value["tokens"], "refresh_token": ""}}).encode(),
+               json.dumps({**value, "tokens": {**value["tokens"], "access_token": None}}).encode(),
+               json.dumps({**value, "tokens": {"refresh_token": "x"}}).encode(),
+               json.dumps({**value, "tokens": "x"}).encode()]
+        with tempfile.TemporaryDirectory() as directory:
+            source, private = Path(directory) / "auth.json", Path(directory) / "private.json"
+            for data in bad:
+                with self.subTest(data=data[:60]):
+                    source.write_bytes(CODEX_AUTH)
+                    private.write_bytes(data)
+                    self.assertEqual(matrix.sync_codex_auth(source, matrix._sha(CODEX_AUTH), private), "invalid")
+                    self.assertEqual(source.read_bytes(), CODEX_AUTH)
+            api_key = b'{"OPENAI_API_KEY": "synthetic-key"}\n'
+            source.write_bytes(api_key)
+            private.write_bytes(b'{"OPENAI_API_KEY": ""}\n')
+            self.assertEqual(matrix.sync_codex_auth(source, matrix._sha(api_key), private), "invalid")
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["auth.json", "private.json"])
+
+    def test_a_failed_write_back_keeps_the_callers_file_and_leaves_no_temporary_file(self):
+        refreshed = CODEX_AUTH.replace(b"synthetic-r", b"synthetic-r2")
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "caller"
+            caller.mkdir()
+            source, private = caller / "auth.json", Path(directory) / "private.json"
+            source.write_bytes(CODEX_AUTH)
+            private.write_bytes(refreshed)
+            copied = matrix._sha(CODEX_AUTH)
+            caller.chmod(0o500)  # the temporary file cannot be created
+            try:
+                self.assertEqual(matrix.sync_codex_auth(source, copied, private), "failed")
+            finally:
+                caller.chmod(0o700)
+            for error in (OSError(28, "No space left on device"), matrix.MatrixInterrupted(signal.SIGTERM)):
+                with self.subTest(error=type(error).__name__), mock.patch.object(matrix.os, "replace",
+                                                                                 side_effect=error):
+                    if isinstance(error, OSError):
+                        self.assertEqual(matrix.sync_codex_auth(source, copied, private), "failed")
+                    else:
+                        with self.assertRaises(matrix.MatrixInterrupted):
+                            matrix.sync_codex_auth(source, copied, private)
+                self.assertEqual(sorted(path.name for path in caller.iterdir()), ["auth.json"])
+                self.assertEqual(source.read_bytes(), CODEX_AUTH)
+
+    def test_the_column_scratch_is_removed_even_when_the_write_back_fails(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(matrix, "sync_codex_auth", side_effect=RuntimeError("synthetic")):
+            with self.assertRaises(RuntimeError):
+                run_column(Path(directory), "codex", cells=("agent.census",), auth=CODEX_AUTH)
+            self.assertFalse((Path(directory) / "scratch-codex-honest").exists())
 
     def test_an_agent_cell_records_its_attempts(self):
         for attempts in (0, matrix.AGENT_ATTEMPTS + 1, "1", True, None):
