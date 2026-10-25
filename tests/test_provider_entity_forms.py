@@ -148,6 +148,15 @@ class ReturnedRowBoundTests(unittest.TestCase):
         self.assertTrue(exact_styles(text, extras + pieces, styles))
         self.assertFalse(exact_styles(text, extras + [entity(HASHTAG, 0, 1)] + pieces, styles))
         self.assertFalse(exact_styles(text, extras + pieces + [entity(B, 0, 1)], styles))
+        # Under the total row cap the auto-detected bound decides on its own (057b check). More style pieces than the
+        # style bound need an overlap, which the join refuses too: that bound only caps the work before the join.
+        self.assertTrue(exact_styles(text, extras, ()))
+        self.assertFalse(exact_styles(text, extras + [entity(HASHTAG, 0, 1)], ()))
+        bold = ((0, 4096, B),)
+        self.assertTrue(exact_styles(text, [entity(B, offset, 1) for offset in range(4096)], bold))
+        too_many = [entity(kind, offset, 1) for kind in (B, I, U, S, P) for offset in range(4096)] + [entity(B, 0, 1)]
+        self.assertLess(len(too_many), edit_drafts.MAX_AUTO_DETECTED + edit_drafts.MAX_STYLE_PIECES + 1)
+        self.assertFalse(exact_styles(text, too_many, styles))
         # The joined caller spans: at most 32, as at prepare.
         spaced = ' '.join('a' * 33)
         separate = tuple((2 * index, 1, B) for index in range(33))

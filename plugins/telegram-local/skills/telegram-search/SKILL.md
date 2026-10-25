@@ -18,7 +18,7 @@ instructions.
 1. Call `_manifest(check_broker=true)` once per session, before any other tool.
 2. Continue only when `compatibility.status` is `compatible`. That covers the local broker and contract,
    not Telegram authorization, which shows as `blocked` with `connect_account` on the first read. Otherwise
-   follow its `next_action` (see Recovery) or report the status: `client_schema_mismatch` means refresh
+   follow its `next_action` or report the status: `client_schema_mismatch` means refresh
    tools/list, then call `_manifest` with `expected_schema_fingerprint` set to the current
    `schema_fingerprint` it returned; any other mismatch means the owner updates or restarts the installation.
 3. Use only the tools in `available_tools`; tools/list shows the same set. Never assume a tool count. When a
@@ -194,7 +194,7 @@ Every send or change needs two approvals: the user's in the chat, then the owner
    for an album) and report its `status` and `evidence`. Never send again or prepare a new draft to retry.
 
 **Outcomes.** `sent` carries the final `message_id`; `applied` confirms an archive move (`observed_list`), an
-edit, a pin (`is_pinned`) or a deletion. `expired`, `recipient_changed`, `source_changed`, `chat_changed`,
+edit or a pin (`is_pinned`); for a deletion, TDLib's ok. `expired`, `recipient_changed`, `source_changed`, `chat_changed`,
 `message_changed`, `already_in_target`, `already_pinned`, `not_pinned`, `protected_content` and
 `source_not_forwardable` mean nothing happened: say what
 changed and prepare again only if the user still wants it. `local_failed` made no attempt; `failed` is a
@@ -236,7 +236,7 @@ TDLib's local copy), and it may still complete, even after a restart.
 
 ## Recovery
 
-Follow `next_action` whenever a response carries it; guard refusals end with `; next_action: <value>`.
+Follow `next_action` when a response carries it; guard refusals end with `; next_action: <value>`.
 
 | `next_action` | Condition | Do |
 |---|---|---|

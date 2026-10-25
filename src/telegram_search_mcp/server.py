@@ -571,7 +571,7 @@ _SURFACE: dict[str, tuple[str, str, str]] = {
     "apply_prepared_message_delete": ("Apply a prepared deletion",
         "Revalidate the message, then make exactly one irreversible deletion attempt for everyone; it also unpins "
         "the message.",
-        "applied means Telegram confirmed it; failed means the message is still there; message_changed means no "
+        "applied: TDLib answered ok after a local read; failed: the message is still there; message_changed: no "
         "attempt. " + _approval("deletes", "outcome_unknown means it may still complete later, even after a restart: "
                                 "call get_send_status and never resend.")),
 }
