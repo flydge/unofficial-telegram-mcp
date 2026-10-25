@@ -433,17 +433,21 @@ and confirm it with `connect` (`already_connected`).
    enrollment binds `tdlib/` by its inode, so its contents are replaced, never the directory itself:
 
    ```bash
-   mkdir -m 700 "$S/tdlib-migrated-$STAMP"
-   mv "$S/tdlib/db" "$S/tdlib/files" "$S/tdlib-migrated-$STAMP/"
-   cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/"
-   diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
+   ASIDE="$S/tdlib-migrated-$(date +%Y%m%d-%H%M%S)"
+   mkdir -m 700 "$ASIDE" &&
+     mv "$S/tdlib/db" "$S/tdlib/files" "$ASIDE/" &&
+     test ! -e "$S/tdlib/db" && test ! -e "$S/tdlib/files" &&
+     cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/" &&
+     diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
    ```
 4. Start each broker with the `launchctl bootstrap` command above, then run the restored release's
    `connect` for that account: it answers `already_connected` with no new login, or runs the QR flow on
    the existing enrollment if the session is no longer authorized. Reconnect the clients and make one
    bounded read.
 
-The backup and the moved-aside copy stay until the owner decides otherwise; deleting either is a separate
+Each attempt moves the current session aside under a new name and copies only once the old directories are
+gone, so a repeated attempt never merges into a session the old TDLib already wrote. The backup and every
+moved-aside copy stay until the owner decides otherwise; deleting either is a separate
 owner decision. No installer guard is added for this (decision of 25.10.2026, recorded in the
 [upgrade procedure](tdlib-upgrade.md#8-rollback-path-to-the-old-pin)): a hash of `tdlib/db` changes on every
 start, the database version is readable only with the Keychain key, which the installer never reads, and a

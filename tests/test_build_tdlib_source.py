@@ -388,8 +388,9 @@ class DocumentTests(unittest.TestCase):
                 if len(self.calls) == 1:
                     raise KeyboardInterrupt
                 return -9
-        with mock.patch.object(B.os, 'killpg') as killpg, self.assertRaises(KeyboardInterrupt):
+        with mock.patch.object(B.os, 'killpg') as killpg, self.assertRaises(B.BuildError) as caught:
             B._step(lambda command, **kwargs: Interrupted(), ['make'], env={}, timeout=5, log=log)
+        self.assertEqual(str(caught.exception), 'build_interrupted')  # Ctrl-C is the same fixed refusal.
         killpg.assert_called_once_with(78, B.signal.SIGKILL)
         self.assertEqual(Interrupted.calls, [5, None])  # Reaped after the kill.
         self.assertTrue(all(B.signal.getsignal(n) is sentinel for n in numbers))
@@ -408,12 +409,30 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(all(B.signal.getsignal(n) is sentinel for n in numbers))
         self.assertEqual(received, [])
 
+    def test_a_signal_inherited_as_ignored_stays_ignored(self):
+        # Under nohup SIGHUP arrives ignored: a hangup must not cancel the build, and the handler stays as it was.
+        previous = B.signal.signal(B.signal.SIGHUP, B.signal.SIG_IGN)
+        self.addCleanup(B.signal.signal, B.signal.SIGHUP, previous)
+
+        def wait(timeout=None, calls=[]):
+            calls.append(timeout)
+            if len(calls) == 1:
+                B.signal.raise_signal(B.signal.SIGHUP)
+            return 0
+        B._step(lambda command, **kwargs: mock.Mock(pid=80, wait=wait), ['make'], env={}, timeout=5,
+                log=io.BytesIO())
+        self.assertIs(B.signal.getsignal(B.signal.SIGHUP), B.signal.SIG_IGN)
+
     def test_a_signalled_tool_leaves_no_build_process_behind(self):
         # A real child group that would outlive the tool: a shell and its background sleep, in their own session.
         script = (
             'import importlib.util, io, subprocess, sys\n'
             'spec = importlib.util.spec_from_file_location("b", sys.argv[1])\n'
             'b = importlib.util.module_from_spec(spec); sys.modules["b"] = b; spec.loader.exec_module(b)\n'
+            # A backgrounded run inherits SIGINT (and maybe SIGTERM) as ignored; the tool under test starts from the
+            # interactive defaults a Terminal gives it.
+            'import signal; signal.signal(signal.SIGINT, signal.default_int_handler)\n'
+            'signal.signal(signal.SIGTERM, signal.SIG_DFL)\n'
             'b._step(subprocess.Popen, ["/bin/sh", "-c", sys.argv[2]], env={"PATH": "/usr/bin:/bin"}, timeout=60,'
             ' log=open(sys.argv[3], "wb"))\n')
         for number in (B.signal.SIGINT, B.signal.SIGTERM):

@@ -184,8 +184,9 @@ The output holds `native/`, the generated `include/td/telegram/td_api.h`, `notic
 `source-rebuild-lock.json`. That last file is a document with the v1 lock's keys whose build method is
 `source-rebuild`. The v1 grammar refuses it, so it never replaces `packaging/tdlib-lock.json`. The build tree
 is removed after a successful build and kept after a failed one, and all tool output goes only to `--log`.
-Each cmake step runs in its own process group, which is killed with the step on a timeout, Ctrl-C, SIGTERM
-or SIGHUP (refused `build_interrupted`), so no compiler outlives the tool. `compare` exits 0 only when every
+Each cmake step runs in its own process group, which is killed with the step on a timeout (refused
+`build_failed`) or on Ctrl-C, SIGTERM or SIGHUP (refused `build_interrupted`; a signal the tool inherited as
+ignored, as under `nohup`, stays ignored), so no compiler outlives the tool. `compare` exits 0 only when every
 name, mode and byte is equal.
 
 The source-built `libtdjson` is not expected to equal the Homebrew one. Homebrew's implicit build flags are
@@ -360,18 +361,22 @@ candidate is accepted and no rollback can be needed; deleting it is a separate o
      enrollment binds `tdlib/` by its inode, so its contents are replaced, never the directory itself:
 
      ```bash
-     mkdir -m 700 "$S/tdlib-migrated-$STAMP"
-     mv "$S/tdlib/db" "$S/tdlib/files" "$S/tdlib-migrated-$STAMP/"
-     cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/"
-     diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
+     ASIDE="$S/tdlib-migrated-$(date +%Y%m%d-%H%M%S)"
+     mkdir -m 700 "$ASIDE" &&
+       mv "$S/tdlib/db" "$S/tdlib/files" "$ASIDE/" &&
+       test ! -e "$S/tdlib/db" && test ! -e "$S/tdlib/files" &&
+       cp -pR "$S/tdlib-backup-$STAMP/db" "$S/tdlib-backup-$STAMP/files" "$S/tdlib/" &&
+       diff -rq "$S/tdlib" "$S/tdlib-backup-$STAMP" && echo "restored"
      ```
   4. Start each broker (`launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"`),
      then run the restored release's `connect` for that account: it answers `already_connected` with no new
      login. If the session is no longer authorized, `connect` runs the QR flow on the existing enrollment.
      Reconnect the clients, call `_manifest` with `check_broker=true` and make one bounded read.
 
-  Restoring by copy keeps the backup for a second attempt. TDLib fetches from the server what it had cached
-  after the copy was made.
+  Restoring by copy keeps the backup for a second attempt. Each attempt moves the current session aside under a
+  new name first and copies only once `tdlib/db` and `tdlib/files` are gone, so a repeated attempt never merges
+  into a session the old TDLib already wrote, and nothing is overwritten or deleted. TDLib fetches from the
+  server what it had cached after the copy was made.
 - **No installer guard (decision, 25.10.2026).** A cheap installer-side guard is not added now. Hashing
   `tdlib/db` cannot be one, because TDLib writes to its database whenever it runs, so every rollback would
   refuse. Reading the database version needs the Keychain key, which the installer never reads. A guard on

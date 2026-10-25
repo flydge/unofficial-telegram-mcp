@@ -358,13 +358,16 @@ def _step(popen, command, *, env, timeout, log):
     It runs in a session of its own, so a terminal's SIGINT reaches only this process: its whole process group
     is killed and reaped whenever the wait ends other than by its exit (timeout, KeyboardInterrupt, SIGTERM or
     SIGHUP, any error), so no compiler outlives the tool. SIGTERM and SIGHUP, fatal by default, are caught for
-    the step's duration (main thread only) and refused as build_interrupted; the previous handlers come back."""
+    the step's duration (main thread only, and never where the signal was inherited as ignored, as under nohup)
+    and, like KeyboardInterrupt, refused as build_interrupted; a timeout is build_failed. The previous handlers
+    come back."""
     log.write(('\n$ ' + ' '.join(command) + '\n').encode())
     log.flush()
     previous = {}
     if threading.current_thread() is threading.main_thread():
         for number in (signal.SIGTERM, signal.SIGHUP):
-            previous[number] = signal.signal(number, _terminated)
+            if signal.getsignal(number) is not signal.SIG_IGN:
+                previous[number] = signal.signal(number, _terminated)
     process, code = None, None
     try:
         try:
@@ -383,7 +386,7 @@ def _step(popen, command, *, env, timeout, log):
                 process.wait()
     except subprocess.TimeoutExpired:
         raise BuildError('build_failed') from None
-    except _Terminated:
+    except (_Terminated, KeyboardInterrupt):
         raise BuildError('build_interrupted') from None
     finally:
         for number, handler in previous.items():

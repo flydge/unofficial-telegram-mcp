@@ -197,3 +197,20 @@ above stand, and no build was repeated.
    still equals the files present. `run-a.status` and `run-b.status`, which were empty, now hold `exit=0`
    from `run-ab.exit`, the one exit status of the chained A and B builds.
 10. **The criterion 3 reading (low).** Stated above, and added to the owner decision sheet.
+
+## Check fixes (lead, 25.10.2026)
+
+The fix-only check of the review fixes found two mediums and two lows, fixed by the lead:
+
+- The documented restore was not repeat-safe: a second attempt with the same move-aside name failed to move the
+  session but still copied, merging the backup into a database the old TDLib had written. Each attempt now moves
+  the current session aside under a new timestamped name and copies only once `tdlib/db` and `tdlib/files` are
+  gone, with the steps joined so a failed step stops the rest (docs/tdlib-upgrade.md step 8 and docs/security.md).
+  Rehearsed twice on a scratch tree: both attempts restored, each moved-aside copy kept its own state, and the
+  inode of `tdlib/` was kept.
+- The real-signal test failed when the suite ran in the background, where SIGINT is inherited as ignored: its
+  child now starts from the interactive defaults; it passes in the foreground and as a background job.
+- `_step` replaced a signal handler inherited as ignored, so a build started under `nohup` was cancelled by a
+  hangup: a signal inherited as ignored now stays ignored (new test).
+- The docs said a timeout and Ctrl-C refuse `build_interrupted`: Ctrl-C now does (it was a traceback), and a
+  timeout stays `build_failed`, as the doc now says.
