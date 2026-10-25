@@ -22,7 +22,7 @@ The public surface of the current candidate contains sixty-four tools (published
 - `prepare_reply_artifact_send`, `get_reply_artifact_draft`, `update_reply_artifact_draft` and `refresh_reply_artifact_draft` prepare and inspect document, photo and voice-note replies with bound local bytes, caption, source provenance and target evidence (separate opt-in); `send_prepared_artifact` makes the approved reply attempt.
 - `prepare_reply_text_send`, `get_reply_draft`, `update_reply_draft` and `refresh_reply_draft` prepare and inspect immutable same-chat text replies with full target evidence and fresh approval (separate opt-in); `send_prepared_text` makes the approved reply attempt. An exact forum topic additionally requires `topic_text_send`; topic replies support text revision but require fresh preparation instead of refresh.
 - `prepare_text_send` and `send_prepared_text` preview the full normalized text and make one approved send attempt; an optional exact forum topic requires the separate `topic_text_send` capability.
-- `prepare_artifact_send` fixes the recipient, file hash, size, name, MIME, caption, and `kind=document|photo|voice_note` in an unsent draft. Document is the compatible default. Photos are decoded and validated; voice sources are converted locally to verified OGG/Opus mono.
+- `prepare_artifact_send` fixes the recipient, file hash, size, name, MIME, caption (optionally styled since 0.58; see [Styled outgoing captions](#styled-outgoing-captions-058-candidate)), and `kind=document|photo|voice_note` in an unsent draft. Document is the compatible default. Photos are decoded and validated; voice sources are converted locally to verified OGG/Opus mono.
 - `send_prepared_artifact` makes one provider attempt only after explicit user approval of that exact preview.
 - `prepare_forward_send` and `send_prepared_forward` forward (original sender shown) or copy (no attribution) exactly one existing message from one exact chat to another, with a complete source preview, owner approval and one provider attempt (separate default-off `forward_send` opt-in together with `send`); see [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 - `prepare_video_send` and `send_prepared_video` send one owned MP4/MOV artifact (at most 64 MiB) as a native Telegram video, with duration, dimensions, codec, audio and streaming layout read locally from the file's own boxes, a complete preview, owner approval and one provider attempt (separate default-off `video_send` opt-in together with `send`); see [Native video send (F15a)](#native-video-send-f15a).
@@ -180,8 +180,9 @@ space; U+2028, U+2029, U+030A, U+0333 and U+033F are removed; leading and traili
 boundaries. Normalize and recalculate spans before preparation; no parser or
 automatic span rebasing is provided. Null, extra fields, duplicate/crossing spans
 and overlapping or adjacent spans of the same style are rejected. Distinct styles
-may nest or cover the same range. Hidden links, mentions, custom emoji, quotes,
-code and formatted attachment captions are outside this outgoing subset.
+may nest or cover the same range. Hidden links, mentions, custom emoji, quotes
+and code are outside this outgoing subset; attachment captions take the same five
+styles under their own capability since 0.58 (below).
 
 Review the full text, every style/range/covered substring including spoilers,
 account, recipient, optional exact topic and complete reply evidence, expiry and
@@ -205,6 +206,51 @@ its text may come back (review fix 057b). The result's rows are bounded per kind
 TDLib's pieces make grow: at most 32 joined caller spans, 4096 detected entities and 4096 pieces per style
 (review fix 057b). This technical
 contract does not establish actual Telegram rendering or live consumer readiness.
+
+## Styled outgoing captions (0.58 candidate)
+
+`prepare_artifact_send`, `prepare_reply_artifact_send`, `update_reply_artifact_draft`, `update_draft` (with
+`caption`) and `prepare_video_send` accept an optional `outgoing_entities`: the five styles above over the caption
+of a document, photo, voice note or video. This supersedes the earlier sections' statements that attachment
+captions stay plain or keep empty entities. Album items stay plain, and so does the caption a forward copies.
+
+- **Capability.** The default-off `formatted_caption_send`, in the `send` profile. It depends on `send`
+  (`required_capabilities()` is the single source), and it is an option of a caption send, never an operation
+  gate. Without it `prepare_artifact_send` answers `error` and `prepare_video_send` `unavailable`, creating no
+  draft; the reply tools answer `capability_disabled` naming it after `reply_artifact_send` and `send`.
+- **The caption.** A styled caption must already be the text Telegram stores: no change under NFKC, no CR, tab,
+  control or format character, no leading or trailing space or line feed, no character Telegram rewrites.
+  Anything else is refused, never rewritten, so the spans address the caption exactly as given. Spans count its
+  UTF-16 code units under the same closed rules as text (at most 32, no crossing, one style's spans separate).
+  An empty caption takes no styles. A plain caption keeps the 0.57 normalization.
+- **The preview.** `prepare_artifact_send` and `get_draft` show `outgoing_entities` and a `preview_sha256` over
+  domain `telegram-search-mcp.artifact` version 1: the draft ID, account, recipient and title, expiry in UTC,
+  kind, artifact ID, SHA-256, size, display name and MIME type, the caption with its native styles, the voice
+  facts, and the fixed send and content options with no topic, reply or markup. A plain draft has neither field,
+  so its wire is unchanged. A styled reply's facts move to reply-artifact version 2, whose `outgoing_entities`
+  slot holds the native styles; its inner draft carries the artifact digest too, and a plain reply stays version 1.
+  A styled video preview is video version 2, with the styles in its request's caption entities.
+- **Authority.** A styled draft is bound to the provider and epoch it was prepared under, like formatted text.
+  Refresh keeps the styles under the same provider; a caption update states its styles again, and an empty list
+  leaves the new caption plain. The capability is checked again at inspection, revision, the owner dialog, the
+  claim, the registration, just before transport, and for status and receipt replay.
+- **Transport.** One closed `sendMessage` whose caption carries exactly the frozen styles. The TDLib guard admits
+  only canonical caller styles over a caption in its stored form on a single send, and only plain captions on an
+  album item. The reviewed account and recipient title are read again under the serialized provider lock just
+  before the one attempt.
+- **Read-back.** The returned caption must match the sent one by digest. Its entities must be exactly the frozen
+  styles, possibly in TDLib's split form, plus only the entities Telegram detects (as for formatted text); a media
+  timestamp must sit on a whole token with its value, at most a voice note's own duration, and a document or photo
+  without a reply keeps none. Anything else leaves the send `outcome_unknown`, which is never retried.
+- **Plain captions (a defect older than 0.58).** An artifact reply's read-back used to require empty caption
+  entities, so a caption with a link, mention or hashtag never confirmed. A plain caption now tolerates exactly the
+  auto-detected entities, and plain document, photo, voice-note and video sends register the caption digest too:
+  a caption that comes back changed leaves them `outcome_unknown`.
+
+The owner dialog lists each style with its covered text under the caption (see "Owner approval dialog"). The
+schema change is listed as `0.58-formatted-captions`; it moves the schema fingerprint, so a pinned policy needs the
+installer's rewrite. Disable `formatted_caption_send` to roll back. The evidence is synthetic; one approved
+formatted-caption send is part of the owner session.
 
 ## Text in one exact forum topic
 
@@ -502,6 +548,8 @@ Expires: <time>
 In reply to message <ID> in chat <ID> [untrusted Telegram evidence] (rendering[, cleaned, not exact]):
 │ «<the message replied to>»
 Target sanitized: True|False; truncated: False
+[Target styles and hidden payloads [untrusted Telegram evidence] (exact source text; UTF-16 code units):
+<Type>: offset <N>, length <N>; covered «<text>»[; <hidden payload>] …]
 
 Reply text (exact):
 │ «<text>»
@@ -525,9 +573,25 @@ The reply evidence is the bound rendering of the message replied to (`render_con
 nothing was cleaned. Its label therefore always says `(rendering)`, and `(rendering, cleaned, not exact)`
 when cleaning changed it (`sanitized` true); the sanitized flag always sits directly under the evidence.
 
+Since the 0.58 candidate one row per entity of the replied message follows the flag, for text and caption
+sources alike: its style or family without the `textEntityType` prefix (`Bold`, `TextUrl`, `CustomEmoji`,
+`MediaTimestamp`, …), its offset and length in the source's UTF-16 code units, the exact covered source text in
+`« »` under the reading rule, and its hidden payload where it has one: `hidden URL «…»` (a text link),
+`custom emoji id <N>`, `media timestamp <N> seconds`, `mentions user <N>` (or `mentions you`), `unix time <N>`
+with `no formatting`, `relative formatting` or `absolute formatting (time …, date …, day of week …)`, and
+`language «…»` (a code block). A hidden payload is therefore never legible only inside the escaped rendering.
+The broker passes the stored source projection with the preview; the renderer shows a dialog only when that
+projection renders exactly the reviewed target (`source_sha256` and display included), so the rows cannot
+describe another message. `ReplyTarget` and the preview digest are unchanged, and a target without entities
+shows no rows. The goldens (one per source family, the media TextUrl and voice-note timestamp sources, and every
+styled caption kind) are pinned byte for byte in `tests/fixtures/dialog_goldens_058.json`.
+
 A reply with a document, photo or voice note uses the same reply block, then the file lines of a plain
 file send. Its heading is `Send a document|photo|voice note reply to …`. A voice reply adds
-`Waveform (base64): <value>` after its source hash. Forward/copy, native video, archive and text-edit
+`Waveform (base64): <value>` after its source hash. A styled caption (0.58) is followed by
+`Caption styles (exact caption; UTF-16 code units):` and one `<Style>: offset <N>, length <N>; covered «…»`
+row per style; a file send with one also shows its `Preview SHA-256` and closes with "will revalidate this
+account and recipient, then make one upload/send attempt". Forward/copy, native video, archive and text-edit
 dialogs follow the same layout, shown in their own sections.
 
 The dialog is mutually exclusive with every other preview. Each preview is checked against the broker's
@@ -3177,7 +3241,9 @@ The request has one closed shape, enforced before transport (see the
 non-zero `sending_id`, and an `inputMessageVideo` whose `inputVideo` carries the staged
 local file, no thumbnail and no cover, `start_timestamp: 0`, no added stickers and the
 probed `duration`, `width`, `height` and `supports_streaming`, with a plain caption
-without entities, `show_caption_above_media: false`, no self-destruct and no spoiler.
+without entities (since 0.58, or exactly the reviewed caption styles; see
+[styled outgoing captions](#styled-outgoing-captions-058-candidate)), `show_caption_above_media: false`, no
+self-destruct and no spoiler.
 Notifications are normal; nothing is scheduled, paid or content-protected.
 
 ### Video owner dialog

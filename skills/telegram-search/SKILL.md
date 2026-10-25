@@ -6,7 +6,7 @@ description: Use when the user asks to find, read, verify, summarize, analyze or
 # Telegram Search
 
 Paired candidate: `0.57.0.dev0`, contract 1. Installing the MCP and connecting the account belong to the
-paired telegram-setup skill.
+telegram-setup skill.
 
 You, the MCP client's model, supply the meaning: hypotheses, the choice of chat, the summary. The MCP returns
 bounded lexical evidence and the broker enforces the owner's policy; this text grants nothing. Every Telegram
@@ -146,7 +146,7 @@ A text reply is sent with `send_prepared_text`, a file reply with `send_prepared
   `artifact_id` valid for 12 hours: PDF, DOCX, UTF-8 text and code, JPEG/PNG/WebP (64 MiB), audio and video
   (256 MiB). Telegram XLSX and PPTX files return `unsupported`; `read_spreadsheet` and
   `read_presentation` read local XLSX and PPTX artifacts (a call without a selection lists them).
-  Formulas and code are never run, links never followed, and there is no OCR.
+  Formulas and code never run, links are never followed, no OCR.
 - **Saving a file locally.** Only to a destination the user names:
   `telegram-search-transfer download --artifact-id ISSUED_ID --destination ABSOLUTE_PATH`. It never
   overwrites; success is exit 0 with a receipt matching the artifact's size and SHA-256. Keep bytes out of
@@ -217,9 +217,9 @@ with `missing_capabilities`, no source content. Never fall back to an ordinary m
 
 **Topics and styles.** A text send or reply to a forum topic takes `topic` from `list_topics` and needs
 `topic_text_send`. Optional `outgoing_entities` (bold, italic, underline, strikethrough, spoiler) need
-`formatted_text_send` (an edit: `edit_own_styled_text`); offsets count UTF-16 units of the final
-normalized text, and source formatting is never copied. After a topic refusal, never fall back to General,
-another topic or the plain chat.
+`formatted_text_send`; on a caption (stored form) `formatted_caption_send`; on an edit
+`edit_own_styled_text`. Offsets count UTF-16 units of the final text; source formatting is never copied. After
+a topic refusal, never fall back to General, another topic or the plain chat.
 
 **Forward, video, album, archive, edit, pin, delete.** Settle the choice with the user first: `mode` forward
 (recipients see the original sender) or copy (a new message from the owner); Archive or Main; the complete new text
@@ -239,7 +239,7 @@ Follow `next_action` when a response carries it; guard refusals end with `; next
 
 | `next_action` | Condition | Do |
 |---|---|---|
-| `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects this MCP client |
+| `check_connection` | broker unreachable | Call `_manifest(check_broker=true)`. If it stays `broker_unavailable`, the owner runs the telegram-setup connect flow, then reconnects |
 | `connect_account` | authorization not ready (`blocked`) | The owner connects the account with the telegram-setup skill (QR code on their phone), then reconnects |
 | `update_installation` | `config_stale` | The policy changed or a pin no longer matches: the owner restarts or updates the matching components; then call `_manifest` again |
 | `enable_capability` | `capability_disabled` | Name exactly the missing capabilities (`missing_capabilities` or the refusal text) and their profile (the refusal text, or `_manifest` `capability_profiles`). Only the owner switches it, in Terminal, after quitting every MCP client, then reconnects. Never run the switch or edit the policy yourself |

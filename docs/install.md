@@ -219,7 +219,7 @@ switch, then reconnect the clients:
 | Profile | Capabilities | Also enables |
 | --- | --- | --- |
 | `readers` | `read_messages`, `read_history`, `read_reply_chain`, `list_topics`, `read_topic_history`, `search_messages`, `list_chats`, `search_chats`, `verified_targets`, `attachment_pages`, `spreadsheets`, `presentations`, `retained_selections` | |
-| `send` | `send`, `formatted_text_send`, `topic_text_send` | |
+| `send` | `send`, `formatted_text_send`, `topic_text_send`, `formatted_caption_send` | |
 | `replies` | `reply_text_send`, `reply_artifact_send` and every `reply_*_targets` source family | `send` |
 | `forward` | `forward_send` | `send` |
 | `video` | `video_send` | `send` |
@@ -1378,6 +1378,7 @@ Write them as plain integers (`selection_ttl_seconds = 1200`); a boolean, decima
 | Approved sending | `send` |
 | Exact forum-topic text sends/replies | `send`, `topic_text_send`, and `reply_text_send` for replies |
 | Explicit outgoing text styles | `send`, `formatted_text_send`, and `reply_text_send` for replies |
+| Styled document, photo, voice-note or video captions (candidate) | `send`, `formatted_caption_send`, plus `reply_artifact_send` for replies or `video_send` for a video; see the [styled caption reference](reference.md#styled-outgoing-captions-058-candidate). The caption must already be the text Telegram stores; album items stay plain |
 | Text or attachment replies | `send` plus `reply_text_send` or `reply_artifact_send` respectively |
 | Exact forward/copy of one message (candidate) | `send` and `forward_send`; see the [forward/copy reference](reference.md#exact-forwardcopy-f14). Off by default; each send still needs the preview, approval and local confirmation |
 | One native MP4/MOV video of at most 64 MiB (candidate) | `send` and `video_send`, plus `artifacts` to supply the file; see the [native video reference](reference.md#native-video-send-f15a). Off by default; each send still needs the preview, approval and local confirmation |

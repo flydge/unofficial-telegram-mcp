@@ -1738,6 +1738,35 @@ always comes from a read or a retained selection; this is on the owner sheet. Fo
 refusing CustomEmoji and MediaTimestamp, and the TDLib request allowlist equals the 0.57 set. Disable a
 family's capability to roll back. Synthetic evidence does not establish real provider sources or delivery.
 
+### The owner dialog states every hidden payload of a reply target (0.58)
+
+The reply evidence stays the bound rendering, and for an inert family (TextUrl) that rendering escapes every
+string value, so a hidden URL was legible there only as Unicode escapes. The dialog now adds one row per stored
+target entity: its type, its UTF-16 offset and length, the exact covered source text and its hidden payload (a text
+link's URL, a custom emoji's id, a media timestamp, a mentioned user, a date with its formatting, a code block's
+language). Every string in a row is untrusted and shown under the dialog's reading rule, which marks invisible,
+bidirectional, look-alike and normalization-sensitive characters; nothing is resolved, fetched or followed. The rows
+come from the stored source projection, which the broker passes with the preview; the renderer shows no dialog
+unless that projection renders exactly the reviewed target, so the rows cannot describe another message, and the
+owner's own user id becomes `you` as everywhere else. `ReplyTarget`, the output schemas and the preview digest are
+unchanged.
+
+### Styled outgoing captions need their own default-off authority and an exact read-back (0.58)
+
+`formatted_caption_send` is a new default-off capability in the `send` profile and depends on `send`. It admits
+only the five caller styles on a document, photo, voice-note or video caption that is already the text Telegram
+stores: input that normalization or Telegram's rewrite would change is refused, never rewritten, so a span can
+never shift onto other text. The frozen styles are bound into the artifact preview digest (reply-artifact v2,
+video v2) and to the provider and epoch they were reviewed under; the capability is rechecked at every step up to
+the raw send, and for status and receipt replay. The TDLib guard admits only canonical frozen styles over a
+stored-form caption, and only plain captions on album items. The read-back is exact: the caption's digest, and
+only the frozen styles (TDLib's split pieces joined) plus the entities Telegram itself detects. A missing, added or
+shifted style leaves the send `outcome_unknown`, which is never retried. Plain captions now take the same rule with
+no styles, which fixes a pre-0.58 defect where a reply caption with a link never confirmed, and plain document,
+photo, voice-note and video sends register their caption digest, so a caption that comes back changed is no longer
+reported `sent`. The listed schema change moves the schema fingerprint. Disable `formatted_caption_send` to roll
+back; the evidence is synthetic.
+
 ## Exact forum-topic text sending (0.49.0)
 
 `topic_text_send` is a new default-off capability required together with `send`.
