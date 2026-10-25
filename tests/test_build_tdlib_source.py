@@ -168,7 +168,7 @@ class PinAndArchiveTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
 
-    def test_the_payload_lock_names_exactly_one_approved_row(self):
+    def test_the_payload_lock_must_name_the_commit_of_row_0(self):
         data, files = archive()
         pin, row = B.source_pin(json.dumps({'tdlib_source': pin_for(data, files)}).encode())
         self.assertIs(row, ROW)
@@ -179,6 +179,18 @@ class PinAndArchiveTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(B.BuildError) as caught:
                 B.source_pin(json.dumps(value).encode())
             self.assertEqual(str(caught.exception), 'pin_not_approved')
+
+    def test_the_rebuild_builds_row_0_like_prepare_native_also_beside_a_row_of_the_same_commit(self):
+        # An OpenSSL-only upgrade keeps the commit: the candidate row 0 and the kept row name one commit.
+        data, files = archive()
+        lock = json.dumps({'tdlib_source': pin_for(data, files)}).encode()
+        candidate = dataclasses.replace(ROW, openssl_version='3.6.5')
+        with mock.patch.object(B, 'APPROVED_PINS', (candidate, ROW)):
+            self.assertIs(B.source_pin(lock)[1], candidate)
+        with mock.patch.object(B, 'APPROVED_PINS', (dataclasses.replace(ROW, source_commit='1' * 40), ROW)), \
+                self.assertRaises(B.BuildError) as caught:
+            B.source_pin(lock)
+        self.assertEqual(str(caught.exception), 'pin_not_approved')
 
     def test_a_verified_archive_extracts_with_its_modes_and_commit_time(self):
         data, files = archive()
@@ -482,6 +494,7 @@ class BuildFlowTests(unittest.TestCase):
         self.assertEqual([a['dependencies'] for a in document['artifacts']], [
             ['@loader_path/libssl.3.dylib', '@loader_path/libcrypto.3.dylib', *SYSTEM], ['@loader_path/libcrypto.3.dylib', SYSTEM[2]],
             [SYSTEM[2]]])
+        self.assertEqual(summary['committed_lock'], 'compared')
         self.assertEqual(summary['equals_committed_artifact'], dict.fromkeys(native_runtime.NAMES, False))
         self.assertIn('artifacts[0].sha256', summary['differing_fields'])
         self.assertIn('build.method', summary['differing_fields'])
@@ -547,15 +560,33 @@ class BuildFlowTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'keg_mismatch')
         self.assertFalse((self.root / 'out-c').exists())
 
-    def test_a_kept_or_unremovable_tree_is_reported_and_a_bad_committed_lock_refuses(self):
+    def test_a_kept_or_unremovable_tree_is_reported_and_an_unreadable_committed_lock_is_only_reported(self):
         self.assertFalse(self.build('kept', keep_build_tree=True)['build_tree_removed'])
         self.assertTrue((self.root / 'root-kept/source/.git/HEAD').is_file())
         with mock.patch.object(B.shutil, 'rmtree', side_effect=OSError('busy')):
             self.assertFalse(self.build('busy')['build_tree_removed'])
+        # Between step 1 (the v1 literals moved to the candidate) and step 2's cp the committed lock no longer
+        # parses: the comparison is information, so a complete build still succeeds and says so.
         (self.root / 'bad-lock.json').write_text('{"manifest_version": 1}')
+        for name, committed in (('bad', self.root / 'bad-lock.json'), ('missing', self.root / 'missing-lock.json')):
+            with self.subTest(name):
+                summary = self.build(name, committed=committed)
+                self.assertEqual(summary['committed_lock'], 'unreadable')
+                self.assertNotIn('equals_committed_artifact', summary)
+                self.assertNotIn('differing_fields', summary)
+                self.assertTrue(summary['build_tree_removed'])
+                self.assertTrue((self.root / f'out-{name}' / B.DOCUMENT).is_file())
+
+    def test_an_archive_that_is_not_the_pinned_one_refuses_before_anything_is_created(self):
+        (self.root / 'longer.tar.gz').write_bytes((self.root / 'td.tar.gz').read_bytes() + b'\0')
         with self.assertRaises(B.BuildError) as caught:
-            self.build('bad', committed=self.root / 'bad-lock.json')
-        self.assertEqual(str(caught.exception), 'pin_not_approved')
+            B.build(self.root / 'out-x', source_archive=self.root / 'longer.tar.gz', build_root=self.root / 'root-x',
+                    log=self.root / 'x.log', openssl_keg=self.fakes.openssl, payload_lock=self.root / 'payload-lock.json',
+                    runner=self.fakes.run, popen=self.fakes.popen, probe=False)
+        self.assertEqual(str(caught.exception), 'archive_mismatch')
+        for path in ('out-x', 'root-x', 'x.log'):
+            self.assertFalse((self.root / path).exists(), path)
+        self.assertEqual((self.fakes.commands, self.fakes.steps), ([], []))
 
     def test_main_prints_only_a_code_when_it_refuses(self):
         stdout, stderr = io.StringIO(), io.StringIO()

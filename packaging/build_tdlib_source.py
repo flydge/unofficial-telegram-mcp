@@ -5,9 +5,10 @@ relocated Homebrew build. This route shows that the pinned commit rebuilds from 
 byte for byte and from any build directory, and gives an upgrade the generated td_api.h to check against.
 
 `build` inputs, all pinned: the codeload archive of the commit payload-lock.json's tdlib_source names
-(bytes, sha256, member count and unpacked size, the pax commit comment), the one APPROVED_PINS row of
-that commit (schema sha256, version, minimum OS, OpenSSL version), the pinned OpenSSL keg and fixed host
-tools. It extracts the archive into a fresh private build root, adds a detached .git/HEAD naming the
+(bytes, sha256, member count and unpacked size, the pax commit comment), APPROVED_PINS row 0, the row
+prepare_native builds, which must name that commit (schema sha256, version, minimum OS, OpenSSL version),
+the pinned OpenSSL keg and fixed host tools. The archive's length and sha256 are checked before anything
+is created. It extracts the archive into a fresh private build root, adds a detached .git/HEAD naming the
 commit (TDLib's CMake reads it for the commit_hash option; an archive has no .git), configures the fixed
 flag set (Release, the formula's -DCMAKE_POLICY_VERSION_MINIMUM=3.5, the pinned OpenSSL keg, the lock's
 minimum macOS, no rpath, optional packages off), and builds only the tdjson target with SOURCE_DATE_EPOCH
@@ -17,8 +18,10 @@ checks and ad-hoc signature, and validate_native probes the result. Output, one 
 native/, include/td/telegram/td_api.h (the generated header the media schema pins read), notices/,
 provenance/ and source-rebuild-lock.json, a document with the v1 lock's keys whose build.method is
 "source-rebuild" (the v1 grammar refuses it, so it can never stand in for tdlib-lock.json). The build
-root is removed after success and kept after a failure; tool output goes only to the private --log. A build
-step runs in its own process group, which ends with the step on a timeout, an interrupt, SIGTERM or SIGHUP.
+root is removed after success and kept after a failure; tool output goes only to the private --log. The
+comparison with the committed tdlib-lock.json is information: a lock the v1 grammar cannot read is
+reported, never refused. A build step runs in its own process group, which ends with the step on a
+timeout, an interrupt, SIGTERM or SIGHUP.
 
 `facts` prints a candidate archive's payload-lock.json tdlib_source record and the schema sha256, version and
 commit time it implies (docs/tdlib-upgrade.md, step 1). `compare` checks two build outputs byte for byte
@@ -182,7 +185,10 @@ def build_env(root, developer_dir, epoch, row):
 
 
 def source_pin(data):
-    """payload-lock.json's tdlib_source and the one APPROVED_PINS row naming its commit."""
+    """payload-lock.json's tdlib_source and APPROVED_PINS row 0, which must name its commit.
+
+    Row 0 is the pin prepare_native builds. A kept row may name the same commit (an OpenSSL-only upgrade);
+    it is never the one rebuilt."""
     try:
         pin = json.loads(data)['tdlib_source']
         _need(type(pin) is dict and re.fullmatch(r'[0-9a-f]{40}', pin['commit']) is not None
@@ -191,9 +197,9 @@ def source_pin(data):
               and pin['bytes'] <= MAX_ARCHIVE and pin['files'] <= MAX_MEMBERS, 'pin_not_approved')
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         raise BuildError('pin_not_approved') from None
-    rows = [row for row in APPROVED_PINS if row.source_commit == pin['commit']]
-    _need(len(rows) == 1, 'pin_not_approved')
-    return pin, rows[0]
+    row = APPROVED_PINS[0]
+    _need(row.source_commit == pin['commit'], 'pin_not_approved')
+    return pin, row
 
 
 def _relative(name):
@@ -461,6 +467,7 @@ def build(output, *, source_archive, build_root, log, openssl_keg=OPENSSL_KEG, c
     except native.NativePreparationError as error:
         raise BuildError(str(error)) from None
     archive = _read(source_archive, MAX_ARCHIVE, 'archive_mismatch')
+    _need(len(archive) == pin['bytes'] and sha256(archive) == pin['sha256'], 'archive_mismatch')  # Before any write.
     toolchain = detect_toolchain(runner, cmake, gperf, developer_dir)
     try:
         log_stream = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb')
@@ -502,14 +509,18 @@ def build(output, *, source_archive, build_root, log, openssl_keg=OPENSSL_KEG, c
                'header_sha256': sha256((output / 'include/td/telegram/td_api.h').read_bytes()),
                'toolchain': dict(toolchain.versions)}
     if committed is not None:
+        # Information, never a criterion: between step 1 (the v1 literals moved to the candidate) and step 2's
+        # cp the committed lock no longer parses, and a complete build still reports success.
         try:
             expected = parse_native_manifest(_read(committed, MAX_LOCK, 'pin_not_approved')).model_dump(mode='json')
-        except NativeRuntimeError:
-            raise BuildError('pin_not_approved') from None
-        pinned = {a['name']: (a['bytes'], a['sha256']) for a in expected['artifacts']}
-        summary['equals_committed_artifact'] = {a['name']: pinned.get(a['name']) == (a['bytes'], a['sha256'])
-                                                for a in artifacts}
-        summary['differing_fields'] = native.differences(document, expected)
+        except (NativeRuntimeError, BuildError):
+            summary['committed_lock'] = 'unreadable'
+        else:
+            pinned = {a['name']: (a['bytes'], a['sha256']) for a in expected['artifacts']}
+            summary['committed_lock'] = 'compared'
+            summary['equals_committed_artifact'] = {a['name']: pinned.get(a['name']) == (a['bytes'], a['sha256'])
+                                                    for a in artifacts}
+            summary['differing_fields'] = native.differences(document, expected)
     removed = False
     if not keep_build_tree:
         try:
