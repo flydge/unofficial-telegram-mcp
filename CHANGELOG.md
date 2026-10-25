@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.57.0.dev0 — unreleased
+## 0.57.0rc1 — release candidate, 2026-10-25 (not published)
 
-Development of 0.57.0, own-message actions, F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
+Release candidate of 0.57.0, own-message actions ([release notes](docs/release-notes-0.57.0rc1.md)), F17 rest ([spec](docs/plans/0.57-own-message-actions-spec.md)),
 part 1: one draft-kind table (no behaviour change); the default-off `edit_own_caption`, `edit_own_styled_text`,
 `pin_messages` and `delete_own_message` capabilities, each requiring `send` and `read` (the two edits in
 `archive_edit`, new `pin` and `delete` profiles); `prepare_caption_edit` and `apply_prepared_caption_edit`
