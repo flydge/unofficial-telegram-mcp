@@ -10,7 +10,10 @@ preserved. Technical acceptance of a bounded slice does not complete that plan.
 ## In development — **0.59.0.dev0** (final acceptance)
 
 The F18 consumer matrix, the controlled TDLib upgrade procedure and its rehearsal, F19 and the final audit:
-[spec](plans/final-acceptance-spec.md) and its [task record](plans/final-acceptance-spec.tasks.md).
+[spec](plans/final-acceptance-spec.md) and its [task record](plans/final-acceptance-spec.tasks.md). The
+requirement-by-requirement [final audit](plans/final-audit.md) of P0–P3 and F1–F19 is written (its independent
+critic is pending), and the [owner decision sheet](plans/owner-decision-sheet.md) consolidates every decision and
+owner-session row for the owner session.
 
 ## Release candidate — **0.58.0rc1**
 

@@ -21,9 +21,15 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       session restore.
 - [x] Criterion 4: F19 transport pins pass (unit tests) — `tests/test_transport_scope.py`, 823ccf7.
 - [ ] Criterion 5: Audit table complete; critic finds no unresolved applicable gap (critic report).
+      Audit written, 25.10.2026: [`final-audit.md`](final-audit.md), one row per requirement (P0–P3, F1–F19): 12
+      met, 4 met with owner remainder, 7 partly met, none not applicable or not met, with the release gates and
+      the open items. The consolidated [owner decision sheet](owner-decision-sheet.md) is written beside it.
+      **The independent critic has not run**, so the criterion stays open.
 - [ ] Open item for the criterion 5 audit (recorded 24.10.2026 from 0.55; not 0.55's): a first install never moves
       the default's own runtime.toml version line, so an uninstall and a reinstall at another version meets
       config_stale and then policy_conflict (0.53/0.54 behaviour; 0.55 left it unchanged under criterion 2).
+      Carried into the audit as open item 1 (a first install rewrites that line only when it adopts a legacy
+      service) and onto the decision sheet: fix it in the installer or disclose it.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
