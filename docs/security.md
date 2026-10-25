@@ -123,7 +123,7 @@ deleteMessages (closed one-own-message deletion for everyone, only after explici
 
 `getChatListsToAddChat` is a read with one closed shape: `chat_id` (a non-zero integer within 2^53-1 in magnitude) and no other key; any extra key or a boolean, zero, string or out-of-range chat ID raises a forbidden-request error before the request reaches TDLib. `loadChats` admits exactly the limits 50 (catalog lane) and 100 (the one-shot load above) for `chatListMain` or `chatListArchive`.
 
-These change request types (and, since 0.57, the caption edit, pin and unpin) travel only through one dedicated one-attempt change transport. The generic provider call refuses them even in their exact closed shape, and the change transport refuses every other request type, re-validates the shape, runs the capability and claim guard immediately before the raw send and never retries. `deleteMessages` travels only through its own one-attempt delete transport with the same guard; the change transport refuses it, because its rule that a 4xx proves no change is wrong for a deletion: TDLib deletes the local copy before the server answers. A deletion is `applied` only on the server's `ok`, `failed` only when a read-back after a 4xx finds the message on the server again, and unknown otherwise; TDLib logs a server deletion and replays it after a restart, so every unknown deletion is reported as one that may still complete later. See [Archive and own text edit boundary](#archive-and-own-text-edit-boundary-f17a-candidate).
+These change request types (and, since 0.57, the caption edit, pin and unpin) travel only through one dedicated one-attempt change transport. The generic provider call refuses them even in their exact closed shape, and the change transport refuses every other request type, re-validates the shape, runs the capability and claim guard immediately before the raw send and never retries. `deleteMessages` travels only through its own one-attempt delete transport with the same guard; the change transport refuses it, because its rule that a 4xx proves no change is wrong for a deletion: TDLib deletes the local copy before the server answers. A deletion is `applied` only on TDLib's `ok` right after a successful local read (not proof that the server deleted it; see the residual risks of the [boundary](#archive-and-own-text-edit-boundary-f17a-candidate)), `failed` only when a read-back after a 4xx finds the message on the server again, and unknown otherwise; TDLib logs a server deletion and replays it after a restart, so every unknown deletion is reported as one that may still complete later. See [Archive and own text edit boundary](#archive-and-own-text-edit-boundary-f17a-candidate).
 
 The broker socket lives in an owner-only directory with mode `0700`; the socket and owner lock use mode `0600`. The broker also verifies the kernel-reported peer UID through Darwin `getpeereid`. A nonblocking owner lock prevents a second broker. Only the lock holder may replace a same-owner, non-symlink Unix socket after proving that it is stale. Same-UID processes are inside this local filesystem trust boundary. IPC version 2 requires a same-connection contract handshake before every operation; IPC version 1 has no execution compatibility. The handshake compares loaded package/contract/finalized schema identity and effective trusted config. The next request binds the process generation; config freshness and capability checks occur before dispatch. Handshake-only diagnostics do not initialize TDLib. Requests use versioned length-prefixed strict JSON, a fixed operation allowlist, public-model validation on both sides, 1 MiB request and 8 MiB response limits, random process-lifetime client IDs, random request IDs, a 250-millisecond per-read bound, and monotonic deadlines capped at 570 seconds.
 
@@ -224,7 +224,10 @@ nested in it or an auto-detected entity inside it; the pieces are joined before 
 Telegram detects in the text (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand,
 BankCardNumber on whole scalars, and a MediaTimestamp exactly on a whole timestamp token with its value) may
 differ (review fix 057). Missing, added, shifted or merged styles leave delivery uncertain, with no automatic
-retry. This technical
+retry. A plain reply or topic text send takes the same rule with no styles: only the entities Telegram detects in
+its text may come back (review fix 057b). The result's rows are bounded per kind, never by their raw count, which
+TDLib's pieces make grow: at most 32 joined caller spans, 4096 detected entities and 4096 pieces per style
+(review fix 057b). This technical
 contract does not establish actual Telegram rendering or live consumer readiness.
 
 ## Pending draft ownership, revisions and cancellation
@@ -2984,6 +2987,14 @@ Residual risks, recorded rather than closed:
   client can race the final check, and Telegram acts on whatever it holds at transport time. The edit
   window can close between preparation and apply; that is `message_changed` (or `local_failed` when it
   closes during the dialog) with no attempt.
+- **A deletion's `applied` is TDLib's `ok` after a local read** (review fix 057b). Every locked read before
+  the attempt is TDLib's local copy (memory or its message database), not a server round trip. A deletion
+  for yourself made on another device that this session has not received yet (an offline broker, a running
+  catch-up, an update gap) still passes them; TDLib then sends `deleteMessages` with `revoke` true for a
+  message the server no longer holds for this account, and if the server answers that without an error
+  (assumed, not observed) the result reads `applied` while the other participants still see the message.
+  The window lasts as long as this session's updates lag behind, not one round trip; no client-side check
+  closes it, and the server's answer for an already self-deleted message is left to the owner session.
 - **`applied` is the state right after the call.** Telegram may move an archived chat whose
   notifications are enabled back to Main on a new message, and a move that becomes visible after the
   10-second observation is still `outcome_unknown`. An edit is confirmed by the returned message, not by a

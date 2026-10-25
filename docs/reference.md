@@ -200,7 +200,10 @@ nested in it or an auto-detected entity inside it; the pieces are joined before 
 Telegram detects in the text (Url, EmailAddress, PhoneNumber, Mention, Hashtag, Cashtag, BotCommand,
 BankCardNumber on whole scalars, and a MediaTimestamp exactly on a whole timestamp token with its value) may
 differ (review fix 057). Missing, added, shifted or merged styles leave delivery uncertain, with no automatic
-retry. This technical
+retry. A plain reply or topic text send takes the same rule with no styles: only the entities Telegram detects in
+its text may come back (review fix 057b). The result's rows are bounded per kind, never by their raw count, which
+TDLib's pieces make grow: at most 32 joined caller spans, 4096 detected entities and 4096 pieces per style
+(review fix 057b). This technical
 contract does not establish actual Telegram rendering or live consumer readiness.
 
 ## Text in one exact forum topic
@@ -4190,8 +4193,13 @@ succeed with the reviewed projection. Pinned TDLib behaviour decides the evidenc
   `getMessage` answers 404 from that local state. Neither is evidence of a deletion.
 - For a message TDLib does not hold, it answers `ok` without any server request. The attempt is therefore made only
   right after that last `getMessage` succeeded; a failing or changed read there is `local_failed` with no attempt.
-- `ok` after that read is `applied`: `TDLib deleted the message for everyone; the server confirmed the deletion`.
-  Nothing is read afterwards.
+- `ok` after that read is `applied`: `TDLib answered ok after a successful local read`. Nothing is read
+  afterwards. Recorded, not closed (review fix 057b): every locked read is TDLib's local copy (memory or its
+  message database), not a server round trip, so a deletion for yourself made on another device that this session
+  has not received yet still passes them. TDLib then sends the request for a message the server no longer holds for
+  this account, and if the server answers that without an error (assumed, not observed) the result reads `applied`
+  while the other participants still see the message. The window lasts as long as this session's updates lag
+  behind; no client-side check closes it.
 - After a 4xx TDLib fetches the message from the server again. One `getMessage` read-back that finds that exact
   message is `failed` (`TDLib rejected the deletion (code <N>); read back right after, the message is still in the
   chat`); a 404, another message, a malformed answer or a failed read-back is `outcome_unknown`.
