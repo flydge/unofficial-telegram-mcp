@@ -466,6 +466,16 @@ class BuildFlowTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), 'keg_mismatch')
         self.assertFalse((self.root / 'out-c').exists())
 
+    def test_a_kept_or_unremovable_tree_is_reported_and_a_bad_committed_lock_refuses(self):
+        self.assertFalse(self.build('kept', keep_build_tree=True)['build_tree_removed'])
+        self.assertTrue((self.root / 'root-kept/source/.git/HEAD').is_file())
+        with mock.patch.object(B.shutil, 'rmtree', side_effect=OSError('busy')):
+            self.assertFalse(self.build('busy')['build_tree_removed'])
+        (self.root / 'bad-lock.json').write_text('{"manifest_version": 1}')
+        with self.assertRaises(B.BuildError) as caught:
+            self.build('bad', committed=self.root / 'bad-lock.json')
+        self.assertEqual(str(caught.exception), 'pin_not_approved')
+
     def test_main_prints_only_a_code_when_it_refuses(self):
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):

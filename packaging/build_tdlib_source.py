@@ -474,14 +474,22 @@ def build(output, *, source_archive, build_root, log, openssl_keg=OPENSSL_KEG, c
                'header_sha256': sha256((output / 'include/td/telegram/td_api.h').read_bytes()),
                'toolchain': dict(toolchain.versions)}
     if committed is not None:
-        expected = json.loads(_read(committed, MAX_LOCK, 'pin_not_approved'))
+        try:
+            expected = parse_native_manifest(_read(committed, MAX_LOCK, 'pin_not_approved')).model_dump(mode='json')
+        except NativeRuntimeError:
+            raise BuildError('pin_not_approved') from None
         pinned = {a['name']: (a['bytes'], a['sha256']) for a in expected['artifacts']}
         summary['equals_committed_artifact'] = {a['name']: pinned.get(a['name']) == (a['bytes'], a['sha256'])
                                                 for a in artifacts}
         summary['differing_fields'] = native.differences(document, expected)
+    removed = False
     if not keep_build_tree:
-        shutil.rmtree(root)
-    summary['build_tree_removed'] = not keep_build_tree
+        try:
+            shutil.rmtree(root)
+            removed = True
+        except OSError:
+            pass  # The outputs are complete; a tree left behind is reported, never reused.
+    summary['build_tree_removed'] = removed
     return summary
 
 
