@@ -1709,6 +1709,35 @@ empty entities. Both routes preserve exact approved options. Disable `reply_text
 Synthetic evidence does not close native/live provider, actual owner-dialog,
 F18 outcome, license or public release gates.
 
+### Media TextUrl, CustomEmoji and voice-note MediaTimestamp need their own default-off authority (0.58)
+
+Each family is one row of the reply-source ladder table, which alone decides versions, capability tuples and
+stored-version admission. Odd versions stay messageText and even versions media; v27 is reserved, so parity still
+decides `is_media`. A stored media projection must validate under its version's admission and its caption must
+select exactly that version, so a forged tag or a shortened voice note refuses. The 0.57 keyword helpers do not
+admit any new family; only the broker's ladder admission does.
+
+- **v24 media TextUrl** (`reply_text_url_targets`). The hidden URL stays an opaque, bounded provider string. The
+  complete media display uses v23's one reversible inert JSON layer for every string value, never the sanitizer,
+  so hidden content cannot be rewritten or dropped silently. Overflow of the marker-inclusive 4,096-character
+  display refuses without truncation.
+- **v25/v26 CustomEmoji** (`reply_custom_emoji_targets`). The id is accepted only as TDLib's decimal int64
+  string; integers, signs, padding, non-ASCII digits and values above 2^63−1 refuse. The covered text must be
+  one emoji in a closed local grammar that admits every control-free element of the pinned TDLib's own emoji
+  table, so a custom emoji cannot hide ordinary text. Nothing resolves the id, and `getCustomEmojiStickers`
+  stays outside the request allowlist. The custom emoji counts as an exclusive family: it may sit inside the
+  five styles but not overlap links, mentions, quotes, code, DateTime or another exclusive entity.
+- **v28 MediaTimestamp** (`reply_media_timestamp_targets`), on voice-note captions only. The value must equal
+  the whole timestamp token it covers and lie between 0 and the voice note's own duration. Text, documents and
+  photos refuse it.
+
+Both new capabilities live only in `KNOWN_CAPABILITIES` and the `replies` profile, as conjuncts of
+`reply_text_send` or `reply_artifact_send`, which already require `send`. They follow `reply_formatted_targets`
+at the front of the fixed listing order, so no v1–v23 tuple moves. No `read` is added, because a reply source
+always comes from a read or a retained selection; this is on the owner sheet. Forward and edit admission keep
+refusing CustomEmoji and MediaTimestamp, and the TDLib request allowlist equals the 0.57 set. Disable a
+family's capability to roll back. Synthetic evidence does not establish real provider sources or delivery.
+
 ## Exact forum-topic text sending (0.49.0)
 
 `topic_text_send` is a new default-off capability required together with `send`.

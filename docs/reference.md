@@ -2502,6 +2502,44 @@ retirement is best effort with TTL fallback. No source evidence adds outgoing en
 Disable `reply_text_url_targets` to roll back. Synthetic evidence leaves native/
 live provider behavior, actual owner approval and F18 outcome unverified.
 
+### Media TextUrl, CustomEmoji and voice-note MediaTimestamp sources (0.58 candidate)
+
+Three more default-off source families are rows of the one reply-source ladder table. They supersede the earlier
+sections' statements that TextUrl captions, CustomEmoji and MediaTimestamp are closed. Every v1–v23 source keeps
+its bytes, display and authority: a frozen hash matrix of 6,098 0.57 sources is recomputed byte for byte, and only
+sources 0.57 refused may change.
+
+- **Media TextUrl (v24).** A document, static-photo or OGG-voice-note caption with a TextUrl needs
+  `reply_media_targets`, `reply_formatted_targets` and `reply_text_url_targets`. The whole display record (caption
+  and media facts) is the single inert JSON layer v23 text uses: every string-value scalar outside ASCII letters,
+  digits, underscore and hyphen is a lowercase Unicode escape, so the hidden URL is kept exactly and never
+  sanitized. `sanitized` compares that layer with ordinary JSON for every provider string.
+- **CustomEmoji (v25 text, v26 captions).** Needs `reply_formatted_targets` and `reply_custom_emoji_targets`, plus
+  `reply_media_targets` for a caption. The id must be TDLib's decimal string of a positive int64: no sign, padding
+  or non-ASCII digit, at most 2^63−1. An integer id refuses. The covered text must be exactly one emoji: a
+  pictograph with at most one skin-tone modifier, a lone modifier, a keycap or a two-letter flag, plus at most one
+  VS16. ZWJ sequences and tag flags refuse, because their format characters fail the visible-text policy. The
+  record shows `custom_emoji_id` and the provider type. No sticker or emoji file is fetched, and
+  `getCustomEmojiStickers` stays outside the request allowlist.
+- **Disclosure: messages heavy with custom emoji refuse.** Each custom emoji record takes about 140 display
+  characters. A message text with more than 27 custom emoji carrying 19-digit ids (26 in a caption) exceeds the
+  complete 4,096-character display, so the whole source refuses. It is never truncated.
+- **MediaTimestamp (v28, voice notes only).** Needs `reply_media_targets`, `reply_formatted_targets` and
+  `reply_media_timestamp_targets`. The entity must sit exactly on one whole timestamp token of the caption, with
+  that token's value, from 0 to the voice note's duration (TDLib drops a timestamp beyond it). Text, document and
+  photo sources have no duration and refuse it. v27 is reserved and refused, so even versions remain exactly the
+  media versions.
+
+The capability tuple is `reply_media_targets` (media only), `reply_formatted_targets`, the top family's
+capability, then the other present families in the fixed order `reply_media_timestamp_targets`,
+`reply_custom_emoji_targets`, `reply_text_url_targets`, `reply_bank_card_targets`, `reply_phone_targets`,
+`reply_email_targets`, `reply_url_targets`, `reply_datetime_targets`, `reply_lexical_targets`,
+`reply_identity_targets`. The two new capabilities are reply conjuncts in the `replies` profile, never operation
+gates, and a refusal names them in `missing_capabilities`. That closed enum gains them, a listed schema change,
+so the schema fingerprint moves and a pinned policy needs the installer's rewrite. No `read` is added (owner
+sheet). Forward and own-message edit admission keep refusing both entity types. Disable the family's capability
+to roll back. The evidence is synthetic; real sources are an owner session.
+
 ## Development-candidate artifact ownership
 
 Use artifact IDs and upload tokens from the same running MCP client. Normal socket
