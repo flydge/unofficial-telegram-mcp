@@ -17,7 +17,8 @@ checks and ad-hoc signature, and validate_native probes the result. Output, one 
 native/, include/td/telegram/td_api.h (the generated header the media schema pins read), notices/,
 provenance/ and source-rebuild-lock.json, a document with the v1 lock's keys whose build.method is
 "source-rebuild" (the v1 grammar refuses it, so it can never stand in for tdlib-lock.json). The build
-root is removed after success and kept after a failure; tool output goes only to the private --log.
+root is removed after success and kept after a failure; tool output goes only to the private --log. A build
+step runs in its own process group, which ends with the step on a timeout, an interrupt, SIGTERM or SIGHUP.
 
 `facts` prints a candidate archive's payload-lock.json tdlib_source record and the schema sha256, version and
 commit time it implies (docs/tdlib-upgrade.md, step 1). `compare` checks two build outputs byte for byte
@@ -44,6 +45,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 import zlib
 
 from telegram_search_mcp.native_runtime import APPROVED_PINS, NAMES, NativeRuntimeError, parse_native_manifest, validate_native
@@ -92,7 +94,7 @@ CONFIGURE_TIMEOUT = 1800
 BUILD_TIMEOUT = 4 * 3600
 CODES = native.CODES | frozenset({
     'build_root_refused', 'log_refused', 'pin_not_approved', 'archive_mismatch', 'source_refused',
-    'toolchain_refused', 'build_failed', 'compare_refused'})
+    'toolchain_refused', 'build_failed', 'build_interrupted', 'compare_refused'})
 VERSION_GRAMMAR = {
     'cmake': re.compile(r'cmake version ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,5})\n'),
     'gperf': re.compile(r'GNU gperf ([0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?)\n'),
@@ -336,24 +338,50 @@ def _xcode_version(developer_dir):
     return value
 
 
+class _Terminated(BaseException):
+    """SIGTERM or SIGHUP while a build step runs; raised in the main thread so the step's group ends first."""
+
+
+def _terminated(number, frame):
+    raise _Terminated()
+
+
 def _step(popen, command, *, env, timeout, log):
-    """One long build tool, its output appended to the private log only; its whole process group ends on timeout."""
+    """One long build tool, its output appended to the private log only.
+
+    It runs in a session of its own, so a terminal's SIGINT reaches only this process: its whole process group
+    is killed and reaped whenever the wait ends other than by its exit (timeout, KeyboardInterrupt, SIGTERM or
+    SIGHUP, any error), so no compiler outlives the tool. SIGTERM and SIGHUP, fatal by default, are caught for
+    the step's duration (main thread only) and refused as build_interrupted; the previous handlers come back."""
     log.write(('\n$ ' + ' '.join(command) + '\n').encode())
     log.flush()
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for number in (signal.SIGTERM, signal.SIGHUP):
+            previous[number] = signal.signal(number, _terminated)
+    process, code = None, None
     try:
-        process = popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env,
-                        start_new_session=True)
-    except OSError:
-        raise BuildError('build_failed') from None
-    try:
-        code = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process = popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env,
+                            start_new_session=True)
         except OSError:
-            pass
-        process.wait()
+            raise BuildError('build_failed') from None
+        try:
+            code = process.wait(timeout=timeout)
+        finally:
+            if code is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                process.wait()
+    except subprocess.TimeoutExpired:
         raise BuildError('build_failed') from None
+    except _Terminated:
+        raise BuildError('build_interrupted') from None
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
     _need(code == 0, 'build_failed')
 
 

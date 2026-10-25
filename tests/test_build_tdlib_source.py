@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -358,6 +359,86 @@ class DocumentTests(unittest.TestCase):
         with mock.patch.object(B.os, 'killpg') as killpg, self.assertRaises(B.BuildError):
             B._step(process(expires=True), ['cmake'], env={}, timeout=5, log=log)
         killpg.assert_called_once_with(77, B.signal.SIGKILL)
+
+    def test_an_interrupt_ends_the_steps_process_group_and_restores_the_signal_handlers(self):
+        log, received, numbers = io.BytesIO(), [], (B.signal.SIGTERM, B.signal.SIGHUP)
+
+        def sentinel(number, frame):  # Takes a signal the step failed to handle, instead of ending the suite.
+            received.append(number)
+        previous = {n: B.signal.signal(n, sentinel) for n in numbers}
+        self.addCleanup(lambda: [B.signal.signal(n, h) for n, h in previous.items()])
+
+        class Interrupted:
+            pid, calls = 78, []
+
+            def wait(self, timeout=None):
+                self.calls.append(timeout)
+                if len(self.calls) == 1:
+                    raise KeyboardInterrupt
+                return -9
+        with mock.patch.object(B.os, 'killpg') as killpg, self.assertRaises(KeyboardInterrupt):
+            B._step(lambda command, **kwargs: Interrupted(), ['make'], env={}, timeout=5, log=log)
+        killpg.assert_called_once_with(78, B.signal.SIGKILL)
+        self.assertEqual(Interrupted.calls, [5, None])  # Reaped after the kill.
+        self.assertTrue(all(B.signal.getsignal(n) is sentinel for n in numbers))
+        for number in numbers:  # SIGTERM and SIGHUP become a fixed refusal once the group has ended.
+            def wait(timeout=None, number=number, calls=[]):
+                calls.append(timeout)
+                if len(calls) == 1:
+                    B.signal.raise_signal(number)
+                return -9
+            process = mock.Mock(pid=79, wait=wait)
+            with self.subTest(signal=number), mock.patch.object(B.os, 'killpg') as killpg, \
+                    self.assertRaises(B.BuildError) as caught:
+                B._step(lambda command, **kwargs: process, ['make'], env={}, timeout=5, log=log)
+            self.assertEqual(str(caught.exception), 'build_interrupted')
+            killpg.assert_called_once_with(79, B.signal.SIGKILL)
+            self.assertTrue(all(B.signal.getsignal(n) is sentinel for n in numbers))
+        self.assertEqual(received, [])
+
+    def test_a_signalled_tool_leaves_no_build_process_behind(self):
+        # A real child group that would outlive the tool: a shell and its background sleep, in their own session.
+        script = (
+            'import importlib.util, io, subprocess, sys\n'
+            'spec = importlib.util.spec_from_file_location("b", sys.argv[1])\n'
+            'b = importlib.util.module_from_spec(spec); sys.modules["b"] = b; spec.loader.exec_module(b)\n'
+            'b._step(subprocess.Popen, ["/bin/sh", "-c", sys.argv[2]], env={"PATH": "/usr/bin:/bin"}, timeout=60,'
+            ' log=open(sys.argv[3], "wb"))\n')
+        for number in (B.signal.SIGINT, B.signal.SIGTERM):
+            with self.subTest(signal=number), tempfile.TemporaryDirectory() as tmp:
+                pids = Path(tmp) / 'pids'
+                child = f"sleep 30 & echo \"$$ $!\" > '{pids}.part' && mv '{pids}.part' '{pids}'; wait"
+                env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(ROOT / 'src'), os.environ.get('PYTHONPATH', '')]))
+                tool = subprocess.Popen([sys.executable, '-c', script, str(ROOT / 'packaging/build_tdlib_source.py'), child,
+                                         str(Path(tmp) / 'step.log')], env=env, stderr=subprocess.DEVNULL)
+                self.addCleanup(lambda: tool.poll() is None and tool.kill())
+                for _ in range(200):
+                    if pids.exists() or tool.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                shell, sleeper = map(int, pids.read_text().split())
+                self.addCleanup(self.kill_group, shell)
+                tool.send_signal(number)
+                self.assertNotEqual(tool.wait(timeout=10), 0)
+                for pid in (shell, sleeper):
+                    self.assertTrue(self.gone(pid), pid)
+
+    @staticmethod
+    def kill_group(pid):
+        try:
+            os.killpg(pid, B.signal.SIGKILL)
+        except OSError:
+            pass
+
+    @staticmethod
+    def gone(pid):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.05)
+        return False
 
 
 class BuildFlowTests(unittest.TestCase):
