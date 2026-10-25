@@ -641,8 +641,13 @@ class HeaderOverrideTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {tdlib_header.ENVIRONMENT: str(Path(tmp) / 'missing.h')}), \
                     self.assertRaises(self.failureException):
                 tdlib_header.pinned_header(self)
-        with mock.patch.dict(os.environ, {tdlib_header.ENVIRONMENT: ''}):
-            self.assertEqual(tdlib_header.header_path()[0].parts[-4:], ('include', 'td', 'telegram', 'td_api.h'))
+        # An empty value (an unset shell variable, say) is an override that names no file, never the keg's header.
+        with mock.patch.dict(os.environ, {tdlib_header.ENVIRONMENT: ''}), self.assertRaises(self.failureException):
+            tdlib_header.pinned_header(self)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(tdlib_header.ENVIRONMENT, None)
+            path, overridden = tdlib_header.header_path()
+        self.assertEqual((path.parts[-4:], overridden), (('include', 'td', 'telegram', 'td_api.h'), False))
 
 
 if __name__ == '__main__':
