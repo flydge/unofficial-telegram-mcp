@@ -632,7 +632,7 @@ class CommittedPayloadLockTests(unittest.TestCase):
         lock = PP.load_lock((ROOT / 'packaging/payload-lock.json').read_bytes())
         pins = {}
         for match in re.finditer(r'^([A-Za-z0-9_.-]+)==(\S+) \\\n\s+--hash=sha256:([0-9a-f]{64})$',
-                                 (ROOT / 'packaging/constraints-0.58.0.txt').read_text(), re.M):
+                                 (ROOT / 'packaging/constraints-0.59.0.txt').read_text(), re.M):
             pins[match.group(1)] = (match.group(2), match.group(3))
         self.assertEqual({w['project']: (w['version'], w['sha256']) for w in lock['app']}, pins)
         self.assertEqual([(w['project'], w['version'], w['sha256']) for w in lock['installer']],

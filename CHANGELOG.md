@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.59.0.dev0 — unreleased
+
+Development of 0.59.0, final acceptance ([spec](docs/plans/final-acceptance-spec.md),
+[task record](docs/plans/final-acceptance-spec.tasks.md)): a controlled TDLib upgrade procedure
+([docs/tdlib-upgrade.md](docs/tdlib-upgrade.md)) with a from-source build route for the pinned commit and a
+rehearsal in which independent rebuilds were byte-identical; the consumer matrix over every tool; the
+requirement-by-requirement audit. Technical evidence only; the owner session is pending.
+
 ## 0.58.0rc1 — release candidate, 2026-10-25 (not published)
 
 Release candidate of 0.58.0, reply-source families and formatted captions, F13 rest ([release notes](docs/release-notes-0.58.0rc1.md))

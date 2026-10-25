@@ -7,6 +7,11 @@ Updated **2026-10-25**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
+## In development — **0.59.0.dev0** (final acceptance)
+
+The F18 consumer matrix, the controlled TDLib upgrade procedure and its rehearsal, F19 and the final audit:
+[spec](plans/final-acceptance-spec.md) and its [task record](plans/final-acceptance-spec.tasks.md).
+
 ## Release candidate — **0.58.0rc1**
 
 Reply-source families and formatted captions: [spec](plans/0.58-reply-sources-and-captions-spec.md), its
