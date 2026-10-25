@@ -3539,10 +3539,11 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
     _fresh(folder)
     for attempt in range(1, AGENT_ATTEMPTS + 1):
         here = _fresh(folder / f"attempt-{attempt}")
-        home = Path(os.path.realpath(tempfile.mkdtemp(prefix="tga.", dir="/private/tmp")))
         tmp, workdir = _fresh(scratch / f"proxy-{cell_id}-{attempt}"), _fresh(scratch / f"work-{cell_id}-{attempt}")
-        broker, started, code, timed_out = None, time.monotonic(), None, False
+        broker, home, started, code, timed_out = None, None, time.monotonic(), None, False
         try:
+            with deferred_interrupts():
+                home = Path(os.path.realpath(tempfile.mkdtemp(prefix="tga.", dir="/private/tmp")))
             write_policy(home, list(RESTRICTED_CAPABILITIES) if session == "restricted" else list(census["capabilities"]))
             with deferred_interrupts():
                 broker = start_broker(runtime, home, tmp, "authorized", "scripted",
@@ -3561,12 +3562,13 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
         finally:
             if broker is not None:
                 stop_broker(*broker)
-            log = home / "matrix-broker.jsonl"
-            server_log = log.read_bytes() if log.is_file() else b""
-            if account:
+            log = home / "matrix-broker.jsonl" if home is not None else None
+            server_log = log.read_bytes() if log is not None and log.is_file() else b""
+            if account and home is not None:
                 server_log += canonical(registry_postscript(home)).replace(b"\n", b"") + b"\n"
             for path in (home, tmp, workdir):
-                shutil.rmtree(path, ignore_errors=True)
+                if path is not None:
+                    shutil.rmtree(path, ignore_errors=True)
         write_private(here / "server.jsonl", server_log)
         events = (here / "events.jsonl").read_bytes().decode("utf-8", "replace")
         if (here / "answer.txt").is_file():
@@ -3603,14 +3605,14 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
     if binary is None or evidence is None:
         return {"status": "unavailable", "reason": "cli_not_given"}
     _fresh(scratch)
-    home, config, tmp = (_fresh(scratch / name) for name in ("agent-home", "agent-config", "agent-tmp"))
-    env = agent_environment(column, home=home, config=config, tmp=tmp)
-    guarded = claude_configuration(claude_login_home()) if column == "claude_code" else None
-
-    def unchanged() -> None:
-        need(guarded is None or claude_configuration(claude_login_home()) == guarded, "client_config_changed")
     auth = None
     try:
+        home, config, tmp = (_fresh(scratch / name) for name in ("agent-home", "agent-config", "agent-tmp"))
+        env = agent_environment(column, home=home, config=config, tmp=tmp)
+        guarded = claude_configuration(claude_login_home()) if column == "claude_code" else None
+
+        def unchanged() -> None:
+            need(guarded is None or claude_configuration(claude_login_home()) == guarded, "client_config_changed")
         version = agent_version(column, binary, env)
         unchanged()
         if version is None:
@@ -3800,9 +3802,10 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
     """Every session at once, each with its own short HOME (a socket path holds at most 104 bytes), its
     own broker where it needs one and its own driver; results in `sessions` order. `extra` adds plan keys:
     the bundle session's installer_path and the Inspector session's inspector."""
-    base = Path(os.path.realpath(tempfile.mkdtemp(prefix="tgcm.", dir="/private/tmp")))
-    brokers, drivers, outputs = [], [], []
+    base, brokers, drivers, outputs = None, [], [], []
     try:
+        with deferred_interrupts():
+            base = Path(os.path.realpath(tempfile.mkdtemp(prefix="tgcm.", dir="/private/tmp")))
         for index, name in enumerate(sessions):
             # The name feeds the proxy's derived LaunchAgent label: distinctive, so the offline session's
             # restart attempt (`launchctl kickstart` of that label) can only find nothing.
@@ -3852,7 +3855,8 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
             log.close()
         for broker in brokers:
             stop_broker(*broker)
-        shutil.rmtree(base, ignore_errors=True)
+        if base is not None:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 # --- commands ------------------------------------------------------------------------------------------
@@ -3935,8 +3939,10 @@ def run(args: argparse.Namespace) -> int:
     repo = _gate_call(gate, "repo_unavailable", gate.toplevel, args.repo)
     git = gate.Git(repo)
     commit = _gate_call(gate, "unknown_commit", gate.resolve_commit, git, args.commit)
-    work, temporary = _workdir(args.workdir)
+    work, temporary = None, False
     try:
+        with deferred_interrupts():
+            work, temporary = _workdir(args.workdir)
         built = build_wheel(gate, git, commit, work / "build")
         committed = committed_facts(gate, built)
         # The receipt is the commit's harness and gate at work: a working-tree edit of either refuses.
@@ -4011,8 +4017,10 @@ def check(args: argparse.Namespace) -> int:
     commit = _gate_call(gate, "unknown_commit", gate.resolve_commit, git, receipt["commit"])
     if args.commit is not None:
         need(commit == _gate_call(gate, "unknown_commit", gate.resolve_commit, git, args.commit), "commit_mismatch")
-    work = Path(tempfile.mkdtemp(prefix="tgmcp-matrix-check-")).resolve()
+    work = None
     try:
+        with deferred_interrupts():
+            work = Path(tempfile.mkdtemp(prefix="tgmcp-matrix-check-")).resolve()
         built = build_wheel(gate, git, commit, work / "build")
         committed = committed_facts(gate, built)
         # Re-derived with the receipt commit's own harness and gate, never a working-tree edit of them.
@@ -4027,7 +4035,8 @@ def check(args: argparse.Namespace) -> int:
         check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census,
                       committed=committed, derived={"install": installed, "listing_sha256": listing})
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
     print("consumer matrix receipt verified: " + summary_line(receipt).split(": ", 1)[1]
           + f" (commit {receipt['commit']}, wheel sha256 {receipt['wheel']['sha256']})")
     return 0
