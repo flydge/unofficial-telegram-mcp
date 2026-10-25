@@ -62,9 +62,9 @@ GOLDEN_054 = {
 SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510ca37ca0e87b'
 # Every later slice that changes a tool schema lists the change in tests/fixtures/schema_changes/ and moves this
 # pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 part 1 (0.57-capabilities, 0.57-caption-tools), 0.57 part 2
-# (0.57-styled-text-edit, 0.57-pin-tools), 0.57 part 3 (0.57-delete-tools). Accounts themselves never enter the
-# fingerprint.
-SCHEMA_FINGERPRINT = '0479e65fbf53f1d9f3d4d2a31ebd7f32999ecc02b257043dbaa9dd9292506318'
+# (0.57-styled-text-edit, 0.57-pin-tools), 0.57 part 3 (0.57-delete-tools; review fix 057b corrected its applied
+# description, which the fingerprint covers). Accounts themselves never enter the fingerprint.
+SCHEMA_FINGERPRINT = 'ea3c00e34404f73ba7bad83693852ee489cfe421862d5f5ef585187126f4b113'
 SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities', '0.57-caption-tools',
                             '0.57-delete-tools', '0.57-pin-tools', '0.57-styled-text-edit')
 

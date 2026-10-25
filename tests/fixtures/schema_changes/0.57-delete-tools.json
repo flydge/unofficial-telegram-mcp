@@ -1,6 +1,6 @@
 {
   "structure": {
-    "apply_prepared_message_delete": "new tool (0.57 deletion of an own message): one approved deleteMessages attempt for everyone after a locked read, applied only on the server's ok, failed only when a read-back after a rejection finds the message, the 0.54 approval statuses and next_action",
+    "apply_prepared_message_delete": "new tool (0.57 deletion of an own message): one approved deleteMessages attempt for everyone after a locked read, applied only on TDLib's ok after that local read, failed only when a read-back after a rejection finds the message, the 0.54 approval statuses and next_action",
     "prepare_message_delete": "new tool (0.57 deletion of an own message): one own message deletable for everyone as an immutable draft; Saved Messages, self-only deletion and other people's messages refused"
   }
 }
