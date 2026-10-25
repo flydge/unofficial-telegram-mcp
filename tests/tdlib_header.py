@@ -2,8 +2,9 @@
 
 TGMCP_TDLIB_HEADER, an absolute path to a generated td_api.h (build_tdlib_source.py writes one to
 include/td/telegram/td_api.h of its output), points the pins at a candidate without relinking Homebrew
-(docs/tdlib-upgrade.md, step 4). An override that names no regular file fails, an empty value included (an unset
-shell variable must never fall back to the keg's header); only a missing keg header skips.
+(docs/tdlib-upgrade.md, step 4). A set variable that names no regular file fails, an empty value included, so
+`TGMCP_TDLIB_HEADER=$NAME` with NAME unset never falls back to the keg's header. Only with the variable unset are
+the keg's header read and a missing one skipped.
 """
 from __future__ import annotations
 

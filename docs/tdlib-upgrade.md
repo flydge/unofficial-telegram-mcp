@@ -234,9 +234,9 @@ TGMCP_TDLIB_HEADER=<evidence>/run-a/include/td/telegram/td_api.h HOME="$TMPDIR/t
 
 Without the variable, the pins read the linked keg's header (`/opt/homebrew/opt/tdlib/include/td/telegram/td_api.h`)
 and skip when it is missing. A variable that is set but names no regular file fails the run, an empty value
-included, so an unset shell variable never tests the keg's header by mistake. The release suite must show
-0 skipped, so the linked keg must be the candidate's when step 6 runs. Re-check each note that `git grep`
-listed in step 1 against the candidate's sources.
+included, so `TGMCP_TDLIB_HEADER=$NAME` with `NAME` unset never tests the keg's header by mistake. The
+release suite must show 0 skipped, so the linked keg must be the candidate's when step 6 runs. Re-check
+each note that the search listed in step 1 against the candidate's sources.
 
 ### 5. Re-sign and repin under the new `APPROVED_PINS` row
 
