@@ -46,6 +46,10 @@ class SendObservation:
 
 FORWARD_CONTENT_TYPES = frozenset({'messageText', 'messagePhoto', 'messageDocument', 'messageVoiceNote',
                                    'messageVideo', 'messageAudio', 'messageAnimation'})
+# 0.58: every caption a send writes is read back exactly, by its digest and its entities (plain or styled).
+CAPTION_CONTENT_TYPES = frozenset({'messageDocument', 'messagePhoto', 'messageVoiceNote', 'messageVideo'})
+_STYLES = frozenset({'textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
+                     'textEntityTypeStrikethrough', 'textEntityTypeSpoiler'})
 # Album items (0.56): photos and videos mixed, or documents only; audio is deferred.
 ALBUM_CONTENT_GROUPS = (frozenset({'messagePhoto', 'messageVideo'}), frozenset({'messageDocument'}))
 # Terminal updates that overtake the album's `messages` result, kept until it binds; bounded.
@@ -272,13 +276,39 @@ def _thumbnail(value):
         'thumbnailFormatJpeg','thumbnailFormatGif','thumbnailFormatMpeg4','thumbnailFormatPng','thumbnailFormatTgs','thumbnailFormatWebm','thumbnailFormatWebp'}
         and _number(value['width'],16384,1) and _number(value['height'],16384,1) and _file(value['file']))
 
-def _artifact_matches(content,observation):
+def _timestamp_bound(content,observation):
+    """TDLib's bound of a media timestamp in this caption (get_message_max_media_timestamp): the own media's duration
+    for a voice note (a video's may change when the provider re-encodes it, so it is not compared), the replied
+    message's media for a document or photo reply (not carried here, so not compared), and none (-1) for a document
+    or photo without a reply, whose caption therefore keeps no timestamp."""
+    if observation.content_type=='messageVoiceNote':
+        voice=content.get('voice_note')
+        duration=voice.get('duration') if isinstance(voice,dict) else None
+        return duration if _number(duration,600,1) else -1
+    if observation.content_type=='messageVideo' or observation.reply_anchor is not None:
+        return None
+    return -1
+
+def _caption_matches(content,observation):
+    """The sent caption exactly (0.58): its text by digest, and its entities by the styled-edit rule
+    (edit_drafts.exact_styles): exactly the frozen styles, which TDLib may return as touching pieces, plus only the
+    entities Telegram detects in the text. A plain caption has no styles, so a link, mention or hashtag in it still
+    confirms (before 0.58 its entities had to be [] and such a send stayed outcome_unknown)."""
     caption=content.get('caption')
     if not (_shape(caption,'formattedText',('text','entities')) and type(caption['text']) is str
-        and len(caption['text'])<=1024 and caption['entities']==[]):return False
+        and len(caption['text'])<=1024 and type(caption['entities']) is list):return False
     try:
         if hashlib.sha256(caption['text'].encode('utf-8')).hexdigest()!=observation.caption_sha256:return False
     except UnicodeError:return False
+    from .edit_drafts import exact_styles
+    return exact_styles(caption['text'],caption['entities'],observation.outgoing_entities,
+                        max_media_timestamp=_timestamp_bound(content,observation))
+
+def _artifact_matches(content,observation):
+    """The caption of every caption send; the complete media shape only for an artifact reply, whose correlation
+    0.53 bound to it. A plain send's media, and a video's facts, are decided by correlation as before."""
+    if not _caption_matches(content,observation):return False
+    if observation.reply_anchor is None:return True
     if observation.content_type=='messageDocument':
         if not _shape(content,'messageDocument',('document','caption')):return False
         doc=content['document']
@@ -343,8 +373,9 @@ class SendObservations:
             if (type(video) is not tuple or len(video) != 4 or content_type != 'messageVideo' or forward or
                     not _number(video[0], 3 * 3600, 1) or not _number(video[1], 8192, 16) or
                     not _number(video[2], 8192, 16) or not _number(video[3], 64 * 1024 * 1024, 1) or
-                    any(value is not None for value in (text_sha256, reply_anchor, caption_sha256, voice_duration,
-                        waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or outgoing_entities):
+                    any(value is not None for value in (text_sha256, reply_anchor, voice_duration,
+                        waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or
+                    (outgoing_entities and caption_sha256 is None)):
                 raise ObservationUnavailable('invalid video observation')
         elif content_type == 'messageVideo' and not forward:
             raise ObservationUnavailable('video observation requires reviewed facts')
@@ -357,15 +388,17 @@ class SendObservations:
                     waveform_sha256, waveform_size, forum_topic_id, saved_messages_topic_id)) or outgoing_entities)):
             raise ObservationUnavailable('invalid forward observation')
         if outgoing_entities:
-            styles = {'textEntityTypeBold', 'textEntityTypeItalic', 'textEntityTypeUnderline',
-                      'textEntityTypeStrikethrough', 'textEntityTypeSpoiler'}
-            if (content_type != 'messageText' or caption_sha256 is not None or
-                    type(text_sha256) is not str or len(text_sha256) != 64 or
-                    any(c not in '0123456789abcdef' for c in text_sha256) or
+            # Formatted text has a text digest; a styled caption (0.58) a caption digest and no text digest.
+            digest = caption_sha256 if content_type in CAPTION_CONTENT_TYPES else text_sha256
+            if ((content_type != 'messageText' and content_type not in CAPTION_CONTENT_TYPES) or
+                    (content_type == 'messageText' and caption_sha256 is not None) or
+                    (content_type != 'messageText' and text_sha256 is not None) or
+                    type(digest) is not str or len(digest) != 64 or
+                    any(c not in '0123456789abcdef' for c in digest) or
                     any(type(row) is not tuple or len(row) != 3 or
                         type(row[0]) is not int or type(row[1]) is not int or
                         not 0 <= row[0] < 8192 or not 0 < row[1] <= 8192 or
-                        row[0] + row[1] > 8192 or type(row[2]) is not str or row[2] not in styles
+                        row[0] + row[1] > 8192 or type(row[2]) is not str or row[2] not in _STYLES
                         for row in outgoing_entities)):
                 raise ObservationUnavailable('invalid formatted text expectation')
             if tuple(sorted(outgoing_entities, key=lambda row: (row[0], -row[1], row[2]))) != outgoing_entities:
@@ -389,11 +422,13 @@ class SendObservations:
                 reply_anchor is not None or forum_topic_id is not None or caption_sha256 is not None):
             raise ObservationUnavailable('invalid saved messages observation')
         if caption_sha256 is not None:
-            if (reply_anchor is None or content_type not in {'messageDocument','messagePhoto','messageVoiceNote'}
+            # 0.58: every caption send registers its caption; only an artifact reply also binds its media facts.
+            if (content_type not in CAPTION_CONTENT_TYPES or text_sha256 is not None
+                or (reply_anchor is not None and content_type=='messageVideo')
                 or type(caption_sha256) is not str or len(caption_sha256)!=64
                 or any(c not in '0123456789abcdef' for c in caption_sha256)):
-                raise ObservationUnavailable('invalid artifact reply expectation')
-            if content_type=='messageVoiceNote' and not (_number(voice_duration,600,1)
+                raise ObservationUnavailable('invalid artifact caption expectation')
+            if reply_anchor is not None and content_type=='messageVoiceNote' and not (_number(voice_duration,600,1)
                 and _number(waveform_size,100,1) and type(waveform_sha256) is str and len(waveform_sha256)==64
                 and all(c in '0123456789abcdef' for c in waveform_sha256)):
                 raise ObservationUnavailable('invalid voice reply expectation')
@@ -499,8 +534,10 @@ class SendObservations:
             and value["content"].get("@type") == observation.content_type
             and SendObservations._text_matches(value["content"], observation.text_sha256, observation.outgoing_entities)
             and SendObservations._reply_matches(value, observation.reply_anchor, observation.forum_topic_id)
-            and (not observation.outgoing_entities or observation.reply_anchor is not None or value.get('reply_to') is None)
-            and (not observation.outgoing_entities or observation.forum_topic_id is not None or value.get('topic_id') is None or (
+            and (not observation.outgoing_entities or observation.caption_sha256 is not None or
+                 observation.reply_anchor is not None or value.get('reply_to') is None)
+            and (not observation.outgoing_entities or observation.caption_sha256 is not None or
+                 observation.forum_topic_id is not None or value.get('topic_id') is None or (
                 observation.saved_messages_topic_id is not None and strict_shape(value.get('topic_id'),
                     {'@type': 'messageTopicSavedMessages', 'saved_messages_topic_id': observation.saved_messages_topic_id})))
             and (observation.forum_topic_id is None or (

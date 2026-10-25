@@ -1013,7 +1013,8 @@ class TransportShapeTests(unittest.TestCase):
     def test_video_observation_registration_is_closed_and_final_correlates_by_type(self):
         observations = SendObservations()
         for kwargs in ({'video': (5, 1280, 720)}, {'video': [5, 1280, 720, 9]}, {'video': (0, 1280, 720, 9)},
-                       {'video': (5, 1280, 720, 9), 'caption_sha256': 'a' * 64},
+                       # 0.58: a video registers its caption digest too; only a malformed one refuses.
+                       {'video': (5, 1280, 720, 9), 'caption_sha256': 'A' * 64},
                        {'video': (5, 1280, 720, 9), 'reply_anchor': (RECIPIENT, 1)},
                        {'video': (5, 1280, 720, 9), 'forward': True}, {}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ObservationUnavailable):
@@ -1087,7 +1088,8 @@ class TransportShapeTests(unittest.TestCase):
             raw.receive = receive
             if kind == 'document':
                 raw.send = lambda request, raw=raw: (raw.sent.append(request) or raw.events.append(
-                    {**outgoing(-10, {'@type': 'messageDocument'}, sending_state={'@type': 'messageSendingStatePending',
+                    {**outgoing(-10, {'@type': 'messageDocument', 'caption': {'@type': 'formattedText', 'text': '',
+                                      'entities': []}}, sending_state={'@type': 'messageSendingStatePending',
                      'sending_id': request['options']['sending_id']}), '@extra': request['@extra']}))
             client = TDLibClient(raw=raw); client._ready = True
             with patch('telegram_search_mcp.tdjson.STAGING_ROOT', root), patch('time.monotonic', lambda: clock[0]):

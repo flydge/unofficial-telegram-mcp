@@ -995,7 +995,8 @@ class LegacyTDJson:
         self.close()
 
 
-from .send_observations import SendObservations, ObservationUnavailable, album_outcomes, other_chat_update
+from .send_observations import (CAPTION_CONTENT_TYPES, SendObservations, ObservationUnavailable, album_outcomes,
+                                other_chat_update)
 
 
 class TDLibClient:
@@ -2739,8 +2740,10 @@ class TDLibClient:
                     **({'outgoing_entities': outgoing_entities} if outgoing_entities else {}),
                     **({'saved_messages_topic_id': saved_messages_topic_id} if saved_messages_topic_id is not None else {}),
                     **({'video': video} if video is not None else {}),
-                    **({'caption_sha256':hashlib.sha256(content['caption']['text'].encode('utf-8')).hexdigest(),
-                        'voice_duration':content['voice_note']['duration'] if expected_type=='messageVoiceNote' else None,
+                    # 0.58: every caption is read back exactly; an artifact reply also binds its voice facts.
+                    **({'caption_sha256':hashlib.sha256(content['caption']['text'].encode('utf-8')).hexdigest()}
+                       if expected_type in CAPTION_CONTENT_TYPES else {}),
+                    **({'voice_duration':content['voice_note']['duration'] if expected_type=='messageVoiceNote' else None,
                         'waveform_sha256':hashlib.sha256(base64.b64decode(content['voice_note']['waveform'],validate=True)).hexdigest() if expected_type=='messageVoiceNote' else None,
                         'waveform_size':len(base64.b64decode(content['voice_note']['waveform'],validate=True)) if expected_type=='messageVoiceNote' else None} if artifact_reply else {}))
             except ObservationUnavailable as error:

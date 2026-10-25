@@ -124,10 +124,10 @@ class TDLibBoundaryTests(unittest.TestCase):
                 if self.delayed:
                     self.pending.extend([
                         {"@type": "message", "id": -9, "chat_id": 123, "is_outgoing": True,
-                         "content": {"@type": "messageDocument"}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
+                         "content": {"@type": "messageDocument", "caption": {"@type": "formattedText", "text": "", "entities": []}}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
                         {"@type": "updateMessageSendFailed", "old_message_id": -9, "error": error,
                          "message": {"@type":"message", "id": 9, "chat_id":123, "is_outgoing":True,
-                            "content":{"@type":"messageDocument"}, "sending_state":{"@type":"messageSendingStateFailed","error":error}}},
+                            "content":{"@type":"messageDocument", "caption": {"@type": "formattedText", "text": "", "entities": []}}, "sending_state":{"@type":"messageSendingStateFailed","error":error}}},
                     ])
                 else:
                     self.pending.append({**error, "@extra": payload["@extra"]})
@@ -161,10 +161,10 @@ class TDLibBoundaryTests(unittest.TestCase):
                 self.sent.append(payload)
                 self.pending.extend([
                     {"@type": "message", "id": -3, "chat_id": 123, "is_outgoing": True,
-                     "content": {"@type": "messageVoiceNote"}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
+                     "content": {"@type": "messageVoiceNote", "caption": {"@type": "formattedText", "text": "", "entities": []}}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
                     {"@type": "updateMessageSendSucceeded", "old_message_id": -3,
                      "message": {"@type": "message", "id": 901, "chat_id": 123,
-                                 "is_outgoing": True, "content": {"@type": "messageVoiceNote"}}},
+                                 "is_outgoing": True, "content": {"@type": "messageVoiceNote", "caption": {"@type": "formattedText", "text": "", "entities": []}}}},
                 ])
 
             def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -190,10 +190,10 @@ class TDLibBoundaryTests(unittest.TestCase):
                 self.sent.append(payload)
                 self.pending.extend([
                     {"@type": "message", "id": -4, "chat_id": 123, "is_outgoing": True,
-                     "content": {"@type": "messagePhoto"}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
+                     "content": {"@type": "messagePhoto", "caption": {"@type": "formattedText", "text": "Picture", "entities": []}}, "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
                     {"@type": "updateMessageSendSucceeded", "old_message_id": -4,
                      "message": {"@type": "message", "id": 811, "chat_id": 123,
-                                 "is_outgoing": True, "content": {"@type": "messagePhoto"}}},
+                                 "is_outgoing": True, "content": {"@type": "messagePhoto", "caption": {"@type": "formattedText", "text": "Picture", "entities": []}}}},
                 ])
 
             def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -258,11 +258,11 @@ class TDLibBoundaryTests(unittest.TestCase):
                 chat_id = payload["chat_id"]
                 self.pending.extend([
                     {"@type": "message", "id": -99, "chat_id": chat_id,
-                     "is_outgoing": True, "content": {"@type": "messageDocument"},
+                     "is_outgoing": True, "content": {"@type": "messageDocument", "caption": {"@type": "formattedText", "text": "reviewed", "entities": []}},
                      "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
                     {"@type": "updateMessageSendSucceeded", "old_message_id": -99,
                      "message": {"@type": "message", "id": 200, "chat_id": chat_id,
-                                 "is_outgoing": True, "content": {"@type": "messageDocument"}}},
+                                 "is_outgoing": True, "content": {"@type": "messageDocument", "caption": {"@type": "formattedText", "text": "reviewed", "entities": []}}}},
                 ])
 
             def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -294,10 +294,11 @@ class TDLibBoundaryTests(unittest.TestCase):
                 self.sent.append(payload)
                 chat_id = payload["chat_id"]
                 final = lambda chat, identifier: {"@type": "message", "id": identifier, "chat_id": chat,
-                                                  "is_outgoing": True, "content": {"@type": "messageDocument"}}
+                                                  "is_outgoing": True, "content": {"@type": "messageDocument",
+                                                  "caption": {"@type": "formattedText", "text": "reviewed", "entities": []}}}
                 self.pending.extend([
                     {"@type": "message", "id": -99, "chat_id": chat_id,
-                     "is_outgoing": True, "content": {"@type": "messageDocument"},
+                     "is_outgoing": True, "content": {"@type": "messageDocument", "caption": {"@type": "formattedText", "text": "reviewed", "entities": []}},
                      "sending_state": {"@type": "messageSendingStatePending", "sending_id": payload["options"]["sending_id"]}, "@extra": payload["@extra"]},
                     {"@type": "updateMessageSendSucceeded", "old_message_id": -99, "message": final(chat_id + 1, 300)},
                     {"@type": "updateMessageSendSucceeded", "old_message_id": -99, "message": final(-chat_id, 301)},
