@@ -275,8 +275,9 @@ class CapabilityBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(tools)[49:55], ['prepare_video_send', 'send_prepared_video', 'prepare_chat_archive',
                                               'apply_prepared_archive', 'prepare_text_edit', 'apply_prepared_text_edit'])
         self.assertEqual(list(tools)[55:58], ['prepare_album_send', 'send_prepared_album', 'get_album_send_status'])
+        # 0.58: optional caption styles (formatted_caption_send), listed in schema_changes/0.58-formatted-captions.
         self.assertEqual(set(tools['prepare_video_send'].input_schema['properties']),
-                         {'artifact_id', 'recipient', 'caption'})
+                         {'artifact_id', 'recipient', 'caption', 'outgoing_entities'})
         self.assertEqual(set(tools['send_prepared_video'].input_schema['properties']), {'draft_id', 'approved'})
         for name in ('prepare_video_send', 'send_prepared_video'):
             self.assertFalse(tools[name].input_schema['additionalProperties'])

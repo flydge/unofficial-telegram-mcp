@@ -170,8 +170,14 @@ class OutgoingFormattingModelTests(unittest.TestCase):
                         {'draft_id': DID, 'text': TEXT, 'outgoing_entities': None}):
                 with self.subTest(model=model.__name__, bad=bad), self.assertRaises(ValidationError):
                     model.model_validate(bad)
-        with self.assertRaises(ValidationError):
-            UpdateDraftRequest.model_validate({'draft_id': DID, 'caption': 'x', 'outgoing_entities': [entity()]})
+        # 0.58: a caption revision may carry styles too (formatted_caption_send), but only over a caption that is
+        # already the text Telegram stores; one that normalization or Telegram's rewrite would change is refused.
+        styled = UpdateDraftRequest.model_validate({'draft_id': DID, 'caption': 'x', 'outgoing_entities': [entity()]})
+        self.assertEqual(styled.model_dump(mode='json')['outgoing_entities'], [entity()])
+        for caption in (' x', 'x\n', 'ｘ', '\tx'):
+            with self.subTest(caption=caption), self.assertRaises(ValidationError):
+                UpdateDraftRequest.model_validate({'draft_id': DID, 'caption': caption,
+                                                   'outgoing_entities': [entity()]})
 
     def test_request_ranges_are_checked_against_final_normalized_text(self):
         base = {'recipient': CHAT, 'reply_to': {'chat_id': CHAT, 'message_id': 55}}
