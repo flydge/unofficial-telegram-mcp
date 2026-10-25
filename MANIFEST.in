@@ -28,6 +28,7 @@ include tests/fixtures/reply_phone_v19_goldens.json
 include tests/fixtures/reply_bank_card_v20_goldens.json
 include tests/fixtures/reply_bank_card_v21_goldens.json
 include tests/fixtures/reply_text_url_v22_goldens.json
+include tests/fixtures/reply_ladder_matrix_0_57.json
 include docs/install.md
 include docs/reference.md
 include docs/release-notes-0.51.0.md
