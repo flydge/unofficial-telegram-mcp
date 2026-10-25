@@ -249,16 +249,16 @@ _REPLY_FAMILIES = (
     ("bank cards", "reply_bank_card_targets"), ("phones", "reply_phone_targets"), ("emails", "reply_email_targets"),
     ("URLs", "reply_url_targets"), ("dates", "reply_datetime_targets"),
     ("hashtags, cashtags, bot commands", "reply_lexical_targets"), ("mentions", "reply_identity_targets"),
-    ("hidden text links", "reply_text_url_targets"),
+    ("hidden text links", "reply_text_url_targets"), ("custom emoji", "reply_custom_emoji_targets"),
+    ("voice-note timestamps", "reply_media_timestamp_targets"),
 )
 _REPLY = (
     "A reply targets one exact committed message in the recipient chat (reply_to from a search or read result, "
-    "or reply_selection_id). The source may need more default-off capabilities: a document, static photo or "
-    "OGG voice note reply_media_targets; styled text or captions reply_formatted_targets plus one per entity "
-    "family present ("
+    "or reply_selection_id). The source may need default-off capabilities: a document, static photo or OGG "
+    "voice note reply_media_targets; styles reply_formatted_targets plus one per entity family ("
     + "; ".join(f"{family} {capability}" for family, capability in _REPLY_FAMILIES)
-    + "); a forum topic topic_text_send. Without them the result is capability_disabled, naming only "
-    "missing_capabilities and no source content. " + _UNTRUSTED
+    + "); a forum topic topic_text_send. Otherwise the result is capability_disabled, naming only "
+    "missing_capabilities, no source content. " + _UNTRUSTED
 )
 # Follows the generated exactly-one source rule (_source_rule) on every tool that accepts a retained selection.
 _SELECTION = ("A selection (from retain_selection; also needs retained_selections) expires after a bounded time set "

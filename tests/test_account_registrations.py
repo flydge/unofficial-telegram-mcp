@@ -63,10 +63,12 @@ SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510c
 # Every later slice that changes a tool schema lists the change in tests/fixtures/schema_changes/ and moves this
 # pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 part 1 (0.57-capabilities, 0.57-caption-tools), 0.57 part 2
 # (0.57-styled-text-edit, 0.57-pin-tools), 0.57 part 3 (0.57-delete-tools; review fix 057b corrected its applied
-# description, which the fingerprint covers). Accounts themselves never enter the fingerprint.
-SCHEMA_FINGERPRINT = 'ea3c00e34404f73ba7bad83693852ee489cfe421862d5f5ef585187126f4b113'
+# description, which the fingerprint covers), 0.58 part 2 (0.58-reply-family-capabilities). Accounts themselves never
+# enter the fingerprint.
+SCHEMA_FINGERPRINT = 'b20e5985b046bdfb2d2437ad9414370b24b4287ee7e63b9de928594e6e453a1d'
 SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities', '0.57-caption-tools',
-                            '0.57-delete-tools', '0.57-pin-tools', '0.57-styled-text-edit')
+                            '0.57-delete-tools', '0.57-pin-tools', '0.57-styled-text-edit',
+                            '0.58-reply-family-capabilities')
 
 
 def digest(data):

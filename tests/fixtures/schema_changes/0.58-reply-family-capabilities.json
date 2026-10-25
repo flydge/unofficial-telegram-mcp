@@ -1,0 +1,15 @@
+{
+  "structure": {
+    "get_reply_artifact_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "get_reply_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "prepare_album_send": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "prepare_caption_edit": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "prepare_reply_artifact_send": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "prepare_reply_text_send": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "prepare_text_edit": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "refresh_reply_artifact_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "refresh_reply_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "update_reply_artifact_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)",
+    "update_reply_draft": "output: the closed missing_capabilities enum gains reply_custom_emoji_targets and reply_media_timestamp_targets (two more items allowed)"
+  }
+}

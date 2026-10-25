@@ -207,14 +207,13 @@ working, so show the new preview and ask again. A draft with a forum topic canno
 again. `list_drafts` and `cancel_draft` cover text, file and reply drafts; other drafts are superseded by
 preparing again or expire.
 
-**Replies.** `reply_to` is one committed message in the recipient chat, or use `reply_selection_id`. The
-source may need more default-off capabilities: `reply_media_targets` for a document, static photo or OGG
-voice note; `reply_formatted_targets` for styled text, plus one per entity family present
-(`reply_url_targets`, `reply_text_url_targets`, `reply_email_targets`, `reply_phone_targets`,
-`reply_bank_card_targets`, `reply_datetime_targets`, `reply_lexical_targets`, `reply_identity_targets`);
-`topic_text_send` for a forum topic. When one is off, the result is `capability_disabled` with
-`missing_capabilities` and no source content. Send an ordinary message instead only if the user agrees it
-will not be a reply.
+**Replies.** `reply_to` (or `reply_selection_id`) is one committed message in the recipient chat. The
+source may need default-off capabilities: `reply_media_targets` for a document, photo or voice note;
+`reply_formatted_targets` for styled text, plus one per entity family (`reply_url_targets`,
+`reply_text_url_targets`, `reply_email_targets`, `reply_phone_targets`, `reply_bank_card_targets`,
+`reply_datetime_targets`, `reply_lexical_targets`, `reply_identity_targets`, `reply_custom_emoji_targets`,
+`reply_media_timestamp_targets`); `topic_text_send` for a forum topic. If one is off: `capability_disabled`
+with `missing_capabilities`, no source content. Never fall back to an ordinary message unless the user agrees.
 
 **Topics and styles.** A text send or reply to a forum topic takes `topic` from `list_topics` and needs
 `topic_text_send`. Optional `outgoing_entities` (bold, italic, underline, strikethrough, spoiler) need
