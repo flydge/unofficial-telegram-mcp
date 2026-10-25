@@ -380,23 +380,77 @@ def _topic_document(draft, alias) -> str:
         closing)
 
 
-def _reply_target(target, account_id) -> tuple[list, list[str]]:
+_PRECISIONS = {'dateTimePartPrecisionNone': 'none', 'dateTimePartPrecisionShort': 'short',
+               'dateTimePartPrecisionLong': 'long'}
+
+
+def _payload_detail(kind: str, value: dict, account_id: int) -> str | None:
+    """The hidden payload of one stored target entity, stated plainly (0.58): a text link's URL (untrusted, under
+    the readable rule), a custom emoji's id, a media timestamp, a mentioned user, a date and its formatting, a code
+    block's language. Fieldless kinds carry nothing beyond their covered text."""
+    if kind == 'textEntityTypeTextUrl':
+        return f'hidden URL {_span(value["url"])}'
+    if kind == 'textEntityTypeCustomEmoji':
+        return f'custom emoji id {value["custom_emoji_id"]}'
+    if kind == 'textEntityTypeMediaTimestamp':
+        seconds = value['media_timestamp']
+        return f'media timestamp {seconds} second{"" if seconds == 1 else "s"}'
+    if kind == 'textEntityTypeMentionName':
+        return f'mentions {_sender("user", value["user_id"], account_id)}'
+    if kind == 'textEntityTypePreCode':
+        return f'language {_span(value["language"])}'
+    if kind == 'textEntityTypeDateTime':
+        formatting = value.get('formatting_type')
+        shown = ('no formatting' if formatting is None else 'relative formatting'
+                 if formatting['@type'] == 'dateTimeFormattingTypeRelative' else
+                 f"absolute formatting (time {_PRECISIONS[formatting['time_precision']['@type']]}, date "
+                 f"{_PRECISIONS[formatting['date_precision']['@type']]}, day of week "
+                 f"{'shown' if formatting['show_day_of_week'] else 'hidden'})")
+        return f'unix time {value["unix_time"]}; {shown}'
+    return None
+
+
+def _target_rows(projection: str, target, account_id: int) -> list[str]:
+    """One row per entity of the replied message as the stored projection holds it (0.58): its style or family, the
+    exact covered source text and its hidden payload, so nothing hidden is legible only inside the escaped rendering
+    above. The projection is bound to the reviewed target: it must render exactly that target, digest included."""
+    from .reply_drafts import ReplySource
+    from .reply_formatted_sources import _boundaries
+    source = ReplySource(projection)
+    _require(source.target() == target)
+    content = json.loads(projection)['message']['content']
+    formatted = content['caption'] if 'kind' in content else content['text']
+    text, bounds = formatted['text'], _boundaries(formatted['text'])
+    rows = []
+    for entity in formatted['entities']:
+        kind, offset, length = entity['type']['@type'], entity['offset'], entity['length']
+        covered = text[bounds[offset]:bounds[offset + length]]
+        detail = _payload_detail(kind, entity['type'], account_id)
+        rows.append(f'{kind[len("textEntityType"):]}: offset {offset}, length {length}; covered {_span(covered)}'
+                    + (f'; {detail}' if detail is not None else ''))
+    return ([f'Target styles and hidden payloads {_MARK} (exact source text; UTF-16 code units):', *rows]
+            if rows else [])
+
+
+def _reply_target(target, account_id, projection=None) -> tuple[list, list[str]]:
     """(payload lines, technical lines) for the message replied to; its text is untrusted evidence. The
     evidence is always the bound rendering (render_content / sanitize_telegram_text; styled and media
     targets are JSON renderings even when nothing was cleaned), so the block is labelled a rendering, a
-    sanitized one also "cleaned, not exact", and its sanitized flag stays directly under it."""
+    sanitized one also "cleaned, not exact", and its sanitized flag stays directly under it. With the stored
+    projection (0.58) every style and hidden payload follows as its own row."""
     anchor = target.anchor
     label = ' (rendering, cleaned, not exact)' if target.sanitized else ' (rendering)'
     return ([f'In reply to message {anchor.message_id} in {_chat(anchor.chat_id, account_id)} {_MARK}{label}:',
              _Payload(_evidence(target.text)),
-             f'Target sanitized: {target.sanitized}; truncated: {target.truncated}'],
+             f'Target sanitized: {target.sanitized}; truncated: {target.truncated}',
+             *(_target_rows(projection, target, account_id) if projection is not None else [])],
             [f'Target source SHA-256: {target.source_sha256}'])
 
 
-def _reply_document(validated, alias) -> str:
+def _reply_document(validated, alias, projection=None) -> str:
     draft = validated.draft
     topic, topic_technical = _topic_lines(draft.topic, draft.account_id, alias)
-    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id, projection)
     return _document(
         [*_head(f'Send a reply to {_span(draft.recipient_title)} ({_chat(draft.recipient, draft.account_id)})',
                 draft.account_id, draft.expires_at, alias), *topic],
@@ -406,9 +460,9 @@ def _reply_document(validated, alias) -> str:
         f'{identity.DISPLAY_NAME} will revalidate cached target evidence and make one reply attempt.')
 
 
-def _reply_artifact_document(validated, alias) -> str:
+def _reply_artifact_document(validated, alias, projection=None) -> str:
     draft = validated.draft
-    target, target_technical = _reply_target(validated.reply_target, draft.account_id)
+    target, target_technical = _reply_target(validated.reply_target, draft.account_id, projection)
     voice = ([f'Source file: {_span(draft.source_display_name)}', f'Duration: {draft.duration_seconds} seconds',
               f'Converted to OGG/Opus mono: {draft.converted}'] if draft.kind == 'voice_note' else [])
     voice_technical = ([f'Source SHA-256: {draft.source_sha256}', f'Waveform (base64): {draft.waveform_base64}']
@@ -698,9 +752,12 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
             duration_seconds, source_sha256, source_display_name, reply_preview, reply_artifact_preview,
             topic_preview, forward_preview, video_preview, archive_preview, text_edit_preview,
             draft_preview, account_alias, album_preview, caption_edit_preview, pin_change_preview,
-            message_delete_preview) -> tuple[str, str]:
-    """(document, its verb: send, change or delete) for exactly one preview bound to the broker's own arguments."""
+            message_delete_preview, reply_source=None) -> tuple[str, str]:
+    """(document, its verb: send, change or delete) for exactly one preview bound to the broker's own arguments.
+    `reply_source` (0.58) is a reply's stored source projection; it must render the reviewed target exactly."""
     _require(_valid_alias(account_alias))
+    _require(reply_source is None or (type(reply_source) is str and
+                                      (reply_preview is not None or reply_artifact_preview is not None)))
     alias = account_alias
     previews = (topic_preview, reply_preview, reply_artifact_preview, forward_preview, video_preview,
                 archive_preview, text_edit_preview, draft_preview, album_preview, caption_edit_preview,
@@ -793,7 +850,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == draft.kind and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.sha256 == sha256 and draft.size_bytes == size_bytes and draft.display_name == display_name and
                  draft.caption == (caption or '') and text in ('', None))
-        return _reply_artifact_document(validated, alias), 'send'
+        return _reply_artifact_document(validated, alias, reply_source), 'send'
     if reply_preview is not None:
         from .reply_drafts import ReplyDraftPreview
         validated = ReplyDraftPreview.model_validate(reply_preview)
@@ -801,7 +858,7 @@ def _render(*, recipient_title, recipient, display_name, size_bytes, sha256, cap
         _require(kind == 'text' and draft.recipient == recipient and draft.recipient_title == recipient_title and
                  draft.text == text and draft.sha256 == sha256 and draft.size_bytes == size_bytes)
         _text_only(display_name, caption, duration_seconds, source_sha256, source_display_name)
-        return _reply_document(validated, alias), 'send'
+        return _reply_document(validated, alias, reply_source), 'send'
     from .draft_models import DraftPreview
     validated = DraftPreview.model_validate(draft_preview)
     # Text styles have their own document (topic_preview); a file's caption styles (0.58) stay on this one.
@@ -830,7 +887,7 @@ _DEFAULTS = dict(kind='document', text='', duration_seconds=None, source_sha256=
                  reply_preview=None, reply_artifact_preview=None, topic_preview=None, forward_preview=None,
                  video_preview=None, archive_preview=None, text_edit_preview=None, draft_preview=None,
                  account_alias=None, album_preview=None, caption_edit_preview=None, pin_change_preview=None,
-                 message_delete_preview=None)
+                 message_delete_preview=None, reply_source=None)
 
 
 def decide_approved_send(
@@ -852,6 +909,7 @@ def decide_approved_send(
     caption_edit_preview: dict | None = None,
     pin_change_preview: dict | None = None,
     message_delete_preview: dict | None = None,
+    reply_source: str | None = None,
 ) -> ApprovalDecision:
     """Ask the signed-in macOS user. Only an explicit Send/Apply/Delete click approves; a decline, the
     timer, or any failure to render or show the dialog means no send, change or deletion. `account_alias` (only once
@@ -864,7 +922,7 @@ def decide_approved_send(
         video_preview=video_preview, archive_preview=archive_preview, text_edit_preview=text_edit_preview,
         draft_preview=draft_preview, account_alias=account_alias, album_preview=album_preview,
         caption_edit_preview=caption_edit_preview, pin_change_preview=pin_change_preview,
-        message_delete_preview=message_delete_preview)
+        message_delete_preview=message_delete_preview, reply_source=reply_source)
     if rendered is None:
         return UNAVAILABLE
     document, verb = rendered

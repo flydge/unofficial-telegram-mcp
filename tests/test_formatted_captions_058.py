@@ -497,7 +497,10 @@ class ArtifactLifecycleTests(ArtifactSendFixture, unittest.TestCase):
         sent = self.send(reply['draft']['draft_id'])
         self.assertEqual((sent['status'], sent['message_id']), ('sent', 701), sent)
         self.assertEqual(self.approvals[-1]['reply_artifact_preview'], reply)
-        shown = render_approval(**self.approvals[-1])
+        from telegram_search_mcp.reply_drafts import source_from_message
+        self.assertEqual(self.approvals[-1]['reply_source'],
+                         source_from_message(self.raw.source, 123, 55).projection_json)
+        shown = render_approval(**self.approvals[-1])  # the stored projection renders the reviewed target
         self.assertIn('Caption styles (exact caption; UTF-16 code units):', shown[0])
         wire = self.sends()[0]
         self.assertEqual(wire['input_message_content']['caption']['entities'], NATIVE)

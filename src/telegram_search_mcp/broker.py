@@ -2172,7 +2172,9 @@ class Broker(SelectionBrokerMixin):
                 self._require_topic_policy(request.draft_id, owner)
                 self._reply_budget_check(provider_before_dialog)
             reply_preview=((self._reply_preview if text_only else self._reply_artifact_preview)(entry,owner).model_dump(mode="json") if entry.reply_source is not None else None)
-            reply_confirmation={("reply_preview" if text_only else "reply_artifact_preview"):reply_preview} if reply_preview is not None else {}
+            # 0.58: the stored source projection too, so the dialog can state every style and hidden payload.
+            reply_confirmation=({("reply_preview" if text_only else "reply_artifact_preview"):reply_preview,
+                                 "reply_source":entry.reply_source.projection_json} if reply_preview is not None else {})
             if entry.reply_source is None:
                 # A styled caption (0.58) keeps the file draft's own preview, now with its styles and digest.
                 reply_confirmation[('topic_preview' if entry.topic is not None or
