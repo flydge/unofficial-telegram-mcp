@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +31,46 @@ ASSETS = (('bootstrap', 'bootstrap.sh'), ('seed', 'bootstrap-verifier'), ('index
 # (argv, pasted): a pasted run feeds the block to the interactive shell on stdin instead of -c.
 SHELLS = ((('/bin/zsh', '-f'), False), (('/bin/bash', '--norc'), False), (('/bin/sh',), False),
           (('/bin/zsh', '-f', '-i'), True), (('/bin/bash', '--norc', '-i'), True), (('/bin/sh', '-i'), True))
+
+
+RECIPE_SECONDS = 60
+
+
+def run_shell(argv, script, *, pasted, env, timeout=None):
+    """One shell run of `script`: with -c, or (pasted) fed on stdin to the shell as given. Bounded in every case:
+    the shell runs in its own session (no controlling terminal, so an interactive shell never stops our group),
+    its output goes to files (it can never block on a pipe we have to drain), the paste is written by a thread (a
+    blocked write never holds the deadline), and at the deadline, or when the shell exits, its whole process
+    group is killed, which also ends a blocked write. A timeout raises subprocess.TimeoutExpired."""
+    limit = RECIPE_SECONDS if timeout is None else timeout
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen([*argv] if pasted else [*argv, '-c', script],
+                                   stdin=subprocess.PIPE if pasted else subprocess.DEVNULL, stdout=out, stderr=err,
+                                   env=env, start_new_session=True)
+        writer = None
+        if pasted:
+            def paste(stream=process.stdin, data=script.encode()):
+                try:
+                    stream.write(data)
+                    stream.close()
+                except OSError:  # The shell stopped reading (exited or was killed): the paste ends there.
+                    pass
+            writer = threading.Thread(target=paste, daemon=True)
+            writer.start()
+        try:
+            returncode = process.wait(timeout=limit)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.wait()
+            if writer is not None:
+                writer.join(timeout=10)
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(argv, returncode, out.read().decode(errors='replace'),
+                                           err.read().decode(errors='replace'))
 
 
 def recipe():
@@ -78,9 +122,7 @@ for a in "$@"; do printf '%s\\n' "$a"; done > '{self.base}/bootstrap-argv'
         for path in (self.home / 'tgmcp-kit', self.log, self.base / 'bootstrap-argv') if fresh else ():
             shutil.rmtree(path, ignore_errors=True) if path.is_dir() else path.unlink(missing_ok=True)
         argv, pasted = shell
-        feed = {'input': self.script} if pasted else {'stdin': subprocess.DEVNULL}
-        return subprocess.run([*argv] if pasted else [*argv, '-c', self.script], capture_output=True, text=True,
-                              timeout=60, env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin'}, **feed)
+        return run_shell(argv, self.script, pasted=pasted, env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin'})
 
     def test_the_tagged_pins_are_checked_before_bootstrap_runs_with_them(self):
         pins = self.pins()
@@ -128,6 +170,72 @@ for a in "$@"; do printf '%s\\n' "$a"; done > '{self.base}/bootstrap-argv'
                 done = self.run_recipe(shell, fresh=False)
                 self.assertIn('Stopped:', done.stdout)
                 self.assertFalse((self.base / 'bootstrap-argv').exists())
+
+
+# Runs run_shell in a child process: the stop log of 25.10 sampled a pasted `bash --norc -i` and its writer
+# deadlocked on pipes (the shell blocked on its full stderr pipe while the runner sat in a write to its stdin, so
+# the timeout could never fire). The selector stands in for the sampled host: it reports the stdin pipe writable,
+# and nothing else, while input is left, so the runner writes before it drains and a blocking write can start
+# into a full pipe. `prompts` is that interactive bash; `silent` is a shell that never reads and never exits.
+GUARDED = r"""
+import json, selectors, subprocess, sys, time
+sys.path.insert(0, sys.argv[1])
+import test_install_guide_recipe as recipe
+
+
+class WritesFirst(subprocess._PopenSelector):
+    def select(self, timeout=None):
+        writers = [(key, selectors.EVENT_WRITE) for key in self.get_map().values()
+                   if key.events & selectors.EVENT_WRITE]
+        return writers or super().select(timeout)
+
+
+subprocess._PopenSelector = WritesFirst
+mode, home = sys.argv[2], sys.argv[3]
+env = {'HOME': home, 'PATH': '/usr/bin:/bin'}
+started = time.monotonic()
+try:
+    if mode == 'prompts':
+        done = recipe.run_shell(('/bin/bash', '--norc', '-i'), ':\n' * 100000, pasted=True, env=env, timeout=20)
+    else:
+        done = recipe.run_shell(('/bin/sleep', '613'), 'x' * 200000, pasted=True, env=env, timeout=2)
+    outcome = {'outcome': 'completed', 'returncode': done.returncode}
+except subprocess.TimeoutExpired:
+    outcome = {'outcome': 'timeout'}
+outcome['seconds'] = round(time.monotonic() - started, 1)
+print(json.dumps(outcome))
+"""
+GUARD_SECONDS = 45
+
+
+class BoundedRunTests(unittest.TestCase):
+    """run_shell is bounded in every case: a shell blocked on its own output, or one that never reads or exits,
+    cannot hold the runner past its timeout, and no process of the run outlives it."""
+
+    def guarded(self, mode):
+        with tempfile.TemporaryDirectory(prefix='tg-recipe-guard-') as home:
+            child = subprocess.Popen([sys.executable, '-I', '-c', GUARDED, str(ROOT / 'tests'), mode, home],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     start_new_session=True)
+            try:
+                out, err = child.communicate(timeout=GUARD_SECONDS)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.communicate()
+                self.fail(f'run_shell hung past its timeout ({mode})')
+            self.assertEqual(child.returncode, 0, err.decode(errors='replace')[-2000:])
+            return json.loads(out.decode().strip().splitlines()[-1])
+
+    def test_a_pasted_interactive_shell_blocked_on_its_prompts_cannot_deadlock_the_writer(self):
+        outcome = self.guarded('prompts')
+        self.assertEqual((outcome['outcome'], outcome.get('returncode')), ('completed', 0))
+
+    def test_a_shell_that_never_reads_is_killed_at_the_timeout_with_its_whole_group(self):
+        outcome = self.guarded('silent')
+        self.assertEqual(outcome['outcome'], 'timeout')
+        self.assertLess(outcome['seconds'], 15)
+        listed = subprocess.run(['/bin/ps', '-axo', 'command'], capture_output=True, text=True, timeout=30).stdout
+        self.assertNotIn('/bin/sleep 613', listed)
 
 
 if __name__ == '__main__':
