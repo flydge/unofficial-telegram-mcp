@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.58.0.dev0 — unreleased
+## 0.58.0rc1 — release candidate, 2026-10-25 (not published)
 
-Development of 0.58.0, reply-source families and formatted captions, F13 rest
+Release candidate of 0.58.0, reply-source families and formatted captions, F13 rest ([release notes](docs/release-notes-0.58.0rc1.md))
 ([spec](docs/plans/0.58-reply-sources-and-captions-spec.md)). Part 1 freezes the 0.57 reply-source ladder in a
 pinned hash matrix of 6,098 sources and consolidates it into one family table, with no behaviour change. Part 2
 admits media TextUrl (v24), CustomEmoji (v25/v26: a decimal int64 id over exactly one emoji) and voice-note
