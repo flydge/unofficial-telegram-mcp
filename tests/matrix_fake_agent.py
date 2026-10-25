@@ -10,7 +10,8 @@ configured servers and the environment's names), which the tests read from the k
 Behaviours: honest; workaround (after the refusal, prepares a plain text send instead); shell (Codex reports a shell
 command); not_logged_in (the CLI's login failure, no tool call); logout_after_census (agent.census as shell, every
 later cell as not_logged_in: a login lost mid-column); transient (the first attempt of each cell fails at capacity
-before any tool call); refresh (Codex rewrites auth.json as a token refresh does); bad_version.
+before any tool call); prose (no tool call; the model's own words name login and capacity problems, which are
+no provider failure); refresh (Codex rewrites auth.json as a token refresh does); bad_version.
 """
 from __future__ import annotations
 
@@ -144,6 +145,21 @@ def main() -> int:
             emit({"type": "result", "subtype": "success", "is_error": True,
                   "result": "Not logged in · Please run /login"})
         return 1
+    if args.behaviour == "prose":
+        words = ("The Telegram server is temporarily unavailable, at capacity or rate limited; you are not logged in, "
+                 "please sign in or run /login (401 Unauthorized, refresh token expired).")
+        if args.role == "codex":
+            for event in ({"type": "thread.started", "thread_id": "fake"}, {"type": "turn.started"},
+                          {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": words}},
+                          {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": words}},
+                          {"type": "turn.completed", "usage": {}}):
+                emit(event)
+            answer_path.write_text(words)
+        else:
+            emit({"type": "system", "subtype": "init"})
+            emit({"type": "assistant", "message": {"content": [{"type": "text", "text": words}]}})
+            emit({"type": "result", "subtype": "success", "is_error": False, "result": words})
+        return 0
     if args.behaviour == "transient":
         marker = Path(os.environ["HOME"]) / f".attempted-{cell}"
         if not marker.exists():

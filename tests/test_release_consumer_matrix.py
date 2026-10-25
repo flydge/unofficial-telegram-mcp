@@ -130,7 +130,7 @@ def agent_pass(cli: str = "codex-cli 0.162.0") -> dict:
     """A passed agent column as run records it (digests are only checked against kept evidence)."""
     return {"status": "pass", "cli": cli, "model": "default",
             "cells": [{"id": cell, "status": "pass", "checks": matrix.AGENT_CHECKS[cell], "advisory_failed": [],
-                       "evidence": {name: "1" * 64 for name in ("server", "events", "answer", "run")}}
+                       "evidence": {name: "1" * 64 for name in ("server", "events", "answer", "run")}, "attempts": 1}
                       for cell in matrix.AGENT_IDS]}
 
 
@@ -1139,7 +1139,7 @@ def run_column(base: Path, column: str, behaviour: str = "honest", *, cells=matr
 
 
 def isolation(evidence: Path, column: str, cell: str) -> dict:
-    return json.loads((evidence / column / cell / "events.jsonl").read_text().splitlines()[0])
+    return json.loads((evidence / column / cell / "attempt-1" / "events.jsonl").read_text().splitlines()[0])
 
 
 class AgentTableTests(unittest.TestCase):
@@ -1241,6 +1241,19 @@ class AgentTableTests(unittest.TestCase):
             self.assertEqual((source.read_bytes(), stat.S_IMODE(source.stat().st_mode)), (b"refreshed", 0o600))
             self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["auth.json", "private.json"])
 
+    def test_an_agent_cell_records_its_attempts(self):
+        for attempts in (0, matrix.AGENT_ATTEMPTS + 1, "1", True, None):
+            with self.subTest(attempts=attempts):
+                section = agent_pass()
+                section["cells"][0]["attempts"] = attempts
+                self.assertEqual(refusal(matrix.check_agent_section, "codex", section), "agent_invalid")
+        section = agent_pass()
+        del section["cells"][0]["attempts"]
+        self.assertEqual(refusal(matrix.check_agent_section, "codex", section), "checks_mismatch")
+        section = agent_pass()
+        section["cells"][0]["attempts"] = matrix.AGENT_ATTEMPTS
+        matrix.check_agent_section("codex", section)
+
     def test_run_refuses_unusable_agent_arguments_before_building(self):
         with tempfile.TemporaryDirectory() as directory:
             full = Path(directory) / "full"
@@ -1271,7 +1284,7 @@ class AgentColumnTests(unittest.TestCase):
         shutil.rmtree(cls.base, ignore_errors=True)
 
     def files(self, cell: str) -> dict:
-        return matrix.read_evidence(self.evidence / "codex" / cell)
+        return matrix.read_evidence(self.evidence / "codex" / cell / "attempt-1")
 
     def judged(self, cell: str, files: dict) -> dict:
         return matrix.judge_evidence("codex", cell, files, bindings_for(self.census))
@@ -1301,9 +1314,11 @@ class AgentColumnTests(unittest.TestCase):
         self.assertFalse((self.base / "scratch-codex-honest").exists())
         self.assertEqual(sorted(path.name for path in self.codex_home.iterdir()), ["auth.json"])
         for folder in (self.evidence / "codex").iterdir():
-            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["attempt-1"])
+            for directory in (folder, folder / "attempt-1"):
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
             for name in matrix.AGENT_EVIDENCE:
-                self.assertEqual(stat.S_IMODE((folder / name).stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE((folder / "attempt-1" / name).stat().st_mode), 0o600)
 
     def test_each_verdict_is_the_evidence_judged_again(self):
         for cell in self.section["cells"]:
@@ -1415,11 +1430,11 @@ class AgentColumnTests(unittest.TestCase):
             """A copy of the evidence with one file of agent.read changed, and a receipt carrying its new digest."""
             copy_dir = self.base / f"tampered-{name}-{len(list(self.base.iterdir()))}"
             shutil.copytree(self.evidence, copy_dir)
-            path = copy_dir / "codex" / "agent.read" / name
+            path = copy_dir / "codex" / "agent.read" / "attempt-1" / name
             path.write_bytes(change(path.read_bytes()))
             changed = copy.deepcopy(document)
             changed["agents"]["codex"]["cells"][read]["evidence"] = matrix.evidence_digests(
-                matrix.read_evidence(copy_dir / "codex" / "agent.read"))
+                matrix.read_evidence(copy_dir / "codex" / "agent.read" / "attempt-1"))
             return copy_dir, changed
 
         def no_read(data: bytes) -> bytes:
@@ -1436,12 +1451,12 @@ class AgentColumnTests(unittest.TestCase):
                 self.assertEqual(refusal(matrix.verify_agent_evidence, changed, directory, SERVER),
                                  "evidence_mismatch")
         missing, _ = rewritten("answer.txt", lambda data: data)
-        (missing / "codex" / "agent.read" / "answer.txt").unlink()
+        (missing / "codex" / "agent.read" / "attempt-1" / "answer.txt").unlink()
         self.assertEqual(refusal(matrix.verify_agent_evidence, document, missing, SERVER), "evidence_invalid")
         linked, _ = rewritten("answer.txt", lambda data: data)
-        target = linked / "codex" / "agent.read" / "answer.txt"
+        target = linked / "codex" / "agent.read" / "attempt-1" / "answer.txt"
         target.unlink()
-        target.symlink_to(self.evidence / "codex" / "agent.read" / "answer.txt")
+        target.symlink_to(self.evidence / "codex" / "agent.read" / "attempt-1" / "answer.txt")
         self.assertEqual(refusal(matrix.verify_agent_evidence, document, linked, SERVER), "evidence_invalid")
 
     def test_the_check_command_requires_the_evidence_of_passed_agent_cells(self):
@@ -1512,10 +1527,40 @@ class AgentBehaviourTests(unittest.TestCase):
                 self.assertEqual(err.getvalue().strip(), f"{column}: login failed after the column's first cell")
                 self.assertEqual(refusal(matrix.check_agent_section, column, section), "agent_invalid")
 
-    def test_a_provider_failure_before_any_tool_is_retried(self):
+    def test_a_provider_failure_before_any_tool_is_retried_and_every_attempt_is_kept(self):
         section, evidence, _ = run_column(self.base, "codex", "transient", cells=("agent.census",))
-        self.assertEqual(section["status"], "pass")
-        self.assertEqual(json.loads((evidence / "codex" / "agent.census" / "run.json").read_text())["attempt"], 2)
+        self.assertEqual((section["status"], section["cells"][0]["attempts"]), ("pass", 2))
+        folder = evidence / "codex" / "agent.census"
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["attempt-1", "attempt-2"])
+        first, second = (matrix.read_evidence(folder / f"attempt-{n}") for n in (1, 2))
+        self.assertEqual([json.loads(files["run.json"])["attempt"] for files in (first, second)], [1, 2])
+        self.assertIn(b"at capacity", first["events.jsonl"])
+        self.assertFalse(matrix.Transcript(matrix._jsonl(first["server.jsonl"])).reached())
+        self.assertEqual(section["cells"][0]["evidence"], matrix.evidence_digests(second))
+        census = live_census()
+        document = {"commit": COMMIT, "wheel": {"sha256": WHEEL}, "version": census["version"],
+                    "schema_fingerprint": census["schema_fingerprint"],
+                    "agents": {"codex": section, "claude_code": {"status": "unavailable", "reason": "cli_not_given"}}}
+        matrix.verify_agent_evidence(document, evidence, SERVER)
+        claimed = copy.deepcopy(document)
+        claimed["agents"]["codex"]["cells"][0]["attempts"] = 1
+        self.assertEqual(refusal(matrix.verify_agent_evidence, claimed, evidence, SERVER), "evidence_mismatch")
+        shutil.rmtree(folder / "attempt-1")
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, evidence, SERVER), "evidence_invalid")
+
+    def test_markers_in_the_models_own_words_are_not_provider_failures(self):
+        for column in ("codex", "claude_code"):
+            with self.subTest(column=column):
+                section, evidence, _ = run_column(self.base, column, "prose", cells=("agent.census",))
+                self.assertEqual((section["status"], section["cells"][0]["failed_check"],
+                                  section["cells"][0]["attempts"]), ("fail", "broker_checked", 1))
+                self.assertEqual(sorted(path.name for path in (evidence / column / "agent.census").iterdir()),
+                                 ["attempt-1"])
+        self.assertEqual(matrix.provider_errors("codex", json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": "rate limit"}}) + "\n", ""), "")
+        self.assertIn("401 unauthorized", matrix.provider_errors("codex", json.dumps(
+            {"type": "turn.failed", "error": {"message": "401 Unauthorized"}}) + "\n", ""))
+        self.assertIn("overloaded", matrix.provider_errors("claude_code", "", "API Error: Overloaded"))
 
     def test_refreshed_codex_credentials_return_to_the_callers_codex_home(self):
         with contextlib.redirect_stderr(io.StringIO()) as err:

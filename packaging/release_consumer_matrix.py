@@ -506,7 +506,8 @@ AGENT_UNAVAILABLE = frozenset({"cli_not_given", "cli_unusable", "auth_missing", 
 AGENT_SECONDS, AGENT_ATTEMPTS = 420, 3
 AGENT_EVIDENCE = ("server.jsonl", "events.jsonl", "answer.txt", "run.json")
 MAX_EVIDENCE_BYTES = 16 << 20
-# A provider failure before any tool reached the broker says nothing about the agent: the cell is retried.
+# A provider failure before any tool reached the broker says nothing about the agent: the cell is retried. Both marker
+# sets are matched only against what the CLI itself reports as failing (provider_errors), never the model's words.
 TRANSIENT_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable", "stream disconnected",
                      "internal server error", "503 service unavailable", "502 bad gateway")
 LOGIN_MARKERS = ("401 unauthorized", "not logged in", "please run /login", "authentication_failed",
@@ -3089,6 +3090,30 @@ def agent_observations(column: str, events: str, server: str) -> dict:
     return {"turn_completed": turn, "calls": calls, "foreign_tools": foreign}
 
 
+def provider_errors(column: str, events: str, stderr: str) -> str:
+    """What the CLI itself reported as failing, casefolded, for the retry and login decisions: its stderr and its
+    provider error events (Codex: `error` events, `turn.failed` errors and `error` items; Claude Code: API error
+    messages and failed results), never the model's own messages or reasoning."""
+    texts = [stderr]
+    for event in _events(events):
+        kind = event.get("type")
+        if column == "codex":
+            item = event.get("item") if kind in ("item.started", "item.updated", "item.completed") else None
+            error = event.get("error") if kind == "turn.failed" else None
+            texts += [event.get("message") if kind == "error" else None,
+                      error.get("message") if isinstance(error, dict) else None,
+                      item.get("message") if isinstance(item, dict) and item.get("type") == "error" else None]
+        elif kind == "assistant" and (event.get("is_api_error_message") is True or isinstance(event.get("error"), str)):
+            message = event.get("message")
+            texts += [event.get("error"), *(block.get("text") for block in (
+                message.get("content") or [] if isinstance(message, dict) else []) if isinstance(block, dict))]
+        elif kind == "result" and event.get("is_error") is True:
+            errors = event.get("errors")
+            texts += [event.get("result"), event.get("api_error_status") and str(event["api_error_status"]),
+                      *(errors if isinstance(errors, list) else [])]
+    return "\n".join(text for text in texts if isinstance(text, str)).casefold()
+
+
 def agent_answer(column: str, events: str) -> str:
     """Claude Code's answer: its last result text (Codex writes its own to answer.txt)."""
     answer = ""
@@ -3293,6 +3318,15 @@ def judge_evidence(column: str, cell_id: str, files: dict, expected: dict) -> di
                             run=run if isinstance(run, dict) else {}, expected=expected)
 
 
+def run_record(files: dict) -> dict:
+    try:
+        run = json.loads(files["run.json"])
+    except ValueError:
+        raise MatrixRefusal("evidence_mismatch") from None
+    need(isinstance(run, dict), "evidence_mismatch")
+    return run
+
+
 def evidence_digests(files: dict) -> dict:
     return {name.split(".")[0]: _sha(files[name]) for name in AGENT_EVIDENCE}
 
@@ -3363,15 +3397,15 @@ def sync_codex_auth(source: Path, copied: str, private: Path) -> str:
 
 def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None, version: str, runtime: "Runtime",
                    census: dict, scratch: Path, env: dict, config: Path, folder: Path, bindings: dict) -> tuple:
-    """One cell (retried when a provider failure stopped it before any tool reached the broker): its evidence in
-    `folder`, then (its judged result with the evidence digests, whether a login failure stopped it before any tool
-    reached the broker)."""
+    """One cell (retried when a provider failure stopped it before any tool reached the broker): every attempt's
+    evidence in `folder`/attempt-<n>, then (its judged result with the evidence digests and the attempt count,
+    whether a login failure stopped it before any tool reached the broker)."""
     _, session, _, _ = agent_cell(cell_id)
     server = agent_server(session, bindings["server_name"])
     account = ALIAS if session == "alias" else None
+    _fresh(folder)
     for attempt in range(1, AGENT_ATTEMPTS + 1):
-        shutil.rmtree(folder, ignore_errors=True)
-        _fresh(folder)
+        here = _fresh(folder / f"attempt-{attempt}")
         home = Path(os.path.realpath(tempfile.mkdtemp(prefix="tga.", dir="/private/tmp")))
         tmp, workdir = _fresh(scratch / f"proxy-{cell_id}-{attempt}"), _fresh(scratch / f"work-{cell_id}-{attempt}")
         broker, started, code, timed_out = None, time.monotonic(), None, False
@@ -3387,9 +3421,9 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
                 write_private(mcp, claude_config(server, proxy, runtime.env(home, tmp)))
             code, timed_out = bounded(agent_command(column, binary, model, agent_request(cell_id, bindings["server_name"]),
                                                     server=server,
-                                                    workdir=workdir, answer=folder / "answer.txt", mcp_config=mcp),
-                                      cwd=workdir, env=env, timeout=AGENT_SECONDS, stdout=folder / "events.jsonl",
-                                      stderr=folder / "stderr.txt")
+                                                    workdir=workdir, answer=here / "answer.txt", mcp_config=mcp),
+                                      cwd=workdir, env=env, timeout=AGENT_SECONDS, stdout=here / "events.jsonl",
+                                      stderr=here / "stderr.txt")
         finally:
             if broker is not None:
                 stop_broker(*broker)
@@ -3399,16 +3433,16 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
                 server_log += canonical(registry_postscript(home)).replace(b"\n", b"") + b"\n"
             for path in (home, tmp, workdir):
                 shutil.rmtree(path, ignore_errors=True)
-        write_private(folder / "server.jsonl", server_log)
-        events = (folder / "events.jsonl").read_bytes()
-        if (folder / "answer.txt").is_file():
-            os.chmod(folder / "answer.txt", 0o600)
-        if column == "claude_code" or not (folder / "answer.txt").is_file():
-            write_private(folder / "answer.txt", agent_answer(column, events.decode("utf-8", "replace")).encode())
-        write_private(folder / "run.json", canonical({
+        write_private(here / "server.jsonl", server_log)
+        events = (here / "events.jsonl").read_bytes().decode("utf-8", "replace")
+        if (here / "answer.txt").is_file():
+            os.chmod(here / "answer.txt", 0o600)
+        if column == "claude_code" or not (here / "answer.txt").is_file():
+            write_private(here / "answer.txt", agent_answer(column, events).encode())
+        write_private(here / "run.json", canonical({
             **bindings, "column": column, "cell": cell_id, "cli": version, "model": model or "default",
             "exit": code, "timed_out": timed_out, "attempt": attempt, "seconds": round(time.monotonic() - started, 1)}))
-        stream = (events + (folder / "stderr.txt").read_bytes()).decode("utf-8", "replace").casefold()
+        stream = provider_errors(column, events, (here / "stderr.txt").read_bytes().decode("utf-8", "replace"))
         login_failed = False
         if Transcript(_jsonl(server_log)).reached():
             break
@@ -3418,8 +3452,9 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
         if attempt == AGENT_ATTEMPTS or not any(marker in stream for marker in TRANSIENT_MARKERS):
             break
         time.sleep(AGENT_RETRY_SECONDS * attempt)
-    files = read_evidence(folder)
-    return {**judge_evidence(column, cell_id, files, bindings), "evidence": evidence_digests(files)}, login_failed
+    files = read_evidence(here)
+    return ({**judge_evidence(column, cell_id, files, bindings), "evidence": evidence_digests(files),
+             "attempts": attempt}, login_failed)
 
 
 def run_agent_column(column: str, binary: Path | None, model: str | None, runtime: "Runtime", census: dict,
@@ -3472,7 +3507,8 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
 
 def check_agent_section(column: str, section: object) -> None:
     """One agent column on its own: exactly the unavailable form with a fixed reason, or the CLI's version, the model
-    and every cell in AGENT_IDS order passed at its frozen count, with known advisory labels and four digests."""
+    and every cell in AGENT_IDS order passed at its frozen count, with known advisory labels, four digests and its
+    attempt count."""
     need(isinstance(section, dict) and section.get("status") in ("pass", "unavailable"), "agent_invalid")
     if section["status"] == "unavailable":
         need(set(section) == {"status", "reason"} and section["reason"] in AGENT_UNAVAILABLE, "agent_invalid")
@@ -3487,8 +3523,9 @@ def check_agent_section(column: str, section: object) -> None:
     hex64 = re.compile(r"[0-9a-f]{64}")
     for item in cells:
         advisory, evidence = item.get("advisory_failed"), item.get("evidence")
-        need(set(item) == {"id", "status", "checks", "advisory_failed", "evidence"} and type(item["checks"]) is int
-             and item["checks"] == AGENT_CHECKS[item["id"]], "checks_mismatch")
+        need(set(item) == {"id", "status", "checks", "advisory_failed", "evidence", "attempts"}
+             and type(item["checks"]) is int and item["checks"] == AGENT_CHECKS[item["id"]], "checks_mismatch")
+        need(type(item["attempts"]) is int and 1 <= item["attempts"] <= AGENT_ATTEMPTS, "agent_invalid")
         need(isinstance(advisory, list) and advisory == sorted(set(advisory))
              and set(advisory) <= set(AGENT_ADVISORY[item["id"]]), "agent_invalid")
         need(isinstance(evidence, dict) and set(evidence) == {name.split(".")[0] for name in AGENT_EVIDENCE}
@@ -3500,9 +3537,10 @@ def agents_passed(receipt: dict) -> list:
 
 
 def verify_agent_evidence(receipt: dict, directory: Path | None, server_name: str) -> None:
-    """Every passed agent cell against its kept evidence: the four digests, the run record's bindings (commit, wheel,
-    version, fingerprint, the commit's server name, column, cell, CLI version, model) and the same verdict when the
-    cell is judged again."""
+    """Every passed agent cell against its kept evidence (`<column>/<cell>/attempt-<n>`, n its attempt count): the
+    four digests, the run record's bindings (commit, wheel, version, fingerprint, the commit's server name, column,
+    cell, CLI version, model, attempt) and the same verdict when the cell is judged again; each earlier attempt must
+    be kept, numbered, and show that nothing reached its broker (the only failure a cell is retried for)."""
     passed = agents_passed(receipt)
     if not passed:
         return
@@ -3513,15 +3551,18 @@ def verify_agent_evidence(receipt: dict, directory: Path | None, server_name: st
     for column in passed:
         section = receipt["agents"][column]
         for cell in section["cells"]:
-            files = read_evidence(directory / column / cell["id"])
+            folder = directory / column / cell["id"]
+            for earlier in range(1, cell["attempts"]):
+                files = read_evidence(folder / f"attempt-{earlier}")
+                need(run_record(files).get("attempt") == earlier
+                     and not Transcript(_jsonl(files["server.jsonl"])).reached(), "evidence_mismatch")
+            need(not (folder / f"attempt-{cell['attempts'] + 1}").exists(), "evidence_mismatch")
+            files = read_evidence(folder / f"attempt-{cell['attempts']}")
             need(evidence_digests(files) == cell["evidence"], "evidence_mismatch")
-            try:
-                run = json.loads(files["run.json"])
-            except ValueError:
-                raise MatrixRefusal("evidence_mismatch") from None
-            need(isinstance(run, dict) and {key: run.get(key) for key in (*bindings, "column", "cell", "cli", "model")}
+            run = run_record(files)
+            need({key: run.get(key) for key in (*bindings, "column", "cell", "cli", "model", "attempt")}
                  == {**bindings, "column": column, "cell": cell["id"], "cli": section["cli"],
-                     "model": section["model"]}, "evidence_mismatch")
+                     "model": section["model"], "attempt": cell["attempts"]}, "evidence_mismatch")
             judged = judge_evidence(column, cell["id"], files, bindings)
             need({key: judged.get(key) for key in ("status", "checks", "advisory_failed")}
                  == {key: cell[key] for key in ("status", "checks", "advisory_failed")}, "evidence_mismatch")
