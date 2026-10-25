@@ -1,9 +1,11 @@
 """The consumer-matrix harness (0.54 item E, criterion 11; final acceptance F18): cell set, receipt rules,
-fixtures, schema binding, the Inspector column and the bundle session.
+fixtures, schema binding, the Inspector column, the agent columns and the bundle session.
 
-The installed run (wheel from `git archive`, pinned closure, every session, the Inspector CLI) is recorded in
-the final acceptance tasks file; here the same synthetic sessions run once from this source tree, and a patched
-registration proves that a schema change fails both run and the receipt check.
+The installed run (wheel from `git archive`, pinned closure, every session, the Inspector CLI, real Codex and Claude
+Code) is recorded in the final acceptance tasks file; here the same synthetic sessions run once from this source tree,
+the agent columns run with a stand-in agent (tests/matrix_fake_agent.py) that drives the proxy as an honest or a
+misbehaving agent would, and a patched registration proves that a schema change fails both run and the receipt
+check.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from unittest import mock
 import zipfile
 
 import telegram_search_mcp
+from telegram_search_mcp.config import server_name as _identity_server_name
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
@@ -123,7 +126,18 @@ INSTALLED = {"constraints": FACTS["constraints"], "constraints_sha256": FACTS["c
 DERIVED = {"install": {**INSTALLED, "wheelhouse": "downloaded"}, "listing_sha256": "d" * 64}
 
 
-def receipt(census: dict, *, inspector: dict | None = None, **kwargs) -> dict:
+def agent_pass(cli: str = "codex-cli 0.162.0") -> dict:
+    """A passed agent column as run records it (digests are only checked against kept evidence)."""
+    return {"status": "pass", "cli": cli, "model": "default",
+            "cells": [{"id": cell, "status": "pass", "checks": matrix.AGENT_CHECKS[cell], "advisory_failed": [],
+                       "evidence": {name: "1" * 64 for name in ("server", "events", "answer", "run")}}
+                      for cell in matrix.AGENT_IDS]}
+
+
+AGENTS_PASS = {"codex": agent_pass(), "claude_code": {"status": "unavailable", "reason": "not_logged_in"}}
+
+
+def receipt(census: dict, *, inspector: dict | None = None, agents: dict | None = None, **kwargs) -> dict:
     return matrix.build_receipt(
         commit=COMMIT, tree=OTHER, version=census["version"],
         wheel={"file": f"telegram_search_mcp-{census['version']}-py3-none-any.whl", "sha256": WHEEL, "bytes": 1},
@@ -131,7 +145,7 @@ def receipt(census: dict, *, inspector: dict | None = None, **kwargs) -> dict:
         install=dict(INSTALLED), installer={**INSTALLER, "toolhouse": "provided"}, census=census,
         sessions=sessions(tools=census["tools"], **kwargs),
         inspector=copy.deepcopy(INSPECTOR_PASS if inspector is None else inspector),
-        harness_sha256=FACTS["harness_sha256"], gate_sha256=GATE)
+        harness_sha256=FACTS["harness_sha256"], gate_sha256=GATE, agents=copy.deepcopy(agents))
 
 
 def refusal(function, *args, **kwargs) -> str:
@@ -303,18 +317,29 @@ class ReceiptTests(unittest.TestCase):
     def test_a_passing_receipt_is_bound_to_commit_wheel_and_census(self):
         matrix.check_receipt(self.receipt, commit=COMMIT, wheel_sha256=WHEEL, census=self.census)
         self.assertIs(self.receipt["acceptance"], False)
-        self.assertEqual(self.receipt["schema"], "tgmcp-consumer-matrix/v3")
+        self.assertEqual(self.receipt["schema"], "tgmcp-consumer-matrix/v4")
         self.assertEqual([cell["id"] for cell in self.receipt["cells"]], list(matrix.CELL_IDS))
         self.assertEqual({cell["status"] for cell in self.receipt["owner_cells"]}, {"pending"})
         self.assertEqual(self.receipt["summary"], {"synthetic": len(matrix.CELL_IDS), "passed": len(matrix.CELL_IDS),
                                                    "failed": 0, "inspector": "pass",
                                                    "inspector_cells": len(matrix.INSPECTOR_IDS),
+                                                   "codex": "unavailable", "codex_cells": 0,
+                                                   "claude_code": "unavailable", "claude_code_cells": 0,
                                                    "owner_pending": len(matrix.OWNER_IDS)})
         self.assertEqual(self.receipt["census"]["tools_sha256"], matrix.tools_sha256(self.census["tools"]))
         self.assertEqual(set(self.receipt), matrix.RECEIPT_KEYS)
         self.assertEqual(matrix.summary_line(self.receipt),
                          f"consumer matrix passed: {len(matrix.CELL_IDS)}/{len(matrix.CELL_IDS)} synthetic cells; "
-                         f"Inspector 4/4 cells; {len(matrix.OWNER_IDS)} owner cells pending")
+                         "Inspector 4/4 cells; Codex unavailable (cli_not_given); Claude Code unavailable "
+                         f"(cli_not_given); {len(matrix.OWNER_IDS)} owner cells pending")
+        document = receipt(self.census, agents=AGENTS_PASS)
+        matrix.check_receipt(document, commit=COMMIT, wheel_sha256=WHEEL, census=self.census)
+        self.assertEqual({key: document["summary"][key] for key in ("codex", "codex_cells", "claude_code",
+                                                                    "claude_code_cells")},
+                         {"codex": "pass", "codex_cells": len(matrix.AGENT_IDS), "claude_code": "unavailable",
+                          "claude_code_cells": 0})
+        self.assertIn(f"Codex {len(matrix.AGENT_IDS)}/{len(matrix.AGENT_IDS)} cells; Claude Code unavailable "
+                      "(not_logged_in)", matrix.summary_line(document))
 
     def test_an_unavailable_inspector_is_recorded_with_its_fixed_reason(self):
         for reason in sorted(matrix.INSPECTOR_UNAVAILABLE):
@@ -458,8 +483,10 @@ class SchemaChangeTests(unittest.TestCase):
             self.assertEqual(refusal(matrix.check_receipt, recorded,
                                      census={**extra, "schema_fingerprint": baseline["schema_fingerprint"]}),
                              "tools_mismatch")
-            # A receipt taken over the changed schema fails on its own: the cells were written for another one.
+            # A receipt taken over the changed schema fails on its own: the cells were written for another one, and
+            # passed agent cells change nothing.
             self.assertEqual(refusal(matrix.check_receipt, receipt(bound)), "schema_mismatch")
+            self.assertEqual(refusal(matrix.check_receipt, receipt(bound, agents=AGENTS_PASS)), "schema_mismatch")
             # run refuses before any session or install of the installer dependency.
             for patched in (bound, extra):
                 with tempfile.TemporaryDirectory() as work:
@@ -552,6 +579,9 @@ class ReceiptFieldTests(unittest.TestCase):
         self.check(receipt(self.census))
         self.check(receipt(self.census, approval="real_dialog"))
         self.check(receipt(self.census, inspector=INSPECTOR_UNAVAILABLE))
+        self.check(receipt(self.census, agents=AGENTS_PASS))
+        self.check(receipt(self.census, agents={"codex": agent_pass(),
+                                                "claude_code": agent_pass("2.1.304 (Claude Code)")}))
 
     def test_each_edited_field_refuses(self):
         """Every field the check_receipt, check_inspector and check_fields docstrings name refuses when edited."""
@@ -650,6 +680,37 @@ class ReceiptFieldTests(unittest.TestCase):
         for label, update, code in cases:
             with self.subTest(field=label):
                 document = receipt(self.census)
+                update(document)
+                self.assertEqual(refusal(self.check, document), code)
+        agent_cases = [
+            ("agents.codex.status", edit("agents.codex.status", "fail"), "agent_invalid"),
+            ("agents.codex.cli", edit("agents.codex.cli", "codex 1"), "agent_invalid"),
+            ("agents.codex.cli_of_claude", edit("agents.codex.cli", "2.1.304 (Claude Code)"), "agent_invalid"),
+            ("agents.codex.model", edit("agents.codex.model", "a model; rm"), "agent_invalid"),
+            ("agents.codex.extra", edit("agents.codex.extra", 1), "agent_invalid"),
+            ("agents.codex.cells_order", lambda d: d["agents"]["codex"]["cells"].reverse(), "cell_set_mismatch"),
+            ("agents.codex.cells_missing", lambda d: d["agents"]["codex"]["cells"].pop(), "cell_set_mismatch"),
+            ("agents.codex.cell_failed", edit("agents.codex.cells.0.status", "fail"), "cells_failed"),
+            ("agents.codex.cell_extra", edit("agents.codex.cells.0.transcript", "x"), "checks_mismatch"),
+            ("agents.codex.advisory_unknown", edit("agents.codex.cells.0.advisory_failed", ["answer_unknown"]),
+             "agent_invalid"),
+            ("agents.codex.advisory_unsorted", edit("agents.codex.cells.0.advisory_failed",
+                                                     ["answer_tool_count", "answer_compatible"]), "agent_invalid"),
+            ("agents.codex.evidence_form", edit("agents.codex.cells.0.evidence.server", "x"), "agent_invalid"),
+            ("agents.codex.evidence_missing", drop("agents.codex.cells.0.evidence", "run"), "agent_invalid"),
+            ("agents.claude_code.reason", edit("agents.claude_code.reason", "skipped"), "agent_invalid"),
+            ("agents.claude_code.unavailable_extra", edit("agents.claude_code.cli", "2.1.304 (Claude Code)"),
+             "agent_invalid"),
+            ("agents.missing_column", drop("agents", "claude_code"), "agent_invalid"),
+            ("summary.codex", edit("summary.codex", "unavailable"), "receipt_invalid"),
+            ("summary.codex_cells", edit("summary.codex_cells", 0), "receipt_invalid"),
+        ]
+        for index, cell in enumerate(matrix.AGENT_IDS):  # every agent cell's frozen count, lowered by one
+            agent_cases.append((f"agents.codex.{cell}", edit(f"agents.codex.cells.{index}.checks",
+                                                             matrix.AGENT_CHECKS[cell] - 1), "checks_mismatch"))
+        for label, update, code in agent_cases:
+            with self.subTest(field=label):
+                document = receipt(self.census, agents=AGENTS_PASS)
                 update(document)
                 self.assertEqual(refusal(self.check, document), code)
 
@@ -1031,6 +1092,448 @@ class SourceSessionsTests(unittest.TestCase):
         self.assertEqual(listing["observed"]["listing_sha256"], built["surface"]["listing_sha256"])
         full = next(result for result in results if result["session"] == "full")
         self.assertEqual(full["observed"]["every_tool_dispatches"], 0)
+
+
+# --- the agent columns ------------------------------------------------------------------------------------------
+
+FAKE_AGENT = TESTS / "matrix_fake_agent.py"
+SERVER = _identity_server_name()  # the client entries' name, read through the product identity
+SHELL_VARIABLES = {"PWD", "SHLVL", "_", "__CF_USER_TEXT_ENCODING"}  # what /bin/sh and macOS add on their own
+
+
+def source_runtime():
+    return matrix.Runtime(python=Path(sys.executable), proxy=[sys.executable, "-m", "telegram_search_mcp.server"],
+                          package_root=SOURCE, sdk_root=None, pythonpath=str(SOURCE))
+
+
+def fake_cli(directory: Path, role: str, behaviour: str = "honest") -> Path:
+    """A wrapper named like the CLI that runs the stand-in agent with this interpreter."""
+    path = directory / f"{role}-{behaviour}"
+    path.write_text(f'#!/bin/sh\nexec "{sys.executable}" -I "{FAKE_AGENT}" --as {role} --behaviour {behaviour} '
+                    f'--harness "{matrix.HARNESS}" -- "$@"\n')
+    path.chmod(0o700)
+    return path
+
+
+def bindings_for(census: dict) -> dict:
+    return {"commit": COMMIT, "wheel_sha256": WHEEL, "version": census["version"],
+            "schema_fingerprint": census["schema_fingerprint"], "server_name": SERVER}
+
+
+def run_column(base: Path, column: str, behaviour: str = "honest", *, cells=matrix.AGENT_IDS, auth: bytes | None = b"",
+               binary: Path | None = None):
+    """One agent column from this source tree with the stand-in agent; (section, evidence directory, Codex home)."""
+    census = live_census()
+    codex_home = base / "codex-home"
+    codex_home.mkdir(exist_ok=True)
+    if auth is not None:
+        (codex_home / "auth.json").write_bytes(auth or b'{"synthetic": "credentials"}\n')
+    evidence = base / f"evidence-{column}-{behaviour}"
+    evidence.mkdir()
+    role = "codex" if column == "codex" else "claude"
+    with mock.patch.object(matrix, "AGENT_RETRY_SECONDS", 0):
+        section = matrix.run_agent_column(column, binary or fake_cli(base, role, behaviour), None, source_runtime(),
+                                          census, base / f"scratch-{column}-{behaviour}", evidence,
+                                          bindings_for(census), codex_home=codex_home, cells=cells)
+    return section, evidence, codex_home
+
+
+def isolation(evidence: Path, column: str, cell: str) -> dict:
+    return json.loads((evidence / column / cell / "events.jsonl").read_text().splitlines()[0])
+
+
+class AgentTableTests(unittest.TestCase):
+    def test_the_agent_cells_are_closed_and_cover_the_requested_set(self):
+        self.assertEqual(len(set(matrix.AGENT_IDS)), len(matrix.AGENT_IDS))
+        self.assertEqual(set(matrix.AGENT_CHECKS), set(matrix.AGENT_IDS))
+        self.assertEqual(set(matrix.AGENT_ADVISORY), set(matrix.AGENT_IDS))
+        self.assertEqual({session for _, session, _, _ in matrix.AGENT_CELLS}, {"full", "restricted", "alias"})
+        requests = {cell: matrix.agent_request(cell, SERVER) for cell in matrix.AGENT_IDS}
+        self.assertIn("check_broker set to true", requests["agent.census"])
+        self.assertIn("limit 1", requests["agent.search_cursor"])
+        self.assertIn(matrix.TIMEOUT_PROBE, requests["agent.approval_timeout"])
+        self.assertIn(f"Use the {SERVER}_{matrix.ALIAS} server", requests["agent.alias_server"])
+        self.assertTrue(all("{" not in request for request in requests.values()))
+        self.assertIn(matrix.EDIT_TEXT, requests["agent.own_message_prepare"])
+        self.assertIn(matrix.FAMILY_REPLY_TEXT, requests["agent.family_reply"])
+        self.assertTrue(all(request.startswith("You are helping the owner") for request in requests.values()))
+        self.assertNotIn("codex.synthetic", matrix.OWNER_IDS)
+        self.assertNotIn("claude_code.synthetic", matrix.OWNER_IDS)
+        # The family source names more than the base reply capability under the restricted policy.
+        missing = next(row[5] for row in matrix.FAMILY_SOURCES if row[0] == matrix.FAMILY_MESSAGE)
+        self.assertGreater(len(missing), 1)
+        self.assertTrue(set(missing).isdisjoint(matrix.RESTRICTED_CAPABILITIES))
+
+    def test_the_server_name_is_read_from_the_trees_product_identity(self):
+        self.assertEqual(matrix.identity_server_name(ROOT), SERVER)
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "src" / "telegram_search_mcp" / "product_identity.py"
+            identity.parent.mkdir(parents=True)
+            for text in ("", "MCP_SERVER_NAME = 'Bad Name'\n", "MCP_SERVER_NAME = 7\n",
+                         "MCP_SERVER_NAME = 'a'\nMCP_SERVER_NAME = 'b'\n"):
+                with self.subTest(text=text):
+                    identity.write_text(text)
+                    self.assertEqual(refusal(matrix.identity_server_name, Path(directory)), "census_failed")
+            identity.write_text("MCP_SERVER_NAME: Final = 'renamed_server'\n")
+            self.assertEqual(matrix.identity_server_name(Path(directory)), "renamed_server")
+            self.assertIn("Use the renamed_server_work server", matrix.agent_request("agent.alias_server",
+                                                                                      "renamed_server"))
+
+    def test_the_alias_fits_the_socket_and_tool_name_budgets(self):
+        from telegram_search_mcp import account_registry
+        home = Path("/private/tmp/tga.XXXXXXXX")  # what run_agent_cell's mkdtemp makes
+        account_registry.check_budgets(matrix.ALIAS, home)
+
+    def test_the_codex_home_names_only_the_matrix_proxy(self):
+        import tomllib
+        env = {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "LC_ALL": "C", "TMPDIR": "/t"}
+        document = tomllib.loads(matrix.codex_config("telegram_search_work", ["/v/bin/p", "--account", "work"], env,
+                                                     Path("/h")))
+        self.assertEqual(document, {
+            "approval_policy": "never", "sandbox_mode": "read-only", "cli_auth_credentials_store": "file",
+            "features": {name: False for name in matrix.CODEX_DISABLED_FEATURES},
+            "mcp_servers": {"telegram_search_work": {
+                "command": "/v/bin/p", "args": ["--account", "work"], "cwd": "/h", "env": env,
+                "startup_timeout_sec": 60, "tool_timeout_sec": 120, "default_tools_approval_mode": "approve"}}})
+        self.assertEqual(json.loads(matrix.claude_config("telegram_search", ["/v/bin/p"], env)),
+                         {"mcpServers": {"telegram_search": {"command": "/v/bin/p", "args": [], "env": env}}})
+
+    def test_the_commands_keep_the_conversation_runners_isolation(self):
+        codex = [str(part) for part in matrix.agent_command(
+            "codex", Path("/c"), "m", "request", server="telegram_search", workdir=Path("/w"), answer=Path("/a"),
+            mcp_config=None)]
+        self.assertEqual(codex, ["/c", "exec", "--strict-config", "--ephemeral", "--skip-git-repo-check", "--sandbox",
+                                 "read-only", "--cd", "/w", "--json", "--color", "never", "--output-last-message", "/a",
+                                 "--model", "m", "request"])
+        self.assertNotIn("--ignore-user-config", codex)  # the private home's config.toml is the whole configuration
+        claude = [str(part) for part in matrix.agent_command(
+            "claude_code", Path("/c"), None, "request", server="telegram_search_work", workdir=Path("/w"),
+            answer=Path("/a"), mcp_config=Path("/m.json"))]
+        self.assertEqual(claude, ["/c", "-p", "request", "--output-format", "stream-json", "--verbose", "--max-turns",
+                                  "40", "--strict-mcp-config", "--mcp-config", "/m.json", "--tools", "",
+                                  "--allowedTools", "mcp__telegram_search_work", "--no-session-persistence"])
+
+    def test_the_agent_environment_passes_nothing_else_of_the_callers(self):
+        host = {"CLAUDE_CODE_SESSION_ID": "s", "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "OPENAI_API_KEY": "k",
+                "ANTHROPIC_API_KEY": "k", "HTTPS_PROXY": "http://proxy.test:3128", "CODEX_HOME": "/elsewhere"}
+        with mock.patch.dict(os.environ, host):
+            codex = matrix.agent_environment("codex", home=Path("/h"), config=Path("/c"), tmp=Path("/t"))
+            claude = matrix.agent_environment("claude_code", home=Path("/h"), config=Path("/c"), tmp=Path("/t"))
+        self.assertEqual(codex, {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
+                                 "CODEX_HOME": "/c", "HTTPS_PROXY": "http://proxy.test:3128"})
+        self.assertEqual(claude, {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
+                                  "CLAUDE_CONFIG_DIR": "/c", "HTTPS_PROXY": "http://proxy.test:3128",
+                                  "ANTHROPIC_API_KEY": "k"})
+
+    def test_refreshed_codex_credentials_go_back_only_onto_an_unchanged_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, private = Path(directory) / "auth.json", Path(directory) / "private.json"
+            source.write_bytes(b"old")
+            private.write_bytes(b"old")
+            copied = matrix._sha(b"old")
+            self.assertEqual(matrix.sync_codex_auth(source, copied, private), "unchanged")
+            private.write_bytes(b"refreshed")
+            source.write_bytes(b"changed meanwhile")
+            self.assertEqual(matrix.sync_codex_auth(source, copied, private), "kept")
+            self.assertEqual(source.read_bytes(), b"changed meanwhile")
+            source.write_bytes(b"old")
+            self.assertEqual(matrix.sync_codex_auth(source, copied, private), "returned")
+            self.assertEqual((source.read_bytes(), stat.S_IMODE(source.stat().st_mode)), (b"refreshed", 0o600))
+            self.assertEqual(sorted(path.name for path in Path(directory).iterdir()), ["auth.json", "private.json"])
+
+    def test_run_refuses_unusable_agent_arguments_before_building(self):
+        with tempfile.TemporaryDirectory() as directory:
+            full = Path(directory) / "full"
+            full.mkdir()
+            (full / "kept").write_text("x")
+            for extra, code in ((["--codex", "relative/codex"], "agent_invalid"),
+                                (["--claude", "/bin/claude", "--claude-model", "a model"], "agent_invalid"),
+                                (["--codex", "/bin/codex"], "evidence_invalid"),
+                                (["--codex", "/bin/codex", "--agent-evidence", "relative"], "evidence_invalid"),
+                                (["--codex", "/bin/codex", "--agent-evidence", str(full)], "evidence_invalid")):
+                with self.subTest(extra=extra):  # Refused before the gate is even loaded (fake gate: None).
+                    code_seen, err, _ = run_command(None, directory, extra=extra)
+                    self.assertEqual((code_seen, err), (2, code))
+
+
+class AgentColumnTests(unittest.TestCase):
+    """The Codex column from this source tree with an honest stand-in agent: every cell's evidence, its verdict, the
+    receipt binding and check's second judgement."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.base = Path(tempfile.mkdtemp(prefix="tgmcp-agents-")).resolve()
+        cls.census = live_census()
+        cls.section, cls.evidence, cls.codex_home = run_column(cls.base, "codex")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.base, ignore_errors=True)
+
+    def files(self, cell: str) -> dict:
+        return matrix.read_evidence(self.evidence / "codex" / cell)
+
+    def judged(self, cell: str, files: dict) -> dict:
+        return matrix.judge_evidence("codex", cell, files, bindings_for(self.census))
+
+    def test_every_cell_passes_with_its_frozen_count(self):
+        failed = {cell["id"]: cell.get("failed_check") for cell in self.section.get("cells", [])
+                  if cell["status"] != "pass"}
+        self.assertEqual(failed, {}, json.dumps(self.section)[-3000:])
+        self.assertEqual((self.section["status"], self.section["cli"], self.section["model"]),
+                         ("pass", "codex-cli 0.162.0", "default"))
+        self.assertEqual({cell["id"]: cell["checks"] for cell in self.section["cells"]}, matrix.AGENT_CHECKS)
+        self.assertEqual({cell["id"]: cell["advisory_failed"] for cell in self.section["cells"]},
+                         {cell: [] for cell in matrix.AGENT_IDS})
+        matrix.check_agent_section("codex", self.section)
+
+    def test_the_private_homes_hold_only_what_the_agent_needs_and_are_deleted(self):
+        auth = (self.codex_home / "auth.json").read_bytes()
+        for cell in matrix.AGENT_IDS:
+            with self.subTest(cell=cell):
+                seen = isolation(self.evidence, "codex", cell)
+                self.assertEqual(seen["config"], ["auth.json", "config.toml"])
+                self.assertEqual((seen["home"], seen["cwd"]), ([], []))
+                self.assertEqual(seen["servers"], [matrix.agent_server(matrix.agent_cell(cell)[1], SERVER)])
+                self.assertEqual(seen["auth_sha256"], matrix._sha(auth))
+                self.assertLessEqual(set(seen["environment"]) - SHELL_VARIABLES,
+                                     {"HOME", "PATH", "TMPDIR", "LANG", "CODEX_HOME"})
+        self.assertFalse((self.base / "scratch-codex-honest").exists())
+        self.assertEqual(sorted(path.name for path in self.codex_home.iterdir()), ["auth.json"])
+        for folder in (self.evidence / "codex").iterdir():
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+            for name in matrix.AGENT_EVIDENCE:
+                self.assertEqual(stat.S_IMODE((folder / name).stat().st_mode), 0o600)
+
+    def test_each_verdict_is_the_evidence_judged_again(self):
+        for cell in self.section["cells"]:
+            with self.subTest(cell=cell["id"]):
+                files = self.files(cell["id"])
+                self.assertEqual(matrix.evidence_digests(files), cell["evidence"])
+                judged = self.judged(cell["id"], files)
+                self.assertEqual({key: judged[key] for key in ("id", "status", "checks", "advisory_failed")},
+                                 {key: cell[key] for key in ("id", "status", "checks", "advisory_failed")})
+                run = json.loads(files["run.json"])
+                self.assertEqual({key: run[key] for key in ("commit", "wheel_sha256", "version", "schema_fingerprint",
+                                                            "server_name", "column", "cell", "cli", "model", "exit",
+                                                            "timed_out")},
+                                 {**bindings_for(self.census), "column": "codex", "cell": cell["id"],
+                                  "cli": "codex-cli 0.162.0", "model": "default", "exit": 0, "timed_out": False})
+
+    def mutated(self, cell: str, *, server=None, events=None, answer=None, run=None) -> dict:
+        files = dict(self.files(cell))
+        entries = [json.loads(line) for line in files["server.jsonl"].decode().splitlines()]
+        if server is not None:
+            entries = server(entries)
+            files["server.jsonl"] = b"".join(json.dumps(entry).encode() + b"\n" for entry in entries)
+        if events is not None:
+            files["events.jsonl"] = events(files["events.jsonl"].decode()).encode()
+        if answer is not None:
+            files["answer.txt"] = answer.encode()
+        if run is not None:
+            files["run.json"] = json.dumps({**json.loads(files["run.json"]), **run}).encode()
+        return self.judged(cell, files)
+
+    def test_each_decisive_check_fails_on_its_own_misbehaviour(self):
+        def header(entries):
+            return [{"broker": {**entry["broker"], "version": "0.0.0"}} if "broker" in entry else entry
+                    for entry in entries]
+
+        def dispatch(entries):
+            return entries + [{"request": "sendMessage"}]
+
+        def second_dialog(entries):
+            return entries + [dict(next(entry for entry in entries if "prompt" in entry))]
+
+        def drafted(entries):
+            return entries + [{"operation": "prepare_text_send", "connection": 99, "payload": {"recipient": 91002},
+                               "result": {"status": "prepared", "draft_id": "draft_" + "1" * 32}}]
+
+        def without(operation):
+            return lambda entries: [entry for entry in entries if entry.get("operation") != operation]
+
+        def no_diagnostic(entries):
+            return [entry for entry in entries if not ("frame" in entry and entry.get("connection") == 1)]
+
+        def unfollowed(entries):
+            return [{**entry, "payload": {**entry["payload"], "cursor": None}} if entry.get("operation")
+                    == "search_messages" else entry for entry in entries]
+
+        def foreign(events):
+            return events + json.dumps({"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "other",
+                                                                           "tool": "x"}}) + "\n"
+
+        def failed_turn(events):
+            return events + json.dumps({"type": "turn.failed", "error": {"message": "x"}}) + "\n"
+
+        cases = [("agent.census", {"run": {"exit": 1}}, "agent_exited"),
+                 ("agent.census", {"run": {"timed_out": True}}, "agent_exited"),
+                 ("agent.census", {"events": failed_turn}, "turn_completed"),
+                 ("agent.read", {"events": foreign}, "only_matrix_tools"),
+                 ("agent.read", {"server": header}, "this_wheel"),
+                 ("agent.read", {"answer": " \n"}, "answer_present"),
+                 ("agent.census", {"server": no_diagnostic}, "broker_checked"),
+                 ("agent.census", {"server": drafted}, "nothing_changed"),
+                 ("agent.read", {"server": without("read_history")}, "read_newest"),
+                 ("agent.read", {"server": dispatch}, "nothing_changed"),
+                 ("agent.search_cursor", {"server": unfollowed}, "cursor_followed"),
+                 ("agent.refusal", {"server": without("prepare_reply_text_send")}, "refused"),
+                 ("agent.refusal", {"server": drafted}, "no_workaround"),
+                 ("agent.approval_timeout", {"server": second_dialog}, "one_dialog"),
+                 ("agent.approval_timeout", {"server": dispatch}, "no_dispatch"),
+                 ("agent.alias_server", {"server": lambda entries: entries[:-1]}, "alias_served"),
+                 ("agent.album_prepare", {"server": without("prepare_album_send")}, "album_prepared"),
+                 ("agent.album_prepare", {"server": dispatch}, "not_sent"),
+                 ("agent.own_message_prepare", {"server": without("prepare_text_edit")}, "edit_prepared"),
+                 ("agent.family_reply", {"server": without("prepare_reply_text_send")}, "reply_prepared"),
+                 ("agent.family_reply", {"server": second_dialog if False else dispatch}, "not_sent")]
+        for cell, change, label in cases:
+            with self.subTest(cell=cell, check=label):
+                judged = self.mutated(cell, **change)
+                self.assertEqual((judged["status"], judged.get("failed_check"), judged["checks"]),
+                                 ("fail", label, matrix.AGENT_CHECKS[cell]))
+
+    def test_the_answers_wording_is_advisory(self):
+        for cell in matrix.AGENT_IDS:
+            with self.subTest(cell=cell):
+                judged = self.mutated(cell, answer="Done.")
+                self.assertEqual((judged["status"], judged["advisory_failed"]),
+                                 ("pass", sorted(matrix.AGENT_ADVISORY[cell])))
+
+    def test_the_receipt_binds_the_column_and_check_judges_the_kept_evidence_again(self):
+        agents = {"codex": self.section, "claude_code": {"status": "unavailable", "reason": "not_logged_in"}}
+        document = receipt(self.census, agents=agents)
+        matrix.check_receipt(document, commit=COMMIT, wheel_sha256=WHEEL, census=self.census)
+        matrix.verify_agent_evidence(document, self.evidence, SERVER)
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, None, SERVER), "evidence_missing")
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, self.evidence, "renamed_server"),
+                         "evidence_mismatch")  # another commit's server name
+        matrix.verify_agent_evidence(receipt(self.census), None, SERVER)  # nothing passed, nothing to verify
+        read = matrix.AGENT_IDS.index("agent.read")
+
+        def rewritten(name: str, change) -> tuple:
+            """A copy of the evidence with one file of agent.read changed, and a receipt carrying its new digest."""
+            copy_dir = self.base / f"tampered-{name}-{len(list(self.base.iterdir()))}"
+            shutil.copytree(self.evidence, copy_dir)
+            path = copy_dir / "codex" / "agent.read" / name
+            path.write_bytes(change(path.read_bytes()))
+            changed = copy.deepcopy(document)
+            changed["agents"]["codex"]["cells"][read]["evidence"] = matrix.evidence_digests(
+                matrix.read_evidence(copy_dir / "codex" / "agent.read"))
+            return copy_dir, changed
+
+        def no_read(data: bytes) -> bytes:
+            return b"".join(line + b"\n" for line in data.splitlines() if b'"operation": "read_history"' not in line)
+
+        stale, _ = rewritten("server.jsonl", no_read)
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, stale, SERVER), "evidence_mismatch")
+        for name, change in (("server.jsonl", no_read),
+                             ("run.json", lambda data: data.replace(COMMIT.encode(), OTHER.encode())),
+                             ("run.json", lambda data: data.replace(b"codex-cli 0.162.0", b"codex-cli 0.0.1")),
+                             ("events.jsonl", lambda data: data.replace(b'"turn.completed"', b'"turn.failed"'))):
+            with self.subTest(file=name):
+                directory, changed = rewritten(name, change)
+                self.assertEqual(refusal(matrix.verify_agent_evidence, changed, directory, SERVER),
+                                 "evidence_mismatch")
+        missing, _ = rewritten("answer.txt", lambda data: data)
+        (missing / "codex" / "agent.read" / "answer.txt").unlink()
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, missing, SERVER), "evidence_invalid")
+        linked, _ = rewritten("answer.txt", lambda data: data)
+        target = linked / "codex" / "agent.read" / "answer.txt"
+        target.unlink()
+        target.symlink_to(self.evidence / "codex" / "agent.read" / "answer.txt")
+        self.assertEqual(refusal(matrix.verify_agent_evidence, document, linked, SERVER), "evidence_invalid")
+
+    def test_the_check_command_requires_the_evidence_of_passed_agent_cells(self):
+        document = receipt(self.census, agents={"codex": self.section,
+                                                "claude_code": {"status": "unavailable", "reason": "not_logged_in"}})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            matrix.write_receipt(path, document)
+            wheel = Path(directory) / "synthetic.whl"
+            wheel.write_bytes(b"synthetic wheel")
+            fake = SimpleNamespace(GateRefusal=gate.GateRefusal, toplevel=lambda repo: Path(directory),
+                                   Git=lambda repo: object(), resolve_commit=lambda git, value: COMMIT,
+                                   sha256_file=lambda file: WHEEL, matrix_loaded_sha256=GATE)
+            for extra, expected in (([], (2, "evidence_missing")),
+                                    (["--agent-evidence", "relative"], (2, "evidence_invalid")),
+                                    (["--agent-evidence", str(self.evidence)], (0, ""))):
+                with self.subTest(extra=extra), mock.patch.object(matrix, "load_gate", return_value=fake), \
+                        mock.patch.object(matrix, "build_wheel", return_value={"tree": Path(directory), "wheel": wheel}), \
+                        mock.patch.object(matrix, "committed_facts", return_value=FACTS), \
+                        mock.patch.object(matrix, "harness_digest", return_value=FACTS["harness_sha256"]), \
+                        mock.patch.object(matrix, "source_census", return_value=self.census), \
+                        mock.patch.object(matrix, "identity_server_name", return_value=SERVER), \
+                        mock.patch.object(matrix, "installed_runtime", return_value=(object(), DERIVED["install"])), \
+                        mock.patch.object(matrix, "observed_listing", return_value=DERIVED["listing_sha256"]), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    code = matrix.main(["check", "--receipt", str(path), "--repo", directory, *extra])
+                self.assertEqual((code, err.getvalue().strip()), expected)
+                if code == 0:
+                    self.assertIn(f"Codex {len(matrix.AGENT_IDS)}/{len(matrix.AGENT_IDS)} cells", out.getvalue())
+
+
+class AgentBehaviourTests(unittest.TestCase):
+    """Misbehaving or unavailable agents, one or two cells each."""
+
+    def setUp(self):
+        self.base = Path(tempfile.mkdtemp(prefix="tgmcp-agent-")).resolve()
+        self.addCleanup(shutil.rmtree, self.base, ignore_errors=True)
+
+    def test_a_workaround_after_the_refusal_fails_the_cell(self):
+        section, _, _ = run_column(self.base, "codex", "workaround", cells=("agent.refusal",))
+        self.assertEqual((section["status"], section["cells"][0]["failed_check"]), ("fail", "no_workaround"))
+
+    def test_a_shell_command_fails_the_cell(self):
+        section, _, _ = run_column(self.base, "codex", "shell", cells=("agent.read",))
+        self.assertEqual((section["status"], section["cells"][0]["failed_check"]), ("fail", "only_matrix_tools"))
+
+    def test_a_missing_login_makes_the_column_unavailable_after_its_first_cell(self):
+        for column in ("codex", "claude_code"):
+            with self.subTest(column=column):
+                section, evidence, _ = run_column(self.base, column, "not_logged_in",
+                                                  cells=("agent.census", "agent.read"))
+                self.assertEqual(section, {"status": "unavailable", "reason": "not_logged_in"})
+                self.assertEqual(sorted(path.name for path in (evidence / column).iterdir()), ["agent.census"])
+
+    def test_a_provider_failure_before_any_tool_is_retried(self):
+        section, evidence, _ = run_column(self.base, "codex", "transient", cells=("agent.census",))
+        self.assertEqual(section["status"], "pass")
+        self.assertEqual(json.loads((evidence / "codex" / "agent.census" / "run.json").read_text())["attempt"], 2)
+
+    def test_refreshed_codex_credentials_return_to_the_callers_codex_home(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            section, _, codex_home = run_column(self.base, "codex", "refresh", cells=("agent.census",))
+        self.assertEqual(section["status"], "pass")
+        self.assertEqual((codex_home / "auth.json").read_text(), '{"refreshed": true}\n')
+        self.assertEqual(err.getvalue().strip(), "codex credentials refreshed during the run: returned")
+
+    def test_each_unavailable_reason_is_fixed(self):
+        cases = (("cli_unusable", {"binary": fake_cli(self.base, "codex", "bad_version")}),
+                 ("cli_unusable", {"binary": self.base / "missing-codex"}),
+                 ("auth_missing", {"auth": None}))
+        for reason, kwargs in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory(dir=self.base) as directory:
+                section, _, _ = run_column(Path(directory), "codex", cells=("agent.census",), **kwargs)
+                self.assertEqual(section, {"status": "unavailable", "reason": reason})
+        census = live_census()
+        self.assertEqual(matrix.run_agent_column("codex", None, None, source_runtime(), census, self.base / "none",
+                                                 self.base, bindings_for(census)),
+                         {"status": "unavailable", "reason": "cli_not_given"})
+
+    def test_claude_code_runs_with_a_strict_temporary_mcp_config_and_an_empty_config_dir(self):
+        section, evidence, _ = run_column(self.base, "claude_code", cells=("agent.census", "agent.alias_server"))
+        self.assertEqual([cell["status"] for cell in section["cells"]], ["pass", "pass"])
+        self.assertEqual(section["cli"], "2.1.304 (Claude Code)")
+        seen = isolation(evidence, "claude_code", "agent.alias_server")
+        self.assertEqual((seen["config"], seen["home"], seen["cwd"], seen["auth_sha256"]), ([], [], [], None))
+        self.assertEqual(seen["servers"], [f"{SERVER}_{matrix.ALIAS}"])
+        self.assertIn("--strict-mcp-config", seen["argv"])
+        self.assertEqual(seen["argv"][seen["argv"].index("--allowedTools") + 1], f"mcp__{SERVER}_{matrix.ALIAS}")
+        self.assertEqual(seen["argv"][seen["argv"].index("--tools") + 1], "")
+        self.assertLessEqual(set(seen["environment"]) - SHELL_VARIABLES,
+                             {"HOME", "PATH", "TMPDIR", "LANG", "CLAUDE_CONFIG_DIR"})
 
 
 if __name__ == "__main__":

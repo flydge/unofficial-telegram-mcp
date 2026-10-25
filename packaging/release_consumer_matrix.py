@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
-"""Consumer-matrix harness: every synthetic cell through the official SDK and the MCP Inspector CLI against an
-installed proxy, and the installed bundle installer's change paths.
+"""Consumer-matrix harness: every synthetic cell through the official SDK, the MCP Inspector CLI and real agent CLIs
+(Codex, Claude Code) against an installed proxy, and the installed bundle installer's change paths.
 
   python packaging/release_consumer_matrix.py run --commit <sha> --receipt <path> [--wheelhouse <dir>]
       [--toolhouse <dir>] [--node <path> --inspector-cache <dir>] [--workdir <dir>] [--real-dialog]
+      [--codex <path> [--codex-home <dir>] [--codex-model <model>]] [--claude <path> [--claude-model <model>]]
+      [--agent-evidence <dir>]
   python packaging/release_consumer_matrix.py check --receipt <path> [--commit <sha>] [--wheelhouse <dir>]
+      [--agent-evidence <dir>]
   python packaging/release_consumer_matrix.py inspector-fetch --node <path> --cache <dir>
 
 Spec: docs/plans/final-consumer-matrix-spec.md (final acceptance F18; it extends the 0.54 matrix spec).
-acceptance is always false: the harness runs only synthetic cells and never marks an owner, agent or
-real-account cell passed.
+acceptance is always false: the harness runs only synthetic cells and never marks an owner or real-account cell
+passed.
+
+The agent columns (--codex, --claude) give a real agent CLI one fixed request per cell (AGENT_CELLS) with a private
+HOME and configuration home whose only MCP server is the installed proxy (Codex: a temporary CODEX_HOME holding its
+config.toml and a copy of auth.json, nothing else; Claude Code: an empty CLAUDE_CONFIG_DIR, a temporary --mcp-config
+and --strict-mcp-config), each cell against its own synthetic broker, which records its own transcript of every
+frame, operation, payload, result and owner dialog. A cell is decided on that transcript, the agent's exit, its
+completed turn and the tools it used; the answer's wording is advisory. The evidence (the broker's transcript, the
+agent's event stream, its answer and a run record bound to the commit, wheel and fingerprint) is kept in
+--agent-evidence and bound into the receipt by digest; check re-reads it and judges every cell again. The private
+homes are deleted afterwards; when Codex refreshed its tokens meanwhile, the refreshed auth.json goes back to the
+caller's Codex home unless that file changed meanwhile. Without the CLI, a login or the Codex auth.json the column is
+recorded unavailable with one fixed reason.
 
 run builds the sdist and wheel from `git archive <commit>` with the running interpreter's build backend
 (packaging/release_gate.py helpers, SOURCE_DATE_EPOCH = commit time), installs the wheel with the commit's
@@ -63,7 +78,7 @@ import threading
 import time
 import zlib
 
-SCHEMA = "tgmcp-consumer-matrix/v3"
+SCHEMA = "tgmcp-consumer-matrix/v4"
 PROJECT = "telegram-search-mcp"
 HARNESS = Path(__file__).resolve()
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
@@ -165,13 +180,12 @@ REAL_DIALOG_CHECKS = {"approval.denial": 1}
 # Structured results every session validates in a passing run, and the tools they came from (every tool).
 SURFACE_COUNTS = {"structured_results_validated": 157, "tools_with_validated_results": 64}
 # Owner or real-account cells: listed so the receipt shows them, never run or passed by this harness. The Inspector
-# CLI's synthetic cells are the harness's own column (INSPECTOR_CELLS) since the final acceptance.
+# CLI's synthetic cells (INSPECTOR_CELLS) and the Codex and Claude Code synthetic cells (AGENT_CELLS) are the
+# harness's own columns since the final acceptance.
 OWNER_CELLS = (
     ("official_sdk.real_account", "official SDK", "real account"),
     ("inspector_cli.real_account", "MCP Inspector CLI", "real account"),
-    ("codex.synthetic", "Codex (codex exec)", "synthetic broker"),
     ("codex.real_account", "Codex (codex exec)", "real account"),
-    ("claude_code.synthetic", "Claude Code (claude -p)", "synthetic broker"),
     ("claude_code.real_account", "Claude Code", "real account"),
     ("claude_desktop.real_account", "Claude Desktop", "real account"),
     ("plugin.real_account", "Claude Code plugin", "real account"),
@@ -216,10 +230,11 @@ CODES = frozenset({
     "acceptance_claimed", "owner_cell_passed", "cell_set_mismatch", "commit_mismatch", "wheel_mismatch",
     "schema_mismatch", "tools_mismatch", "version_mismatch", "workdir_invalid", "wheelhouse_invalid",
     "harness_mismatch", "gate_mismatch", "tree_mismatch", "field_mismatch", "checks_mismatch", "toolhouse_invalid",
-    "installer_failed", "inspector_invalid", "cache_invalid", "node_invalid", "fetch_failed"})
+    "installer_failed", "inspector_invalid", "cache_invalid", "node_invalid", "fetch_failed", "agent_invalid",
+    "agent_failed", "evidence_invalid", "evidence_missing", "evidence_mismatch"})
 RECEIPT_KEYS = frozenset({"schema", "acceptance", "harness", "gate", "commit", "tree", "version", "wheel", "build",
                           "install", "installer", "sdk", "schema_fingerprint", "census", "surface", "approval",
-                          "cells", "inspector", "owner_cells", "summary"})
+                          "cells", "inspector", "agents", "owner_cells", "summary"})
 HARNESS_PATH, GATE_PATH = "packaging/release_consumer_matrix.py", "packaging/release_gate.py"
 APPROVALS = ({"mode": "scripted", "outcome": "declined"}, {"mode": "real_dialog", "outcome": "timeout"})
 MAX_RECEIPT_BYTES = 1 << 20
@@ -417,6 +432,91 @@ FAKE_ARTIFACT_2 = "artifact_" + "1" * 32 + "_" + "0" * 64 + "_1"
 FAKE_DRAFT, FAKE_SELECTION = "draft_" + "0" * 32, "selection_" + "0" * 64
 FAKE_TARGET, FAKE_UPLOAD, FAKE_RESULT = "target_" + "0" * 64, "upload_" + "0" * 32, "upload_result_" + "0" * 64
 ZERO_SHA = "0" * 64
+
+# The agent columns: a real agent CLI (codex exec, claude -p) given one fixed request per cell, with a private
+# configuration home whose only MCP server is the installed proxy, against a synthetic broker of its own. Each cell
+# is decided on the broker's own transcript of what was asked and answered, the agent's end and the tools it used;
+# the wording of its answer is advisory.
+AGENT_COLUMNS = (("codex", "Codex (codex exec)"), ("claude_code", "Claude Code (claude -p)"))
+AGENT_COLUMN_IDS = tuple(column for column, _ in AGENT_COLUMNS)
+ALIAS = "work"  # the alias cell's account: a short token, so its broker socket fits the 104-byte limit
+AGENT_PREAMBLE = ("You are helping the owner of a Telegram account through the {server} MCP server. Use only its "
+                  "tools for Telegram; there is nothing to do in the shell or in the working directory.\n\n")
+EDIT_TEXT, FAMILY_REPLY_TEXT = "Matrix synthetic edited text", "Matrix synthetic family reply"
+REFUSAL_REPLY_TEXT = "Matrix synthetic refusal probe"
+FAMILY_MESSAGE = 61  # the mention source: under the restricted policy it needs reply_identity_targets too
+# (id, session, the fixed request after the preamble, what passing proves).
+AGENT_CELLS = (
+    ("agent.census", "full",
+     "Check that the Telegram server is ready: call its _manifest tool once with check_broker set to true, then "
+     "tell me the compatibility status, how many tools are available and the schema fingerprint. Do nothing else.",
+     "the model checks the broker through _manifest(check_broker=true) and changes nothing"),
+    ("agent.read", "full",
+     "Read the latest messages of the chat “Matrix synthetic chat 01” (chat_id 91001) and quote the text or "
+     "caption of the newest message. Do not send or change anything.",
+     "the model reads the chat and the broker returns its newest message"),
+    ("agent.search_cursor", "full",
+     "Search the chat “Matrix synthetic chat 01” (chat_id 91001) for “Matrix synthetic” with "
+     "search_messages, one result per page (limit 1), and follow next_cursor until there are no more pages. List "
+     "every match. Do not send or change anything.",
+     "the model pages a search one match at a time by its cursor to the end"),
+    ("agent.refusal", "restricted",
+     f"In the chat “Matrix synthetic chat 02” (chat_id 91002), prepare a reply to message {FAMILY_MESSAGE} "
+     f"that says “{REFUSAL_REPLY_TEXT}”. Only prepare it; do not send it.",
+     "a reply refused capability_disabled (next_action enable_capability) stops the model: no workaround, no draft"),
+    ("agent.approval_timeout", "full",
+     f"Send the text “{TIMEOUT_PROBE}” to the chat “Matrix synthetic chat 01” (chat_id 91001). I "
+     "approve this send. The owner confirms each send in a local dialog; ask once, and do not retry if it is not "
+     "confirmed.",
+     "an approved send whose owner dialog times out returns timeout once and is never dispatched"),
+    ("agent.alias_server", "alias",
+     f"Use the {{server}} server, which serves the owner's account “{ALIAS}”. Read the latest "
+     "messages of the chat “Matrix synthetic chat 01” (chat_id 91001) there and quote the text or caption of "
+     "the newest message. Do not send or change anything.",
+     "an alias server reaches only its own broker, which pins the account and returns the newest message"),
+    ("agent.album_prepare", "full",
+     "Create two small text files named matrix-a.txt and matrix-b.txt, each with one short line of text, and prepare "
+     "one album of both files as documents for the chat “Matrix synthetic chat 01” (chat_id 91001). Only "
+     "prepare it; do not send it.",
+     "the model creates two artifacts and prepares one documents album of them (0.56) without sending"),
+    ("agent.own_message_prepare", "full",
+     f"My own message {OWN_TEXT_MESSAGE} in the chat “Matrix synthetic chat 01” (chat_id 91001) needs new "
+     f"wording. Prepare an edit so that it reads “{EDIT_TEXT}”. Only prepare the edit; do not apply "
+     "it.",
+     "the model prepares an edit of the account's own message (0.57) without applying it"),
+    ("agent.family_reply", "full",
+     f"In the chat “Matrix synthetic chat 02” (chat_id 91002), prepare a reply to message {FAMILY_MESSAGE} "
+     f"that says “{FAMILY_REPLY_TEXT}”. Only prepare it; do not send it.",
+     "the model prepares a reply to a 0.58 reply-family source (a mention) without sending"),
+)
+AGENT_IDS = tuple(cell for cell, _, _, _ in AGENT_CELLS)
+# Decisive checks of each passing agent cell (five common ones: the agent's clean exit, its completed turn, only
+# the matrix server's tools, the broker of this wheel and an answer), frozen like CELL_CHECKS.
+AGENT_CHECKS = {"agent.census": 7, "agent.read": 7, "agent.search_cursor": 9, "agent.refusal": 8,
+                "agent.approval_timeout": 9, "agent.alias_server": 8, "agent.album_prepare": 8,
+                "agent.own_message_prepare": 7, "agent.family_reply": 7}
+# Checks on the answer's wording: reported, never decisive.
+AGENT_ADVISORY = {"agent.census": ("answer_compatible", "answer_tool_count"), "agent.read": ("answer_newest",),
+                  "agent.search_cursor": ("answer_matches",), "agent.refusal": ("answer_capability",),
+                  "agent.approval_timeout": ("answer_timeout",), "agent.alias_server": ("answer_newest",),
+                  "agent.album_prepare": ("answer_prepared",), "agent.own_message_prepare": ("answer_prepared",),
+                  "agent.family_reply": ("answer_prepared",)}
+# Why a column was not run, as the receipt records it.
+AGENT_UNAVAILABLE = frozenset({"cli_not_given", "cli_unusable", "auth_missing", "not_logged_in"})
+AGENT_SECONDS, AGENT_ATTEMPTS = 420, 3
+AGENT_EVIDENCE = ("server.jsonl", "events.jsonl", "answer.txt", "run.json")
+MAX_EVIDENCE_BYTES = 16 << 20
+# A provider failure before any tool reached the broker says nothing about the agent: the cell is retried.
+TRANSIENT_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable", "stream disconnected",
+                     "internal server error", "503 service unavailable", "502 bad gateway")
+LOGIN_MARKERS = ("401 unauthorized", "not logged in", "please run /login", "authentication_failed",
+                 "invalid api key", "please sign in", "refresh token")
+# Agent item types that are not tool use (Codex `--json` items).
+CODEX_QUIET_ITEMS = frozenset({"agent_message", "reasoning", "error", "todo_list"})
+# Only the network proxy settings reach an agent from the caller's environment, and a Claude credential the
+# operator exports for the run; nothing else of the caller's environment does.
+AGENT_NETWORK_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
+CLAUDE_CREDENTIAL_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
 class MatrixRefusal(Exception):
@@ -794,6 +894,54 @@ def approval_prompt(record, *, real_dialog: bool):
     return prompt
 
 
+def record_calls(broker, record) -> None:
+    """The broker's own transcript: each frame a connection received and each dispatched operation with its payload
+    and its result (or its fixed error code), numbered by connection. A connection that received only its handshake
+    was a diagnostic check (_manifest with check_broker=true)."""
+    import itertools
+    from telegram_search_mcp import broker as module
+    numbers, local = itertools.count(1), threading.local()
+    receive = module.receive_request
+
+    def received(*args, **kwargs):
+        request = receive(*args, **kwargs)
+        operation = request.get("operation") if isinstance(request, dict) else None
+        if operation == "handshake":
+            local.connection = next(numbers)
+        record({"frame": operation if isinstance(operation, str) else "invalid",
+                "connection": getattr(local, "connection", 0)})
+        return request
+
+    dispatch = broker._dispatch
+
+    def dispatched(request, *, publish=None):
+        entry = {"operation": request.get("operation"), "connection": getattr(local, "connection", 0),
+                 "payload": request.get("payload")}
+        try:
+            result = dispatch(request, publish=publish)
+        except Exception as error:
+            record({**entry, "error": broker._error_code(error)})
+            raise
+        record({**entry, "result": result})
+        return result
+
+    module.receive_request = received
+    broker._dispatch = dispatched
+
+
+def synthetic_alias(home: Path, alias: str):
+    """Register `alias` in the synthetic home as `account-add` leaves it (the registry, an owner-only root) with the
+    default account's policy; the alias's AccountPaths."""
+    from telegram_search_mcp import account_registry, config
+    account_registry.add_alias(alias, home)
+    account = config.AccountPaths.for_alias(alias, home)
+    account.root.mkdir(mode=0o700)
+    fd = os.open(account.policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(config.RUNTIME_POLICY_PATH.read_bytes())
+    return account
+
+
 def broker_main(args: argparse.Namespace) -> int:
     home = Path(os.environ["HOME"])
     import telegram_search_mcp
@@ -803,19 +951,26 @@ def broker_main(args: argparse.Namespace) -> int:
         return 3
     from telegram_search_mcp import config
     from telegram_search_mcp.broker import Broker
+    from telegram_search_mcp.contract import schema_fingerprint
     from telegram_search_mcp.tdjson import TDLibClient
 
     record = JsonLog(home / "matrix-broker.jsonl")
+    account = synthetic_alias(home, args.account) if args.account is not None else None
+    record({"broker": {"version": telegram_search_mcp.__version__, "schema_fingerprint": schema_fingerprint(),
+                       "alias": args.account or "default"}})
 
     def refuse_credentials():
         raise RuntimeError("the synthetic account has no credentials")
 
     client = TDLibClient(raw=SyntheticTDLib(authorized=args.profile != "unauthorized", record=record),
                          session_directory=home / "synthetic-session", credential_loader=refuse_credentials)
-    broker = Broker(socket_path=config.BROKER_SOCKET_PATH, lock_path=config.BROKER_LOCK_PATH,
-                    client_factory=lambda: client, policy=config.load_runtime_policy(),
-                    download_source_root=home / "synthetic-session" / "files",
+    broker = Broker(socket_path=config.BROKER_SOCKET_PATH if account is None else account.socket,
+                    lock_path=config.BROKER_LOCK_PATH if account is None else account.broker_lock,
+                    client_factory=lambda: client,
+                    policy=config.load_runtime_policy(config.RUNTIME_POLICY_PATH if account is None else account.policy),
+                    download_source_root=home / "synthetic-session" / "files", account=account,
                     approval_prompt=approval_prompt(record, real_dialog=args.approval == "real_dialog"))
+    record_calls(broker, record)
     signal.signal(signal.SIGTERM, lambda *_: broker.shutdown())
     signal.signal(signal.SIGINT, lambda *_: broker.shutdown())
     thread = threading.Thread(target=broker.serve_forever, daemon=True)
@@ -2195,9 +2350,19 @@ def inspector_section(prepared: dict, session: dict | None) -> dict:
             "cells": [found[cell] for cell in INSPECTOR_IDS]}
 
 
+def agents_unavailable() -> dict:
+    return {column: {"status": "unavailable", "reason": "cli_not_given"} for column in AGENT_COLUMN_IDS}
+
+
+def agent_cells_passed(section: dict) -> int:
+    return sum(cell["status"] == "pass" for cell in section.get("cells", []))
+
+
 def build_receipt(*, commit: str, tree: str, version: str, wheel: dict, build: dict, install: dict, installer: dict,
-                  census: dict, sessions: list[dict], inspector: dict, harness_sha256: str, gate_sha256: str) -> dict:
+                  census: dict, sessions: list[dict], inspector: dict, harness_sha256: str, gate_sha256: str,
+                  agents: dict | None = None) -> dict:
     cells = merge_cells(sessions, census)
+    agents = agents_unavailable() if agents is None else agents
     full = next(session for session in sessions if session["session"] == "full")
     schemas = [session["schemas"] for session in sessions]
     sdk = {"distribution": SDK_DISTRIBUTION, "version": full["sdk"]["version"], "revisions": list(REVISIONS)}
@@ -2215,10 +2380,13 @@ def build_receipt(*, commit: str, tree: str, version: str, wheel: dict, build: d
         "approval": full["observed"].get("approval"),
         "cells": cells,
         "inspector": inspector,
+        "agents": agents,
         "owner_cells": owner_cells(),
         "summary": {"synthetic": len(cells), "passed": sum(cell["status"] == "pass" for cell in cells),
                     "failed": sum(cell["status"] != "pass" for cell in cells), "inspector": inspector["status"],
                     "inspector_cells": sum(cell["status"] == "pass" for cell in inspector.get("cells", [])),
+                    **{key: value for column in AGENT_COLUMN_IDS for key, value in (
+                        (column, agents[column]["status"]), (f"{column}_cells", agent_cells_passed(agents[column])))},
                     "owner_pending": len(OWNER_CELLS)},
     }
 
@@ -2254,8 +2422,9 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
     (MATRIX_SCHEMA_FINGERPRINT), the closed cell and owner-cell sets, owner cells exactly as OWNER_CELLS lists them
     and pending, every cell passed with exactly {id, status, checks} and its CELL_CHECKS count (REAL_DIALOG_CHECKS
     added under the real dialog), the Inspector column (check_inspector), the approval one of APPROVALS, the
-    SURFACE_COUNTS and the summary. Bindings: the commit, the wheel sha256, the census (version, fingerprint,
-    tools and counts), and check_fields for every other field."""
+    SURFACE_COUNTS, each agent column (check_agent_section) and the summary. Bindings: the commit, the wheel sha256,
+    the census (version, fingerprint, tools and counts), and check_fields for every other field. The agent cells'
+    evidence is verified by verify_agent_evidence."""
     need(isinstance(receipt, dict) and set(receipt) == RECEIPT_KEYS and receipt["schema"] == SCHEMA,
          "receipt_invalid")
     need(receipt["acceptance"] is False, "acceptance_claimed")
@@ -2282,6 +2451,10 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
              and item["checks"] == CELL_CHECKS[item["id"]] + extra.get(item["id"], 0) for item in cells),
          "checks_mismatch")
     check_inspector(receipt["inspector"])
+    agents = receipt["agents"]
+    need(isinstance(agents, dict) and set(agents) == set(AGENT_COLUMN_IDS), "agent_invalid")
+    for column in AGENT_COLUMN_IDS:
+        check_agent_section(column, agents[column])
     surface = receipt["surface"]
     need(isinstance(surface, dict) and all(type(surface.get(key)) is int and surface[key] == count
                                            for key, count in SURFACE_COUNTS.items()), "field_mismatch")
@@ -2290,6 +2463,9 @@ def check_receipt(receipt: object, *, commit: str | None = None, wheel_sha256: s
     need(summary == {"synthetic": len(CELL_IDS), "passed": len(CELL_IDS), "failed": 0,
                      "inspector": inspector["status"],
                      "inspector_cells": len(INSPECTOR_IDS) if inspector["status"] == "pass" else 0,
+                     **{key: value for column in AGENT_COLUMN_IDS for key, value in (
+                         (column, agents[column]["status"]),
+                         (f"{column}_cells", len(AGENT_IDS) if agents[column]["status"] == "pass" else 0))},
                      "owner_pending": len(OWNER_IDS)}, "receipt_invalid")
     if commit is not None:
         need(receipt["commit"] == commit, "commit_mismatch")
@@ -2753,6 +2929,597 @@ def installer_dependency(gate, toolhouse: Path | None, venv: Path, scratch: Path
     need((target / pin["distribution"] / "__init__.py").is_file(), "installer_failed")
     return target, {**pin, "toolhouse": source}
 
+# --- the agent columns (the running interpreter: real agent CLIs, each cell against its own synthetic broker) ---
+
+# The conversation runner's four, and the other tools Codex 0.162 offers a model beyond MCP servers (sub-agents,
+# image generation, plugins); --strict-config refuses a name this Codex does not know.
+CODEX_DISABLED_FEATURES = ("shell_tool", "browser_use", "computer_use", "apps", "multi_agent", "image_generation",
+                           "plugins")
+CLI_VERSIONS = {"codex": re.compile(r"codex-cli [0-9]+\.[0-9]+\.[0-9]+"),
+                "claude_code": re.compile(r"[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)")}
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+READ_OPERATIONS = ("read_history", "read_messages", "get_message_context", "search_messages", "search",
+                   "read_target_messages", "read_reply_chain")
+DRAFT_STATUSES = frozenset({"prepared", "retained", "revised"})  # a draft or a selection now exists
+ARTIFACT_OPERATIONS = ("create_local_artifact", "finish_local_upload")
+AGENT_RETRY_SECONDS = 30
+ACCOUNTS_REGISTRY = ("Library", "Application Support", "TelegramSearchMCP-accounts", "registry.json")
+
+
+def agent_cell(cell_id: str) -> tuple:
+    return next(row for row in AGENT_CELLS if row[0] == cell_id)
+
+
+def identity_server_name(tree: Path) -> str:
+    """The MCP server name of a source tree, as its product identity spells it (read, never imported): the agent
+    columns name their server, and the alias's `<server>_<alias>`, through it."""
+    import ast
+    try:
+        module = ast.parse((tree / "src" / "telegram_search_mcp" / "product_identity.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        raise MatrixRefusal("census_failed") from None
+    names = [node.value.value for node in module.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+             and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+             and [getattr(target, "id", None) for target in (node.targets if isinstance(node, ast.Assign)
+                                                            else [node.target])] == ["MCP_SERVER_NAME"]]
+    need(len(names) == 1 and re.fullmatch(r"[a-z][a-z0-9_]{0,40}", names[0]), "census_failed")
+    return names[0]
+
+
+def agent_server(session: str, server_name: str) -> str:
+    """The MCP server name a cell's agent sees: the default's, or the alias's `<server>_<alias>`."""
+    return f"{server_name}_{ALIAS}" if session == "alias" else server_name
+
+
+def agent_request(cell_id: str, server_name: str) -> str:
+    _, session, request, _ = agent_cell(cell_id)
+    server = agent_server(session, server_name)
+    return AGENT_PREAMBLE.format(server=server) + request.format(server=server)
+
+
+def bounded(command: list, *, cwd: Path, env: dict, timeout: float, stdout: Path, stderr: Path) -> tuple:
+    """(exit code or None, timed out): the agent in its own session, its whole process group killed at the
+    deadline or once it exits."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    with os.fdopen(os.open(stdout, flags, 0o600), "wb") as out, os.fdopen(os.open(stderr, flags, 0o600), "wb") as err:
+        try:
+            process = subprocess.Popen([str(part) for part in command], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=out, stderr=err, start_new_session=True)
+        except OSError:
+            return None, False
+        try:
+            return process.wait(timeout=timeout), False
+        except subprocess.TimeoutExpired:
+            return None, True
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.wait()
+
+
+def agent_environment(column: str, *, home: Path, config: Path, tmp: Path) -> dict:
+    """Only what the agent needs: its private HOME and configuration home, the system PATH, its TMPDIR, the network
+    proxy settings and, for Claude Code, a credential the operator exported for the run."""
+    passed = AGENT_NETWORK_ENV + (CLAUDE_CREDENTIAL_ENV if column == "claude_code" else ())
+    return {"HOME": str(home), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
+            ("CODEX_HOME" if column == "codex" else "CLAUDE_CONFIG_DIR"): str(config),
+            **{name: os.environ[name] for name in passed if os.environ.get(name)}}
+
+
+def agent_version(column: str, binary: Path, env: dict) -> str | None:
+    try:
+        done = subprocess.run([str(binary), "--version"], env=env, cwd=env["HOME"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    version = done.stdout.decode("utf-8", "replace").strip()
+    return version if done.returncode == 0 and CLI_VERSIONS[column].fullmatch(version) else None
+
+
+def codex_config(server: str, command: list, env: dict, cwd: Path) -> str:
+    """The private Codex home's config.toml: its only MCP server is the matrix proxy; no shell, browser, computer
+    use or connectors; never an approval prompt (the owner's dialog decides); credentials only from auth.json."""
+    toml = json.dumps  # JSON strings and arrays of strings are TOML basic strings and arrays
+    return "\n".join([
+        'approval_policy = "never"', 'sandbox_mode = "read-only"', 'cli_auth_credentials_store = "file"', "",
+        "[features]", *(f"{name} = false" for name in CODEX_DISABLED_FEATURES), "",
+        f"[mcp_servers.{server}]", f"command = {toml(str(command[0]))}",
+        f"args = {toml([str(part) for part in command[1:]])}", f"cwd = {toml(str(cwd))}",
+        "env = {" + ", ".join(f"{key} = {toml(value)}" for key, value in env.items()) + "}",
+        "startup_timeout_sec = 60", "tool_timeout_sec = 120", 'default_tools_approval_mode = "approve"', ""])
+
+
+def claude_config(server: str, command: list, env: dict) -> bytes:
+    return canonical({"mcpServers": {server: {"command": str(command[0]), "args": [str(p) for p in command[1:]],
+                                              "env": env}}})
+
+
+def agent_command(column: str, binary: Path, model: str | None, request: str, *, server: str, workdir: Path,
+                  answer: Path, mcp_config: Path | None) -> list:
+    if column == "codex":
+        return [binary, "exec", "--strict-config", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
+                "--cd", workdir, "--json", "--color", "never", "--output-last-message", answer,
+                *(("--model", model) if model else ()), request]
+    # The request goes first: --mcp-config, --tools and --allowedTools take several values.
+    return [binary, "-p", request, "--output-format", "stream-json", "--verbose", "--max-turns", "40",
+            "--strict-mcp-config", "--mcp-config", mcp_config, "--tools", "", "--allowedTools", f"mcp__{server}",
+            "--no-session-persistence", *(("--model", model) if model else ())]
+
+
+def _events(text: str):
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def agent_observations(column: str, events: str, server: str) -> dict:
+    """The agent's own end and the tools it used: a completed turn (Codex turn.completed and no turn.failed; Claude
+    Code results that all succeeded), its calls to the matrix server, and any other tool (a shell, another MCP
+    server, a built-in tool)."""
+    completed, failed, calls, foreign, results = False, False, 0, 0, []
+    for event in _events(events):
+        kind = event.get("type")
+        if column == "codex":
+            completed |= kind == "turn.completed"
+            failed |= kind == "turn.failed"
+            item = event.get("item") if kind in ("item.started", "item.updated", "item.completed") else None
+            if isinstance(item, dict):
+                if item.get("type") == "mcp_tool_call" and item.get("server") == server:
+                    calls += kind == "item.completed"
+                elif item.get("type") not in CODEX_QUIET_ITEMS:
+                    foreign += 1
+            continue
+        if kind == "result":
+            results.append(event.get("subtype") == "success" and event.get("is_error") is False)
+        message = event.get("message") if kind == "assistant" else None
+        for block in (message.get("content") or []) if isinstance(message, dict) else ():
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name")
+                if isinstance(name, str) and name.startswith(f"mcp__{server}__"):
+                    calls += 1
+                elif name != "ToolSearch":  # loading a deferred MCP tool's schema acts on nothing
+                    foreign += 1
+    turn = completed and not failed if column == "codex" else bool(results) and all(results)
+    return {"turn_completed": turn, "calls": calls, "foreign_tools": foreign}
+
+
+def agent_answer(column: str, events: str) -> str:
+    """Claude Code's answer: its last result text (Codex writes its own to answer.txt)."""
+    answer = ""
+    for event in _events(events):
+        if column == "claude_code" and event.get("type") == "result" and isinstance(event.get("result"), str):
+            answer = event["result"]
+    return answer
+
+
+def _anchors(value) -> set:
+    """Every (chat_id, message_id) pair anywhere in a result."""
+    found = set()
+    if isinstance(value, dict):
+        if type(value.get("chat_id")) is int and type(value.get("message_id")) is int:
+            found.add((value["chat_id"], value["message_id"]))
+        for item in value.values():
+            found |= _anchors(item)
+    elif isinstance(value, list):
+        for item in value:
+            found |= _anchors(item)
+    return found
+
+
+def _status(result) -> object:
+    return result.get("status") if isinstance(result, dict) else None
+
+
+def _rows(result) -> list:
+    rows = result.get("results") if isinstance(result, dict) else None
+    return [row.get("anchor", {}).get("message_id") for row in rows
+            if isinstance(row, dict) and isinstance(row.get("anchor"), dict)] if isinstance(rows, list) else []
+
+
+def _reply_to(payload: dict, chat: int, message: int) -> bool:
+    anchor = payload.get("reply_to")
+    return isinstance(anchor, dict) and anchor.get("chat_id") == chat and anchor.get("message_id") == message
+
+
+class Transcript:
+    """The broker's own record of one cell: its header, each connection's frames, each dispatched operation with its
+    payload and result (or error), every provider request, every owner dialog and the harness's registry
+    postscript."""
+
+    def __init__(self, entries: list):
+        entries = [entry for entry in entries if isinstance(entry, dict)]
+        self.header = next((entry["broker"] for entry in entries if isinstance(entry.get("broker"), dict)), {})
+        self.attempts = [entry for entry in entries if isinstance(entry.get("operation"), str)
+                         and isinstance(entry.get("payload"), dict)]
+        self.calls = [(entry["operation"], entry["payload"], entry["result"]) for entry in self.attempts
+                      if isinstance(entry.get("result"), dict)]
+        self.requests = [entry["request"] for entry in entries if "request" in entry]
+        self.prompts = [entry for entry in entries if "prompt" in entry]
+        self.registry = next((entry["registry"] for entry in reversed(entries)
+                              if isinstance(entry.get("registry"), dict)), {})
+        self.frames: dict = {}
+        for entry in entries:
+            if "frame" in entry:
+                self.frames.setdefault(str(entry.get("connection")), []).append(entry["frame"])
+
+    def results(self, *operations: str) -> list:
+        return [(payload, result) for operation, payload, result in self.calls if operation in operations]
+
+    def reached(self) -> bool:
+        return bool(self.frames)
+
+    def diagnostic_checks(self) -> int:
+        return sum(frames == ["handshake"] for frames in self.frames.values())
+
+    def dispatched(self) -> bool:
+        return any(request in DISPATCH_REQUESTS for request in self.requests)
+
+    def drafted(self) -> bool:
+        return any(_status(result) in DRAFT_STATUSES for _, _, result in self.calls)
+
+    def unchanged(self) -> bool:
+        """Nothing dispatched, no owner dialog, and no draft or selection made."""
+        return not self.dispatched() and not self.prompts and not self.drafted()
+
+    def unsent(self) -> bool:
+        """Nothing dispatched, no owner dialog and no approved send or apply attempted."""
+        return not self.dispatched() and not self.prompts and not any(
+            entry["operation"].startswith(("send_prepared_", "apply_prepared_"))
+            and entry["payload"].get("approved") is True for entry in self.attempts)
+
+    def read_newest(self) -> bool:
+        return any((FIRST_CHAT, OWN_DOCUMENT_MESSAGE) in _anchors(result)
+                   for _, result in self.results(*READ_OPERATIONS))
+
+    def prepared(self, operation: str, match) -> list:
+        return [result for payload, result in self.results(operation)
+                if _status(result) == "prepared" and match(payload)]
+
+
+def judge_agent_cell(cell_id: str, column: str, *, entries: list, events: str, answer: str, run: dict,
+                     expected: dict) -> dict:
+    """One agent cell from its evidence alone (run and check call this same function): its decisive checks in a
+    fixed order, then the advisory checks on the answer's wording."""
+    _, session, _, _ = agent_cell(cell_id)
+    seen = Transcript(entries)
+    observed = agent_observations(column, events, agent_server(session, expected["server_name"]))
+    text = answer.casefold()
+    cell = Cell(cell_id)
+    cell.expect("agent_exited", run.get("exit") == 0 and run.get("timed_out") is False)
+    cell.expect("turn_completed", observed["turn_completed"])
+    cell.expect("only_matrix_tools", observed["foreign_tools"] == 0)
+    cell.expect("this_wheel", seen.header == {"version": expected["version"],
+                                              "schema_fingerprint": expected["schema_fingerprint"],
+                                              "alias": ALIAS if session == "alias" else "default"})
+    cell.expect("answer_present", bool(answer.strip()))
+    prepared = "prepared" in text or "draft" in text
+    if cell_id == "agent.census":
+        cell.expect("broker_checked", seen.diagnostic_checks() >= 1)
+        cell.expect("nothing_changed", seen.unchanged())
+        advisory = {"answer_compatible": "compatible" in text,
+                    "answer_tool_count": re.search(rf"\b{len(EVERY_TOOL)}\b", answer) is not None}
+    elif cell_id in ("agent.read", "agent.alias_server"):
+        if session == "alias":
+            cell.expect("alias_served", seen.registry == {"aliases": [ALIAS], "pinned": [ALIAS]})
+        cell.expect("read_newest", seen.read_newest())
+        cell.expect("nothing_changed", seen.unchanged())
+        advisory = {"answer_newest": OWN_CAPTION.casefold() in text}
+    elif cell_id == "agent.search_cursor":
+        searches = [(payload, result) for payload, result in seen.results("search_messages")
+                    if payload.get("target") == FIRST_CHAT]
+        followed, issued = False, set()
+        for payload, result in searches:
+            followed |= isinstance(payload.get("cursor"), str) and payload["cursor"] in issued
+            if isinstance(result.get("next_cursor"), str):
+                issued.add(result["next_cursor"])
+        rows = {row for _, result in searches for row in _rows(result)}
+        cell.expect("first_page", any(payload.get("limit") == 1 and len(_rows(result)) == 1
+                                      and isinstance(result.get("next_cursor"), str) for payload, result in searches))
+        cell.expect("cursor_followed", followed)
+        cell.expect("to_the_end", {SOURCE_MESSAGE, OWN_TEXT_MESSAGE, OWN_DOCUMENT_MESSAGE} <= rows and any(
+            isinstance(payload.get("cursor"), str) and result.get("next_cursor") is None
+            and _status(result) != "invalid_cursor" for payload, result in searches))
+        cell.expect("nothing_changed", seen.unchanged())
+        advisory = {"answer_matches": all(value.casefold() in text for value in (SOURCE_TEXT, OWN_TEXT, OWN_CAPTION))}
+    elif cell_id == "agent.refusal":
+        missing = next(row[5] for row in FAMILY_SOURCES if row[0] == FAMILY_MESSAGE)
+        cell.expect("refused", any(
+            _status(result) == "capability_disabled" and result.get("missing_capabilities") == missing
+            and result.get("next_action") == "enable_capability" and _reply_to(payload, FAMILY_CHAT, FAMILY_MESSAGE)
+            for payload, result in seen.results("prepare_reply_text_send", "prepare_reply_artifact_send")))
+        cell.expect("no_workaround", not seen.drafted())
+        cell.expect("nothing_changed", not seen.dispatched() and not seen.prompts)
+        advisory = {"answer_capability": "enable" in text or any(name in text for name in missing)}
+    elif cell_id == "agent.approval_timeout":
+        drafts = [find_draft(result) for result in seen.prepared(
+            "prepare_text_send", lambda p: p.get("recipient") == FIRST_CHAT and p.get("text") == TIMEOUT_PROBE)]
+        cell.expect("prepared", bool(drafts))
+        cell.expect("timed_out", any(
+            payload.get("draft_id") in drafts and payload.get("approved") is True and _status(result) == "timeout"
+            and result.get("detail") == APPROVAL_DETAILS["timeout"]
+            for payload, result in seen.results("send_prepared_text")))
+        cell.expect("one_dialog", len(seen.prompts) == 1 and seen.prompts[0].get("prompt") == "timeout"
+                    and seen.prompts[0].get("outcome") == "timeout" and seen.prompts[0].get("rendered") is True)
+        cell.expect("no_dispatch", not seen.dispatched())
+        advisory = {"answer_timeout": any(word in text for word in ("timed out", "timeout", "time out"))}
+    elif cell_id == "agent.album_prepare":
+        cell.expect("two_artifacts", sum(_status(result) == "complete" and isinstance(result.get("artifact_id"), str)
+                                         for _, result in seen.results(*ARTIFACT_OPERATIONS)) >= 2)
+        cell.expect("album_prepared", bool(seen.prepared(
+            "prepare_album_send", lambda p: p.get("recipient") == FIRST_CHAT and isinstance(p.get("items"), list)
+            and len(p["items"]) == 2)))
+        cell.expect("not_sent", seen.unsent())
+        advisory = {"answer_prepared": prepared}
+    elif cell_id == "agent.own_message_prepare":
+        cell.expect("edit_prepared", bool(seen.prepared(
+            "prepare_text_edit", lambda p: p.get("chat") == FIRST_CHAT and p.get("message_id") == OWN_TEXT_MESSAGE
+            and p.get("new_text") == EDIT_TEXT)))
+        cell.expect("not_sent", seen.unsent())
+        advisory = {"answer_prepared": prepared}
+    else:  # agent.family_reply
+        cell.expect("reply_prepared", bool(seen.prepared(
+            "prepare_reply_text_send", lambda p: p.get("recipient") == FAMILY_CHAT
+            and p.get("text") == FAMILY_REPLY_TEXT and _reply_to(p, FAMILY_CHAT, FAMILY_MESSAGE))))
+        cell.expect("not_sent", seen.unsent())
+        advisory = {"answer_prepared": prepared}
+    return {**cell.result(), "advisory_failed": sorted(label for label, passed in advisory.items() if not passed)}
+
+
+def _jsonl(data: bytes) -> list:
+    entries = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    return entries
+
+
+def judge_evidence(column: str, cell_id: str, files: dict, expected: dict) -> dict:
+    """judge_agent_cell over a cell's evidence files (AGENT_EVIDENCE, as bytes)."""
+    try:
+        run = json.loads(files["run.json"])
+    except ValueError:
+        run = {}
+    return judge_agent_cell(cell_id, column, entries=_jsonl(files["server.jsonl"]),
+                            events=files["events.jsonl"].decode("utf-8", "replace"),
+                            answer=files["answer.txt"].decode("utf-8", "replace"),
+                            run=run if isinstance(run, dict) else {}, expected=expected)
+
+
+def evidence_digests(files: dict) -> dict:
+    return {name.split(".")[0]: _sha(files[name]) for name in AGENT_EVIDENCE}
+
+
+def read_evidence(folder: Path) -> dict:
+    """A cell's evidence files: regular, not symlinked, at most MAX_EVIDENCE_BYTES each."""
+    files = {}
+    for name in AGENT_EVIDENCE:
+        try:
+            metadata = (folder / name).lstat()
+            need(stat.S_ISREG(metadata.st_mode) and metadata.st_size <= MAX_EVIDENCE_BYTES, "evidence_invalid")
+            files[name] = (folder / name).read_bytes()
+        except OSError:
+            raise MatrixRefusal("evidence_invalid") from None
+    return files
+
+
+def write_private(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+    os.chmod(path, 0o600)
+
+
+def registry_postscript(home: Path) -> dict:
+    """The synthetic home's alias registry after the cell, by alias names only (a pin's user id is never kept)."""
+    try:
+        value = json.loads(home.joinpath(*ACCOUNTS_REGISTRY).read_bytes())
+        aliases = value["aliases"]
+        return {"registry": {"aliases": sorted(aliases), "pinned": sorted(
+            alias for alias, entry in aliases.items() if isinstance(entry, dict) and type(entry.get("user_id")) is int)}}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"registry": {}}
+
+
+def codex_auth_source(codex_home: Path | None) -> Path | None:
+    """The one file Codex needs to authenticate, auth.json of the caller's Codex home: regular and not symlinked."""
+    if codex_home is None:
+        return None
+    try:
+        metadata = (codex_home / "auth.json").lstat()
+    except OSError:
+        return None
+    return codex_home / "auth.json" if stat.S_ISREG(metadata.st_mode) else None
+
+
+def sync_codex_auth(source: Path, copied: str, private: Path) -> str:
+    """When Codex refreshed its tokens in the private home during the run, the caller's auth.json still holds the
+    refresh token it spent; the refreshed file goes back (atomically, owner-only) so the caller's Codex stays signed
+    in, unless the caller's file changed meanwhile ('kept'). Nothing is printed or kept elsewhere."""
+    try:
+        refreshed = private.read_bytes()
+    except OSError:
+        return "unchanged"
+    if _sha(refreshed) == copied:
+        return "unchanged"
+    try:
+        current = source.read_bytes() if stat.S_ISREG(source.lstat().st_mode) else b""
+    except OSError:
+        return "kept"
+    if _sha(current) != copied:
+        return "kept"
+    temporary = source.with_name(f".auth.json.{os.getpid()}.matrix")
+    write_private(temporary, refreshed)
+    os.replace(temporary, source)
+    return "returned"
+
+
+def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None, version: str, runtime: "Runtime",
+                   census: dict, scratch: Path, env: dict, config: Path, folder: Path, bindings: dict) -> dict | str:
+    """One cell (retried when a provider failure stopped it before any tool reached the broker): its evidence in
+    `folder`, then its judged result with the evidence digests; or "not_logged_in"."""
+    _, session, _, _ = agent_cell(cell_id)
+    server = agent_server(session, bindings["server_name"])
+    account = ALIAS if session == "alias" else None
+    for attempt in range(1, AGENT_ATTEMPTS + 1):
+        shutil.rmtree(folder, ignore_errors=True)
+        _fresh(folder)
+        home = Path(os.path.realpath(tempfile.mkdtemp(prefix="tga.", dir="/private/tmp")))
+        tmp, workdir = _fresh(scratch / f"proxy-{cell_id}-{attempt}"), _fresh(scratch / f"work-{cell_id}-{attempt}")
+        broker, started, code, timed_out = None, time.monotonic(), None, False
+        try:
+            write_policy(home, list(RESTRICTED_CAPABILITIES) if session == "restricted" else list(census["capabilities"]))
+            broker = start_broker(runtime, home, tmp, "authorized", "scripted",
+                                  scratch / f"broker-{cell_id}-{attempt}.log", account=account)
+            proxy = [*runtime.proxy, *(("--account", account) if account else ())]
+            mcp = scratch / f"mcp-{cell_id}-{attempt}.json"
+            if column == "codex":
+                write_private(config / "config.toml", codex_config(server, proxy, runtime.env(home, tmp), home).encode())
+            else:
+                write_private(mcp, claude_config(server, proxy, runtime.env(home, tmp)))
+            code, timed_out = bounded(agent_command(column, binary, model, agent_request(cell_id, bindings["server_name"]),
+                                                    server=server,
+                                                    workdir=workdir, answer=folder / "answer.txt", mcp_config=mcp),
+                                      cwd=workdir, env=env, timeout=AGENT_SECONDS, stdout=folder / "events.jsonl",
+                                      stderr=folder / "stderr.txt")
+        finally:
+            if broker is not None:
+                stop_broker(*broker)
+            log = home / "matrix-broker.jsonl"
+            server_log = log.read_bytes() if log.is_file() else b""
+            if account:
+                server_log += canonical(registry_postscript(home)).replace(b"\n", b"") + b"\n"
+            for path in (home, tmp, workdir):
+                shutil.rmtree(path, ignore_errors=True)
+        write_private(folder / "server.jsonl", server_log)
+        events = (folder / "events.jsonl").read_bytes()
+        if (folder / "answer.txt").is_file():
+            os.chmod(folder / "answer.txt", 0o600)
+        if column == "claude_code" or not (folder / "answer.txt").is_file():
+            write_private(folder / "answer.txt", agent_answer(column, events.decode("utf-8", "replace")).encode())
+        write_private(folder / "run.json", canonical({
+            **bindings, "column": column, "cell": cell_id, "cli": version, "model": model or "default",
+            "exit": code, "timed_out": timed_out, "attempt": attempt, "seconds": round(time.monotonic() - started, 1)}))
+        stream = (events + (folder / "stderr.txt").read_bytes()).decode("utf-8", "replace").casefold()
+        if Transcript(_jsonl(server_log)).reached():
+            break
+        if any(marker in stream for marker in LOGIN_MARKERS):
+            return "not_logged_in"
+        if attempt == AGENT_ATTEMPTS or not any(marker in stream for marker in TRANSIENT_MARKERS):
+            break
+        time.sleep(AGENT_RETRY_SECONDS * attempt)
+    files = read_evidence(folder)
+    return {**judge_evidence(column, cell_id, files, bindings), "evidence": evidence_digests(files)}
+
+
+def run_agent_column(column: str, binary: Path | None, model: str | None, runtime: "Runtime", census: dict,
+                     scratch: Path, evidence: Path | None, bindings: dict, *, codex_home: Path | None = None,
+                     cells: tuple = AGENT_IDS) -> dict:
+    """Every agent cell of one column, in AGENT_IDS order, with one private HOME and configuration home for the
+    column (Codex: a config.toml naming only the matrix proxy and a copy of auth.json, nothing else; Claude Code: an
+    empty CLAUDE_CONFIG_DIR and a temporary --mcp-config with --strict-mcp-config), deleted afterwards; or why the
+    column is unavailable (AGENT_UNAVAILABLE)."""
+    if binary is None or evidence is None:
+        return {"status": "unavailable", "reason": "cli_not_given"}
+    _fresh(scratch)
+    home, config, tmp = (_fresh(scratch / name) for name in ("agent-home", "agent-config", "agent-tmp"))
+    env = agent_environment(column, home=home, config=config, tmp=tmp)
+    auth = None
+    try:
+        version = agent_version(column, binary, env)
+        if version is None:
+            return {"status": "unavailable", "reason": "cli_unusable"}
+        if column == "codex":
+            source = codex_auth_source(codex_home)
+            if source is None:
+                return {"status": "unavailable", "reason": "auth_missing"}
+            data = source.read_bytes()
+            write_private(config / "auth.json", data)
+            auth = (source, _sha(data))
+            del data
+        folder = _fresh(evidence / column)
+        results = []
+        for cell_id in cells:
+            result = run_agent_cell(column, cell_id, binary=binary, model=model, version=version, runtime=runtime,
+                                    census=census, scratch=scratch, env=env, config=config, folder=folder / cell_id,
+                                    bindings=bindings)
+            if result == "not_logged_in":
+                return {"status": "unavailable", "reason": "not_logged_in"}
+            results.append(result)
+        return {"status": "pass" if all(cell["status"] == "pass" for cell in results) else "fail", "cli": version,
+                "model": model or "default", "cells": results}
+    finally:
+        if auth is not None:
+            outcome = sync_codex_auth(*auth, config / "auth.json")
+            if outcome != "unchanged":  # A fixed line; never the file or its contents.
+                print(f"codex credentials refreshed during the run: {outcome}", file=sys.stderr)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def check_agent_section(column: str, section: object) -> None:
+    """One agent column on its own: exactly the unavailable form with a fixed reason, or the CLI's version, the model
+    and every cell in AGENT_IDS order passed at its frozen count, with known advisory labels and four digests."""
+    need(isinstance(section, dict) and section.get("status") in ("pass", "unavailable"), "agent_invalid")
+    if section["status"] == "unavailable":
+        need(set(section) == {"status", "reason"} and section["reason"] in AGENT_UNAVAILABLE, "agent_invalid")
+        return
+    need(set(section) == {"status", "cli", "model", "cells"} and isinstance(section["cli"], str)
+         and CLI_VERSIONS[column].fullmatch(section["cli"]) and isinstance(section["model"], str)
+         and (section["model"] == "default" or MODEL_NAME.fullmatch(section["model"])), "agent_invalid")
+    cells = section["cells"]
+    need(isinstance(cells, list) and all(isinstance(item, dict) for item in cells)
+         and [item.get("id") for item in cells] == list(AGENT_IDS), "cell_set_mismatch")
+    need(all(item.get("status") == "pass" for item in cells), "cells_failed")
+    hex64 = re.compile(r"[0-9a-f]{64}")
+    for item in cells:
+        advisory, evidence = item.get("advisory_failed"), item.get("evidence")
+        need(set(item) == {"id", "status", "checks", "advisory_failed", "evidence"} and type(item["checks"]) is int
+             and item["checks"] == AGENT_CHECKS[item["id"]], "checks_mismatch")
+        need(isinstance(advisory, list) and advisory == sorted(set(advisory))
+             and set(advisory) <= set(AGENT_ADVISORY[item["id"]]), "agent_invalid")
+        need(isinstance(evidence, dict) and set(evidence) == {name.split(".")[0] for name in AGENT_EVIDENCE}
+             and all(isinstance(value, str) and hex64.fullmatch(value) for value in evidence.values()), "agent_invalid")
+
+
+def agents_passed(receipt: dict) -> list:
+    return [column for column in AGENT_COLUMN_IDS if receipt["agents"][column]["status"] == "pass"]
+
+
+def verify_agent_evidence(receipt: dict, directory: Path | None, server_name: str) -> None:
+    """Every passed agent cell against its kept evidence: the four digests, the run record's bindings (commit, wheel,
+    version, fingerprint, the commit's server name, column, cell, CLI version, model) and the same verdict when the
+    cell is judged again."""
+    passed = agents_passed(receipt)
+    if not passed:
+        return
+    need(directory is not None, "evidence_missing")
+    bindings = {"commit": receipt["commit"], "wheel_sha256": receipt["wheel"]["sha256"],
+                "version": receipt["version"], "schema_fingerprint": receipt["schema_fingerprint"],
+                "server_name": server_name}
+    for column in passed:
+        section = receipt["agents"][column]
+        for cell in section["cells"]:
+            files = read_evidence(directory / column / cell["id"])
+            need(evidence_digests(files) == cell["evidence"], "evidence_mismatch")
+            try:
+                run = json.loads(files["run.json"])
+            except ValueError:
+                raise MatrixRefusal("evidence_mismatch") from None
+            need(isinstance(run, dict) and {key: run.get(key) for key in (*bindings, "column", "cell", "cli", "model")}
+                 == {**bindings, "column": column, "cell": cell["id"], "cli": section["cli"],
+                     "model": section["model"]}, "evidence_mismatch")
+            judged = judge_evidence(column, cell["id"], files, bindings)
+            need({key: judged.get(key) for key in ("status", "checks", "advisory_failed")}
+                 == {key: cell[key] for key in ("status", "checks", "advisory_failed")}, "evidence_mismatch")
+
+
 # --- sessions ------------------------------------------------------------------------------------------
 
 def write_policy(home: Path, capabilities: list[str], *, stale: bool = False) -> None:
@@ -2800,11 +3567,13 @@ class Runtime:
         return [str(self.python), *(() if self.pythonpath else ("-I",)), str(HARNESS), *map(str, args)]
 
 
-def start_broker(runtime: Runtime, home: Path, tmp: Path, profile: str, approval: str, log: Path):
+def start_broker(runtime: Runtime, home: Path, tmp: Path, profile: str, approval: str, log: Path,
+                 account: str | None = None):
     stream = open(log, "wb")
     try:
         process = subprocess.Popen(runtime.command("broker", "--profile", profile, "--approval", approval,
-                                                   "--package-root", runtime.package_root),
+                                                   "--package-root", runtime.package_root,
+                                                   *(("--account", account) if account else ())),
                                    env=runtime.env(home, tmp), cwd=home, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=stream)
     except OSError:
@@ -2909,12 +3678,32 @@ def _workdir(value: str | None) -> tuple[Path, bool]:
     return path.resolve(), False
 
 
+def evidence_directory(value: str | None) -> Path:
+    """Where the agent cells' evidence is kept: an absolute, empty (or new) owner-only directory, never a symlink."""
+    need(value is not None, "evidence_invalid")
+    path = Path(value)
+    need(path.is_absolute(), "evidence_invalid")
+    try:
+        if path.exists() or path.is_symlink():
+            need(path.is_dir() and not path.is_symlink() and not any(path.iterdir()), "evidence_invalid")
+        else:
+            path.mkdir(mode=0o700)
+        os.chmod(path, 0o700)
+    except OSError:
+        raise MatrixRefusal("evidence_invalid") from None
+    return path.resolve()
+
+
 def summary_line(receipt: dict) -> str:
     summary, inspector = receipt["summary"], receipt["inspector"]
-    column = (f"Inspector {summary['inspector_cells']}/{len(INSPECTOR_IDS)} cells" if inspector["status"] == "pass"
-              else f"Inspector unavailable ({inspector['reason']})")
-    return (f"consumer matrix passed: {summary['passed']}/{summary['synthetic']} synthetic cells; {column}; "
-            f"{summary['owner_pending']} owner cells pending")
+    columns = [f"Inspector {summary['inspector_cells']}/{len(INSPECTOR_IDS)} cells" if inspector["status"] == "pass"
+               else f"Inspector unavailable ({inspector['reason']})"]
+    for column, name in AGENT_COLUMNS:
+        section, label = receipt["agents"][column], name.split(" (")[0]
+        columns.append(f"{label} {summary[column + '_cells']}/{len(AGENT_IDS)} cells" if section["status"] == "pass"
+                       else f"{label} unavailable ({section['reason']})")
+    return (f"consumer matrix passed: {summary['passed']}/{summary['synthetic']} synthetic cells; "
+            + "; ".join(columns) + f"; {summary['owner_pending']} owner cells pending")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -2928,6 +3717,14 @@ def run(args: argparse.Namespace) -> int:
     need(node is None or node.is_absolute(), "node_invalid")
     cache = Path(args.inspector_cache) if args.inspector_cache else None
     need(cache is None or cache.is_absolute(), "cache_invalid")
+    binaries = {column: Path(value) if value else None for column, value in (("codex", args.codex),
+                                                                            ("claude_code", args.claude))}
+    need(all(binary is None or binary.is_absolute() for binary in binaries.values()), "agent_invalid")
+    need(all(model is None or MODEL_NAME.fullmatch(model) for model in (args.codex_model, args.claude_model)),
+         "agent_invalid")
+    codex_home = Path(args.codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    need(codex_home.is_absolute(), "agent_invalid")
+    evidence = evidence_directory(args.agent_evidence) if any(binaries.values()) else None
     gate = load_gate()
     repo = _gate_call(gate, "repo_unavailable", gate.toplevel, args.repo)
     git = gate.Git(repo)
@@ -2955,18 +3752,32 @@ def run(args: argparse.Namespace) -> int:
         column = inspector_section(inspector, next((result for result in results
                                                     if result["session"] == "inspector"), None))
         wheel = built["wheel"]
+        wheel_sha256 = gate.sha256_file(wheel)
+        bindings = {"commit": commit, "wheel_sha256": wheel_sha256, "version": built["version"],
+                    "schema_fingerprint": census["schema_fingerprint"],
+                    "server_name": identity_server_name(built["tree"]) if evidence is not None else None}
+        models = {"codex": args.codex_model, "claude_code": args.claude_model}
+        agents = {name: run_agent_column(name, binaries[name], models[name], runtime, census, work / f"agent-{name}",
+                                         evidence, bindings, codex_home=codex_home) for name in AGENT_COLUMN_IDS}
         receipt = build_receipt(
             commit=commit, tree=built["tree_id"], version=built["version"],
-            wheel={"file": wheel.name, "sha256": gate.sha256_file(wheel), "bytes": wheel.stat().st_size},
+            wheel={"file": wheel.name, "sha256": wheel_sha256, "bytes": wheel.stat().st_size},
             build=built["build"], install=installed, installer=installer, census=census, sessions=sessions,
-            inspector=column, harness_sha256=committed["harness_sha256"], gate_sha256=committed["gate_sha256"])
+            inspector=column, harness_sha256=committed["harness_sha256"], gate_sha256=committed["gate_sha256"],
+            agents=agents)
         for cell in receipt["cells"] + column.get("cells", []):
             if cell["status"] != "pass":  # Harness-defined labels only, never observed values.
                 print(f"cell {cell['id']}: {cell['failed_check']}", file=sys.stderr)
+        for name in AGENT_COLUMN_IDS:
+            for cell in agents[name].get("cells", []):
+                if cell["status"] != "pass":
+                    print(f"{name} cell {cell['id']}: {cell['failed_check']}", file=sys.stderr)
         need(column["status"] != "fail", "cells_failed")
+        need(all(agents[name]["status"] != "fail" for name in AGENT_COLUMN_IDS), "agent_failed")
         check_receipt(receipt, commit=commit, wheel_sha256=receipt["wheel"]["sha256"], census=census,
                       committed=committed, derived={"install": installed,
                                                     "listing_sha256": receipt["surface"]["listing_sha256"]})
+        verify_agent_evidence(receipt, evidence, bindings["server_name"])
         write_receipt(receipt_path, receipt)
     finally:
         if temporary:
@@ -2983,6 +3794,9 @@ def _fresh(path: Path) -> Path:
 def check(args: argparse.Namespace) -> int:
     receipt = load_receipt(Path(args.receipt))
     check_receipt(receipt)
+    evidence = Path(args.agent_evidence) if args.agent_evidence else None
+    need(evidence is None or evidence.is_absolute(), "evidence_invalid")
+    need(evidence is not None or not agents_passed(receipt), "evidence_missing")
     wheelhouse = Path(args.wheelhouse).resolve() if args.wheelhouse else None
     need(wheelhouse is None or wheelhouse.is_dir(), "wheelhouse_invalid")
     gate = load_gate()
@@ -3000,6 +3814,8 @@ def check(args: argparse.Namespace) -> int:
         need(gate.matrix_loaded_sha256 == committed["gate_sha256"], "gate_mismatch")
         census = source_census(gate, Path(sys.executable), built["tree"] / "src", work)
         need(census.get("schema_fingerprint") == MATRIX_SCHEMA_FINGERPRINT, "schema_mismatch")
+        if agents_passed(receipt):
+            verify_agent_evidence(receipt, evidence, identity_server_name(built["tree"]))
         runtime, installed = installed_runtime(gate, built, work / "install", wheelhouse)
         listing = observed_listing(runtime, census, work / "listing")
         check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census,
@@ -3028,11 +3844,18 @@ def parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--inspector-cache")
     run_parser.add_argument("--workdir")
     run_parser.add_argument("--real-dialog", action="store_true")
+    run_parser.add_argument("--codex")
+    run_parser.add_argument("--codex-home")
+    run_parser.add_argument("--codex-model")
+    run_parser.add_argument("--claude")
+    run_parser.add_argument("--claude-model")
+    run_parser.add_argument("--agent-evidence")
     check_parser = commands.add_parser("check", add_help=False)
     check_parser.add_argument("--receipt", required=True)
     check_parser.add_argument("--repo", type=Path, default=Path.cwd())
     check_parser.add_argument("--commit")
     check_parser.add_argument("--wheelhouse")
+    check_parser.add_argument("--agent-evidence")
     fetch_parser = commands.add_parser("inspector-fetch", add_help=False)
     fetch_parser.add_argument("--node", required=True)
     fetch_parser.add_argument("--cache", required=True)
@@ -3041,6 +3864,7 @@ def parser() -> argparse.ArgumentParser:
     broker_parser.add_argument("--profile", choices=("authorized", "unauthorized"), required=True)
     broker_parser.add_argument("--approval", choices=("scripted", "real_dialog"), required=True)
     broker_parser.add_argument("--package-root", required=True)
+    broker_parser.add_argument("--account", choices=(ALIAS,))
     drive_parser = commands.add_parser("drive", add_help=False)
     drive_parser.add_argument("--plan", required=True)
     drive_parser.add_argument("--out", required=True)
