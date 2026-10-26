@@ -10,8 +10,10 @@ evidence forms and decisions still hold unless this spec says otherwise. **Tasks
 
 ## 1. One sentence
 
-The matrix covers every tool through 0.58 (64 tools): the harness drives 48 synthetic cells through the
-official SDK, four cells through the MCP Inspector's scripted CLI mode, the installed bundle installer's
+The matrix covers every tool through 0.58 (64 tools): the harness drives 55 synthetic cells through the
+official SDK (48 since part 1, and since the final audit seven more: the Boolean search form and the sender,
+direction and topic filters, a synthetic XLSX and PPTX, a styled caption and the 0.58 reply sources prepared, and
+the typed text-send refusal), four cells through the MCP Inspector's scripted CLI mode, the installed bundle installer's
 upgrade, rollback and uninstall paths and nine cells through each real agent CLI (Codex, Claude Code), all
 against synthetic brokers and homes from one `git archive` wheel, and writes a receipt bound to the commit, the
 wheel hash, the schema fingerprint the cells were written for, the harness, the release gate and, for the agent
@@ -41,6 +43,13 @@ The receipt's `owner_cells` drop `inspector_cli.synthetic` (part 1) and `codex.s
   newer messages before it. `searchChatMessages` and `searchMessages` match the query case-insensitively in a
   text or caption and answer in one page; a media filter finds nothing. `getUser` names every synthetic peer;
   `getChatListsToAddChat` offers the Archive list.
+- Final audit additions (section 5a): chat 91002 also holds 69, a document whose caption `Matrix caption link`
+  carries a text link (the 0.58 media TextUrl reply source, v24) with the complete file shape a reply's media
+  projection reads; a forum supergroup -91003 (supergroup 91003, `getSupergroup` answers `is_forum`,
+  `getForumTopic` topics 41 and 42), outside the Main list, holds 70 (incoming, topic 41), 71 (incoming, topic 42)
+  and 72 (the account's own, topic 41). `searchChatMessages` keeps only its `sender_id` and `topic_id` when given,
+  as TDLib does; the first chat and the forum have a history; chat 91002's history stays empty and
+  `searchMessages` still searches the first chat only.
 - Every provider-changing request (`sendMessage`, `sendMessageAlbum`, `forwardMessages`, `addChatToList`,
   `editMessageText`, `editMessageCaption`, `pinChatMessage`, `unpinChatMessage`, `deleteMessages`) is logged;
   `sendMessage` then loses its transport (outcome unknown), every other one answers an error. "No dispatch"
@@ -69,7 +78,7 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | agent `restricted` (the refusal cell) | the restricted policy above | authorized synthetic account, scripted owner |
 | agent `alias` (the alias cell) | every capability, for the default and for alias `work` | the alias's broker (`broker --account work`): the registry and the alias root as `account-add` leaves them |
 
-## 5. The synthetic cells (48)
+## 5. The synthetic cells (55)
 
 `n` is the frozen check count (`CELL_CHECKS`); a cell passes only with exactly that many checks.
 
@@ -91,6 +100,7 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | `refusal.capability_disabled` | restricted | 5 | `read_history`, `list_chats`, `prepare_forward_send` refuse naming their capability and profile |
 | `refusal.guard_profiles` | restricted | 33 | the 31 disabled tools are exactly the unlisted ones and each refuses naming exactly its missing capabilities and the one profile that unlocks them (`readers`, `forward`, `video`, `albums`, `archive_edit`, `pin`, `delete`); a `selection_id` adds `retained_selections` |
 | `refusal.reply_families` | restricted | 22 | a reply to each family source returns `capability_disabled` with exactly `reply_formatted_targets` and the family's capability; styled reply text needs `formatted_text_send`, a styled reply caption `formatted_caption_send`; no draft |
+| `refusal.text_options` | restricted | 5 | a styled `prepare_text_send` returns `capability_disabled` with exactly `formatted_text_send`, a styled topic one with `formatted_text_send` and `topic_text_send`, the fixed detail and `next_action: enable_capability`; no draft, dialog or dispatch (section 5a) |
 | `refusal.guard_every_tool` | closed | 65 | only `_manifest` and `check_connection` are listed; each of the 60 gated tools refuses with its full requirement and hint (`owner enables profile …` or `owner must enable in runtime.toml`); the three upload-authority tools answer `unavailable` |
 | `refusal.prompt_policy`, `refusal.config_stale` | restricted, stale | 2, 3 | as in 0.54 |
 | `image.png`, `image.pdf_page` | full | 6, 5 | as in 0.54 |
@@ -98,9 +108,15 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | `cursor.list_chats` | full | 4 | 20 rows and a cursor, then the last 5 |
 | `cursor.read_history`, `cursor.search_messages` | full | 6 each | `limit` 1 pages 57, 56, 55 by cursor to the end; a replayed cursor returns `invalid_cursor`, no rows, `restart_listing` |
 | `cursor.list_drafts` | full | 5 | two owned drafts page one at a time with `after_draft_id`, then `has_more` false |
+| `search.boolean` | full | 6 | `search_messages` with `{all: [synthetic, own], none: [caption]}` returns 56, `{any: [source, caption]}` 57 and 55, `{any: [matrix, synthetic]}` 57, 56 and 55 once each from its two branches (3 scanned each); every page `partial` (`provider_end_unverified`) under the local matching semantics, every result a complete rehydrated match |
+| `search.filters` | full | 7 | the sender filter (the peer) returns 55; `direction` outgoing 57 and 56, incoming 55; the forum topic 41 returns 72 and 70 (not 71), each in that topic; topic, own sender and outgoing together 72; the Boolean form `{all: [forum], none: [own]}` in topic 41, incoming, 70 |
+| `documents.xlsx` | full | 6 | `read_spreadsheet` of a synthetic XLSX lists the catalog (`Matrix` visible, `Hidden` hidden); `A1:B2` of sheet 1 is complete: an inline string, the number 2, the formula `B1*2` as data with its cached 4, an empty cell; `A1` of the hidden sheet its text |
+| `documents.pptx` | full | 5 | `read_presentation` of a synthetic PPTX lists the catalog (slide 1 with notes, slide 2 hidden without); slide 1 with `include_notes` returns its text and notes, `selection_complete`, never `full_content_complete`; slide 2 its text and no notes |
 | `recovery.*` (7) | as in 0.54 | 4, 2, 8, 5, 3, 4, 3 | one cell per value of the closed `next_action` map |
 | `caps.manifest`, `caps.input_bounds` | full | 8, 6 | as in 0.54 |
 | `caps.input_bounds_058` | full | 13 | one past each cap of the tools through 0.58 (hypotheses 6, message ids 21, album items 11 and 1, album caption 1,025, edit text 4,097, new caption 1,025, 33 styles, `list_drafts` limit 51, `max_depth` 11, 21 retained anchors, 6 search targets, `max_cells` 201) is refused with the fixed text |
+| `prepare.styled_caption` | full | 4 | `prepare_artifact_send` of a PNG with a bold caption style is prepared with those `outgoing_entities` and a `preview_sha256`, which `get_draft` shows unchanged; `prepare_reply_artifact_send` with the same style is prepared; no dialog, no dispatch |
+| `prepare.reply_sources_058` | full | 5 | a reply to 69 (media caption with a text link, v24) and to 67 (custom emoji, v25) is prepared with its exact target and text; the media evidence is the inert record naming the link's URL on `link`, the custom emoji evidence names its id; no dialog, no dispatch |
 | `approval.declined_flag`, `approval.denial` | full | 5, 8 (+1 real dialog) | as in 0.54 |
 | `approval.timeout` | full | 6 | the timeout probe's dialog times out: `timeout` with its fixed detail, one rendered text dialog, no dispatch, the draft still pending |
 | `approval.denial_every_family` | full | 34 | artifact, reply text, reply artifact, forward, video, album, archive, text edit, caption edit, pin and delete: each is prepared, approved by the caller, declined by one rendered dialog of its family and verb (`send`, `change` or `delete`); no dispatch at all |
@@ -109,7 +125,7 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | `bundle.rollback` | bundle | 7 | back to the older release: `rolled_back`/`restarted`, pointer, definition, entries, skills, pin, session, the newer release kept |
 | `bundle.uninstall` | bundle | 8 | `uninstalled` with everything owned removed (root, plist and job, Codex and Desktop entries, skills), neighbours and the whole session kept; a repeat answers `absent` |
 
-Surface (`SURFACE_COUNTS`): 157 structured results validated, from all 64 tools.
+Surface (`SURFACE_COUNTS`): 182 structured results validated (157 before the final audit cells), from all 64 tools.
 
 ### 5.1 Every tool
 
@@ -120,6 +136,19 @@ dialog opens. The statuses are those of the synthetic account: `discover_targets
 `get_attachment` of a text message, `analyze_media` of a PNG, `list_topics`/`read_topic_history` of a private
 chat and `read_spreadsheet`/`read_presentation` of a CSV answer `unsupported`; every other tool reaches its
 success status (`prepared`, `declined`, `pending`, `revised`, `retained`, `complete`, …).
+
+### 5a. The final audit cells
+
+The [final audit](final-audit.md) left F6, F9 and F13 partly met for want of an installed consumer calling the 0.51
+forms and the 0.58 prepares under a policy that allows them, and recorded two findings of this matrix (section 10).
+Seven cells close the agent side: `search.boolean` and `search.filters` (F6), `documents.xlsx` and
+`documents.pptx` (F9), `prepare.styled_caption` and `prepare.reply_sources_058` (F13), all in the full session on
+its legacy proxy before the approval cells, and `refusal.text_options` in the restricted session, which freezes the
+typed `prepare_text_send` refusal (the second finding, fixed with the listed schema change
+`0.59-text-send-capabilities`; `MATRIX_SCHEMA_FINGERPRINT` moved with it). The search cells run on the first chat's
+three messages and the new forum, so no earlier cell's rows change; the documents are hand-authored OOXML packages
+built by the harness byte for byte (stdlib `zipfile`, fixed timestamps), read through `create_local_artifact`; the
+prepares never send. Statuses are those of the synthetic account (a search page `partial`, as in section 5.1).
 
 ## 6. The bundle session
 
@@ -258,7 +287,7 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   downloaded) and `inspector` (the pass or unavailable form), adds `inspector` and `inspector_cells` to the
   summary and drops `inspector_cli.synthetic` from `owner_cells`. A v2 receipt is refused.
 - **The schema is frozen.** `MATRIX_SCHEMA_FINGERPRINT` is the fingerprint these cells were written for (the
-  0.58 surface). `run` refuses another census before any session (`schema_mismatch`), `check_receipt` refuses a
+  0.58 surface; since the final acceptance with the typed `prepare_text_send` refusal, `85b80a45…b071`). `run` refuses another census before any session (`schema_mismatch`), `check_receipt` refuses a
   receipt with another fingerprint on its own, and `check` refuses a commit whose census differs. A deliberate
   schema change must update the cells, their counts, the tool tables and the constant together; a unit test
   holds the constant and every table to the source.
@@ -267,6 +296,19 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   `cache_invalid`, `node_invalid`, `fetch_failed`.
 
 ## 9. Decisions and rejected options
+
+Final audit cells (lead decisions, owner review pending):
+
+- **The forum is a chat of its own, outside the Main list**, and the media TextUrl source is a new message of chat
+  91002: the first chat keeps its three messages, so the cursor, read and agent cells see the same rows, and
+  `cursor.list_chats` the same 25 chats. Rejected: forum messages or a captioned document in the first chat (every
+  cursor cell and the agent read cell would change) and a forum among the Main chats (the listing caps change).
+- **The synthetic `searchChatMessages` applies `sender_id` and `topic_id`**, as TDLib does; the readers filter the
+  rows again on the rehydrated message, so the cells prove both. The history of chat 91002 stays empty, as before.
+- **The typed text-send refusal is frozen in the restricted session** (`refusal.text_options`) rather than in
+  `refusal.reply_families`, whose count stays tied to the family table.
+- **The agent columns are unchanged** (nine cells each); the lead runs them with the whole matrix at the release
+  candidate.
 
 Part 2 (agent columns):
 
@@ -337,17 +379,20 @@ Part 1:
   account is too small or the file is not a spreadsheet or presentation; the cell still proves the tool is
   listed, callable and schema-valid through the consumer.
 
-## 10. Findings recorded for the audit (not changed here)
+## 10. Findings recorded for the audit (fixed in the final acceptance)
 
 - **Retained selections of messages with entities.** `selection_projection.message_projection` accepts an
   entity only with exactly the keys `offset`, `length`, `type`, while TDLib's JSON writes every object with its
   `@type` (`"@type": "textEntity"`), which the forward projection's own check requires. On the synthetic
   account the hashtag message 55 forwards but `retain_selection` of it answers `selection_unavailable`; the
   selection tests use entities without `@type`. Not yet checked on the real account. The matrix retains a
-  message without entities (56) and does not freeze this behaviour.
+  message without entities (56) and does not freeze this behaviour. **Fixed** in 2c87e08: the projection accepts
+  exactly TDLib's shape (the `@type` key with that value, nothing else extra), the fixtures carry it, and broker tests
+  retain, read and refuse after drift a message with TDLib-shaped entities.
 - **`prepare_text_send` without `formatted_text_send`.** A styled text send under a policy without the
   capability answers `status: error` with `topic draft could not be prepared safely`, where the reply tools
-  answer `capability_disabled` with `missing_capabilities`.
+  answer `capability_disabled` with `missing_capabilities`. **Fixed** in 12f53f6 at the broker, the proxy and
+  through the SDK (a topic option too), a listed schema change; `refusal.text_options` freezes it (section 5a).
 
 ## 11. Seams for part 2 (agent cells), as they were used
 

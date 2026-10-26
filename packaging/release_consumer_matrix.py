@@ -123,6 +123,8 @@ CELLS = (
      "exactly its missing capabilities and the profile that unlocks them"),
     ("refusal.reply_families", "restricted", "a reply to a source of each 0.58 reply family, or with styles, returns "
      "capability_disabled with exactly its missing_capabilities"),
+    ("refusal.text_options", "restricted", "a styled, or styled and topic, prepare_text_send returns "
+     "capability_disabled with exactly its missing_capabilities, as the reply tools do"),
     ("refusal.guard_every_tool", "closed", "with no capability every tool but _manifest is unlisted and refused with "
      "its full requirement and hint; the upload-authority tools answer unavailable"),
     ("refusal.prompt_policy", "restricted", "a prompt needing a disabled tool is unlisted and refused"),
@@ -134,6 +136,14 @@ CELLS = (
     ("cursor.read_history", "full", "read_history pages one message at a time and follows its cursor to the end"),
     ("cursor.search_messages", "full", "search_messages pages one match at a time and follows its cursor to the end"),
     ("cursor.list_drafts", "full", "list_drafts pages owned drafts with after_draft_id"),
+    ("search.boolean", "full", "search_messages with the Boolean form (all, any, none) returns exactly the rehydrated "
+     "matches, each once"),
+    ("search.filters", "full", "search_messages filtered by sender, direction and forum topic returns exactly the "
+     "matching messages"),
+    ("documents.xlsx", "full", "read_spreadsheet of a synthetic XLSX returns its sheet catalog and a selected range, "
+     "formulas as data"),
+    ("documents.pptx", "full", "read_presentation of a synthetic PPTX returns its slide catalog and selected slides "
+     "with their notes"),
     ("recovery.restart_listing", "full", "a replayed cursor returns invalid_cursor with next_action restart_listing"),
     ("recovery.search_again", "full", "an unknown selection returns selection_unavailable with next_action "
      "search_again"),
@@ -150,6 +160,10 @@ CELLS = (
     ("caps.input_bounds", "full", "inputs one past each cap are refused with the fixed invalid_arguments text"),
     ("caps.input_bounds_058", "full", "inputs one past each cap of the tools through 0.58 are refused with the fixed "
      "invalid_arguments text"),
+    ("prepare.styled_caption", "full", "a styled caption is prepared for a file and a file reply under a policy that "
+     "allows it"),
+    ("prepare.reply_sources_058", "full", "a reply to a media caption with a text link and to a custom emoji is "
+     "prepared under a policy that allows them"),
     ("approval.declined_flag", "full", "approved=false declines without a dialog and without dispatch"),
     ("approval.denial", "full", "approved=true with a denying owner (scripted decline or real dialog timeout) never "
      "dispatches"),
@@ -172,18 +186,20 @@ CELL_CHECKS = {
     "refusal.invalid_arguments": 10, "refusal.invalid_arguments_hook": 2, "refusal.invalid_arguments_every_tool": 65,
     "refusal.unknown_tool": 1, "refusal.prompt_unavailable": 1, "refusal.prompt_arguments": 2,
     "refusal.client_schema_mismatch": 4, "refusal.capability_disabled": 5, "refusal.guard_profiles": 33,
-    "refusal.reply_families": 22, "refusal.guard_every_tool": 65, "refusal.prompt_policy": 2,
+    "refusal.reply_families": 22, "refusal.text_options": 5, "refusal.guard_every_tool": 65, "refusal.prompt_policy": 2,
     "refusal.config_stale": 3, "image.png": 6, "image.pdf_page": 5, "image.attachment_page": 5,
     "cursor.list_chats": 4, "cursor.read_history": 6, "cursor.search_messages": 6, "cursor.list_drafts": 5,
+    "search.boolean": 6, "search.filters": 7, "documents.xlsx": 6, "documents.pptx": 5,
     "recovery.restart_listing": 4, "recovery.search_again": 2, "recovery.check_send_status": 8,
     "recovery.enable_capability": 5, "recovery.update_installation": 3, "recovery.check_connection": 4,
     "recovery.connect_account": 3, "caps.manifest": 8, "caps.input_bounds": 6, "caps.input_bounds_058": 13,
+    "prepare.styled_caption": 4, "prepare.reply_sources_058": 5,
     "approval.declined_flag": 5, "approval.denial": 8, "approval.timeout": 6, "approval.denial_every_family": 34,
     "bundle.install": 8, "bundle.upgrade": 9, "bundle.rollback": 7, "bundle.uninstall": 8,
 }
 REAL_DIALOG_CHECKS = {"approval.denial": 1}
 # Structured results every session validates in a passing run, and the tools they came from (every tool).
-SURFACE_COUNTS = {"structured_results_validated": 157, "tools_with_validated_results": 64}
+SURFACE_COUNTS = {"structured_results_validated": 182, "tools_with_validated_results": 64}
 # Owner or real-account cells: listed so the receipt shows them, never run or passed by this harness. The Inspector
 # CLI's synthetic cells (INSPECTOR_CELLS) and the Codex and Claude Code synthetic cells (AGENT_CELLS) are the
 # harness's own columns since the final acceptance.
@@ -259,6 +275,7 @@ CONFIG_STALE = "Error executing tool {}: config_stale (restart matching componen
 CLIENT_SCHEMA_MISMATCH = ("Error executing tool {}: client_schema_mismatch (refresh tools/list, then call _manifest with "
                           "expected_schema_fingerprint set to the current schema_fingerprint)")
 APPROVAL_NOT_GIVEN = "explicit approval was not given"
+TEXT_OPTIONS_DISABLED = "text draft needs capabilities the owner has not enabled: missing_capabilities"
 APPROVAL_DETAILS = {"declined": "the owner declined in the local dialog; no attempt was made",
                     "timeout": "the local dialog timed out without a choice; no attempt was made"}
 PROMPTS = ("check_connection", "find_and_summarize", "reply_with_file", "unread_overview")
@@ -415,6 +432,15 @@ FAMILY_SOURCES = (
      ["reply_formatted_targets", "reply_lexical_targets"]),
 )
 SOURCE_MISSING = ["reply_formatted_targets", "reply_lexical_targets"]  # a hashtag: lexical text
+# A document in the second chat whose caption holds a hidden link: the 0.58 media TextUrl reply source (v24).
+MEDIA_LINK_MESSAGE, MEDIA_LINK_CAPTION, MEDIA_LINK_URL = 69, "Matrix caption link", "https://example.org/caption"
+CUSTOM_EMOJI_SOURCE = 67  # the custom emoji reply source of FAMILY_SOURCES (v25)
+# A forum supergroup outside the Main list (the topic filter): (message id, topic, text, outgoing).
+FORUM_CHAT, FORUM_SUPERGROUP, FORUM_TOPIC = -91003, 91003, 41  # a synthetic id, not a real -100 one
+FORUM_MESSAGES = ((70, FORUM_TOPIC, "Matrix forum topic note", False),
+                  (71, FORUM_TOPIC + 1, "Matrix forum other note", False),
+                  (72, FORUM_TOPIC, "Matrix forum own topic note", True))
+PEER_USER = FIRST_CHAT + 1000  # the first chat's peer, the incoming messages' sender
 STYLED = [{"offset": 0, "length": 6, "type": {"@type": "textEntityTypeBold"}}]  # "Matrix" in bold
 DENIAL_PROBE = "Matrix synthetic denial probe"
 OUTCOME_PROBE = "Matrix synthetic outcome probe"
@@ -683,6 +709,18 @@ def synthetic_pdf(*pages: str) -> bytes:
     return data
 
 
+def media_link_evidence(text: str) -> bool:
+    """Whether a reply target's evidence is the media record (one inert JSON layer, v24) whose caption names the hidden
+    link's URL on its text."""
+    head, marker, record = text.partition("Media target: ")
+    try:
+        caption = json.loads(record)["caption"] if marker else {}
+    except (ValueError, TypeError, KeyError):
+        return False
+    return [(row.get("type"), row.get("text"), row.get("provider_url")) for row in caption.get("entities", [])
+            if isinstance(row, dict)] == [("text_url", "link", MEDIA_LINK_URL)]
+
+
 def find_draft(value: object) -> str | None:
     """The draft_id of a prepare or revise result, wherever its family nests it."""
     if isinstance(value, dict):
@@ -734,6 +772,100 @@ def synthetic_mp4() -> bytes:
     movie = box(b"moov", full(b"mvhd", struct.pack(">IIII", 0, 0, 1000, 5000) + bytes(80)),
                 box(b"trak", header, media))
     return box(b"ftyp", b"isom", struct.pack(">I", 0), b"isom", b"mp42") + movie + box(b"mdat", bytes(64))
+
+
+def _ooxml(parts: dict) -> bytes:
+    """A deterministic OOXML package: each part at a fixed timestamp, deflated, in the given order."""
+    import io
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, text in parts.items():
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, text)
+    return buffer.getvalue()
+
+
+_PKGREL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_DOCREL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+XLSX_TEXT, XLSX_HIDDEN_TEXT = "Matrix synthetic cell", "Matrix hidden cell"
+PPTX_SLIDES = (("Matrix synthetic slide one", "Matrix synthetic note one", False),
+               ("Matrix synthetic slide two", None, True))  # (text, notes, hidden)
+
+
+def synthetic_xlsx() -> bytes:
+    """A workbook of two sheets: "Matrix" (visible: A1 an inline string, B1 the number 2, A2 the formula B1*2 with its
+    cached value 4, B2 empty) and "Hidden" (hidden: A1 an inline string). Hand-authored, no spreadsheet library."""
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    sheet = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+
+    def inline(address, text):
+        return f'<c r="{address}" t="inlineStr"><is><t>{text}</t></is></c>'
+    sheets = (("Matrix", "visible", f'<row r="1">{inline("A1", XLSX_TEXT)}<c r="B1"><v>2</v></c></row>'
+               '<row r="2"><c r="A2"><f>B1*2</f><v>4</v></c></row>'),
+              ("Hidden", "hidden", f'<row r="1">{inline("A1", XLSX_HIDDEN_TEXT)}</row>'))
+    parts = {
+        "[Content_Types].xml": f'<Types xmlns="{_CT}"><Default Extension="rels" ContentType="application/'
+                               'vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType='
+                               '"application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/'
+                               'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                               + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="{sheet}"/>'
+                                         for i in (1, 2)) + "</Types>",
+        "_rels/.rels": f'<Relationships xmlns="{_PKGREL}"><Relationship Id="main" Type="{_DOCREL}/officeDocument" '
+                       'Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<workbook xmlns="{main}" xmlns:r="{_DOCREL}"><sheets>'
+                           + "".join(f'<sheet name="{name}" sheetId="{i}" state="{state}" r:id="rId{i}"/>'
+                                     for i, (name, state, _) in enumerate(sheets, 1)) + "</sheets></workbook>",
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{_PKGREL}">'
+                                      + "".join(f'<Relationship Id="rId{i}" Type="{_DOCREL}/worksheet" '
+                                                f'Target="worksheets/sheet{i}.xml"/>' for i in (1, 2))
+                                      + "</Relationships>",
+    }
+    for i, (_, _, rows) in enumerate(sheets, 1):
+        parts[f"xl/worksheets/sheet{i}.xml"] = f'<worksheet xmlns="{main}"><sheetData>{rows}</sheetData></worksheet>'
+    return _ooxml(parts)
+
+
+def synthetic_pptx() -> bytes:
+    """A presentation of PPTX_SLIDES: slide 1 with speaker notes, slide 2 hidden without. Hand-authored."""
+    pml, dml = "http://schemas.openxmlformats.org/presentationml/2006/main", \
+        "http://schemas.openxmlformats.org/drawingml/2006/main"
+    office = "application/vnd.openxmlformats-officedocument.presentationml."
+
+    def page(kind, text, hidden=False):
+        return (f'<p:{kind} xmlns:p="{pml}" xmlns:a="{dml}" xmlns:r="{_DOCREL}"{" show=\"0\"" if hidden else ""}>'
+                '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+                '<p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="synthetic"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+                f'<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>'
+                f'</p:sp></p:spTree></p:cSld></p:{kind}>')
+    parts = {"_rels/.rels": f'<Relationships xmlns="{_PKGREL}"><Relationship Id="main" Type="{_DOCREL}/'
+                            'officeDocument" Target="ppt/presentation.xml"/></Relationships>'}
+    ids, rels, overrides = [], [], []
+    for index, (text, notes, hidden) in enumerate(PPTX_SLIDES, 1):
+        parts[f"ppt/slides/slide{index}.xml"] = page("sld", text, hidden)
+        ids.append(f'<p:sldId id="{255 + index}" r:id="slide{index}"/>')
+        rels.append(f'<Relationship Id="slide{index}" Type="{_DOCREL}/slide" Target="slides/slide{index}.xml"/>')
+        overrides.append(f'<Override PartName="/ppt/slides/slide{index}.xml" ContentType="{office}slide+xml"/>')
+        if notes is not None:
+            parts[f"ppt/notesSlides/notes{index}.xml"] = page("notes", notes)
+            parts[f"ppt/slides/_rels/slide{index}.xml.rels"] = (
+                f'<Relationships xmlns="{_PKGREL}"><Relationship Id="notes" Type="{_DOCREL}/notesSlide" '
+                f'Target="../notesSlides/notes{index}.xml"/></Relationships>')
+            parts[f"ppt/notesSlides/_rels/notes{index}.xml.rels"] = (
+                f'<Relationships xmlns="{_PKGREL}"><Relationship Id="slide" Type="{_DOCREL}/slide" '
+                f'Target="../slides/slide{index}.xml"/></Relationships>')
+            overrides.append(f'<Override PartName="/ppt/notesSlides/notes{index}.xml" '
+                             f'ContentType="{office}notesSlide+xml"/>')
+    parts["ppt/presentation.xml"] = (f'<p:presentation xmlns:p="{pml}" xmlns:r="{_DOCREL}"><p:sldIdLst>'
+                                     + "".join(ids) + "</p:sldIdLst></p:presentation>")
+    parts["ppt/_rels/presentation.xml.rels"] = f'<Relationships xmlns="{_PKGREL}">' + "".join(rels) + "</Relationships>"
+    parts["[Content_Types].xml"] = (f'<Types xmlns="{_CT}"><Default Extension="xml" ContentType="application/xml"/>'
+                                    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+                                    f'relationships+xml"/><Override PartName="/ppt/presentation.xml" ContentType='
+                                    f'"{office}presentation.main+xml"/>' + "".join(overrides) + "</Types>")
+    return _ooxml(parts)
 
 
 def chat_object(chat_id: int) -> dict:
@@ -791,9 +923,53 @@ def family_message(message_id: int) -> dict:
     return {**message, "chat_id": FAMILY_CHAT, "sender_id": {"@type": "messageSenderUser", "user_id": FAMILY_CHAT + 1000}}
 
 
+def media_link_message() -> dict:
+    """A document in the second chat whose caption holds a text link (the 0.58 media TextUrl reply source, v24), with
+    the complete file shape a reply's media projection reads."""
+    file = {"@type": "file", "id": 2, "size": 21, "expected_size": 21,
+            "local": {"@type": "localFile", "path": "", "can_be_downloaded": True, "can_be_deleted": False,
+                      "is_downloading_active": False, "is_downloading_completed": False, "download_offset": 0,
+                      "downloaded_prefix_size": 0, "downloaded_size": 0},
+            "remote": {"@type": "remoteFile", "id": "matrix-synthetic-caption-link",
+                       "unique_id": "matrix-synthetic-caption-link", "is_uploading_active": False,
+                       "is_uploading_completed": True, "uploaded_size": 21}}
+    offset = MEDIA_LINK_CAPTION.index("link")
+    message = _message(MEDIA_LINK_MESSAGE, {"@type": "messageDocument", "caption": _text(MEDIA_LINK_CAPTION, [
+        {"@type": "textEntity", "offset": offset, "length": len(MEDIA_LINK_CAPTION) - offset,
+         "type": {"@type": "textEntityTypeTextUrl", "url": MEDIA_LINK_URL}}]),
+        "document": {"@type": "document", "file_name": "matrix-caption-link.txt", "mime_type": "text/plain",
+                     "document": file}}, outgoing=False, date=1700000400)
+    return {**message, "chat_id": FAMILY_CHAT,
+            "sender_id": {"@type": "messageSenderUser", "user_id": FAMILY_CHAT + 1000}}
+
+
+def forum_message(message_id: int) -> dict:
+    """A message of the synthetic forum in its topic; the account's own ones are outgoing."""
+    _, topic, text, outgoing = next(row for row in FORUM_MESSAGES if row[0] == message_id)
+    message = _message(message_id, {"@type": "messageText", "text": _text(text)}, outgoing=outgoing,
+                       date=1700000500 + message_id)
+    return {**message, "chat_id": FORUM_CHAT, "topic_id": {"@type": "messageTopicForum", "forum_topic_id": topic}}
+
+
+def forum_chat() -> dict:
+    return {"@type": "chat", "id": FORUM_CHAT, "title": "Matrix synthetic forum",
+            "type": {"@type": "chatTypeSupergroup", "supergroup_id": FORUM_SUPERGROUP, "is_channel": False},
+            "chat_lists": [], "positions": [], "unread_count": 0, "unread_mention_count": 0,
+            "unread_reaction_count": 0, "is_marked_as_unread": False, "has_protected_content": False}
+
+
+def forum_topic(topic: int) -> dict:
+    return {"@type": "forumTopic", "info": {
+        "@type": "forumTopicInfo", "chat_id": FORUM_CHAT, "forum_topic_id": topic, "name": f"Matrix topic {topic}",
+        "creation_date": 1700000000, "creator_id": {"@type": "messageSenderUser", "user_id": PEER_USER},
+        "is_general": False, "is_outgoing": False, "is_closed": False, "is_hidden": False}}
+
+
 def synthetic_messages(chat_id: int = FIRST_CHAT) -> dict[int, dict]:
     if chat_id == FAMILY_CHAT:
-        return {row[0]: family_message(row[0]) for row in FAMILY_SOURCES}
+        return {**{row[0]: family_message(row[0]) for row in FAMILY_SOURCES}, MEDIA_LINK_MESSAGE: media_link_message()}
+    if chat_id == FORUM_CHAT:
+        return {row[0]: forum_message(row[0]) for row in FORUM_MESSAGES}
     if chat_id != FIRST_CHAT:
         return {}
     return {message["id"]: message for message in (source_message(), own_text_message(), own_document_message())}
@@ -835,14 +1011,25 @@ class SyntheticTDLib:
             chat_id = request.get("chat_id")
             if type(chat_id) is int and FIRST_CHAT <= chat_id < FIRST_CHAT + CHAT_COUNT:
                 return chat_object(chat_id)
+            if chat_id == FORUM_CHAT:
+                return forum_chat()
             return {"@type": "error", "code": 400, "message": "CHAT_NOT_FOUND"}
+        if kind == "getSupergroup":
+            if request.get("supergroup_id") == FORUM_SUPERGROUP:
+                return {"@type": "supergroup", "id": FORUM_SUPERGROUP, "is_forum": True, "is_channel": False}
+            return {"@type": "error", "code": 400, "message": "SUPERGROUP_NOT_FOUND"}
+        if kind == "getForumTopic":
+            topic = request.get("forum_topic_id")
+            if request.get("chat_id") == FORUM_CHAT and topic in {row[1] for row in FORUM_MESSAGES}:
+                return forum_topic(topic)
+            return {"@type": "error", "code": 404, "message": "Not Found"}
         if kind == "searchPublicChat":
             if request.get("username") == PUBLIC_USERNAME:
                 return chat_object(FIRST_CHAT)
             return {"@type": "error", "code": 400, "message": "USERNAME_NOT_OCCUPIED"}
         if kind in ("getMessage", "getMessageProperties"):
             chat_id = request.get("chat_id")
-            messages = synthetic_messages(chat_id) if chat_id in (FIRST_CHAT, FAMILY_CHAT) else {}
+            messages = synthetic_messages(chat_id) if chat_id in (FIRST_CHAT, FAMILY_CHAT, FORUM_CHAT) else {}
             message_id = request.get("message_id")
             if type(message_id) is int and message_id in messages:
                 return messages[message_id] if kind == "getMessage" else message_properties(message_id)
@@ -864,11 +1051,12 @@ class SyntheticTDLib:
     def _history(kind: str, request: dict) -> dict:
         """Newest first, as td_api.tl documents getChatHistory: from exactly from_message_id (0: the last message),
         with -offset newer messages before it. A search matches the query case-insensitively in a text or caption
-        and answers in one page; a media filter finds nothing."""
+        and answers in one page; a media filter finds nothing; searchChatMessages keeps only its sender_id and
+        topic_id when given. The first chat and the forum have a history; searchMessages searches the first chat."""
         chat = request.get("chat_id")
-        messages = sorted(synthetic_messages().values(), key=lambda message: -message["id"])
-        if kind != "searchMessages" and chat != FIRST_CHAT:
-            messages = []
+        source = (synthetic_messages() if kind == "searchMessages"
+                  else synthetic_messages(chat) if chat in (FIRST_CHAT, FORUM_CHAT) else {})
+        messages = sorted(source.values(), key=lambda message: -message["id"])
         start, offset = request.get("from_message_id"), request.get("offset")
         if type(start) is int and start > 0:
             first = next((index for index, message in enumerate(messages) if message["id"] <= start), len(messages))
@@ -879,6 +1067,9 @@ class SyntheticTDLib:
             content = lambda message: message["content"].get("text") or message["content"].get("caption") or {}
             messages = [] if request.get("filter") is not None or not query else [
                 message for message in messages if query.casefold() in content(message).get("text", "").casefold()]
+            for key in ("sender_id", "topic_id") if kind == "searchChatMessages" else ():
+                if request.get(key) is not None:
+                    messages = [message for message in messages if message.get(key) == request[key]]
         limit = request.get("limit") if type(request.get("limit")) is int else 0
         messages = messages[:max(limit, 0)]
         if kind == "getChatHistory":
@@ -1268,7 +1459,9 @@ class Driver:
                   "refusal.prompt_unavailable", "refusal.prompt_arguments", "image.png", "image.pdf_page",
                   "image.attachment_page", "cursor.list_chats", "cursor.read_history", "cursor.search_messages",
                   "recovery.search_again", "caps.manifest", "caps.input_bounds", "caps.input_bounds_058",
-                  "approval.declined_flag", "approval.denial", "approval.timeout", "recovery.check_send_status")
+                  "search.boolean", "search.filters", "documents.xlsx", "documents.pptx", "prepare.styled_caption",
+                  "prepare.reply_sources_058", "approval.declined_flag", "approval.denial", "approval.timeout",
+                  "recovery.check_send_status")
 
     async def full(self) -> None:
         from contextlib import AsyncExitStack
@@ -1771,6 +1964,149 @@ class Driver:
             cell.expect(f"{name}:{parameter}", error_text(await consumer.call(name, arguments))
                         == INVALID_ARGUMENTS.format(name, "invalid " + parameter))
 
+    # -- full session: the 0.51 forms and the 0.58 prepares an installed consumer had not called (final audit) --
+    @staticmethod
+    def anchors(page: dict) -> list:
+        return [row.get("anchor", {}).get("message_id") for row in page.get("results", [])]
+
+    @staticmethod
+    def rehydrated(page: dict, *, topic: int | None = None) -> bool:
+        """Every result a complete match with its current text (and, for a topic filter, that forum topic)."""
+        rows = page.get("results", [])
+        return bool(rows) and all(row.get("status") == "match" and row.get("coverage_complete") is True
+                                  and isinstance((row.get("message") or {}).get("text"), dict)
+                                  and (topic is None or (row.get("message") or {}).get("topic")
+                                       == {"kind": "forum", "id": topic}) for row in rows)
+
+    async def search(self, consumer, target: int, query, **filters) -> dict:
+        return structured(await consumer.call("search_messages", {"target": target, "query": query, "mode": "latest",
+                                                                  **filters}))
+
+    async def cell_search_boolean(self, cell, consumer, tools) -> None:
+        """F6: the Boolean form (seeded by TDLib, matched locally over the current full text) over the first chat's
+        55 (incoming source), 56 (own text) and 57 (own caption)."""
+        pages = {}
+        for label, query, expected in (("all_none", {"all": ["synthetic", "own"], "none": ["caption"]},
+                                        [OWN_TEXT_MESSAGE]),
+                                       ("any", {"any": ["source", "caption"]}, [OWN_DOCUMENT_MESSAGE, SOURCE_MESSAGE]),
+                                       ("dedup", {"any": ["matrix", "synthetic"]},
+                                        [OWN_DOCUMENT_MESSAGE, OWN_TEXT_MESSAGE, SOURCE_MESSAGE])):
+            pages[label] = await self.search(consumer, FIRST_CHAT, query)
+            cell.expect(f"{label}:rows", self.anchors(pages[label]) == expected)
+        cell.expect("semantics", all(page.get("status") == "partial" and page.get("stop_reason")
+                                     == "provider_end_unverified" and (page.get("scope") or {}).get(
+                                         "matching_semantics") == "local_nfkc_casefold_whitespace_substring"
+                                     for page in pages.values()))
+        cell.expect("rehydrated", all(self.rehydrated(page) for page in pages.values()))
+        branches = pages["dedup"].get("branch_coverage") or []
+        cell.expect("branches", [(b.get("query"), b.get("scanned_candidates")) for b in branches]
+                    == [("matrix", 3), ("synthetic", 3)])
+
+    async def cell_search_filters(self, cell, consumer, tools) -> None:
+        """F6: the sender, direction and forum-topic filters, alone and together, and with the Boolean form."""
+        own = {"kind": "user", "id": ACCOUNT_ID}
+        sender = await self.search(consumer, FIRST_CHAT, "matrix", sender={"kind": "user", "id": PEER_USER})
+        cell.expect("sender", self.anchors(sender) == [SOURCE_MESSAGE] and self.rehydrated(sender)
+                    and (sender.get("scope") or {}).get("sender") == {"kind": "user", "id": PEER_USER})
+        outgoing = await self.search(consumer, FIRST_CHAT, "matrix", direction="outgoing")
+        cell.expect("outgoing", self.anchors(outgoing) == [OWN_DOCUMENT_MESSAGE, OWN_TEXT_MESSAGE]
+                    and all((row.get("message") or {}).get("is_outgoing") is True
+                            for row in outgoing.get("results", [])))
+        incoming = await self.search(consumer, FIRST_CHAT, "matrix", direction="incoming")
+        cell.expect("incoming", self.anchors(incoming) == [SOURCE_MESSAGE])
+        topic = await self.search(consumer, FORUM_CHAT, "forum", topic={"id": FORUM_TOPIC})
+        cell.expect("topic", self.anchors(topic) == [72, 70])
+        cell.expect("topic_membership", self.rehydrated(topic, topic=FORUM_TOPIC)
+                    and (topic.get("scope") or {}).get("topic") == {"kind": "forum", "id": FORUM_TOPIC})
+        combined = await self.search(consumer, FORUM_CHAT, "forum", topic={"id": FORUM_TOPIC}, sender=own,
+                                     direction="outgoing")
+        cell.expect("combined", self.anchors(combined) == [72] and self.rehydrated(combined, topic=FORUM_TOPIC))
+        boolean = await self.search(consumer, FORUM_CHAT, {"all": ["forum"], "none": ["own"]},
+                                    topic={"id": FORUM_TOPIC}, direction="incoming")
+        cell.expect("boolean_topic", self.anchors(boolean) == [70] and self.rehydrated(boolean, topic=FORUM_TOPIC))
+
+    async def cell_documents_xlsx(self, cell, consumer, tools) -> None:
+        """F9: a synthetic XLSX through read_spreadsheet: its catalog, then a range of the visible sheet (an inline
+        string, a number, a formula as data with its cached value, an empty cell) and a cell of the hidden one."""
+        artifact = await self.artifact(consumer, "matrix-synthetic.xlsx", synthetic_xlsx())
+        catalog = structured(await consumer.call("read_spreadsheet", {"artifact_id": artifact}))
+        cell.expect("catalog", catalog.get("status") == "catalog" and (catalog.get("scope") or {}).get("catalog") == [
+            {"index": 1, "name": "Matrix", "state": "visible"}, {"index": 2, "name": "Hidden", "state": "hidden"}])
+        page = structured(await consumer.call("read_spreadsheet", {
+            "artifact_id": artifact, "selections": [{"sheet_index": 1, "range": "A1:B2"}]}))
+        cells = {row.get("address"): row for row in page.get("cells", [])}
+        cell.expect("range", page.get("status") == "complete" and page.get("scope_complete") is True
+                    and [row.get("address") for row in page.get("cells", [])] == ["A1", "B1", "A2", "B2"])
+        cell.expect("text", (cells.get("A1", {}).get("value_type"), cells.get("A1", {}).get("value"))
+                    == ("inlineStr", XLSX_TEXT) and cells.get("B1", {}).get("value") == "2")
+        cell.expect("formula", {key: cells.get("A2", {}).get(key) for key in ("value_type", "value", "formula",
+                                                                              "formula_kind")}
+                    == {"value_type": "n", "value": "4", "formula": "B1*2", "formula_kind": "normal"})
+        cell.expect("empty", cells.get("B2", {}).get("value_type") == "blank"
+                    and cells.get("B2", {}).get("value") is None)
+        hidden = structured(await consumer.call("read_spreadsheet", {
+            "artifact_id": artifact, "selections": [{"sheet_index": 2, "range": "A1"}]}))
+        cell.expect("hidden_sheet", hidden.get("status") == "complete"
+                    and [row.get("value") for row in hidden.get("cells", [])] == [XLSX_HIDDEN_TEXT])
+
+    async def cell_documents_pptx(self, cell, consumer, tools) -> None:
+        """F9: a synthetic PPTX through read_presentation: its catalog, slide 1 with its notes, slide 2 without."""
+        artifact = await self.artifact(consumer, "matrix-synthetic.pptx", synthetic_pptx())
+        catalog = structured(await consumer.call("read_presentation", {"artifact_id": artifact}))
+        cell.expect("catalog", catalog.get("status") == "catalog" and (catalog.get("scope") or {}).get("catalog") == [
+            {"index": 1, "hidden": False, "has_notes": True}, {"index": 2, "hidden": True, "has_notes": False}])
+        first = structured(await consumer.call("read_presentation", {"artifact_id": artifact, "slides": [1],
+                                                                     "include_notes": True}))
+        slides = first.get("slides") or [{}]
+        cell.expect("slide_text", first.get("status") == "complete" and len(slides) == 1 and slides[0].get("index") == 1
+                    and PPTX_SLIDES[0][0] in (slides[0].get("text") or ""))
+        cell.expect("notes", PPTX_SLIDES[0][1] in (slides[0].get("notes") or ""))
+        cell.expect("coverage", first.get("selection_complete") is True and first.get("full_content_complete") is False)
+        second = structured(await consumer.call("read_presentation", {"artifact_id": artifact, "slides": [2]}))
+        rows = second.get("slides") or [{}]
+        cell.expect("without_notes", second.get("status") == "complete"
+                    and PPTX_SLIDES[1][0] in (rows[0].get("text") or "") and rows[0].get("notes") is None)
+
+    async def cell_prepare_styled_caption(self, cell, consumer, tools) -> None:
+        """F13: caption styles (formatted_caption_send) on a file and on a file reply, prepared, never sent."""
+        prompts, png = len(self.owner_prompts()), await self.artifact(consumer, "matrix-styled.png", synthetic_png())
+        image = {"recipient": FIRST_CHAT, "artifact_id": png, "display_name": "matrix-styled.png",
+                 "mime_type": "image/png", "caption": "Matrix caption", "outgoing_entities": STYLED}
+        draft = structured(await consumer.call("prepare_artifact_send", image))
+        cell.expect("artifact", draft.get("status") == "prepared" and draft.get("caption") == "Matrix caption"
+                    and draft.get("outgoing_entities") == STYLED
+                    and re.fullmatch(r"[0-9a-f]{64}", str(draft.get("preview_sha256"))))
+        pending = structured(await consumer.call("get_draft", {"draft_id": draft.get("draft_id")})).get("draft") or {}
+        cell.expect("get_draft", pending.get("outgoing_entities") == STYLED
+                    and pending.get("preview_sha256") == draft.get("preview_sha256"))
+        reply = structured(await consumer.call("prepare_reply_artifact_send", {
+            **image, "reply_to": {"chat_id": FIRST_CHAT, "message_id": OWN_TEXT_MESSAGE}}))
+        cell.expect("reply_artifact", reply.get("status") == "prepared"
+                    and ((reply.get("reply") or {}).get("draft") or {}).get("outgoing_entities") == STYLED)
+        cell.expect("nothing_sent", self.dispatches() == 0 and len(self.owner_prompts()) == prompts)
+
+    async def cell_prepare_reply_sources_058(self, cell, consumer, tools) -> None:
+        """F13: a reply to the media caption with a text link (v24) and to the custom emoji (v25), prepared under the
+        full policy; the bound evidence carries the hidden payload."""
+        prompts = len(self.owner_prompts())
+        results = {}
+        for label, message_id in (("media_text_url", MEDIA_LINK_MESSAGE), ("custom_emoji", CUSTOM_EMOJI_SOURCE)):
+            text = f"Matrix reply to {label}"
+            results[label] = structured(await consumer.call("prepare_reply_text_send", {
+                "recipient": FAMILY_CHAT, "text": text,
+                "reply_to": {"chat_id": FAMILY_CHAT, "message_id": message_id}}))
+            reply = results[label].get("reply") or {}
+            cell.expect(label, results[label].get("status") == "prepared"
+                        and (reply.get("reply_target") or {}).get("anchor") == {"chat_id": FAMILY_CHAT,
+                                                                               "message_id": message_id}
+                        and (reply.get("draft") or {}).get("text") == text)
+        media = ((results["media_text_url"].get("reply") or {}).get("reply_target") or {}).get("text") or ""
+        cell.expect("media_evidence", media_link_evidence(media))
+        emoji = ((results["custom_emoji"].get("reply") or {}).get("reply_target") or {}).get("text") or ""
+        custom = next(row[2]["custom_emoji_id"] for row in FAMILY_SOURCES if row[0] == CUSTOM_EMOJI_SOURCE)
+        cell.expect("custom_emoji_evidence", custom in emoji)
+        cell.expect("nothing_sent", self.dispatches() == 0 and len(self.owner_prompts()) == prompts)
+
     async def cell_approval_timeout(self, cell, consumer, tools) -> None:
         draft_id = await self.prepared(cell, consumer, TIMEOUT_PROBE)
         result = structured(await consumer.call("send_prepared_text", {"draft_id": draft_id, "approved": True}))
@@ -1848,9 +2184,25 @@ class Driver:
                     cell.expect(f"{label}:next_action", result.get("next_action") == "enable_capability"
                                 and result.get("reply") is None and find_draft(result) is None)
 
+            async def text_options(cell):
+                """A text send's own options refused as the reply tools refuse theirs (final acceptance)."""
+                prompts = len(self.owner_prompts())
+                for label, extra, missing in (("styled", {}, ["formatted_text_send"]),
+                                              ("topic", {"topic": {"id": FORUM_TOPIC}},
+                                               ["formatted_text_send", "topic_text_send"])):
+                    result = structured(await consumer.call("prepare_text_send", {
+                        "recipient": FIRST_CHAT, "text": "Matrix styled text", "outgoing_entities": STYLED, **extra}))
+                    cell.expect(f"{label}:missing", result.get("status") == "capability_disabled"
+                                and result.get("missing_capabilities") == missing
+                                and result.get("detail") == TEXT_OPTIONS_DISABLED)
+                    cell.expect(f"{label}:no_draft", result.get("next_action") == "enable_capability"
+                                and find_draft(result) is None)
+                cell.expect("no_dispatch", self.sends() == 0 and len(self.owner_prompts()) == prompts)
+
             await self.run_cell("refusal.capability_disabled", capability_disabled)
             await self.run_cell("refusal.guard_profiles", guard_profiles)
             await self.run_cell("refusal.reply_families", reply_families)
+            await self.run_cell("refusal.text_options", text_options)
             await self.run_cell("refusal.prompt_policy", prompt_policy)
             await self.run_cell("recovery.enable_capability", enable_capability)
 

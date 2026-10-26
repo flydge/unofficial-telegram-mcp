@@ -170,7 +170,7 @@ class CellSetTests(unittest.TestCase):
         self.assertEqual({session for _, session, _ in matrix.CELLS}, set(matrix.SESSIONS) | {"all"})
         self.assertEqual({cell.split(".")[0] for cell in matrix.CELL_IDS},
                          {"handshake", "census", "output_schemas", "tools", "refusal", "image", "cursor", "recovery",
-                          "caps", "approval", "bundle"})
+                          "caps", "approval", "bundle", "search", "documents", "prepare"})
         self.assertEqual([cell for cell in matrix.CELL_IDS if cell.startswith("handshake.")],
                          [f"handshake.{revision}" for revision in matrix.REVISIONS])
         self.assertEqual([cell for cell in matrix.CELL_IDS if cell.startswith("bundle.")],
@@ -210,6 +210,70 @@ class CellSetTests(unittest.TestCase):
             self.assertTrue(callable(getattr(driver, "cell_" + name.replace(".", "_"), None)), name)
         for name in matrix.SESSIONS + ("inspector", "listing"):
             self.assertTrue(callable(getattr(driver, name, None)), name)
+
+
+class FinalAuditCellTests(unittest.TestCase):
+    """The cells that give the final audit's F6, F9 and F13 installed-consumer evidence, and the typed text refusal:
+    their synthetic fixtures (the source sessions test drives the cells themselves)."""
+
+    def test_the_cells_and_their_sessions(self):
+        cells = {cell: session for cell, session, _ in matrix.CELLS}
+        self.assertEqual({name: cells[name] for name in (
+            "search.boolean", "search.filters", "documents.xlsx", "documents.pptx", "prepare.styled_caption",
+            "prepare.reply_sources_058", "refusal.text_options")},
+            {**dict.fromkeys(("search.boolean", "search.filters", "documents.xlsx", "documents.pptx",
+                              "prepare.styled_caption", "prepare.reply_sources_058"), "full"),
+             "refusal.text_options": "restricted"})
+        self.assertEqual(len(matrix.CELL_IDS), 55)
+        self.assertEqual(matrix.TEXT_OPTIONS_DISABLED, __import__(
+            "telegram_search_mcp.schemas", fromlist=["TEXT_CAPABILITY_DISABLED"]).TEXT_CAPABILITY_DISABLED)
+
+    def test_the_synthetic_documents_are_deterministic_ooxml(self):
+        import io
+        import zipfile
+        for build, names in ((matrix.synthetic_xlsx, {"xl/workbook.xml", "xl/worksheets/sheet1.xml",
+                                                      "xl/worksheets/sheet2.xml"}),
+                             (matrix.synthetic_pptx, {"ppt/presentation.xml", "ppt/slides/slide1.xml",
+                                                      "ppt/slides/slide2.xml", "ppt/notesSlides/notes1.xml"})):
+            with self.subTest(build=build.__name__):
+                self.assertEqual(build(), build())
+                with zipfile.ZipFile(io.BytesIO(build())) as archive:
+                    self.assertLessEqual(names, set(archive.namelist()))
+                    self.assertTrue(all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist()))
+
+    def test_the_synthetic_account_filters_by_sender_and_topic_as_tdlib_does(self):
+        tdlib = matrix.SyntheticTDLib()
+
+        def found(**request):
+            return [message["id"] for message in tdlib._answer({"@type": "searchChatMessages", "query": "matrix",
+                                                                "from_message_id": 0, "offset": 0, "limit": 20,
+                                                                "filter": None, **request})["messages"]]
+        peer = {"@type": "messageSenderUser", "user_id": matrix.PEER_USER}
+        topic = {"@type": "messageTopicForum", "forum_topic_id": matrix.FORUM_TOPIC}
+        self.assertEqual(found(chat_id=matrix.FIRST_CHAT, sender_id=None, topic_id=None), [57, 56, 55])
+        self.assertEqual(found(chat_id=matrix.FIRST_CHAT, sender_id=peer, topic_id=None), [55])
+        self.assertEqual(found(chat_id=matrix.FORUM_CHAT, sender_id=None, topic_id=topic), [72, 70])
+        self.assertEqual(found(chat_id=matrix.FAMILY_CHAT, sender_id=None, topic_id=None), [])  # as before
+        self.assertEqual(tdlib._answer({"@type": "getChatHistory", "chat_id": matrix.FAMILY_CHAT, "from_message_id": 0,
+                                        "offset": 0, "limit": 20})["messages"], [])
+        supergroup = tdlib._answer({"@type": "getSupergroup", "supergroup_id": matrix.FORUM_SUPERGROUP})
+        self.assertIs(supergroup["is_forum"], True)
+        self.assertEqual(tdlib._answer({"@type": "getForumTopic", "chat_id": matrix.FORUM_CHAT,
+                                        "forum_topic_id": matrix.FORUM_TOPIC})["info"]["forum_topic_id"], 41)
+        # The Main list is still the 25 private chats: the forum is reachable by its id only.
+        self.assertNotIn(matrix.FORUM_CHAT, tdlib._answer({"@type": "getChats", "chat_list": {"@type": "chatListMain"},
+                                                           "limit": 100})["chat_ids"])
+
+    def test_the_media_link_message_is_a_v24_reply_source(self):
+        from telegram_search_mcp import reply_media_sources, reply_source_ladder
+        content = matrix.synthetic_messages(matrix.FAMILY_CHAT)[matrix.MEDIA_LINK_MESSAGE]["content"]
+        families = reply_source_ladder.present(content["caption"]["entities"])
+        self.assertEqual(reply_source_ladder.version_for(families, media=True), 24)
+        projected = reply_media_sources.media_content_for(content, reply_source_ladder.admission_for(24))
+        self.assertEqual((projected["kind"], projected["media"]["file_name"]), ("document", "matrix-caption-link.txt"))
+        rendered = reply_media_sources.render_content_for(projected, "", reply_source_ladder.admission_for(24))[0]
+        self.assertTrue(matrix.media_link_evidence(rendered))
+        self.assertFalse(matrix.media_link_evidence(rendered.replace("caption", "elsewhere")))
 
 
 class ToolTableTests(unittest.TestCase):
