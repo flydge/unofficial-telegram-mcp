@@ -9,13 +9,21 @@ from .outgoing_entity_models import (OutgoingEntityList, canonical_caption_entit
 import unicodedata
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator, model_serializer
 
-from .next_actions import NextAction, NextActionHint, next_action_field
+from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
+from .contract import CapabilityName
 from .sanitize import render_evidence, safe_telegram_link
 from .boolean_query import normalize_search_text, boolean_matches, boolean_seeds
+
+
+# Every typed capability refusal names only what its check needs and the policy lacks (the reply tools' rule, 0.54).
+MissingCapabilities = Annotated[list[CapabilityName], Field(min_length=1, max_length=len(get_args(CapabilityName)),
+    description='Only the capabilities the refused check needs and the policy lacks, in requirement order.')]
+# A text send's request options (styles, a topic) refused as the reply tools refuse theirs (final acceptance).
+TEXT_CAPABILITY_DISABLED = 'text draft needs capabilities the owner has not enabled: missing_capabilities'
 
 
 def _reject_zero_chat_id(value: int) -> int:
@@ -573,7 +581,7 @@ class PrepareTextSendRequest(BaseModel):
 
 
 class PrepareTextSendResponse(NextActionHint):
-    status: Literal["prepared", "blocked", "error"]
+    status: Literal["prepared", "blocked", "error", "capability_disabled"]
     draft_id: str | None = None
     recipient: int | None = None
     recipient_title: str | None = None
@@ -586,6 +594,7 @@ class PrepareTextSendResponse(NextActionHint):
     topic: TopicSnapshot | None = None
     preview_sha256: Annotated[str, Field(strict=True, pattern=r'^[0-9a-f]{64}$')] | None = None
     outgoing_entities: OutgoingEntityList = Field(default_factory=list)
+    missing_capabilities: MissingCapabilities | None = optional_field()
     next_action: NextAction | None = next_action_field()
 
     @model_serializer(mode='wrap')
@@ -594,6 +603,20 @@ class PrepareTextSendResponse(NextActionHint):
         if not self.outgoing_entities:
             value.pop('outgoing_entities', None)
         return value
+
+    @model_validator(mode='after')
+    def closed_capability_refusal(self):
+        """`capability_disabled` names only the missing capabilities (closed, distinct) with its fixed detail and no
+        draft field; every other status names none."""
+        names = self.missing_capabilities
+        if (self.status == 'capability_disabled') != (names is not None):
+            raise ValueError('missing capabilities belong to capability_disabled only')
+        if names is not None and (len(set(names)) != len(names) or self.detail != TEXT_CAPABILITY_DISABLED or any(
+                value is not None for value in (self.draft_id, self.recipient, self.recipient_title, self.text,
+                                                self.sha256, self.expires_at, self.account_id, self.topic,
+                                                self.preview_sha256)) or self.outgoing_entities):
+            raise ValueError('invalid capability refusal')
+        return self
 
     @model_validator(mode='before')
     @classmethod

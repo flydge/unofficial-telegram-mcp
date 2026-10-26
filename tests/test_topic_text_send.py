@@ -337,9 +337,11 @@ class TopicTextTests(unittest.TestCase):
         self.assertEqual(self.dispatch('prepare_text_send', {'recipient': 19, 'text': BODY, 'topic': TOPIC})['status'], 'error')
 
     def test_denied_capability_never_hydrates_or_prompts(self):
+        # Since the final acceptance a disabled topic is named, as the reply tools name theirs.
         self.broker._policy = RuntimePolicy()
         result = self.dispatch('prepare_text_send', {'recipient': CHAT, 'text': BODY, 'topic': TOPIC})
-        self.assertEqual(result['status'], 'error')
+        self.assertEqual((result['status'], result['missing_capabilities'], result['next_action']),
+                         ('capability_disabled', ['topic_text_send'], 'enable_capability'))
         self.assertFalse(any(r['@type'] == 'getForumTopic' for r in self.raw.sent))
         self.assertEqual(self.sends(), [])
         self.assertEqual(self.approvals, [])
@@ -728,7 +730,8 @@ class TopicTextTests(unittest.TestCase):
         disabled = BrokerClient(socket_path=Path(self.temporary.name)/'unused.sock', policy=RuntimePolicy(), restart_callback=lambda: None)
         self.addCleanup(disabled.close)
         with patch.object(disabled, '_request') as request_mock:
-            self.assertEqual(disabled.prepare_text_send(request).status, 'error')
+            refused = disabled.prepare_text_send(request)
+            self.assertEqual((refused.status, refused.missing_capabilities), ('capability_disabled', ['topic_text_send']))
             request_mock.assert_not_called()
 
     def test_final_receive_authority_change_hides_receipt_without_retry(self):

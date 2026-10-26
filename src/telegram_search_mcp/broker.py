@@ -61,6 +61,7 @@ from .schemas import (
     MediaFrameResult, MediaSegment, MessageContextRequest, ReadAttachmentRequest, ReadMessagesRequest, ReadHistoryRequest, ReadReplyChainRequest, ListTopicsRequest, ReadTopicHistoryRequest, ListChatsRequest,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, ReadAttachmentResponse,
     PrepareTextSendRequest, PrepareTextSendResponse, SendPreparedTextRequest, SendPreparedTextResponse,
+    TEXT_CAPABILITY_DISABLED,
     BeginLocalUploadRequest, BeginLocalUploadResponse, AppendLocalUploadRequest, AppendLocalUploadResponse,
     FinishLocalUploadRequest, FinishLocalUploadResponse,
     VerifyTargetRequest, ReadTargetMessagesRequest,
@@ -1984,15 +1985,22 @@ class Broker(SelectionBrokerMixin):
                            deadline: float | None = None) -> PrepareTextSendResponse:
         if request.topic is not None or request.outgoing_entities:
             try:
-                require_current(self._policy)
-                required = {'send'} | ({'topic_text_send'} if request.topic is not None else set()) | ({'formatted_text_send'} if request.outgoing_entities else set())
-                if not required <= set(self._policy.enabled_capabilities):
-                    raise CompatibilityError('capability_disabled')
+                # The request's own options are checked together, before Telegram is read, and a missing one is named
+                # as the reply tools name theirs: send, the styles, then the topic (final acceptance, audit item).
+                self._require_capabilities('send', *self._reply_options(formatted=bool(request.outgoing_entities),
+                                                                       topic=request.topic is not None))
                 with self._shared_client().request_budget(min(deadline if deadline is not None else float('inf'), time.monotonic()+30)):
                     return self._prepare_text_send_impl(request, client_id=client_id)
+            except CapabilityDisabled as error:
+                return self._text_disabled(error)
             except (TDLibError, ValueError, CompatibilityError, AttributeError, TimeoutError):
                 return PrepareTextSendResponse(status='error', detail='topic draft could not be prepared safely')
         return self._prepare_text_send_impl(request, client_id=client_id)
+
+    @staticmethod
+    def _text_disabled(error: CapabilityDisabled) -> PrepareTextSendResponse:
+        return PrepareTextSendResponse(status='capability_disabled', missing_capabilities=list(error.missing),
+                                       detail=TEXT_CAPABILITY_DISABLED)
 
     def _prepare_text_send_impl(self, request: PrepareTextSendRequest, *, client_id: str) -> PrepareTextSendResponse:
         try:
@@ -2043,6 +2051,8 @@ class Broker(SelectionBrokerMixin):
             )
         except AuthorizationBlocked:
             return PrepareTextSendResponse(status="blocked", detail="TDLib authorization is not ready")
+        except CapabilityDisabled as error:  # An option revoked while the draft was prepared.
+            return self._text_disabled(error)
         except (DraftError, TDLibError, ValueError, CompatibilityError):
             return PrepareTextSendResponse(status="error", detail="text draft could not be prepared safely")
 

@@ -136,7 +136,7 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
 | `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
 | `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
-| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools, `prepare_album_send`, and `prepare_text_edit` and `prepare_caption_edit` (styles without `edit_own_styled_text`) |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools, `prepare_album_send`, `prepare_text_edit` and `prepare_caption_edit` (styles without `edit_own_styled_text`), and `prepare_text_send` (styles without `formatted_text_send`, a topic without `topic_text_send`; since the final acceptance) |
 | `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools, `get_send_status` and `get_album_send_status`, and a `partial` album with an unconfirmed item; never resend |
@@ -169,6 +169,11 @@ The four text preparation/revision tools accept optional `outgoing_entities`.
 Enable the separate default-off `formatted_text_send` capability together with
 `send`, the selected topic/reply capability and every required reply-source
 capability. Incoming source styles never enable or populate outgoing styles.
+Without `formatted_text_send` (or, for a topic, `topic_text_send`) `prepare_text_send` answers
+`status: capability_disabled` with `missing_capabilities` naming only what is missing, in the order `send`, the
+styles, the topic, the fixed detail `text draft needs capabilities the owner has not enabled: missing_capabilities`
+and `next_action: enable_capability`, before Telegram is read, as the reply tools do; until the final acceptance it
+answered `status: error`.
 
 Pass an actual list of at most 32 closed records, for example
 `[{"offset":0,"length":5,"type":{"@type":"textEntityTypeBold"}}]` for `Hello`.

@@ -64,11 +64,12 @@ SCHEMA_FINGERPRINT_054 = 'f239102a142943c7f5ff3940a10855658300aa8efe7f5ff43f510c
 # pin with it: 0.56 (0.56-albums, 0.56-album-tools), 0.57 part 1 (0.57-capabilities, 0.57-caption-tools), 0.57 part 2
 # (0.57-styled-text-edit, 0.57-pin-tools), 0.57 part 3 (0.57-delete-tools; review fix 057b corrected its applied
 # description, which the fingerprint covers), 0.58 part 2 (0.58-reply-family-capabilities), 0.58 part 3
-# (0.58-formatted-captions). Accounts themselves never enter the fingerprint.
-SCHEMA_FINGERPRINT = '6a0b0971d74d988c60399ed4019db7d8ec97c9997ea5713d9074e9713b1bfe7d'
+# (0.58-formatted-captions), final acceptance (0.59-text-send-capabilities). Accounts themselves never enter the
+# fingerprint.
+SCHEMA_FINGERPRINT = '85b80a452c7643104688e8d45b282b235785c66217158b5b59e4c6ffd3abb071'
 SCHEMA_CHANGES_SINCE_055 = ('0.56-album-tools', '0.56-albums', '0.57-capabilities', '0.57-caption-tools',
                             '0.57-delete-tools', '0.57-pin-tools', '0.57-styled-text-edit',
-                            '0.58-formatted-captions', '0.58-reply-family-capabilities')
+                            '0.58-formatted-captions', '0.58-reply-family-capabilities', '0.59-text-send-capabilities')
 
 
 def digest(data):

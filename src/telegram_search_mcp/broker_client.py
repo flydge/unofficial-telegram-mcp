@@ -32,7 +32,7 @@ from .broker_protocol import (
 )
 from .config import AccountPaths, RuntimePolicy, load_runtime_policy
 from .contract import (CompatibilityError, COMPATIBILITY_CODES, contract_descriptor, require_compatible, fingerprint,
-                       require_current, OPERATION_CAPABILITIES, required_capabilities)
+                       require_current, OPERATION_CAPABILITIES, missing_capabilities, required_capabilities)
 from .send_status_models import GetSendStatusRequest, GetSendStatusResponse, send_status
 from .reply_artifact_drafts import (PrepareReplyArtifactSendRequest, PrepareReplyArtifactSendResponse,
     GetReplyArtifactDraftRequest, GetReplyArtifactDraftResponse, UpdateReplyArtifactDraftRequest,
@@ -65,7 +65,7 @@ from .schemas import (
     AnalyzeMediaRequest, AnalyzeMediaResponse, CreateLocalArtifactRequest, CreateLocalArtifactResponse,
     PrepareArtifactSendRequest, PrepareArtifactSendResponse, SendPreparedArtifactRequest, SendPreparedArtifactResponse,
     PrepareTextSendRequest, PrepareTextSendResponse, SendPreparedTextRequest, SendPreparedTextResponse,
-    BeginLocalUploadRequest, BeginLocalUploadResponse, AppendLocalUploadRequest, AppendLocalUploadResponse,
+    TEXT_CAPABILITY_DISABLED, BeginLocalUploadRequest, BeginLocalUploadResponse, AppendLocalUploadRequest, AppendLocalUploadResponse,
     FinishLocalUploadRequest, FinishLocalUploadResponse,
     AttachmentRequest,
     AttachmentResponse,
@@ -1736,8 +1736,14 @@ class BrokerClient(SelectionClientMixin):
 
     def prepare_text_send(self, request: PrepareTextSendRequest) -> PrepareTextSendResponse:
         try:
-            if request.topic is not None and 'topic_text_send' not in self._policy.enabled_capabilities:
-                raise BrokerUnavailable('topic text sending is disabled')
+            # The request's options under this proxy's own policy, never sent on when disabled: refused as the broker
+            # refuses them, naming only the missing capabilities (send, the styles, then the topic).
+            options = (*(('formatted_text_send',) if request.outgoing_entities else ()),
+                       *(('topic_text_send',) if request.topic is not None else ()))
+            missing = missing_capabilities(self._policy, 'send', *options) if options else ()
+            if missing:
+                return PrepareTextSendResponse(status='capability_disabled', missing_capabilities=list(missing),
+                                               detail=TEXT_CAPABILITY_DISABLED)
             response = PrepareTextSendResponse.model_validate(self._request("prepare_text_send", request.model_dump(mode="json")))
             if response.status == 'prepared':
                 from .outgoing_drafts import _safe_message_text

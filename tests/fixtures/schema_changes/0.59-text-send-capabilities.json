@@ -1,0 +1,5 @@
+{
+  "structure": {
+    "prepare_text_send": "output: status gains capability_disabled with the closed missing_capabilities list (a disabled formatted_text_send or topic_text_send option is named, as the reply tools name theirs) and next_action enable_capability"
+  }
+}

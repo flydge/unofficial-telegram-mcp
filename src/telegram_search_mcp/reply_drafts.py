@@ -6,7 +6,7 @@ import json
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated, Literal, get_args
+from typing import Annotated, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator, model_serializer
 from .draft_models import _Closed, AccountId, DraftId, DraftPreview, DraftText, Hash
@@ -407,7 +407,6 @@ class ReplyDraftPreview(_Closed):
 
 
 from .selection_refs import SelectedInput, SelectionId
-from .contract import CapabilityName
 from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 
 class PrepareReplyTextSendRequest(SelectedInput):
@@ -460,8 +459,7 @@ class UpdateReplyDraftRequest(GetReplyDraftRequest):
 class RefreshReplyDraftRequest(GetReplyDraftRequest):
     pass
 
-MissingCapabilities = Annotated[list[CapabilityName], Field(min_length=1, max_length=len(get_args(CapabilityName)),
-    description='Only the capabilities the refused check needs and the policy lacks, in requirement order.')]
+from .schemas import MissingCapabilities  # One definition for every typed capability refusal.
 
 
 class ReplyRefusal(NextActionHint, _Closed):
