@@ -162,8 +162,8 @@ CELLS = (
      "invalid_arguments text"),
     ("prepare.styled_caption", "full", "a styled caption is prepared for a file and a file reply under a policy that "
      "allows it"),
-    ("prepare.reply_sources_058", "full", "a reply to a media caption with a text link and to a custom emoji is "
-     "prepared under a policy that allows them"),
+    ("prepare.reply_sources_058", "full", "a reply to a media caption with a text link, to a custom emoji and to a "
+     "voice note captioned with a media timestamp is prepared under a policy that allows them"),
     ("approval.declined_flag", "full", "approved=false declines without a dialog and without dispatch"),
     ("approval.denial", "full", "approved=true with a denying owner (scripted decline or real dialog timeout) never "
      "dispatches"),
@@ -193,13 +193,13 @@ CELL_CHECKS = {
     "recovery.restart_listing": 4, "recovery.search_again": 2, "recovery.check_send_status": 8,
     "recovery.enable_capability": 5, "recovery.update_installation": 3, "recovery.check_connection": 4,
     "recovery.connect_account": 3, "caps.manifest": 8, "caps.input_bounds": 6, "caps.input_bounds_058": 13,
-    "prepare.styled_caption": 4, "prepare.reply_sources_058": 5,
+    "prepare.styled_caption": 4, "prepare.reply_sources_058": 7,
     "approval.declined_flag": 5, "approval.denial": 8, "approval.timeout": 6, "approval.denial_every_family": 34,
     "bundle.install": 8, "bundle.upgrade": 9, "bundle.rollback": 7, "bundle.uninstall": 8,
 }
 REAL_DIALOG_CHECKS = {"approval.denial": 1}
 # Structured results every session validates in a passing run, and the tools they came from (every tool).
-SURFACE_COUNTS = {"structured_results_validated": 182, "tools_with_validated_results": 64}
+SURFACE_COUNTS = {"structured_results_validated": 183, "tools_with_validated_results": 64}
 # Owner or real-account cells: listed so the receipt shows them, never run or passed by this harness. The Inspector
 # CLI's synthetic cells (INSPECTOR_CELLS) and the Codex and Claude Code synthetic cells (AGENT_CELLS) are the
 # harness's own columns since the final acceptance.
@@ -435,6 +435,8 @@ SOURCE_MISSING = ["reply_formatted_targets", "reply_lexical_targets"]  # a hasht
 # A document in the second chat whose caption holds a hidden link: the 0.58 media TextUrl reply source (v24).
 MEDIA_LINK_MESSAGE, MEDIA_LINK_CAPTION, MEDIA_LINK_URL = 69, "Matrix caption link", "https://example.org/caption"
 CUSTOM_EMOJI_SOURCE = 67  # the custom emoji reply source of FAMILY_SOURCES (v25)
+# A voice note in the second chat whose caption marks a media timestamp within its duration (v28).
+VOICE_TIMESTAMP_MESSAGE, VOICE_TIMESTAMP_CAPTION, VOICE_SECONDS = 73, "Matrix at 0:05", 30
 # A forum supergroup outside the Main list (the topic filter): (message id, topic, text, outgoing).
 FORUM_CHAT, FORUM_SUPERGROUP, FORUM_TOPIC = -91003, 91003, 41  # a synthetic id, not a real -100 one
 FORUM_MESSAGES = ((70, FORUM_TOPIC, "Matrix forum topic note", False),
@@ -709,16 +711,17 @@ def synthetic_pdf(*pages: str) -> bytes:
     return data
 
 
-def media_link_evidence(text: str) -> bool:
-    """Whether a reply target's evidence is the media record (one inert JSON layer, v24) whose caption names the hidden
-    link's URL on its text."""
-    head, marker, record = text.partition("Media target: ")
+def media_evidence(text: str) -> tuple:
+    """A reply target's media record (JSON, or for a hidden link one inert JSON layer): its kind and each caption
+    entity as (type, covered text, payload: a text link's URL or a media timestamp's seconds); else (None, [])."""
+    _, marker, record = text.partition("Media target: ")
     try:
-        caption = json.loads(record)["caption"] if marker else {}
-    except (ValueError, TypeError, KeyError):
-        return False
-    return [(row.get("type"), row.get("text"), row.get("provider_url")) for row in caption.get("entities", [])
-            if isinstance(row, dict)] == [("text_url", "link", MEDIA_LINK_URL)]
+        value = json.loads(record) if marker else {}
+        rows = [(row.get("type"), row.get("text"), row.get("provider_url", row.get("media_timestamp")))
+                for row in value["caption"]["entities"]]
+        return value["kind"], rows
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None, []
 
 
 def find_draft(value: object) -> str | None:
@@ -926,19 +929,38 @@ def family_message(message_id: int) -> dict:
 def media_link_message() -> dict:
     """A document in the second chat whose caption holds a text link (the 0.58 media TextUrl reply source, v24), with
     the complete file shape a reply's media projection reads."""
-    file = {"@type": "file", "id": 2, "size": 21, "expected_size": 21,
-            "local": {"@type": "localFile", "path": "", "can_be_downloaded": True, "can_be_deleted": False,
-                      "is_downloading_active": False, "is_downloading_completed": False, "download_offset": 0,
-                      "downloaded_prefix_size": 0, "downloaded_size": 0},
-            "remote": {"@type": "remoteFile", "id": "matrix-synthetic-caption-link",
-                       "unique_id": "matrix-synthetic-caption-link", "is_uploading_active": False,
-                       "is_uploading_completed": True, "uploaded_size": 21}}
+    file = _remote_file(2, "matrix-synthetic-caption-link", 21)
     offset = MEDIA_LINK_CAPTION.index("link")
     message = _message(MEDIA_LINK_MESSAGE, {"@type": "messageDocument", "caption": _text(MEDIA_LINK_CAPTION, [
         {"@type": "textEntity", "offset": offset, "length": len(MEDIA_LINK_CAPTION) - offset,
          "type": {"@type": "textEntityTypeTextUrl", "url": MEDIA_LINK_URL}}]),
         "document": {"@type": "document", "file_name": "matrix-caption-link.txt", "mime_type": "text/plain",
                      "document": file}}, outgoing=False, date=1700000400)
+    return {**message, "chat_id": FAMILY_CHAT,
+            "sender_id": {"@type": "messageSenderUser", "user_id": FAMILY_CHAT + 1000}}
+
+
+def _remote_file(file_id: int, unique: str, size: int) -> dict:
+    """A complete TDLib file object, as a reply's media projection reads it (never downloaded)."""
+    return {"@type": "file", "id": file_id, "size": size, "expected_size": size,
+            "local": {"@type": "localFile", "path": "", "can_be_downloaded": True, "can_be_deleted": False,
+                      "is_downloading_active": False, "is_downloading_completed": False, "download_offset": 0,
+                      "downloaded_prefix_size": 0, "downloaded_size": 0},
+            "remote": {"@type": "remoteFile", "id": unique, "unique_id": unique, "is_uploading_active": False,
+                       "is_uploading_completed": True, "uploaded_size": size}}
+
+
+def voice_timestamp_message() -> dict:
+    """A voice note in the second chat whose caption marks 0:05 as a media timestamp (the 0.58 MediaTimestamp reply
+    source, v28), within its 30 s duration."""
+    offset = VOICE_TIMESTAMP_CAPTION.index("0:05")
+    message = _message(VOICE_TIMESTAMP_MESSAGE, {"@type": "messageVoiceNote", "is_listened": False,
+        "caption": _text(VOICE_TIMESTAMP_CAPTION, [
+            {"@type": "textEntity", "offset": offset, "length": 4,
+             "type": {"@type": "textEntityTypeMediaTimestamp", "media_timestamp": 5}}]),
+        "voice_note": {"@type": "voiceNote", "duration": VOICE_SECONDS, "waveform": base64.b64encode(bytes(16)).decode(),
+                       "mime_type": "audio/ogg", "voice": _remote_file(3, "matrix-synthetic-voice-note", 4096)}},
+        outgoing=False, date=1700000410)
     return {**message, "chat_id": FAMILY_CHAT,
             "sender_id": {"@type": "messageSenderUser", "user_id": FAMILY_CHAT + 1000}}
 
@@ -967,7 +989,8 @@ def forum_topic(topic: int) -> dict:
 
 def synthetic_messages(chat_id: int = FIRST_CHAT) -> dict[int, dict]:
     if chat_id == FAMILY_CHAT:
-        return {**{row[0]: family_message(row[0]) for row in FAMILY_SOURCES}, MEDIA_LINK_MESSAGE: media_link_message()}
+        return {**{row[0]: family_message(row[0]) for row in FAMILY_SOURCES}, MEDIA_LINK_MESSAGE: media_link_message(),
+                VOICE_TIMESTAMP_MESSAGE: voice_timestamp_message()}
     if chat_id == FORUM_CHAT:
         return {row[0]: forum_message(row[0]) for row in FORUM_MESSAGES}
     if chat_id != FIRST_CHAT:
@@ -2086,11 +2109,13 @@ class Driver:
         cell.expect("nothing_sent", self.dispatches() == 0 and len(self.owner_prompts()) == prompts)
 
     async def cell_prepare_reply_sources_058(self, cell, consumer, tools) -> None:
-        """F13: a reply to the media caption with a text link (v24) and to the custom emoji (v25), prepared under the
-        full policy; the bound evidence carries the hidden payload."""
+        """F13: a reply to the media caption with a text link (v24), to the custom emoji (v25) and to the voice note
+        whose caption marks a media timestamp (v28), prepared under the full policy; the bound evidence carries each
+        hidden payload."""
         prompts = len(self.owner_prompts())
         results = {}
-        for label, message_id in (("media_text_url", MEDIA_LINK_MESSAGE), ("custom_emoji", CUSTOM_EMOJI_SOURCE)):
+        for label, message_id in (("media_text_url", MEDIA_LINK_MESSAGE), ("custom_emoji", CUSTOM_EMOJI_SOURCE),
+                                  ("voice_timestamp", VOICE_TIMESTAMP_MESSAGE)):
             text = f"Matrix reply to {label}"
             results[label] = structured(await consumer.call("prepare_reply_text_send", {
                 "recipient": FAMILY_CHAT, "text": text,
@@ -2100,11 +2125,14 @@ class Driver:
                         and (reply.get("reply_target") or {}).get("anchor") == {"chat_id": FAMILY_CHAT,
                                                                                "message_id": message_id}
                         and (reply.get("draft") or {}).get("text") == text)
-        media = ((results["media_text_url"].get("reply") or {}).get("reply_target") or {}).get("text") or ""
-        cell.expect("media_evidence", media_link_evidence(media))
-        emoji = ((results["custom_emoji"].get("reply") or {}).get("reply_target") or {}).get("text") or ""
+        target = {label: ((value.get("reply") or {}).get("reply_target") or {}).get("text") or ""
+                  for label, value in results.items()}
+        cell.expect("media_evidence", media_evidence(target["media_text_url"])
+                    == ("document", [("text_url", "link", MEDIA_LINK_URL)]))
         custom = next(row[2]["custom_emoji_id"] for row in FAMILY_SOURCES if row[0] == CUSTOM_EMOJI_SOURCE)
-        cell.expect("custom_emoji_evidence", custom in emoji)
+        cell.expect("custom_emoji_evidence", custom in target["custom_emoji"])
+        cell.expect("voice_evidence", media_evidence(target["voice_timestamp"])
+                    == ("voice_note", [("media_timestamp", "0:05", 5)]))
         cell.expect("nothing_sent", self.dispatches() == 0 and len(self.owner_prompts()) == prompts)
 
     async def cell_approval_timeout(self, cell, consumer, tools) -> None:

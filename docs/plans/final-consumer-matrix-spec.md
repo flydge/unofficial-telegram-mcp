@@ -12,7 +12,7 @@ evidence forms and decisions still hold unless this spec says otherwise. **Tasks
 
 The matrix covers every tool through 0.58 (64 tools): the harness drives 55 synthetic cells through the
 official SDK (48 since part 1, and since the final audit seven more: the Boolean search form and the sender,
-direction and topic filters, a synthetic XLSX and PPTX, a styled caption and the 0.58 reply sources prepared, and
+direction and topic filters, a synthetic XLSX and PPTX, a styled caption and the three 0.58 reply sources prepared, and
 the typed text-send refusal), four cells through the MCP Inspector's scripted CLI mode, the installed bundle installer's
 upgrade, rollback and uninstall paths and nine cells through each real agent CLI (Codex, Claude Code), all
 against synthetic brokers and homes from one `git archive` wheel, and writes a receipt bound to the commit, the
@@ -44,8 +44,9 @@ The receipt's `owner_cells` drop `inspector_cli.synthetic` (part 1) and `codex.s
   text or caption and answer in one page; a media filter finds nothing. `getUser` names every synthetic peer;
   `getChatListsToAddChat` offers the Archive list.
 - Final audit additions (section 5a): chat 91002 also holds 69, a document whose caption `Matrix caption link`
-  carries a text link (the 0.58 media TextUrl reply source, v24) with the complete file shape a reply's media
-  projection reads; a forum supergroup -91003 (supergroup 91003, `getSupergroup` answers `is_forum`,
+  carries a text link (the 0.58 media TextUrl reply source, v24), and 73, a 30-second voice note whose caption
+  `Matrix at 0:05` marks 0:05 as a media timestamp (the MediaTimestamp reply source, v28), each with the complete
+  file shape a reply's media projection reads; a forum supergroup -91003 (supergroup 91003, `getSupergroup` answers `is_forum`,
   `getForumTopic` topics 41 and 42), outside the Main list, holds 70 (incoming, topic 41), 71 (incoming, topic 42)
   and 72 (the account's own, topic 41). `searchChatMessages` keeps only its `sender_id` and `topic_id` when given,
   as TDLib does; the first chat and the forum have a history; chat 91002's history stays empty and
@@ -116,7 +117,7 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | `caps.manifest`, `caps.input_bounds` | full | 8, 6 | as in 0.54 |
 | `caps.input_bounds_058` | full | 13 | one past each cap of the tools through 0.58 (hypotheses 6, message ids 21, album items 11 and 1, album caption 1,025, edit text 4,097, new caption 1,025, 33 styles, `list_drafts` limit 51, `max_depth` 11, 21 retained anchors, 6 search targets, `max_cells` 201) is refused with the fixed text |
 | `prepare.styled_caption` | full | 4 | `prepare_artifact_send` of a PNG with a bold caption style is prepared with those `outgoing_entities` and a `preview_sha256`, which `get_draft` shows unchanged; `prepare_reply_artifact_send` with the same style is prepared; no dialog, no dispatch |
-| `prepare.reply_sources_058` | full | 5 | a reply to 69 (media caption with a text link, v24) and to 67 (custom emoji, v25) is prepared with its exact target and text; the media evidence is the inert record naming the link's URL on `link`, the custom emoji evidence names its id; no dialog, no dispatch |
+| `prepare.reply_sources_058` | full | 7 | a reply to 69 (media caption with a text link, v24), to 67 (custom emoji, v25) and to 73 (voice note with a media timestamp, v28) is prepared with its exact target and text; the media evidence is the record naming the link's URL on `link` (one inert JSON layer) and the timestamp's 5 seconds on `0:05`, the custom emoji evidence names its id; no dialog, no dispatch |
 | `approval.declined_flag`, `approval.denial` | full | 5, 8 (+1 real dialog) | as in 0.54 |
 | `approval.timeout` | full | 6 | the timeout probe's dialog times out: `timeout` with its fixed detail, one rendered text dialog, no dispatch, the draft still pending |
 | `approval.denial_every_family` | full | 34 | artifact, reply text, reply artifact, forward, video, album, archive, text edit, caption edit, pin and delete: each is prepared, approved by the caller, declined by one rendered dialog of its family and verb (`send`, `change` or `delete`); no dispatch at all |
@@ -125,7 +126,7 @@ run one at a time after them, each with a new HOME (`/private/tmp/tga.*`, short 
 | `bundle.rollback` | bundle | 7 | back to the older release: `rolled_back`/`restarted`, pointer, definition, entries, skills, pin, session, the newer release kept |
 | `bundle.uninstall` | bundle | 8 | `uninstalled` with everything owned removed (root, plist and job, Codex and Desktop entries, skills), neighbours and the whole session kept; a repeat answers `absent` |
 
-Surface (`SURFACE_COUNTS`): 182 structured results validated (157 before the final audit cells), from all 64 tools.
+Surface (`SURFACE_COUNTS`): 183 structured results validated (157 before the final audit cells), from all 64 tools.
 
 ### 5.1 Every tool
 
@@ -299,8 +300,8 @@ its hash, checked, extracted and put on the session's path. The receipt records 
 
 Final audit cells (lead decisions, owner review pending):
 
-- **The forum is a chat of its own, outside the Main list**, and the media TextUrl source is a new message of chat
-  91002: the first chat keeps its three messages, so the cursor, read and agent cells see the same rows, and
+- **The forum is a chat of its own, outside the Main list**, and the media TextUrl and MediaTimestamp sources are
+  new messages of chat 91002: the first chat keeps its three messages, so the cursor, read and agent cells see the same rows, and
   `cursor.list_chats` the same 25 chats. Rejected: forum messages or a captioned document in the first chat (every
   cursor cell and the agent read cell would change) and a forum among the Main chats (the listing caps change).
 - **The synthetic `searchChatMessages` applies `sender_id` and `topic_id`**, as TDLib does; the readers filter the
@@ -309,6 +310,8 @@ Final audit cells (lead decisions, owner review pending):
   `refusal.reply_families`, whose count stays tied to the family table.
 - **The agent columns are unchanged** (nine cells each); the lead runs them with the whole matrix at the release
   candidate.
+- **The voice-note MediaTimestamp source is included** although the work item named only the media TextUrl and the
+  custom emoji: the audit's F13 gap names all three 0.58 sources, and one more check in the same cell closes it.
 
 Part 2 (agent columns):
 

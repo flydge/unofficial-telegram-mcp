@@ -264,16 +264,22 @@ class FinalAuditCellTests(unittest.TestCase):
         self.assertNotIn(matrix.FORUM_CHAT, tdlib._answer({"@type": "getChats", "chat_list": {"@type": "chatListMain"},
                                                            "limit": 100})["chat_ids"])
 
-    def test_the_media_link_message_is_a_v24_reply_source(self):
+    def test_the_media_sources_are_0_58_reply_sources_and_their_evidence_names_the_payload(self):
         from telegram_search_mcp import reply_media_sources, reply_source_ladder
-        content = matrix.synthetic_messages(matrix.FAMILY_CHAT)[matrix.MEDIA_LINK_MESSAGE]["content"]
-        families = reply_source_ladder.present(content["caption"]["entities"])
-        self.assertEqual(reply_source_ladder.version_for(families, media=True), 24)
-        projected = reply_media_sources.media_content_for(content, reply_source_ladder.admission_for(24))
-        self.assertEqual((projected["kind"], projected["media"]["file_name"]), ("document", "matrix-caption-link.txt"))
-        rendered = reply_media_sources.render_content_for(projected, "", reply_source_ladder.admission_for(24))[0]
-        self.assertTrue(matrix.media_link_evidence(rendered))
-        self.assertFalse(matrix.media_link_evidence(rendered.replace("caption", "elsewhere")))
+        messages = matrix.synthetic_messages(matrix.FAMILY_CHAT)
+        for message_id, version, kind, rows in (
+                (matrix.MEDIA_LINK_MESSAGE, 24, "document", [("text_url", "link", matrix.MEDIA_LINK_URL)]),
+                (matrix.VOICE_TIMESTAMP_MESSAGE, 28, "voice_note", [("media_timestamp", "0:05", 5)])):
+            with self.subTest(message=message_id):
+                content = messages[message_id]["content"]
+                families = reply_source_ladder.present(content["caption"]["entities"])
+                self.assertEqual(reply_source_ladder.version_for(families, media=True), version)
+                admission = reply_source_ladder.admission_for(version)
+                projected = reply_media_sources.media_content_for(content, admission)
+                self.assertEqual(projected["kind"], kind)
+                rendered = reply_media_sources.render_content_for(projected, "", admission)[0]
+                self.assertEqual(matrix.media_evidence(rendered), (kind, rows))
+        self.assertEqual(matrix.media_evidence("no record"), (None, []))
 
 
 class ToolTableTests(unittest.TestCase):
