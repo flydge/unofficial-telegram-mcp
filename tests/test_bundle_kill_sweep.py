@@ -1,7 +1,7 @@
 """Kill sweep (CLIENTS-13): a hard kill (a forked child, `os._exit`) right after every filesystem create,
 rename, unlink, mkdir and rmdir and after every launchctl or claude CLI call of an upgrade, a rollback, an
-uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, an
-upgrade whose Codex write is planned again over a neighbour added while the release is copied, and a late
+uninstall, `--adopt-legacy` on upgrade and on first install, an uninstall that keeps adoption backups, a first
+install over the default's kept session (its version line moved, final acceptance), an upgrade whose Codex write is planned again over a neighbour added while the release is copied, and a late
 refusal whose journaled restore runs after the broker stop: our Codex entry (or the adopted one) changed while
 the release is copied, for an upgrade and an adopting first install, and `receipt.json` changed after the
 `runtime.toml` version line was rewritten, which the restore puts back first, or our Codex table changed right
@@ -728,6 +728,31 @@ def _put_back_prepare(h):
     skill.chmod(mode)
 
 
+def _reinstall_prepare(h):
+    """The older release installed with every client and a session pinning it, then uninstalled: the session and its
+    runtime.toml stay. The first install of a newer kit then moves that version line onto it (final acceptance, the
+    audit's open item 1), journaled as the account-add repair moves an alias's."""
+    h.full()
+    h.claude()
+    h.change('uninstall')
+    h.kept_policy = (h.session_root / 'runtime.toml').read_bytes()
+    h.new = h.build('b', launcher=b'# second release\n', search=b'search-skill-2')
+    h.claude()
+
+
+def _reinstall_check(h, result):
+    h.assertEqual((result['status'], result['installation'], result['claude_code'], result['claude_desktop']),
+                  ('activation_required', 'installed', 'registered', 'registered'))
+
+
+def _kept_session_moved(h):
+    """The kept session's version line names the installed release; every other byte is as the uninstall kept it."""
+    version = json.loads((h.runtime / 'releases' / h.new[3] / 'manifest/release.json').read_text())['package_version']
+    old = re.search(rb'expected_package_version = "([^"]+)"', h.kept_policy).group(1)
+    expected = h.kept_policy.replace(b'"' + old + b'"', ('"%s"' % version).encode())
+    return [] if (h.session_root / 'runtime.toml').read_bytes() == expected else ['runtime.toml does not name %s' % version]
+
+
 ALIAS = 'work'
 # The release the account scenarios start from: one that knows aliases, since account-add and account-remove run only
 # from such a current release (review fix 055d); the upgrades over aliases go to a newer 0.55 kit. Semantic floors, not
@@ -1097,6 +1122,11 @@ SCENARIOS = {
     'rollback_below_055_retires_the_registry': Scenario(_retire_prepare, lambda h, lc, cl: h.change(
         'rollback', launchctl=lc, claude_runner=cl, alias_pending=lambda *_, **__: 'none'), _retire_check,
         final=_retired),
+    # Final acceptance (the audit's open item 1): a first install over the default's kept session moves its version
+    # line (no broker: no launchctl call; the Claude Code entry the uninstall removed is added again).
+    'first_install_over_a_kept_session': Scenario(_reinstall_prepare, lambda h, lc, cl: h.install(
+        h.new, launchctl=lc, claude_runner=cl), _reinstall_check, final=_kept_session_moved,
+        effects=(frozenset({'create', 'replace', 'renameatx', 'claude'}), 50)),
 }
 
 
@@ -1436,6 +1466,9 @@ class KillSweepTests(AdoptionHarness, unittest.TestCase):
 
     def test_rollback_below_055_retires_the_registry_and_the_readiness_record(self):
         self.sweep('rollback_below_055_retires_the_registry')
+
+    def test_first_install_over_a_kept_session_moves_its_version_line(self):
+        self.sweep('first_install_over_a_kept_session')
 
     def test_repeated_kills_while_staging_never_exhaust_a_recovery_bound(self):
         """More kills than any bound (8) at the same unbound preparation, then one resume: nothing left, nothing refused."""

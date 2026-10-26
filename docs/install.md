@@ -921,7 +921,13 @@ folder was gone, the next install removes the leftover intent itself.
 
 It never touches the Telegram session, `enrollment.json`, `runtime.toml`, the managed key or any
 Keychain item. These stay under `~/Library/Application Support/TelegramSearchMCP`, and each account
-alias's under `TelegramSearchMCP-accounts/<alias>`. With account aliases the uninstall also stops their
+alias's under `TelegramSearchMCP-accounts/<alias>`. A later first install over that kept session moves only
+its `runtime.toml` version line onto the installed release, journaled like an upgrade's, so the broker starts
+without `config_stale` and the next upgrade passes. Only a line naming an equal or older release moves: one
+naming a newer release (a lower version installed after the uninstall) refuses `policy_conflict` before
+anything is created, since a session a newer release served is never handed to an older one; install that
+release again. A line it cannot rewrite exactly refuses `policy_conflict` too. Until the final acceptance a
+first install moved that line only when it adopted a legacy broker. With account aliases the uninstall also stops their
 brokers and connect jobs and removes their owned entries; the alias registry stays while an alias exists,
 and with none left it is moved aside, never deleted
 ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)). The Claude Code

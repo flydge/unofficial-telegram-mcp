@@ -754,7 +754,8 @@ class RepairAtAnotherReleaseTests(RepairHarness, unittest.TestCase):
 
     def reinstalled(self):
         """`kept` at another version: a first install of NEW_VERSION. The default's own version line is not this fix's
-        (a first install never moves it): it is written as the reinstalled release's, so only the alias can block."""
+        (since the final acceptance that first install moves it from the older value; it is written here as the
+        reinstalled release's either way), so only the alias can block."""
         session = self.kept(self.newer())
         self.session(pin=NEW_VERSION)
         self.assertEqual(self.pin(), OLD_VERSION)

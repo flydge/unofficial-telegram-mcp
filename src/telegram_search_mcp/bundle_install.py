@@ -1365,6 +1365,19 @@ def _policy_back(j, session_root, new, alias=None):
         j.write(_key('policy_restore',alias),policy,back,data,existed=True,maximum=MAX_POLICY_BYTES)
 
 
+def _refuse_newer_policy(policy, version):
+    """Before a transaction moves a kept session's runtime.toml version line onto `version` from any value
+    (`_policy_step` with no old value: a first install over the default's kept session, the account-add repair over an
+    alias's): a line it could not rewrite exactly refuses `policy_conflict` here, and so does a newer release's line,
+    whose session an older release must not serve (the rollback's rule; review fix 055d4). An absent file passes."""
+    data,exists=_read_file(policy,MAX_POLICY_BYTES)
+    if not exists:return
+    _policy_candidate(data,None,version)
+    pinned=[_PIN.fullmatch(line.strip()) for line in data.split(b'\n') if line.lstrip().startswith(b'expected_package_version')]
+    if pinned and pinned[0] is not None and _version_key(pinned[0].group(1).decode())>_version_key(version):
+        raise InstallError('policy_conflict')
+
+
 _POLICY_BODY = 'runtime.toml without enabled_capabilities'
 
 
@@ -1709,6 +1722,10 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
     first restores its exact definition and, when it was loaded, the broker (`_Service.restore`). A Codex
     config edited while the install runs is merged (`_codex_write`). `launchctl` and `pending_sends` are the
     injectable service boundary.
+    A first install over the default's kept session (an uninstall keeps it) moves its runtime.toml version line onto
+    this release from an equal or older one, journaled (`policy_previous`, `policy`), as the account-add repair moves
+    an alias's; a newer release's line, or one it cannot rewrite exactly, refuses `policy_conflict` before anything is
+    created. Without a session, or over a line naming this release, nothing changes there.
     Over an installed root this is an upgrade (`_change`); a lower package version refuses
     (`downgrade_refused`): going back is only `rollback`. Once any change exists, the installed release's own kit
     goes through `_change` too: its repeat result (`upgraded`, or after a rollback back to it `rolled_back`, with
@@ -1794,6 +1811,12 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                                  runner=launchctl,pending=probe,home=home)
                 service.check()
                 adopted['service']=data
+            # A kept default session (an uninstall keeps it): its runtime.toml version line moves onto this release in
+            # the transaction from an equal or older release, as the account-add repair moves an alias's (final
+            # acceptance, the audit's open item 1); a newer release's line, or one it cannot rewrite exactly, refuses
+            # here, before anything is created. An adopted broker's session pin follows it at any version.
+            if 'service' not in adopted and os.path.lexists(session_root):
+                _refuse_newer_policy(session_root/'runtime.toml',manifest['package_version'])
         else:source=b'';existed=False;change=None;adopted=None
         _initialize(root,identity,change,existed,checkpoint,adopted)
         with SessionOwnerLease(root/'.install.lock') as lease:
@@ -1986,9 +2009,11 @@ def install(release, index_path, index_sha256, *, installation_root, codex_home,
                         checkpoint('claude_desktop')
                     if not reached('complete'):
                         j.advance('policy_pending')
-                        # The adopted broker's session pin follows it (any version), only that line; checked by
-                        # every run before the commit, since a late refusal's restore puts the old line back.
-                        if 'service' in adopted:_policy_step(j,session_root,None,manifest['package_version'])
+                        # The default session's pin follows this release, only that line, journaled: an adopted
+                        # broker's from any version, a kept session's from an equal or older one (a newer one refused
+                        # before the transaction). Checked by every run before the commit, since a late refusal's
+                        # restore puts an adopted broker's old line back; nothing to move without a session.
+                        _policy_step(j,session_root,None,manifest['package_version'])
                         j.advance('policy')
                         _client_temporaries(j.value['publications'],home,config,plist,session_root)
                     names=['release','telegram-search','telegram-setup']
@@ -4230,14 +4255,7 @@ def account_add(installation_root, *, alias, user_home, checkpoint=lambda _: Non
                 # 055d4): one it could not move refuses here, and so does a newer release's line, whose session an older
                 # release must not serve (the rollback's rule; the owner installs that release or removes the account).
                 if repair and os.path.lexists(jobs.root):
-                    data, exists = _read_file(jobs.policy, MAX_POLICY_BYTES)
-                    if exists:
-                        _policy_candidate(data, None, receipt['package_version'])
-                        pinned = [_PIN.fullmatch(line.strip()) for line in data.split(b'\n')
-                                  if line.lstrip().startswith(b'expected_package_version')]
-                        if pinned and pinned[0] is not None and _version_key(pinned[0].group(1).decode()) > \
-                                _version_key(receipt['package_version']):
-                            raise InstallError('policy_conflict')
+                    _refuse_newer_policy(jobs.policy, receipt['package_version'])
                 source, existed = _config(config)
                 try:
                     change = merge_registration(source, registration, name=name)
