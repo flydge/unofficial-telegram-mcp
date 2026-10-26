@@ -16,17 +16,22 @@ passed.
 
 The agent columns (--codex, --claude) give a real agent CLI one fixed request per cell (AGENT_CELLS) with a private
 configuration whose only MCP server is the installed proxy (Codex: a temporary HOME and CODEX_HOME holding its
-config.toml and a copy of auth.json, nothing else; Claude Code: the default configuration location for its login
-only, with no setting source, auto memory, skill, built-in tool or transcript, a temporary --mcp-config with
---strict-mcp-config, and the caller's Claude Code configuration verified unchanged), each cell against its own
+config.toml and a copy of auth.json, nothing else; Claude Code: the caller's HOME and USER, through which it reaches
+its default configuration location for its login only (on macOS the Keychain), with no setting source, auto memory,
+skill, built-in tool or transcript, a temporary --mcp-config with --strict-mcp-config, and the caller's Claude Code
+configuration verified unchanged), each cell against its own
 synthetic broker, which records its own transcript of every frame, operation, payload, result and owner dialog. A
 cell is decided on that transcript, the agent's exit, its completed turn and the tools it used; the answer's wording
 is advisory. The evidence (the broker's transcript, the
 agent's event stream, its answer and a run record bound to the commit, wheel and fingerprint) is kept in
 --agent-evidence and bound into the receipt by digest; check re-reads it and judges every cell again. The private
-homes are deleted afterwards; when Codex refreshed its tokens meanwhile, the refreshed auth.json goes back to the
-caller's Codex home unless that file changed meanwhile. Without the CLI, a login or the Codex auth.json the column is
-recorded unavailable with one fixed reason.
+homes are deleted afterwards. The write-back can rewrite the caller's Codex auth.json, and only when Codex refreshed
+its tokens in the private home during the run: the refreshed file replaces the caller's (atomically, owner-only,
+'returned') when the caller's file is still byte-identical to the copy and the refreshed one is well formed (a JSON
+object with the same keys, its token fields still non-empty); the caller's file stays as it was when it changed
+meanwhile ('kept'), when the refreshed one is not well formed ('invalid') and when the write fails ('failed', no
+temporary file left). Without the CLI, a login or the Codex auth.json the column is recorded unavailable with one
+fixed reason.
 
 run builds the sdist and wheel from `git archive <commit>` with the running interpreter's build backend
 (packaging/release_gate.py helpers, SOURCE_DATE_EPOCH = commit time), installs the wheel with the commit's
@@ -41,7 +46,8 @@ release gate's pinned tomlkit (from --toolhouse, else a hash-checked download), 
 provides it. The Inspector column runs the pinned Inspector CLI (packaging/inspector, its whole npm tree
 hash-pinned) installed offline from a cache that `inspector-fetch` filled; without --node or the cache, or
 when it cannot install offline, the receipt records it unavailable with one fixed reason. Nothing reaches
-Telegram, the Keychain, launchd state, a client configuration or the live runtime tree. Approval denial is
+Telegram, launchd state or the live runtime tree; the Keychain and the caller's client configuration only as the
+agent columns above say (Claude Code's login, the Codex write-back). Approval denial is
 scripted by default (the bound dialog document is rendered, then declined; the timeout probe's dialog times
 out); --real-dialog shows the real JXA dialog with a 5-second timer and expects `timeout`. The receipt is bound
 to the commit, the wheel sha256 and the schema fingerprint. run refuses when this file or
