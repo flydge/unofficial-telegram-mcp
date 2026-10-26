@@ -572,7 +572,8 @@ class MatrixRefusal(Exception):
 
 class MatrixInterrupted(BaseException):
     """SIGTERM or SIGHUP during run or check, raised so that every finally block runs: agents killed, brokers and
-    drivers stopped, the temporary homes and the copied Codex credential removed, refreshed credentials returned."""
+    drivers stopped, the temporary homes and the copied Codex credential removed, refreshed credentials returned. A
+    signal that lands during a cleanup block (a normal teardown included) raises only once that block has finished."""
 
     def __init__(self, signum: int):
         super().__init__(signum)
@@ -585,7 +586,8 @@ _INTERRUPT = {"deferred": 0, "pending": None, "raised": None}
 
 def _interrupt(signum, frame) -> None:
     """Kill every running agent's session, then raise MatrixInterrupted, once: a repeat signal never cuts the
-    cleanup short. While a child is being started and registered (deferred_interrupts) the raise waits."""
+    cleanup short. While a child is being started and registered, and for the whole of every cleanup block, the
+    Codex write-back included (deferred_interrupts), the raise waits until the block has finished."""
     if _INTERRUPT["raised"] is not None:
         return
     for group in list(_AGENT_GROUPS):
@@ -602,7 +604,9 @@ def _interrupt(signum, frame) -> None:
 
 @contextlib.contextmanager
 def deferred_interrupts():
-    """Around starting a child and handing it to the code whose finally stops it: an interrupt raises afterwards."""
+    """Around starting a child and handing it to the code whose finally stops it, and around the whole of every
+    cleanup block (finally), so that a first signal during a normal teardown never cuts it short: an interrupt raises
+    afterwards."""
     _INTERRUPT["deferred"] += 1
     try:
         yield
@@ -3445,13 +3449,14 @@ def bounded(command: list, *, cwd: Path, env: dict, timeout: float, stdout: Path
         except subprocess.TimeoutExpired:
             return None, True
         finally:
-            if process is not None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                process.wait()
-                _AGENT_GROUPS.discard(process.pid)
+            with deferred_interrupts():
+                if process is not None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    process.wait()
+                    _AGENT_GROUPS.discard(process.pid)
 
 
 def claude_login_home() -> Path:
@@ -3941,15 +3946,18 @@ def run_agent_cell(column: str, cell_id: str, *, binary: Path, model: str | None
                                       cwd=workdir, env=env, timeout=AGENT_SECONDS, stdout=here / "events.jsonl",
                                       stderr=here / "stderr.txt")
         finally:
-            if broker is not None:
-                stop_broker(*broker)
-            log = home / "matrix-broker.jsonl" if home is not None else None
-            server_log = log.read_bytes() if log is not None and log.is_file() else b""
-            if account and home is not None:
-                server_log += canonical(registry_postscript(home)).replace(b"\n", b"") + b"\n"
-            for path in (home, tmp, workdir):
-                if path is not None:
-                    shutil.rmtree(path, ignore_errors=True)
+            with deferred_interrupts():  # A signal meanwhile raises once the broker is stopped and the homes are gone.
+                try:
+                    if broker is not None:
+                        stop_broker(*broker)
+                    log = home / "matrix-broker.jsonl" if home is not None else None
+                    server_log = log.read_bytes() if log is not None and log.is_file() else b""
+                    if account and home is not None:
+                        server_log += canonical(registry_postscript(home)).replace(b"\n", b"") + b"\n"
+                finally:
+                    for path in (home, tmp, workdir):
+                        if path is not None:
+                            shutil.rmtree(path, ignore_errors=True)
         write_private(here / "server.jsonl", server_log)
         events = (here / "events.jsonl").read_bytes().decode("utf-8", "replace")
         if (here / "answer.txt").is_file():
@@ -4023,13 +4031,14 @@ def run_agent_column(column: str, binary: Path | None, model: str | None, runtim
         return {"status": "pass" if not lost and all(cell["status"] == "pass" for cell in results) else "fail",
                 "cli": version, "model": model or "default", "cells": results}
     finally:
-        try:
-            if auth is not None:
-                outcome = sync_codex_auth(*auth, config / "auth.json")
-                if outcome != "unchanged":  # A fixed line; never the file or its contents.
-                    print(f"codex credentials refreshed during the run: {outcome}", file=sys.stderr)
-        finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+        with deferred_interrupts():  # The write-back and the removal run whole; a signal meanwhile raises afterwards.
+            try:
+                if auth is not None:
+                    outcome = sync_codex_auth(*auth, config / "auth.json")
+                    if outcome != "unchanged":  # A fixed line; never the file or its contents.
+                        print(f"codex credentials refreshed during the run: {outcome}", file=sys.stderr)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
 
 
 def check_agent_section(column: str, section: object) -> None:
@@ -4229,15 +4238,20 @@ def run_sessions(runtime: Runtime, census: dict, work: Path, *, approval: str,
         except (OSError, ValueError):
             raise MatrixRefusal("drive_failed") from None
     finally:
-        for process, log in drivers:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            log.close()
-        for broker in brokers:
-            stop_broker(*broker)
-        if base is not None:
-            shutil.rmtree(base, ignore_errors=True)
+        with deferred_interrupts():  # Every driver and broker stopped and the homes removed before a signal raises.
+            try:
+                for process, log in drivers:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+                    log.close()
+            finally:
+                try:
+                    for broker in brokers:
+                        stop_broker(*broker)
+                finally:
+                    if base is not None:
+                        shutil.rmtree(base, ignore_errors=True)
 
 
 # --- commands ------------------------------------------------------------------------------------------
@@ -4373,8 +4387,9 @@ def run(args: argparse.Namespace) -> int:
         verify_agent_evidence(receipt, evidence, bindings["server_name"])
         write_receipt(receipt_path, receipt)
     finally:
-        if temporary:
-            shutil.rmtree(work, ignore_errors=True)
+        with deferred_interrupts():
+            if temporary:
+                shutil.rmtree(work, ignore_errors=True)
     print(summary_line(receipt))
     return 0
 
@@ -4416,8 +4431,9 @@ def check(args: argparse.Namespace) -> int:
         check_receipt(receipt, commit=commit, wheel_sha256=gate.sha256_file(built["wheel"]), census=census,
                       committed=committed, derived={"install": installed, "listing_sha256": listing})
     finally:
-        if work is not None:
-            shutil.rmtree(work, ignore_errors=True)
+        with deferred_interrupts():
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
     print("consumer matrix receipt verified: " + summary_line(receipt).split(": ", 1)[1]
           + f" (commit {receipt['commit']}, wheel sha256 {receipt['wheel']['sha256']})")
     return 0

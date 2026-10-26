@@ -1845,6 +1845,114 @@ class AgentBehaviourTests(unittest.TestCase):
                 self.assertEqual(returned["tokens"]["refresh_token"], "synthetic-r-refreshed")
                 self.assertEqual(sorted(path.name for path in (base / "codex-home").iterdir()), ["auth.json"])
 
+    # A first signal that lands during a normal-path cleanup (closing pass): the stand-in stalls inside the cleanup step
+    # named, the parent signals once, and the whole cleanup still runs before the harness exits 128 + the signal.
+    TEARDOWN = textwrap.dedent("""\
+        import importlib.util, json, shutil, sys, time
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location("matrix_tests", sys.argv[3])
+        tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tests)
+        matrix, scenario, base = tests.matrix, sys.argv[1], Path(sys.argv[2])
+        marker = base / "stalled"
+
+        def note(**fields):
+            with open(base / "record.jsonl", "a") as record:
+                record.write(json.dumps(fields) + "\\n")
+
+        def stall():
+            if not marker.exists():
+                marker.write_text("1")
+                time.sleep(5)  # the parent's one signal lands here
+
+        start_broker = matrix.start_broker
+        def recording(runtime, home, *args, **kwargs):
+            broker = start_broker(runtime, home, *args, **kwargs)
+            note(broker=broker[0].pid, home=str(home))
+            return broker
+        matrix.start_broker = recording
+        if scenario.endswith("broker_stop"):
+            stop_broker = matrix.stop_broker
+            def stopping(*broker):
+                stop_broker(*broker)
+                stall()
+            matrix.stop_broker = stopping
+        elif scenario.endswith("home_removal"):
+            rmtree, prefix = shutil.rmtree, ("tga." if scenario.startswith("cell") else "tgcm.")
+            def removing(path, *args, **kwargs):
+                if Path(path).name.startswith(prefix):
+                    stall()
+                return rmtree(path, *args, **kwargs)
+            shutil.rmtree = removing
+        else:
+            write_private = matrix.write_private
+            def writing(path, data):
+                if Path(path).name.startswith(".auth.json."):
+                    stall()
+                return write_private(path, data)
+            matrix.write_private = writing
+        try:
+            with matrix.interrupt_handlers():
+                if scenario.startswith("sessions"):
+                    work = base / "work"
+                    work.mkdir()
+                    matrix.run_sessions(tests.source_runtime(), tests.live_census(), work, approval="scripted",
+                                        sessions=("full", "restricted"))
+                else:
+                    tests.run_column(base, "codex", "refresh", cells=("agent.census",), auth=tests.CODEX_AUTH)
+        except matrix.MatrixInterrupted as interrupted:
+            sys.exit(128 + interrupted.signum)
+        """)
+
+    @staticmethod
+    def _recorded(base: Path) -> list:
+        path = base / "record.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    @classmethod
+    def _remove_leftovers(cls, base: Path) -> None:
+        for entry in cls._recorded(base):
+            _kill_quietly(entry["broker"])
+            home = Path(entry["home"])
+            shutil.rmtree(home.parent if home.parent.name.startswith("tgcm.") else home, ignore_errors=True)
+
+    def test_a_first_signal_during_a_normal_cleanup_never_cuts_it_short(self):
+        script = self.base / "teardown.py"
+        script.write_text(self.TEARDOWN)
+        for scenario, number in (("cell_broker_stop", signal.SIGTERM), ("cell_home_removal", signal.SIGHUP),
+                                 ("sessions_broker_stop", signal.SIGTERM), ("sessions_home_removal", signal.SIGHUP),
+                                 ("codex_write_back", signal.SIGTERM)):
+            with self.subTest(scenario=scenario, signal=number.name):
+                base = self.base / scenario
+                base.mkdir()
+                self.addCleanup(self._remove_leftovers, base)
+                env = {**os.environ, "PYTHONPATH": str(SOURCE)}
+                with open(base / "child.log", "wb") as log:
+                    child = subprocess.Popen([sys.executable, str(script), scenario, str(base),
+                                              str(Path(__file__).resolve())], env=env, stdin=subprocess.DEVNULL,
+                                             stdout=log, stderr=log)
+                self.addCleanup(lambda child=child: child.poll() is None and (child.kill(), child.wait()))
+                deadline = time.monotonic() + 120
+                while not (base / "stalled").exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue((base / "stalled").exists(), (base / "child.log").read_text()[-2000:])
+                child.send_signal(number)
+                code = child.wait(timeout=90)
+                time.sleep(0.5)
+                recorded = self._recorded(base)
+                self.assertEqual(len(recorded), 2 if scenario.startswith("sessions") else 1)
+                self.assertEqual([_alive(entry["broker"]) for entry in recorded], [False] * len(recorded))
+                homes = {Path(entry["home"]) for entry in recorded}
+                if scenario.startswith("sessions"):
+                    homes = {home.parent for home in homes}
+                self.assertEqual([os.path.lexists(home) for home in homes], [False] * len(homes))
+                self.assertEqual(code, 128 + number, (base / "child.log").read_text()[-2000:])
+                if not scenario.startswith("sessions"):
+                    self.assertFalse((base / "scratch-codex-refresh").exists())
+                    returned = json.loads((base / "codex-home" / "auth.json").read_text())
+                    self.assertEqual(returned["tokens"]["refresh_token"], "synthetic-r-refreshed")
+                    self.assertEqual(sorted(path.name for path in (base / "codex-home").iterdir()), ["auth.json"])
+
     def test_each_unavailable_reason_is_fixed(self):
         cases = (("cli_unusable", {"binary": fake_cli(self.base, "codex", "bad_version")}),
                  ("cli_unusable", {"binary": self.base / "missing-codex"}),

@@ -281,7 +281,9 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   interrupts: under `run` and `check`, SIGTERM and SIGHUP kill every running agent's session and raise through every
   cleanup (brokers and drivers stopped, temporary homes and the copied credential removed, a refreshed credential
   still returned), a repeat signal never cuts the cleanup short, and the command prints `interrupted` and exits
-  with 128 + the signal. `check`'s verified line names the receipt's commit and wheel sha256; the release recipe
+  with 128 + the signal. Since the final acceptance's closing pass the raise is deferred for the whole of every
+  cleanup block, the Codex write-back included, so a first signal that lands during a normal teardown (a broker
+  stop, a temporary home's removal, the write-back) also lets that block finish before the harness exits. `check`'s verified line names the receipt's commit and wheel sha256; the release recipe
   passes `check --commit <release sha>` (a full sha), which refuses a receipt of any other commit.
 
 - v3 adds `installer` (distribution, version, sha256 as the commit's gate pins it, toolhouse provided or
