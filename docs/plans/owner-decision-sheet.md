@@ -27,7 +27,7 @@ what follows from each; section 5, phase A, orders the ones the build depends on
 | # | Decision | Options and what depends on it | Source |
 | --- | --- | --- | --- |
 | 1 | Review the lead decisions of sections 2 and 3, including the release order (0.52, 0.53, 0.54, then F16, F15b, F17, F13 in the owner's stated order, then final acceptance) | Accept them, or name the ones to change. A change to a behaviour the build or the session exercises is a code change made in phase A, before the build; named after the build, it means a rebuild, re-signing and the commit-bound rows again | [completion plan](completion-plan.md#release-sequence) |
-| 2 | Public history and commit identity | Decided in phase A (step 2), with the lead's history and identity report over `v0.51.0`..tip in hand (step 1). **A** accept the history as is: the commits after `v0.51.0` made before the completion plan keep their personal address in public history. **B** rewrite the unmerged range to the public identity with redactions and force-push the branches before `main` moves: every commit after the first rewritten one gets a new id, including the build and release commits, so B is chosen **before the build**; chosen after it, B means a new build commit, re-signing, re-notarizing and the commit-bound rows of phases C–F again. **C** rewrite `main` (not recommended). The remote `main` is not at `v0.51.0`: it already holds six later commits (14.10.2026, before the completion plan), each with the personal author and committer identity, so B leaves those six in public history and only C reaches them. Whichever is chosen, the working branches are already pushed as backups, so the whole unpublished range, including the `v0.52.0` commit and every later candidate, is readable on the public remote now; a rewrite replaces refs but cannot withdraw objects already served ([releasing](../releasing.md#8-publication-gpub)) | [completion plan](completion-plan.md#lead-decisions-owner-review-pending), [releasing](../releasing.md) section 5 |
+| 2 | Public history and commit identity | Decided in phase A (step 2), with the lead's history and identity report over `v0.51.0`..tip in hand (step 1). **A** accept the history as is: the commits after `v0.51.0` made before the completion plan keep their personal address in public history. **B** rewrite the unmerged range to the public identity with redactions and force-push the branches before `main` moves: every commit after the first rewritten one gets a new id, including the build and release commits, so B is chosen **before the build**; chosen after it, B means a new build commit, re-signing, re-notarizing and the commit-bound rows of phases C–F again. B also re-keys the evidence chain: the commit ids that records cite in the rewritten range change, among them the six real-evidence commits that the shipped [0.52.0 notes](../release-notes-0.52.0.md#accepted-scenarios-and-evidence-chain) cite, and every candidate's gate evidence, matrix receipt and rc tag binds to the old ids. So with B the lead keeps an old-to-new commit id map with the release record (outside the public tree), through which each old record stays evidence for its commit, and the build commit (step 14) updates the shipped notes and the audit's and task records' citations to the new ids. **C** rewrite `main` (not recommended). The remote `main` is not at `v0.51.0`: it already holds six later commits (14.10.2026, before the completion plan), each with the personal author and committer identity, so B leaves those six in public history and only C reaches them. Whichever is chosen, the working branches are already pushed as backups, so the whole unpublished range, including the `v0.52.0` commit and every later candidate, is readable on the public remote now; a rewrite replaces refs but cannot withdraw objects already served ([releasing](../releasing.md#8-publication-gpub)) | [completion plan](completion-plan.md#lead-decisions-owner-review-pending), [releasing](../releasing.md) section 5 |
 | 3 | Product name, and whether the MCP server name, the plugin name (placeholder `telegram-local`, server `tg`) and the skill ids change with it | **Keep** the current name: another vendor's listing already uses it, and the official directory waits on a rename. **Rename**: one rename commit through `product_identity.py` in phase A, with or without the server name, plugin name and skill ids; the display name, DMG volume and codesign prefix are in the build, so a rename after it means a rebuild and re-signing, and after any public listing it renames a listed product | [0.53 spec](0.53-client-distribution-spec.md#a--product-identity-no-behaviour-change), phase A and G |
 | 4 | API identity of the public bundle | Decided in phase A (step 6), after the legal review's Telegram-terms part; a later change refuses existing enrollments (`identity_changed`). **No identity** (the build default): a clean user without a Keychain pair gets `connect` refusing `app_identity_missing` ([install guide](../install.md#connect-with-a-qr-code-primary-path)), so phase C cannot meet the 0.52 gate's bullet that the user reaches the QR screen without creating an API app or entering an API pair; that bullet stays unmet and disclosed, and the rest of phase C needs a dedicated test pair stored with the launcher's `api-credentials` first, recorded as the manual workaround (step 19). **The owner's current pair**: meets the bullet, but the checklist advises against it: a public bundle makes the pair harvestable, and a Telegram restriction under the API terms stops every bundled install and the owner's own. **A dedicated application pair** in its own Keychain service (`--app-identity-service`): meets the bullet; the pair is created and stored before the signed build (step 16); a restriction stops the bundled installs, not an install that uses its own pair | [owner checklist](0.53-signing-owner-checklist.md#4-application-identity-in-the-bundle-clients-16), [0.52 requirement](0.52-qr-onboarding.md#acceptance-and-release-gate) |
 | 5 | Signing and notarization | Identity and notary profile provisioned on 21.10.2026 (preflight ok). Decided in phase A (step 8), because the final notes say what the release carries. **Sign** in phase B: the Developer ID build, notarized and stapled, and the release commit with its pins; what Gpub can then publish depends on decision 17 (with the pins as every build writes them today, only the DMG installs). **Do not sign**: no DMG, curl assets or plugin pins are published (a source-only release), and phase C and the checklist's observations cannot run; nor can phases D and E, which run on the phase-C installation, so the owner remainders they carry (F8, F9, F11–F17 and F18's dialog cell) stay open, and decision 11's upgrade route, which needs the signed kit's `Install.command`, is blocked (the real upgrade and rollback stay unobserved, an F18 remainder) | [owner checklist](0.53-signing-owner-checklist.md#5-the-signed-release-build) |
@@ -283,7 +283,9 @@ The gate reports these; it never refuses on them. The lead's history and identit
 (step 1) lists every one by commit, file and rule for the owner before the history decision; each is accepted, or
 remediated by that decision's rewrite, in phase A (step 3), before the build ([releasing](../releasing.md)
 section 8). The build commit's gate and the final G1 run from `v0.51.0` and so report the whole unpublished range
-again; only a finding they add comes to step 38.
+again. A finding the build commit's gate adds (in a phase-A commit, made after step 1's report) comes to the owner
+before step 15: accepted, or the lead replaces the commit that adds it before the build and runs step 14 again. Only
+a finding the final G1 adds comes to step 38.
 
 | Candidate | Commit | File | Rule | What it is | Replaced by |
 | --- | --- | --- | --- | --- | --- |
@@ -330,11 +332,13 @@ the commit that the signed build, the notarization and every later record are ti
 2. **The history decision (decision 2)**, with that report. Option B rewrites every commit after the first rewritten
    one, including the build and release commits: a signed build, a notarization and a release-pins commit made
    before it would point at commits that no longer exist, and every commit-bound record of phases C–F with them.
-   With B, the lead rewrites and force-pushes the working branches before step 14.
+   With B, the lead rewrites and force-pushes the working branches before step 14 and keeps the old-to-new commit id
+   map with the release record; step 14 moves the cited ids.
 3. **The acceptance of the itemized history findings** (section 4), each accepted or remediated by step 2's
    rewrite. It is taken here because only a rewrite remediates a finding: after the build, that rewrite gives the
    build commit a new id, which means a new build commit, re-signing, re-notarizing and the commit-bound rows again.
-   Step 38 keeps only the findings the final G1 adds.
+   A finding the build commit's gate adds is accepted, or its commit replaced, before step 15 (step 14); step 38
+   keeps only the findings the final G1 adds.
 4. **The published version (decision 16)**, which phase B builds, and with it the final notes model: the notes, the
    changelog and the roadmap go into the build commit (step 14).
 5. **The legal review (decision 6)**: its Telegram-terms part bears on step 6, its corresponding-source part on
@@ -362,11 +366,20 @@ the commit that the signed build, the notarization and every later record are ti
 14. **The lead prepares the build commit** (agent work, no owner action): the commits of steps 2–12, the source work
     of decision 17 if chosen, and the version bump; the final `CHANGELOG.md`, `docs/release-notes-<version>.md` and
     `docs/roadmap.md`, with every owner row stated as pending in the session or as deferred (decision 16), which also
-    corrects the stale statements of the final audit's open item 8; the other pre-cut conditions of
-    [releasing](../releasing.md#2-pre-cut-conditions), a closed critic review included; the gate with the bundle
-    stage and `--previous-tag v0.51.0` (`run`, `verify`); the full consumer matrix with both agent columns and
-    `check --commit <build sha>`, its receipt kept; the mounted-DMG `Install.command --prepare-only` run of its ad hoc
-    dry-run kit (final audit, open item 4; done for 0c9f040 on 25.10.2026).
+    corrects the stale statements of the final audit's open item 8; with B (decision 2), the commit ids cited in the
+    shipped notes and in the audit and task records moved to the new ids by the old-to-new map; the other pre-cut
+    conditions of [releasing](../releasing.md#2-pre-cut-conditions), a closed critic review included, over
+    `v0.58.0rc1`..build commit (each earlier candidate's range had its own review under that condition, so it is
+    not repeated, although the gate's history and identity reports run from `v0.51.0`); the release commit's gate
+    (step 37) reuses this review, since the release commit changes only the plugin's `release-pins.json`, a byte copy
+    of the signed build's file that `release-commit` checks, and a rebuilt build commit (step 36) gets its own review
+    of the range since the previous build commit; the gate with the bundle stage and `--previous-tag v0.51.0` (`run`,
+    `verify`); the full consumer matrix with both agent columns and `check --commit <build sha>`, its receipt kept;
+    the mounted-DMG `Install.command --prepare-only` run of its ad hoc dry-run kit (final audit, open item 4; done
+    for 0c9f040 on 25.10.2026). Any history finding the gate reports beyond those accepted in step 3 (the phase-A
+    commits come after step 1's report) goes to the owner for acceptance before step 15, or the lead replaces the
+    phase-A commit that adds it (nothing is built on it yet) and repeats this step: the owner's one touchpoint
+    between steps 14 and 15.
 
 **B. Build, on the build Mac** ([owner checklist](0.53-signing-owner-checklist.md#5-the-signed-release-build))
 
@@ -473,13 +486,13 @@ machine bullet, which then stays unmet and is disclosed in the final notes (deci
 37. The final G1 on the release commit, the build commit's only child, which changes only the plugin's
     `release-pins.json`, a byte-for-byte copy of the signed build's own file; the session's rows on that signed
     build therefore count for it. The lead runs the gate with the bundle stage and `--previous-tag v0.51.0` (`run`,
-    `verify`), the full consumer matrix and `check --commit <release sha>`; the applicable real consumer and provider
+    `verify`; its critic condition is step 14's review), the full consumer matrix and `check --commit <release sha>`; the applicable real consumer and provider
     scenarios are the session's rows on that build (after a rebuild, the re-runs of step 36), their real-account and
     dialog parts by the owner. Then the annotated tag `v<version>` on the release commit by the public identity
     ([releasing](../releasing.md#7-tag)) and `release-commit --tag v<version>` once more. The lead records the
     session's outcomes in the release record outside the public tree and drafts the GitHub release text from it; the
     tagged notes stay as step 14 wrote them (decision 16).
-38. The acceptance of any history finding the final G1 reports beyond those accepted in step 3; remediating one now
+38. The acceptance of any history finding the final G1 reports beyond those accepted in steps 3 and 14; remediating one now
     is a rewrite after the build (a new build commit, re-signing, re-notarizing and the commit-bound rows again).
     Gpub naming the refs, the artifacts and the version from step 4, with the remote pre- and post-checks of
     [releasing](../releasing.md#8-publication-gpub); after it, the plugin's `bin/install` check, if the pins say
