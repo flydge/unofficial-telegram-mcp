@@ -1400,6 +1400,10 @@ class AgentTableTests(unittest.TestCase):
             linked = Path(directory) / "linked-work-tree"
             linked.mkdir()
             (linked / ".git").write_text("gitdir: /elsewhere\n")  # what `git worktree add` leaves
+            # A main work tree of its own (a `.git` directory, as a clone has): the suite also runs from a
+            # `git archive` extraction (the release gate), where this checkout is no work tree at all.
+            checkout = Path(directory) / "checkout"
+            (checkout / ".git").mkdir(parents=True)
             codex = ["--codex", "/bin/codex", "--codex-home", "/h"]
             for extra, code in ((["--codex", "relative/codex"], "agent_invalid"),
                                 (["--claude", "/bin/claude", "--claude-model", "a model"], "agent_invalid"),
@@ -1408,12 +1412,12 @@ class AgentTableTests(unittest.TestCase):
                                 (codex, "evidence_invalid"),
                                 ([*codex, "--agent-evidence", "relative"], "evidence_invalid"),
                                 ([*codex, "--agent-evidence", str(full)], "evidence_invalid"),
-                                ([*codex, "--agent-evidence", str(ROOT / "matrix-evidence")], "evidence_invalid"),
+                                ([*codex, "--agent-evidence", str(checkout / "matrix-evidence")], "evidence_invalid"),
                                 ([*codex, "--agent-evidence", str(linked / "a" / "evidence")], "evidence_invalid")):
                 with self.subTest(extra=extra):  # Refused before the gate is even loaded (fake gate: None).
                     code_seen, err, _ = run_command(None, directory, extra=extra)
                     self.assertEqual((code_seen, err), (2, code))
-            self.assertFalse((ROOT / "matrix-evidence").exists())
+            self.assertFalse((checkout / "matrix-evidence").exists())
             self.assertEqual(sorted(path.name for path in linked.iterdir()), [".git"])
 
     def test_run_keeps_its_receipt_work_directory_and_evidence_out_of_every_git_work_tree(self):
@@ -1421,7 +1425,11 @@ class AgentTableTests(unittest.TestCase):
             linked = Path(directory) / "linked-work-tree"
             linked.mkdir()
             (linked / ".git").write_text("gitdir: /elsewhere\n")
-            for parent in (ROOT, linked, ROOT / "docs"):
+            # A main work tree of its own, as above: never this checkout, which is no work tree under the gate.
+            checkout = Path(directory) / "checkout"
+            (checkout / ".git").mkdir(parents=True)
+            (checkout / "docs").mkdir()
+            for parent in (checkout, linked, checkout / "docs"):
                 with self.subTest(parent=str(parent)), contextlib.redirect_stderr(io.StringIO()) as err, \
                         mock.patch.object(matrix, "load_gate", side_effect=AssertionError("gate")):
                     code = matrix.main(["run", "--commit", COMMIT, "--receipt", str(parent / "r.json"),
@@ -1432,7 +1440,7 @@ class AgentTableTests(unittest.TestCase):
                                                       "evidence_invalid")):
                         self.assertEqual(refusal(function, str(path)), expected)
                         self.assertFalse(path.exists())
-            self.assertTrue(matrix.inside_work_tree(ROOT / "missing" / "deeper"))
+            self.assertTrue(matrix.inside_work_tree(checkout / "missing" / "deeper"))
             self.assertFalse(matrix.inside_work_tree(Path(directory) / "outside"))
 
 
