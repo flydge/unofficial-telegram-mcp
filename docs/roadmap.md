@@ -7,14 +7,14 @@ Updated **2026-10-26**. The released baseline remains **0.51.0**; the
 The [original plan](plans/initial-roadmap.md) and historical 0.51.0 table remain
 preserved. Technical acceptance of a bounded slice does not complete that plan.
 
-## Final acceptance candidate — **0.59.0rc1**
+## Final acceptance candidate — **0.59.0rc2**
 
 The F18 consumer matrix, the controlled TDLib upgrade procedure and its rehearsal, F19 and the final audit:
 [spec](plans/final-acceptance-spec.md) and its [task record](plans/final-acceptance-spec.tasks.md). The
 requirement-by-requirement [final audit](plans/final-audit.md) of P0–P3 and F1–F19 is written (its independent
 critic is pending), and the [owner decision sheet](plans/owner-decision-sheet.md) consolidates every decision and
 owner-session row for the owner session.
-The [release notes](release-notes-0.59.0rc1.md); a local annotated tag with release-gate evidence; not published. The owner
+The [release notes](release-notes-0.59.0rc2.md) (replacing [0.59.0rc1](release-notes-0.59.0rc1.md)); an annotated tag with release-gate evidence; not published. The owner
 session and Gpub follow.
 
 ## Release candidate — **0.58.0rc1**

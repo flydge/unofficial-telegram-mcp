@@ -415,7 +415,8 @@ The copy only reads the original, sits next to it on the same volume and is owne
 downloaded attachments unencrypted). Nothing of the Keychain is copied: the database, and so the copy, is
 encrypted with the random key under the `key_account` that `enrollment.json` names
 (`database_key_<enrollment-id>`), which `enrollment.json` and the `.managed-enrollment` marker bind to this
-session directory by path and by the device and inode of `tdlib/` and the session root. Upgrades and
+session directory by path and by the inode of `tdlib/` and the session root on one volume (the device number is not
+compared: macOS assigns it at mount, so it changes across a reboot). Upgrades and
 rollbacks never write the key, `enrollment.json` or the marker, so the copy opens with the key that stays in
 the Keychain. Record the `key_account` value with the backup's path in the private record, and never delete
 or regenerate that item while the copy may be needed. After the upgrade, which restarts only a broker that

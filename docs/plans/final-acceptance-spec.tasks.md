@@ -441,6 +441,14 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       on its first attempt; the Codex credential was not refreshed, so nothing was written back). The earlier candidate
       commits 7df1e55 (gate refused: two matrix tests assumed a git checkout) and fa8f046 (gate passed; three matrix runs
       each lost one Codex cell to provider throttling) are superseded; see the stop log.
+- [x] **Enrollment after a reboot** (26.10.2026, found installing 0.59.0rc1 on the owner's Mac): `telegram-search-broker
+      install` refused `enrollment_inconsistent`. `EnrollmentStore._binding` compared the recorded `(st_dev, st_ino)` of
+      the session root and `tdlib/`; after the 25.10 reboot both reported another device number with the same inodes
+      (macOS assigns a volume's device number at mount), so every release since 0.52 refused the owner's record, while
+      the 0.52 broker started before the change kept running. Fix: bind by inode on one volume, keep the recorded device
+      numbers uncompared; tests `ReEnumeratedVolumeTests` in `tests/test_enrollment_identity.py` (the remount case failed
+      first; a changed inode and a replaced session directory still refuse). The owner's real record reads under the fix
+      (checked read-only; nothing in the session or enrollment was written). Released as 0.59.0rc2.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---

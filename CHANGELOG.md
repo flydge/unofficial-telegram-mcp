@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.59.0rc2 — final acceptance candidate, 2026-10-26 (not published as a release)
+
+Replaces 0.59.0rc1 ([release notes](docs/release-notes-0.59.0rc2.md)). Fixes an enrollment that read as
+`enrollment_inconsistent` after a reboot: macOS assigns a volume's device number at mount, so the session root and
+`tdlib/` are now bound by inode on one volume and the recorded device numbers are no longer compared (every release
+since 0.52 had this defect). The consumer matrix retries a Codex attempt its provider throttled (HTTP 429).
+
 ## 0.59.0rc1 — final acceptance candidate, 2026-10-26 (not published)
 
 Final acceptance candidate 0.59.0rc1 ([release notes](docs/release-notes-0.59.0rc1.md), [spec](docs/plans/final-acceptance-spec.md),

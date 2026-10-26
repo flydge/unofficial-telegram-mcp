@@ -309,7 +309,7 @@ as much free space as `du -sh "$S/tdlib"` shows.
 Nothing of the Keychain is copied. The database in `tdlib/db`, and so the copy, is encrypted with the random
 key under the Keychain account that `enrollment.json` names (`key_account`, `database_key_<enrollment-id>`,
 service `com.<home-directory-name>.telegram-search-mcp`). `enrollment.json` and the `.managed-enrollment`
-marker bind that key to this session directory, by path and by the device and inode of `tdlib/` and of the
+marker bind that key to this session directory, by path and by the inode (on one volume; macOS changes the device number at mount) of `tdlib/` and of the
 session root. Neither an upgrade nor a rollback writes the key, `enrollment.json` or the marker, so the copy
 opens with the key that stays in the Keychain. Record the `key_account` value and the backup's path with the
 private record of this check. Never delete or regenerate that Keychain item while the copy may be needed.

@@ -157,6 +157,40 @@ class RecordCompatibilityTests(Fixture):
             EnrollmentStore(self.paths).read()
 
 
+class ReEnumeratedVolumeTests(Fixture):
+    """macOS assigns a volume's device number when it mounts it, so after a reboot or a remount every directory of
+    the enrollment reports another st_dev with the same inode. The record must still read; a replaced directory
+    (another inode) must not."""
+
+    def enrolled(self):
+        self.store.values.update(OWN_PAIR)
+        self.assertEqual(self.setup().status, 'ready')
+        return EnrollmentStore(self.paths).read()
+
+    def test_a_record_from_before_a_remount_still_reads(self):
+        record = self.enrolled()
+        moved = {**record, 'root_device': record['root_device'] + 7, 'session_device': record['session_device'] + 7}
+        self.paths.record.write_text(json.dumps(moved, sort_keys=True, separators=(',', ':')))
+        self.assertEqual(EnrollmentStore(self.paths).read(), moved)
+
+    def test_a_replaced_session_or_root_directory_still_refuses(self):
+        record = self.enrolled()
+        for field in ('session_inode', 'root_inode'):
+            with self.subTest(field=field):
+                self.paths.record.write_text(json.dumps({**record, field: record[field] + 1}))
+                with self.assertRaises(EnrollmentError):
+                    EnrollmentStore(self.paths).read()
+        self.paths.record.write_text(json.dumps(record))
+        session = self.paths.session
+        session.rename(session.with_name('tdlib-aside'))
+        session.mkdir(mode=0o700)
+        marker = session.with_name('tdlib-aside') / '.managed-enrollment'
+        (session / '.managed-enrollment').write_bytes(marker.read_bytes())
+        (session / '.managed-enrollment').chmod(0o600)
+        with self.assertRaises(EnrollmentError):
+            EnrollmentStore(self.paths).read()
+
+
 class BrokerLoaderTests(Fixture):
     def test_no_enrollment_keeps_legacy_keychain_and_empty_key(self):
         keychain = mock.Mock(return_value=ApiCredentials(123456, 'a' * 32))

@@ -82,8 +82,11 @@ class EnrollmentStore:
         session_fd = open_private_directory(self.paths.session)
         try:
             root, session = os.fstat(root_fd), os.fstat(session_fd)
-            if ((root.st_dev, root.st_ino) != (record['root_device'], record['root_inode'])
-                    or (session.st_dev, session.st_ino) != (record['session_device'], record['session_inode'])):
+            # macOS assigns a volume's device number when it mounts it, so st_dev changes across a reboot or a
+            # remount while the inodes stay: both directories are bound by inode on one volume. The recorded device
+            # numbers stay in the record and are not compared.
+            if (root.st_ino != record['root_inode'] or session.st_ino != record['session_inode']
+                    or root.st_dev != session.st_dev):
                 raise EnrollmentError()
             marker = os.open('.managed-enrollment', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                              dir_fd=session_fd)
