@@ -12,12 +12,12 @@ evidence forms and decisions still hold unless this spec says otherwise. **Tasks
 
 The matrix covers every tool through 0.58 (64 tools): the harness drives 55 synthetic cells through the
 official SDK (48 since part 1, and since the final audit seven more: the Boolean search form and the sender,
-direction and topic filters, a synthetic XLSX and PPTX, a styled caption and the three 0.58 reply sources prepared, and
-the typed text-send refusal), four cells through the MCP Inspector's scripted CLI mode, the installed bundle installer's
-upgrade, rollback and uninstall paths and nine cells through each real agent CLI (Codex, Claude Code), all
-against synthetic brokers and homes from one `git archive` wheel, and writes a receipt bound to the commit, the
-wheel hash, the schema fingerprint the cells were written for, the harness, the release gate and, for the agent
-cells, the digests of the evidence `check` judges again. The owner cells stay outside the receipt.
+direction and topic filters, a synthetic XLSX and PPTX, a styled caption and the three 0.58 reply sources
+prepared, and the typed text-send refusal), four cells through the MCP Inspector's scripted CLI mode, the
+installed bundle installer's upgrade, rollback and uninstall paths and nine cells through each real agent CLI
+(Codex, Claude Code), all against synthetic brokers and homes from one `git archive` wheel, and writes a receipt
+bound to the commit, the wheel hash, the schema fingerprint the cells were written for, the harness, the release
+gate and, for the agent cells, the digests of the evidence `check` judges again. The owner cells stay outside the receipt.
 
 ## 2. Columns
 
@@ -46,9 +46,9 @@ The receipt's `owner_cells` drop `inspector_cli.synthetic` (part 1) and `codex.s
 - Final audit additions (section 5a): chat 91002 also holds 69, a document whose caption `Matrix caption link`
   carries a text link (the 0.58 media TextUrl reply source, v24), and 73, a 30-second voice note whose caption
   `Matrix at 0:05` marks 0:05 as a media timestamp (the MediaTimestamp reply source, v28), each with the complete
-  file shape a reply's media projection reads; a forum supergroup -91003 (supergroup 91003, `getSupergroup` answers `is_forum`,
-  `getForumTopic` topics 41 and 42), outside the Main list, holds 70 (incoming, topic 41), 71 (incoming, topic 42)
-  and 72 (the account's own, topic 41). `searchChatMessages` keeps only its `sender_id` and `topic_id` when given,
+  file shape a reply's media projection reads; a forum supergroup -91003 (supergroup 91003, `getSupergroup`
+  answers `is_forum`, `getForumTopic` topics 41 and 42), outside the Main list, holds 70 (incoming, topic 41), 71
+  (incoming, topic 42) and 72 (the account's own, topic 41). `searchChatMessages` keeps only its `sender_id` and `topic_id` when given,
   as TDLib does; the first chat and the forum have a history; chat 91002's history stays empty and
   `searchMessages` still searches the first chat only.
 - Every provider-changing request (`sendMessage`, `sendMessageAlbum`, `forwardMessages`, `addChatToList`,
@@ -288,8 +288,9 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   downloaded) and `inspector` (the pass or unavailable form), adds `inspector` and `inspector_cells` to the
   summary and drops `inspector_cli.synthetic` from `owner_cells`. A v2 receipt is refused.
 - **The schema is frozen.** `MATRIX_SCHEMA_FINGERPRINT` is the fingerprint these cells were written for (the
-  0.58 surface; since the final acceptance with the typed `prepare_text_send` refusal, `85b80a45…b071`). `run` refuses another census before any session (`schema_mismatch`), `check_receipt` refuses a
-  receipt with another fingerprint on its own, and `check` refuses a commit whose census differs. A deliberate
+  0.58 surface; since the final acceptance with the typed `prepare_text_send` refusal, `85b80a45…b071`). `run`
+  refuses another census before any session (`schema_mismatch`), `check_receipt` refuses a receipt with another
+  fingerprint on its own, and `check` refuses a commit whose census differs. A deliberate
   schema change must update the cells, their counts, the tool tables and the constant together; a unit test
   holds the constant and every table to the source.
 - Every v2 rule still holds (commit, wheel, census, closure, listing, harness and gate bindings; frozen
@@ -301,9 +302,9 @@ its hash, checked, extracted and put on the session's path. The receipt records 
 Final audit cells (lead decisions, owner review pending):
 
 - **The forum is a chat of its own, outside the Main list**, and the media TextUrl and MediaTimestamp sources are
-  new messages of chat 91002: the first chat keeps its three messages, so the cursor, read and agent cells see the same rows, and
-  `cursor.list_chats` the same 25 chats. Rejected: forum messages or a captioned document in the first chat (every
-  cursor cell and the agent read cell would change) and a forum among the Main chats (the listing caps change).
+  new messages of chat 91002: the first chat keeps its three messages, so the cursor, read and agent cells see
+  the same rows, and `cursor.list_chats` the same 25 chats. Rejected: forum messages or a captioned document in
+  the first chat (every cursor cell and the agent read cell would change) and a forum among the Main chats (the listing caps change).
 - **The synthetic `searchChatMessages` applies `sender_id` and `topic_id`**, as TDLib does; the readers filter the
   rows again on the rehydrated message, so the cells prove both. The history of chat 91002 stays empty, as before.
 - **The typed text-send refusal is frozen in the restricted session** (`refusal.text_options`) rather than in

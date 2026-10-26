@@ -274,8 +274,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       (`prepare_text_send` output: the status and the closed `missing_capabilities`); the fingerprint pin in
       `tests/test_account_registrations.py` and `MATRIX_SCHEMA_FINGERPRINT` move from `6a0b0971…7d` to
       `85b80a452c7643104688e8d45b282b235785c66217158b5b59e4c6ffd3abb071`. Tests
-      (`tests/test_text_send_capability_results.py`, 14 of 20 cases failed first; two topic tests now expect the
-      typed result); the matrix freezes it in `refusal.text_options` (below). The tool description is unchanged (the
+      (`tests/test_text_send_capability_results.py`: 14 failures, test functions and subtests, against the code before
+      the fix, the cases of unchanged behaviour passing; two topic tests now expect the typed result); the matrix freezes it in `refusal.text_options` (below). The tool description is unchanged (the
       description budget had 4 characters left); reference.md says so.
 - [x] **Matrix cells for F6, F9 and F13** (26.10.2026; the audit's agent-side gaps of F6, F9 and F13 and open item 9;
       spec [`final-consumer-matrix-spec.md`](final-consumer-matrix-spec.md), section 5a). 739468c and 2755559: seven
@@ -322,3 +322,4 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 | 5 | F18 part 2 full suite at 45a118e is green | isolated-HOME suite, 25.10, after the matrix run | `4233 passed, 23267 subtests passed in 1627.10s`, 0 failed, 0 skipped (log `matrix-final/suite-45a118e.log`) |
 | 6 | the F18 review fixes leave the full suite green | isolated-HOME suite at 55c970c (the receipt commit fc3f3c8 plus the tasks record), 25.10–26.10, after the matrix run | `4244 passed, 23301 subtests passed in 1765.15s`, 0 failed, 0 skipped (log `matrix-final/suite-55c970c.log`) |
 | 7 | The dry-run build accepts any owner-only output directory outside the checkout and `/tmp` | Built with the output under the temporary directory's `/var` spelling | Refused `assemble_failed`: the bundle producer refuses a symlinked ancestor, and `/var` is a symlink. Rebuilt under the resolved `/private/var` spelling: built and verified. By design; no change |
+| 8 | the four final-acceptance items (2c87e08, 12f53f6, 1b604f9, 739468c, 2755559) leave the full suite green | isolated-HOME suite at bf09630 (the matrix run and the task record included), 26.10 | `4291 passed, 23412 subtests passed in 1650.04s`, 0 failed, 0 skipped; no disk-exhaustion failure, nothing rerun |
