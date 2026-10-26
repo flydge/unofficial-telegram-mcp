@@ -401,7 +401,7 @@ There is no durable draft journal or recovery across broker restarts.
 
 Forward/copy drafts from `prepare_forward_send` are not reachable through these
 tools: `list_drafts` omits them and `get_draft`, `update_draft`, `refresh_draft` and
-`cancel_draft` return `unavailable` for them. Prepare again to supersede one; see
+`cancel_draft` return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft) for them. Prepare again to supersede one; see
 [Exact forward/copy (F14)](#exact-forwardcopy-f14).
 
 Native video drafts from `prepare_video_send` are not reachable through these tools
@@ -411,7 +411,7 @@ one; see [Native video send (F15a)](#native-video-send-f15a).
 
 Archive and text-edit drafts from `prepare_chat_archive` and `prepare_text_edit` are not
 reachable through these tools either: `list_drafts` omits them, `get_draft`, `update_draft`,
-`refresh_draft`, `cancel_draft` and the reply-draft tools return `unavailable` for them, and
+`refresh_draft`, `cancel_draft` and the reply-draft tools return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft) for them, and
 `send_prepared_text`, `send_prepared_artifact`, `send_prepared_forward` and `send_prepared_video`
 return `error`. Prepare again for the same chat (archive) or the same message (edit) to
 supersede one; see [Archive/unarchive and own text edit (F17a)](#archiveunarchive-and-own-text-edit-f17a).
@@ -2920,7 +2920,7 @@ proxy client and current Telegram account, with the same finite TTL (default 15
 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker restart
 loses it. It is not reachable through the generic draft tools: `list_drafts` omits
 it, `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and `get_reply_draft`
-return `unavailable`, and `send_prepared_text`, `send_prepared_artifact` and
+return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft), and `send_prepared_text`, `send_prepared_artifact` and
 `send_prepared_video` return `error`. There is no update, refresh or cancel for forward drafts.
 
 Preparing again for the same owner, source chat, message ID, recipient, `mode` and
@@ -3207,7 +3207,7 @@ A video draft lives in the same in-memory registry as other drafts, as the inter
 (default 15 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker
 restart loses it. It is not reachable through the generic draft tools: `list_drafts`
 omits it, `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and
-`get_reply_artifact_draft` return `unavailable`, and `send_prepared_text`,
+`get_reply_artifact_draft` return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft), and `send_prepared_text`,
 `send_prepared_artifact` and `send_prepared_forward` return `error`. There is no update,
 refresh or cancel for video drafts, and no caption edit: prepare again.
 
@@ -3439,7 +3439,7 @@ ID or normalized caption, in order, or with the normalized `display_name` of an 
 An album draft is the internal kind `album`, bound to the proxy client and current Telegram account like
 every draft, and expires at the shorter of the draft TTL and every item's own deadline. The generic draft
 tools never see it (`list_drafts` omits it; `get_draft`, `update_draft`, `refresh_draft` and `cancel_draft`
-return `unavailable`; the other send tools return `error`), and it cannot be revised or cancelled: prepare
+return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft); the other send tools return `error`), and it cannot be revised or cancelled: prepare
 again. Preparing again for the same owner, recipient and ordered item IDs supersedes the earlier pending
 album.
 
@@ -3923,7 +3923,7 @@ Archive and text-edit drafts live in the same in-memory registry as other drafts
 finite TTL (default 15 minutes, `max_draft_ttl_seconds`), single-use claim and receipt. Broker restart
 loses them. They are not reachable through the generic draft tools (`list_drafts` omits them;
 `get_draft`, `update_draft`, `refresh_draft`, `cancel_draft` and the reply-draft tools return
-`unavailable`), and the send tools return `error` even after the change was applied, so a change
+`unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft)), and the send tools return `error` even after the change was applied, so a change
 receipt is never replayed as a send. There is no update, refresh or cancel for these drafts.
 `apply_prepared_archive` rejects a text-edit draft and `apply_prepared_text_edit` an archive draft with
 `error`, and both reject a plain text draft.

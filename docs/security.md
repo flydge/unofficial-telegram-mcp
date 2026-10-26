@@ -2908,7 +2908,7 @@ nothing.
 Drafts are bound to the proxy client and current account, live in the same in-memory
 registry as other drafts (internal kind `video`) and are not reachable through the
 generic draft tools: `list_drafts` omits them, `get_draft`, `update_draft`,
-`refresh_draft`, `cancel_draft` and `get_reply_artifact_draft` return `unavailable`, and
+`refresh_draft`, `cancel_draft` and `get_reply_artifact_draft` return `unavailable` (a styled `update_draft` without `formatted_text_send` answers `capability_disabled` first, whatever the draft), and
 `send_prepared_text`, `send_prepared_artifact` and `send_prepared_forward` return
 `error`. A foreign client, a new proxy identity, an account change, broker restart,
 supersession or expiry returns the content-free `expired`. Preparing again for the same

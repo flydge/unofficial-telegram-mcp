@@ -12,7 +12,10 @@ or topic `prepare_text_send` without `formatted_text_send` or `topic_text_send` 
 with `missing_capabilities` and `next_action: enable_capability`, as the reply tools do, instead of `error` (a listed
 schema change); a first install over the default's session kept by an uninstall moves its `runtime.toml` version
 line onto the installed release from an equal or older one (journaled) and refuses `policy_conflict` for a newer
-one, so a reinstall at another version no longer meets `config_stale`. The consumer matrix gains cells for the
+one, so a reinstall at another version no longer meets `config_stale` (a line that already reads as the release under
+TOML, with spacing or a comment, stays as it is); a styled `update_draft` without `formatted_text_send` answers
+`capability_disabled` with `missing_capabilities` and `next_action: enable_capability` instead of `unavailable` (a
+listed schema change of `update_draft` and `refresh_draft`). The consumer matrix gains cells for the
 Boolean search form and the sender, direction and topic filters, synthetic XLSX and PPTX reads, a styled caption and
 the three 0.58 media and custom-emoji reply sources. Technical evidence only; the owner session is pending.
 
