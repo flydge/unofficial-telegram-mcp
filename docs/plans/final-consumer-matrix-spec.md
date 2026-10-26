@@ -218,6 +218,11 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   header (`version`, `schema_fingerprint`, `alias`), each frame a connection received (numbered by connection) and
   each dispatched operation with its payload and result or fixed error code. The alias cell adds the harness's
   registry postscript (alias names and which are pinned, never a user id). Decisions rest on this record.
+- **Throttling (26.10.2026).** Codex 0.162 waits out an HTTP 429 from the provider without any event, so a throttled
+  cell used to time out after `turn.started` and count as the agent's failure. The Codex agent alone runs with
+  `RUST_LOG=error,codex_core::responses_retry=warn`: its one retry notice reaches the cell's stderr, which the retry
+  decision reads, and `429 too many requests` / `retrying sampling request` are transient markers, so such an attempt
+  is retried (only while no tool reached the broker). Codex's INFO lines, which carry account fields, stay off.
 - **Isolation.** Codex: a temporary HOME and a temporary `CODEX_HOME` holding a `config.toml` whose only MCP server
   is the installed proxy (`approval_policy = "never"`, `cli_auth_credentials_store = "file"`, features
   `shell_tool`, `browser_use`, `computer_use`, `apps`, `multi_agent`, `image_generation` and `plugins` off,

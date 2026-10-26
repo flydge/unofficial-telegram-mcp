@@ -1302,11 +1302,27 @@ class AgentTableTests(unittest.TestCase):
             codex = matrix.agent_environment("codex", home=Path("/h"), config=Path("/c"), tmp=Path("/t"))
             claude = matrix.agent_environment("claude_code", home=Path("/h"), config=Path("/c"), tmp=Path("/t"))
         self.assertEqual(codex, {"HOME": "/h", "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
-                                 "CODEX_HOME": "/c", "HTTPS_PROXY": "http://proxy.test:3128"})
+                                 "CODEX_HOME": "/c", "RUST_LOG": "error,codex_core::responses_retry=warn",
+                                 "HTTPS_PROXY": "http://proxy.test:3128"})
+
         self.assertEqual(claude, {"HOME": str(Path.home()), "USER": pwd.getpwuid(os.getuid()).pw_name,
                                   "PATH": matrix.SYSTEM_PATH, "TMPDIR": "/t", "LANG": "en_US.UTF-8",
                                   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1",
                                   "HTTPS_PROXY": "http://proxy.test:3128", "ANTHROPIC_API_KEY": "k"})
+
+    def test_a_throttled_codex_attempt_is_retried_not_judged(self):
+        # Codex 0.162 waits out an HTTP 429 without an event; with CODEX_RETRY_LOG its one retry notice reaches
+        # stderr, which provider_errors reads, so an attempt that timed out there is a provider failure.
+        notice = ("2026-10-26T14:36:55Z WARN codex_core::responses_retry: retrying sampling request (1/5 in 325.99s) "
+                  "after error; last status: 429 Too Many Requests\n")
+        events = '{"type":"thread.started","thread_id":"t"}\n{"type":"turn.started"}\n'
+        stream = matrix.provider_errors("codex", events, "Reading additional input from stdin...\n" + notice)
+        self.assertTrue(any(marker in stream for marker in matrix.TRANSIENT_MARKERS))
+        self.assertFalse(any(marker in stream for marker in matrix.LOGIN_MARKERS))
+        # The model's own words never count, as before.
+        said = '{"type":"item.completed","item":{"type":"agent_message","text":"429 Too Many Requests"}}\n'
+        self.assertFalse(any(marker in matrix.provider_errors("codex", events + said, "") for marker in
+                             matrix.TRANSIENT_MARKERS))
 
     def test_refreshed_codex_credentials_go_back_only_onto_an_unchanged_file(self):
         refreshed = CODEX_AUTH.replace(b"synthetic-r", b"synthetic-r2").replace(b"synthetic-a", b"synthetic-a2")
@@ -1485,7 +1501,7 @@ class AgentColumnTests(unittest.TestCase):
                 self.assertEqual(seen["servers"], [matrix.agent_server(matrix.agent_cell(cell)[1], SERVER)])
                 self.assertEqual(seen["auth_sha256"], matrix._sha(auth))
                 self.assertLessEqual(set(seen["environment"]) - SHELL_VARIABLES,
-                                     {"HOME", "PATH", "TMPDIR", "LANG", "CODEX_HOME"})
+                                     {"HOME", "PATH", "TMPDIR", "LANG", "CODEX_HOME", "RUST_LOG"})
         self.assertFalse((self.base / "scratch-codex-honest").exists())
         self.assertEqual(sorted(path.name for path in self.codex_home.iterdir()), ["auth.json"])
         for folder in (self.evidence / "codex").iterdir():

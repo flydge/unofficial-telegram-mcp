@@ -548,7 +548,13 @@ MAX_EVIDENCE_BYTES = 16 << 20
 # A provider failure before any tool reached the broker says nothing about the agent: the cell is retried. Both marker
 # sets are matched only against what the CLI itself reports as failing (provider_errors), never the model's words.
 TRANSIENT_MARKERS = ("at capacity", "rate limit", "overloaded", "temporarily unavailable", "stream disconnected",
-                     "internal server error", "503 service unavailable", "502 bad gateway")
+                     "internal server error", "503 service unavailable", "502 bad gateway",
+                     # Codex waits out an HTTP 429 silently; only its retry notice (CODEX_RETRY_LOG) says so.
+                     "429 too many requests", "retrying sampling request")
+# Codex logs nothing else at this level: errors, and the one warning its sampling retry writes when the provider
+# throttles the account (the cell would otherwise time out with no event after turn.started and count as the agent's
+# failure). Its INFO lines, which carry account fields, stay off.
+CODEX_RETRY_LOG = "error,codex_core::responses_retry=warn"
 LOGIN_MARKERS = ("401 unauthorized", "not logged in", "please run /login", "authentication_failed",
                  "invalid api key", "please sign in", "refresh token")
 # Agent item types that are not tool use (Codex `--json` items).
@@ -3496,7 +3502,7 @@ def agent_environment(column: str, *, home: Path, config: Path, tmp: Path) -> di
     network = {name: os.environ[name] for name in AGENT_NETWORK_ENV if os.environ.get(name)}
     if column == "codex":
         return {"HOME": str(home), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp), "LANG": "en_US.UTF-8",
-                "CODEX_HOME": str(config), **network}
+                "CODEX_HOME": str(config), "RUST_LOG": CODEX_RETRY_LOG, **network}
     return {"HOME": str(claude_login_home()), "USER": pwd.getpwuid(os.getuid()).pw_name, "PATH": SYSTEM_PATH,
             "TMPDIR": str(tmp), "LANG": "en_US.UTF-8", **CLAUDE_QUIET_ENV, **network,
             **{name: os.environ[name] for name in CLAUDE_CREDENTIAL_ENV if os.environ.get(name)}}
