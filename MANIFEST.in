@@ -43,6 +43,7 @@ include docs/release-notes-0.55.0rc1.md
 include docs/release-notes-0.56.0rc1.md
 include docs/release-notes-0.57.0rc1.md
 include docs/release-notes-0.58.0rc1.md
+include docs/release-notes-0.59.0rc1.md
 include docs/assets/unofficial-telegram-mcp-header.png
 include CHANGELOG.md
 include docs/third-party-notices.md

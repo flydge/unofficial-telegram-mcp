@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.59.0.dev0 — unreleased
+## 0.59.0rc1 — final acceptance candidate, 2026-10-26 (not published)
 
-Development of 0.59.0, final acceptance ([spec](docs/plans/final-acceptance-spec.md),
+Final acceptance candidate 0.59.0rc1 ([release notes](docs/release-notes-0.59.0rc1.md), [spec](docs/plans/final-acceptance-spec.md),
 [task record](docs/plans/final-acceptance-spec.tasks.md)): a controlled TDLib upgrade procedure
 ([docs/tdlib-upgrade.md](docs/tdlib-upgrade.md)) with a from-source build route for the pinned commit and a
 rehearsal in which independent rebuilds were byte-identical; the consumer matrix over every tool; the

@@ -62,4 +62,7 @@ The last candidate is accepted when:
 
 ## Result
 
-(Filled at the end.)
+Final acceptance candidate 0.59.0rc1. Criteria 2, 3 and 4 met (criterion 3 in the reading the owner confirms);
+criterion 1 by the release gate's suite on the tagged commit; criterion 5 with the audit and its critic rounds
+recorded in the task record; criterion 6 (owner session rows and Gpub) waits for the owner session, prepared in the
+owner decision sheet.
