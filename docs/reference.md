@@ -136,7 +136,7 @@ them fails validation. It is omitted when no condition applies, so every other r
 | `check_connection` | broker unavailable | `stop_reason` `broker_unavailable` (history, topics, topic history, `search_messages`, `list_chats`, `search_chats`, reply chain); `read_messages` with status `error` and only that issue on every anchor; `_manifest` `compatibility.status` `broker_unavailable` |
 | `connect_account` | authorization not ready | status `blocked` on every response that has it; `stop_reason` `authorization_unavailable` |
 | `update_installation` | `config_stale` | the guard text; `_manifest` `compatibility.status` `config_stale` |
-| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools, `prepare_album_send`, `prepare_text_edit` and `prepare_caption_edit` (styles without `edit_own_styled_text`), and `prepare_text_send` (styles without `formatted_text_send`, a topic without `topic_text_send`; since the final acceptance) |
+| `enable_capability` | `capability_disabled` | the guard text; status `capability_disabled` on the eight reply tools, `prepare_album_send`, `prepare_text_edit` and `prepare_caption_edit` (styles without `edit_own_styled_text`), `prepare_text_send` (styles without `formatted_text_send`, a topic without `topic_text_send`; since the final acceptance), and `update_draft` (styles without `formatted_text_send`, or caption styles without `formatted_caption_send`; since the final acceptance's closing pass) |
 | `search_again` | `selection_unavailable` | every `selection_unavailable` refusal |
 | `restart_listing` | cursor invalid or expired | status `invalid_cursor` on every cursor response, `stop_reason` `invalid_cursor`, and `discover_targets` status `expired` (its continuation lapsed) |
 | `check_send_status` | `outcome_unknown` | the send and apply tools, `get_send_status` and `get_album_send_status`, and a `partial` album with an unconfirmed item; never resend |
@@ -173,7 +173,13 @@ Without `formatted_text_send` (or, for a topic, `topic_text_send`) `prepare_text
 `status: capability_disabled` with `missing_capabilities` naming only what is missing, in the order `send`, the
 styles, the topic, the fixed detail `text draft needs capabilities the owner has not enabled: missing_capabilities`
 and `next_action: enable_capability`, before Telegram is read, as the reply tools do; until the final acceptance it
-answered `status: error`.
+answered `status: error`. `update_draft` with `outgoing_entities` likewise answers `status: capability_disabled`
+naming only what is missing, in the order `send`, then the style capability (`formatted_text_send` with `text`,
+`formatted_caption_send` with `caption`), the fixed detail `draft revision needs capabilities the owner has not
+enabled: missing_capabilities` and `next_action: enable_capability`, before the draft is looked up (the same for any
+draft ID); the draft stays pending. Until the final acceptance's closing pass it answered `status: unavailable` /
+`draft is unavailable`. A stored draft's own state keeps `unavailable`, as `get_draft` does: a `refresh_draft` of a
+styled draft whose styles the owner has since disabled names nothing.
 
 Pass an actual list of at most 32 closed records, for example
 `[{"offset":0,"length":5,"type":{"@type":"textEntityTypeBold"}}]` for `Hello`.
@@ -222,7 +228,8 @@ captions stay plain or keep empty entities. Album items stay plain, and so does 
 - **Capability.** The default-off `formatted_caption_send`, in the `send` profile. It depends on `send`
   (`required_capabilities()` is the single source), and it is an option of a caption send, never an operation
   gate. Without it `prepare_artifact_send` answers `error` and `prepare_video_send` `unavailable`, creating no
-  draft; the reply tools answer `capability_disabled` naming it after `reply_artifact_send` and `send`.
+  draft; the reply tools answer `capability_disabled` naming it after `reply_artifact_send` and `send`, and so does
+  `update_draft` with a styled `caption` (after `send`; since the final acceptance's closing pass).
 - **The caption.** A styled caption must already be the text Telegram stores: no change under NFKC, no CR, tab,
   control or format character, no leading or trailing space or line feed, no character Telegram rewrites.
   Anything else is refused, never rewritten, so the spans address the caption exactly as given. Spans count its

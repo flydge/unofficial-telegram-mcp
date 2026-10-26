@@ -1,0 +1,6 @@
+{
+  "structure": {
+    "refresh_draft": "output: the shared revision result gains status capability_disabled with the closed missing_capabilities list and next_action enable_capability (only update_draft's style option answers it)",
+    "update_draft": "output: status gains capability_disabled with the closed missing_capabilities list (a disabled formatted_text_send or formatted_caption_send option is named, as prepare_text_send names its options) and next_action enable_capability"
+  }
+}

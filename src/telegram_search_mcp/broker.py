@@ -78,7 +78,7 @@ from .reply_drafts import (ReplyDraftPreview, ReplyTextDraftPreview, PrepareRepl
 
 from .draft_models import (ListDraftsRequest, ListDraftsResponse, GetDraftRequest, GetDraftResponse,
                            CancelDraftRequest, CancelDraftResponse, DraftPreview, DraftSummary,
-                           UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse)
+                           UpdateDraftRequest, RefreshDraftRequest, ReviseDraftResponse, REVISION_CAPABILITY_DISABLED)
 from .search_service import ReadOnlyTelegramClient, SearchService
 from .tdjson import AuthorizationBlocked, MessageNotFound, MessageSendFailed, MessageSendNotAttempted, MessageSendOutcomeUnknown, SecretChatRejected, TDLibClient, TDLibError
 from .tdjson import ChangeRejectedInTarget
@@ -1562,8 +1562,14 @@ class Broker(SelectionBrokerMixin):
             from .outgoing_entity_models import caller_outgoing_entities
             update = isinstance(request, UpdateDraftRequest)
             if update and request.outgoing_entities:
-                # The request's own option names itself: text styles, or (0.58) caption styles.
-                self._require_style_capability('text' if request.text is not None else 'document')
+                # The request's own option names itself: text styles, or (0.58) caption styles. Checked before the
+                # draft is looked up (the same for any draft ID), a missing one is named as prepare_text_send names
+                # its own (final acceptance, closing pass); config_stale keeps unavailable.
+                try:
+                    self._require_style_capability('text' if request.text is not None else 'document')
+                except CapabilityDisabled as error:
+                    return ReviseDraftResponse(status='capability_disabled', missing_capabilities=list(error.missing),
+                                               detail=REVISION_CAPABILITY_DISABLED)
             owner = self._draft_owner(client_id)
             old = self._drafts.peek(request.draft_id, owner=owner)
             self._draft_preview(old, owner)

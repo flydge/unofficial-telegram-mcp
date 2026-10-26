@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
-from .schemas import ArtifactId, ChatId
+from .schemas import ArtifactId, ChatId, MissingCapabilities
+from .next_actions import NextAction, NextActionHint, next_action_field, optional_field
 from .topic_models import TopicSnapshot, topic_preview_digest
 from .outgoing_entity_models import (OutgoingEntityList, canonical_caption_entities, canonical_outgoing_entities,
                                      caller_outgoing_entities)
@@ -287,19 +288,33 @@ class CancelDraftResponse(_Closed):
             raise ValueError('unavailable response contains a draft ID')
         return self
 
-class ReviseDraftResponse(_Closed):
-    status: Literal['revised', 'unavailable']
+# update_draft's own style option, refused as prepare_text_send refuses its options (final acceptance, closing pass).
+REVISION_CAPABILITY_DISABLED = 'draft revision needs capabilities the owner has not enabled: missing_capabilities'
+
+
+class ReviseDraftResponse(NextActionHint, _Closed):
+    status: Literal['revised', 'unavailable', 'capability_disabled']
     previous_draft_id: DraftId | None = None
     draft: DraftPreview | None = None
-    detail: Literal['new immutable revision; prior draft invalidated; fresh approval required', 'draft is unavailable']
+    detail: Literal['new immutable revision; prior draft invalidated; fresh approval required', 'draft is unavailable',
+                    'draft revision needs capabilities the owner has not enabled: missing_capabilities']
+    missing_capabilities: MissingCapabilities | None = optional_field()
+    next_action: NextAction | None = next_action_field()
 
     @model_validator(mode='after')
     def shape(self):
+        """`capability_disabled` names only the missing capabilities (closed, distinct) with its fixed detail and no
+        draft field; every other status names none."""
+        names = self.missing_capabilities
+        if (self.status == 'capability_disabled') != (names is not None) or (
+                names is not None and len(set(names)) != len(names)):
+            raise ValueError('missing capabilities belong to capability_disabled only')
         if self.status == 'revised':
             if (self.previous_draft_id is None or self.draft is None or
                     self.draft.draft_id == self.previous_draft_id or self.detail !=
                     'new immutable revision; prior draft invalidated; fresh approval required'):
                 raise ValueError('revision requires distinct old/new IDs and exact preview')
-        elif self.previous_draft_id is not None or self.draft is not None or self.detail != 'draft is unavailable':
+        elif self.previous_draft_id is not None or self.draft is not None or self.detail != (
+                REVISION_CAPABILITY_DISABLED if self.status == 'capability_disabled' else 'draft is unavailable'):
             raise ValueError('unavailable revision contains evidence')
         return self

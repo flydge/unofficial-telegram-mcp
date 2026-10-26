@@ -288,7 +288,8 @@ its hash, checked, extracted and put on the session's path. The receipt records 
   downloaded) and `inspector` (the pass or unavailable form), adds `inspector` and `inspector_cells` to the
   summary and drops `inspector_cli.synthetic` from `owner_cells`. A v2 receipt is refused.
 - **The schema is frozen.** `MATRIX_SCHEMA_FINGERPRINT` is the fingerprint these cells were written for (the
-  0.58 surface; since the final acceptance with the typed `prepare_text_send` refusal, `85b80a45…b071`). `run`
+  0.58 surface; with the final acceptance's typed `prepare_text_send` refusal `85b80a45…b071`, and since its
+  closing pass's typed `update_draft` refusal `8d8fc25c…0d28`). `run`
   refuses another census before any session (`schema_mismatch`), `check_receipt` refuses a receipt with another
   fingerprint on its own, and `check` refuses a commit whose census differs. A deliberate
   schema change must update the cells, their counts, the tool tables and the constant together; a unit test

@@ -478,7 +478,12 @@ class ArtifactLifecycleTests(ArtifactSendFixture, unittest.TestCase):
         self.disable()
         refused = self.dispatch('update_draft', {'draft_id': cleared['draft']['draft_id'], 'caption': CAPTION,
                                                  'outgoing_entities': STYLES})
-        self.assertEqual(refused['status'], 'unavailable')
+        # Named as prepare_text_send names a disabled option (final acceptance, closing pass); the draft stays.
+        self.assertEqual({key: refused.get(key) for key in ('status', 'missing_capabilities', 'detail', 'next_action')},
+                         {'status': 'capability_disabled', 'missing_capabilities': ['formatted_caption_send'],
+                          'detail': 'draft revision needs capabilities the owner has not enabled: '
+                                    'missing_capabilities', 'next_action': 'enable_capability'})
+        self.assertEqual(self.dispatch('get_draft', {'draft_id': cleared['draft']['draft_id']})['status'], 'pending')
 
     def test_a_styled_reply_moves_its_facts_to_v2_and_sends_exactly(self):
         prepared = self.dispatch('prepare_reply_artifact_send', self.payload(reply_to=ANCHOR))

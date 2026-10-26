@@ -87,9 +87,9 @@ PROJECT = "telegram-search-mcp"
 HARNESS = Path(__file__).resolve()
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 # The schema fingerprint these cells were written for (the 0.58 surface, 64 tools, with the final acceptance's typed
-# prepare_text_send refusal). run refuses another census and check another receipt (schema_mismatch): a deliberate
-# schema change must update the cells, their counts and this.
-MATRIX_SCHEMA_FINGERPRINT = "85b80a452c7643104688e8d45b282b235785c66217158b5b59e4c6ffd3abb071"
+# prepare_text_send and update_draft refusals). run refuses another census and check another receipt
+# (schema_mismatch): a deliberate schema change must update the cells, their counts and this.
+MATRIX_SCHEMA_FINGERPRINT = "8d8fc25c73c336b0ce32a8c965b59f57770b8aee9d971aacb0165d0162e00d28"
 # Every revision of the official SDK this harness drives: the four initialize-handshake revisions and the
 # per-request (discover) revision. A newer SDK with another revision fails `sdk_revisions` until listed.
 LEGACY_REVISIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
