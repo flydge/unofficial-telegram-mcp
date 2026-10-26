@@ -449,6 +449,14 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       numbers uncompared; tests `ReEnumeratedVolumeTests` in `tests/test_enrollment_identity.py` (the remount case failed
       first; a changed inode and a replaced session directory still refuse). The owner's real record reads under the fix
       (checked read-only; nothing in the session or enrollment was written). Released as 0.59.0rc2.
+- [x] **Final acceptance candidate 0.59.0rc2** (annotated tag `v0.59.0rc2` on abd32e8; replaces 0.59.0rc1). Release gate
+      `run` and `verify` passed on abd32e8 with the bundle stage (previous tag v0.59.0rc1): full suite in the archive tree
+      `4302 passed, 23431 subtests passed`, 0 skipped; privacy hits 0; `history_findings` 0. Consumer matrix on abd32e8
+      from that exact commit, receipt kept beside the gate directories and verified by `check --commit abd32e8…`: `55/55
+      synthetic cells; Inspector 4/4 cells; Codex 9/9 cells; Claude Code 9/9 cells; 7 owner cells pending`. Installed on
+      the owner's Mac from the same gated wheel (source mode, as the 0.52 runtime was): broker, Claude Code and Codex,
+      `_manifest(check_broker=true)` compatible with the account authorized. The owner published `main` and the tags
+      (history decision: accept as is).
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
