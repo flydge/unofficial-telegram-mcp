@@ -10,6 +10,8 @@ include skills/telegram-setup/SKILL.md
 recursive-include packaging *.py *.sh *.c *.json
 recursive-include packaging/entitlements *.plist
 include packaging/constraints-0.59.0.txt
+include packaging/inspector/package.json
+include packaging/inspector/package-lock.json
 recursive-include src/telegram_search_mcp *.py
 recursive-include tests *.py
 include tests/fixtures/legacy_0_13_tool_hashes.json
