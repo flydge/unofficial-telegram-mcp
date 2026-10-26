@@ -115,8 +115,11 @@ def message_projection(raw, anchor):
             offsets={0};position=0
             for scalar in text:
                 position+=2 if ord(scalar)>0xffff else 1;offsets.add(position)
+            # TDLib's own shape exactly, as the forward, edit and reply projections read it: every object carries
+            # its @type, an entity "textEntity", and nothing else beside offset, length and type.
             for entity in entities:
-                if not isinstance(entity,dict) or set(entity)!={'offset','length','type'}:raise SelectionUnavailable()
+                if (not isinstance(entity,dict) or set(entity)!={'@type','offset','length','type'} or
+                        entity['@type']!='textEntity'):raise SelectionUnavailable()
                 offset,length=entity['offset'],entity['length'];payload=entity['type']
                 if (type(offset) is not int or type(length) is not int or offset<0 or length<=0 or
                         offset not in offsets or offset+length not in offsets or not isinstance(payload,dict) or

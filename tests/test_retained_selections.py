@@ -25,10 +25,41 @@ class RetainedProjectionTests(unittest.TestCase):
 
     def test_entity_only_hidden_url_drift_changes_private_fingerprint(self):
         self.raw['content']['text']['entities'] = [
-            {'offset':0, 'length':3, 'type':{'@type':'textEntityTypeTextUrl','url':'https://example.test/a'}}]
+            {'@type':'textEntity', 'offset':0, 'length':3, 'type':{'@type':'textEntityTypeTextUrl','url':'https://example.test/a'}}]
         first = self.digest(self.raw)
         self.raw['content']['text']['entities'][0]['type']['url'] = 'https://example.test/b'
         self.assertNotEqual(first, self.digest(self.raw))
+
+    def test_entities_in_tdlibs_own_shape_are_projected_and_every_other_shape_refuses(self):
+        # TDLib's JSON writes every object with its @type: {"@type": "textEntity", offset, length, type}.
+        text = 'Bold #tag link 😀 @user'
+        def entity(offset, length, kind, **fields):
+            return {'@type': 'textEntity', 'offset': offset, 'length': length, 'type': {'@type': kind, **fields}}
+        shaped = [entity(0, 4, 'textEntityTypeBold'), entity(5, 4, 'textEntityTypeHashtag'),
+                  entity(10, 4, 'textEntityTypeTextUrl', url='https://example.test/a'),
+                  entity(15, 2, 'textEntityTypeCustomEmoji', custom_emoji_id='5368324170671202286'),
+                  entity(18, 5, 'textEntityTypeMention')]
+        self.raw['content']['text'] = {'@type': 'formattedText', 'text': text, 'entities': shaped}
+        digest, length = self.module.message_projection(self.raw, (7, 11))
+        self.assertEqual(length, len(text))
+        caption = copy.deepcopy(self.raw)
+        caption['content'] = {'@type': 'messageDocument', 'caption': {'@type': 'formattedText', 'text': 'c d',
+            'entities': [entity(2, 1, 'textEntityTypeItalic')]}, 'document': {'file_name': 'a.txt',
+            'mime_type': 'text/plain', 'document': {'@type': 'file', 'id': 8, 'size': 3,
+                                                    'remote': {'unique_id': 'stable-a'}}}}
+        self.assertEqual(len(self.digest(caption)), 64)
+        for name, change in (('no @type', lambda e: e.pop('@type')),
+                             ('another @type', lambda e: e.update({'@type': 'textEntityTypeBold'})),
+                             ('a null @type', lambda e: e.update({'@type': None})),
+                             ('an extra key', lambda e: e.update(extra=1)),
+                             ('no type', lambda e: e.pop('type'))):
+            for index in range(len(shaped)):
+                with self.subTest(shape=name, entity=index):
+                    raw = copy.deepcopy(self.raw)
+                    change(raw['content']['text']['entities'][index])
+                    with self.assertRaises(self.module.SelectionUnavailable):
+                        self.digest(raw)
+        self.assertEqual(self.digest(self.raw), digest)
 
     def test_raw_text_after_display_limit_and_sanitization_equivalent_drift(self):
         self.raw['content']['text']['text'] = 'a' * 21000
@@ -54,7 +85,7 @@ class RetainedProjectionTests(unittest.TestCase):
         invalid=[]
         too_big=copy.deepcopy(self.raw); too_big['content']['text']['text']='a'*65536; invalid.append(too_big)
         utf=copy.deepcopy(self.raw); utf['content']['text']={'text':'😀','entities':[
-            {'offset':1,'length':1,'type':{'@type':'textEntityTypeBold'}}]}; invalid.append(utf)
+            {'@type':'textEntity','offset':1,'length':1,'type':{'@type':'textEntityTypeBold'}}]}; invalid.append(utf)
         timed=copy.deepcopy(self.raw);timed['self_destruct_type']={'@type':'messageSelfDestructTypeTimer','self_destruct_time':10};invalid.append(timed)
         for raw in invalid:
             with self.subTest(raw_kind=next(iter(raw))):
@@ -241,10 +272,26 @@ class RetainedBrokerTests(unittest.TestCase):
         self.assertEqual([r['anchor']['message_id'] for r in result['messages']['results']],[12,11])
         self.assertEqual(self.selected('read_messages',token)['status'],'complete')
         self.provider.messages[11]['content']['text']['entities']=[
-            {'offset':0,'length':3,'type':{'@type':'textEntityTypeTextUrl','url':'https://hidden.test'}}]
+            {'@type':'textEntity','offset':0,'length':3,'type':{'@type':'textEntityTypeTextUrl','url':'https://hidden.test'}}]
         self.unavailable(self.selected('read_messages',token))
         self.provider.messages[11]['content']['text']['entities']=[]
         self.unavailable(self.selected('read_messages',token))
+
+    def test_a_message_with_tdlib_shaped_entities_is_retained_read_and_refused_after_entity_drift(self):
+        text = 'Hashtag #tag and bold'
+        self.provider.messages[11]['content']['text'] = {'@type': 'formattedText', 'text': text, 'entities': [
+            {'@type': 'textEntity', 'offset': 8, 'length': 4, 'type': {'@type': 'textEntityTypeHashtag'}},
+            {'@type': 'textEntity', 'offset': 17, 'length': 4, 'type': {'@type': 'textEntityTypeBold'}}]}
+        result = self.retain({'kind': 'messages', 'anchors': [{'chat_id': 7, 'message_id': 11}]})
+        self.assertEqual(result['status'], 'retained')
+        self.assertEqual([r['message']['text']['value'] for r in result['messages']['results']], [text])
+        token = result['selection_id']
+        read = self.selected('read_messages', token)
+        self.assertEqual((read['status'], [r['message']['text']['value'] for r in read['results']]), ('complete', [text]))
+        self.assertEqual(self.retain({'kind': 'messages', 'anchors': [{'chat_id': 7, 'message_id': 11}]})['selection_id'],
+                         token)
+        self.provider.messages[11]['content']['text']['entities'][1]['type'] = {'@type': 'textEntityTypeItalic'}
+        self.unavailable(self.selected('read_messages', token))
 
     def test_capture_carries_validated_links_and_a_link_flip_never_refuses_or_revokes(self):
         source={'kind':'messages','anchors':[{'chat_id':7,'message_id':12},{'chat_id':7,'message_id':11}]}
