@@ -416,7 +416,21 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       13. *Step 14's critic review had no stated range* (low) — c5318ae: `v0.58.0rc1`..build commit, earlier ranges
           covered by each candidate's review; the release commit's gate reuses it.
       The audit's and the sheet's status lines, P2, F11, open item 1 and section 2 record the two code decisions
-      (items 1 and 2) in the commit that adds this block. Suite and matrix: below.
+      (items 1 and 2) in the commit that adds this block (b0e3d2d).
+      **Suite** at b0e3d2d (isolated HOME): `4299 passed, 23429 subtests passed in 1552.74s`, 0 failed, 0 skipped; no
+      disk-exhaustion failure, nothing rerun.
+      **Matrix**, since the harness and the schema changed: the synthetic and Inspector columns once at b0e3d2d against
+      the 0.58.0rc1 gate wheelhouse and toolhouse (`rc-0.58.0rc1-6d1680d`), Inspector 1.0.2 on Node 22.18.0 from the
+      same offline cache, scripted approval: `consumer matrix passed: 55/55 synthetic cells; Inspector 4/4 cells; Codex
+      unavailable (cli_not_given); Claude Code unavailable (cli_not_given); 7 owner cells pending`. Scratch receipt
+      outside the repository (deleted afterwards, not kept as evidence), sha256
+      `d00ae772f3cd273c23cb2b6beebc4ccb604f475281dbaafb2f0d9d9dbc0e176a`: wheel
+      `4b508746c675ad460cebdcf7e54e97ff74baee9759789f1544345c2587a18d67` (2,202,327 bytes, 0.59.0.dev0), schema
+      fingerprint `8d8fc25c…0d28`, 183 structured results from all 64 tools, installer tomlkit 0.13.3 from the gate
+      toolhouse. `check --commit b0e3d2d52e4a23875e4cd0267617920d226e8b82` with the same wheelhouse: `consumer matrix
+      receipt verified: 55/55 synthetic cells; Inspector 4/4 cells; Codex unavailable (cli_not_given); Claude Code
+      unavailable (cli_not_given); 7 owner cells pending (commit b0e3d2d5…, wheel sha256 4b508746…8d67)`. The kept
+      55-cell receipt with both agent columns is the lead's next run (F6, F9 and F13 depend on it).
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
@@ -434,3 +448,4 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 | 7 | The dry-run build accepts any owner-only output directory outside the checkout and `/tmp` | Built with the output under the temporary directory's `/var` spelling | Refused `assemble_failed`: the bundle producer refuses a symlinked ancestor, and `/var` is a symlink. Rebuilt under the resolved `/private/var` spelling: built and verified. By design; no change |
 | 8 | the four final-acceptance items (2c87e08, 12f53f6, 1b604f9, 739468c, 2755559) leave the full suite green | isolated-HOME suite at bf09630 (the matrix run and the task record included), 26.10 | `4291 passed, 23412 subtests passed in 1650.04s`, 0 failed, 0 skipped; no disk-exhaustion failure, nothing rerun |
 | 9 | the criterion 5 reconciliation and the re-critic's fixes (docs only) leave the full suite green | isolated-HOME suite at ab82e9a (audit, decision sheet and task record committed), 26.10; the privacy guard and the anchor test before each docs commit | `4291 passed, 23412 subtests passed in 1654.11s`, 0 failed, 0 skipped; privacy and anchors `8 passed, 55 subtests passed`; the commit recording this changes only this file and one sentence of the decision sheet |
+| 10 | the closing pass (four code commits, the docs and the task record) leaves the full suite green | isolated-HOME suite at b0e3d2d, 26.10; the privacy guard and the anchor test before each docs commit; then the synthetic and Inspector matrix columns at b0e3d2d | `4299 passed, 23429 subtests passed in 1552.74s`, 0 failed, 0 skipped, nothing rerun; matrix 55/55 and Inspector 4/4, `check` verified (scratch receipt); the commit recording this changes only this file and the wrapping of two audit lines |

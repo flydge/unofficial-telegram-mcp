@@ -189,16 +189,17 @@ cover the whole unpublished range; it runs `verify`, the consumer matrix with ev
 <release sha>`, and the applicable real consumer and provider scenarios count on that commit (original plan, G1);
 then the annotated tag goes on the release commit and `release-commit --tag` runs again. The build commit is gated
 the same way before the build (decision sheet, step 14); its closed critic review covers `v0.58.0rc1`..build commit
-(each earlier candidate had its own) and stands for the release commit, which changes only the plugin's pins. The real-account and dialog parts are the owner's
+(each earlier candidate had its own) and stands for the release commit, which changes only the plugin's pins. The
+real-account and dialog parts are the owner's
 ([decision sheet](owner-decision-sheet.md#5-owner-session-check-list), step 37).
 
 **Gpub.** Not given. No release after 0.51.0 is on the remote `main`, and no later tag has left the machine; but
 the remote `main` already holds six post-`v0.51.0` commits with the personal identity, which only a rewrite of
 `main` (option C) reaches, and the pushed working branches already serve every candidate's commits. Gpub needs the
 owner's history and identity decision and the acceptance of the itemized history findings (both taken before the
-build, with any finding the build commit's gate adds), the acceptance of any finding the final G1 adds, the product name and API identity if the release carries
-assets, the publication decision for the plugin and curl paths (open item 12), the legal review, and the remote
-pre- and post-checks of [releasing](../releasing.md), section 8.
+build, with any finding the build commit's gate adds), the acceptance of any finding the final G1 adds, the product
+name and API identity if the release carries assets, the publication decision for the plugin and curl paths (open
+item 12), the legal review, and the remote pre- and post-checks of [releasing](../releasing.md), section 8.
 
 ## Open items
 
