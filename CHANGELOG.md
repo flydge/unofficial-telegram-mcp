@@ -6,7 +6,15 @@ Development of 0.59.0, final acceptance ([spec](docs/plans/final-acceptance-spec
 [task record](docs/plans/final-acceptance-spec.tasks.md)): a controlled TDLib upgrade procedure
 ([docs/tdlib-upgrade.md](docs/tdlib-upgrade.md)) with a from-source build route for the pinned commit and a
 rehearsal in which independent rebuilds were byte-identical; the consumer matrix over every tool; the
-requirement-by-requirement audit. Technical evidence only; the owner session is pending.
+requirement-by-requirement audit. Fixes: `retain_selection` of a message with any entity answered
+`selection_unavailable`, because the projection refused TDLib's own entity shape (`"@type": "textEntity"`); a styled
+or topic `prepare_text_send` without `formatted_text_send` or `topic_text_send` now answers `capability_disabled`
+with `missing_capabilities` and `next_action: enable_capability`, as the reply tools do, instead of `error` (a listed
+schema change); a first install over the default's session kept by an uninstall moves its `runtime.toml` version
+line onto the installed release from an equal or older one (journaled) and refuses `policy_conflict` for a newer
+one, so a reinstall at another version no longer meets `config_stale`. The consumer matrix gains cells for the
+Boolean search form and the sender, direction and topic filters, synthetic XLSX and PPTX reads, a styled caption and
+the three 0.58 media and custom-emoji reply sources. Technical evidence only; the owner session is pending.
 
 ## 0.58.0rc1 — release candidate, 2026-10-25 (not published)
 

@@ -4,6 +4,10 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 
 - [ ] Criterion 1: Full isolated-HOME suite green with 0 skipped (suite).
 - [x] Criterion 2: Every synthetic and agent matrix cell PASS with a bound receipt; a deliberate schema change fails it (harness).
+      Extended 26.10.2026 by seven synthetic cells (55) and the listed schema change `0.59-text-send-capabilities`
+      (below): the synthetic and Inspector columns pass at 2755559; the agent columns were not re-run, and the receipt
+      at fc3f3c8 no longer verifies against the current commit (its schema fingerprint moved), so the lead runs the
+      whole matrix again at the release candidate.
       Met (25.10.2026, after the F18 review fixes below): 48/48 synthetic, Inspector 4/4, Codex 9/9 and Claude Code
       9/9 in one receipt at fc3f3c8, verified by `check --commit fc3f3c8…`. Part 2's judgement that the Claude Code
       column was not applicable (it never ran: an empty configuration directory cannot reach the Keychain login) is
@@ -217,21 +221,92 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       owner, so not done here: the signed build and everything after it, and Gatekeeper and quarantine on a
       browser-downloaded DMG (a locally built DMG carries no quarantine). The final candidate's build commit gets the
       same run before the owner's build (decision sheet, step 9).
-- [ ] Open item for the criterion 5 audit (recorded 24.10.2026 from 0.55; not 0.55's): a first install never moves
+- [x] Open item for the criterion 5 audit (recorded 24.10.2026 from 0.55; not 0.55's): a first install never moves
       the default's own runtime.toml version line, so an uninstall and a reinstall at another version meets
       config_stale and then policy_conflict (0.53/0.54 behaviour; 0.55 left it unchanged under criterion 2).
       Carried into the audit as open item 1 (a first install rewrites that line only when it adopts a legacy
       service) and onto the decision sheet: fix it in the installer or disclose it.
-- [ ] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix; not fixed there):
+      **Fixed in 1b604f9** (26.10.2026; lead decision on the decision sheet's option, owner review pending): by the rule
+      the account-add repair uses for an alias's line (review fix 055d4), a first install over the default's kept
+      session moves its `expected_package_version` line onto the installed release from an equal or older value,
+      journaled (`policy_previous`, `policy`, by state on every run, the transaction's policy step now running for
+      every first install), and refuses `policy_conflict` before the transaction for a newer value or a line it
+      cannot rewrite exactly (one helper, `_refuse_newer_policy`, shared with the repair path). The adopted broker's
+      pin still follows it at any version. A fresh install with no kept session, or over a line already naming the
+      release, is byte-identical (no policy record, no session root; the criterion 2 journal goldens unchanged).
+      Tests (`tests/test_bundle_kept_session.py`, 4 functions, failed first: the line was not moved, nothing refused,
+      the resumed install did not move it): the move and its journal records, the installed release's policy
+      accepted (`require_current`) and the next upgrade passing; a newer, a doubled and an unquoted line refused before
+      the transaction with every watched file unchanged; equal and fresh installs untouched. Kill sweep scenario
+      `first_install_over_a_kept_session` (153 kill points, a final check of the moved line), which fails on the old
+      installer; the whole kill sweep and the seeded sequences pass (`49 passed, 104 subtests passed`). install.md
+      (Uninstall) and reference.md (`policy_conflict`) say so. The audit's open item 1 and the decision sheet's row
+      are for the lead to reconcile.
+- [x] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix; not fixed there):
       `retain_selection` of a message with any entity answers `selection_unavailable` whenever the entity carries
       TDLib's `"@type": "textEntity"` key, as TDLib's JSON writes every object, because
       `selection_projection.message_projection` accepts exactly `offset`, `length`, `type` (the selection tests'
       fixtures omit the key; the forward projection requires it). Observed on the synthetic account, where the
       same message forwards but cannot be retained; not yet checked on the real account. The matrix retains a
       message without entities and does not freeze this behaviour.
-- [ ] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix): a styled `prepare_text_send`
+      **Fixed in 2c87e08** (26.10.2026): the projection accepts exactly TDLib's shape (the `@type` key with the value
+      `textEntity`, nothing else beside `offset`, `length`, `type`); an entity without it, with another value or with
+      an extra key still refuses. The sweep found no other reader of message entities with the mismatch:
+      `forward_sources`, `edit_drafts.exact_styles` (edits, formatted-send and caption confirmations),
+      `reply_formatted_sources` and `reply_media_sources` already require the key; the outgoing validators
+      (`outgoing_formatting`, `tdjson`) read caller spans or our own native payloads. The three selection fixtures
+      that omitted the key carry it, so their refusals are for the drift or the UTF-16 boundary. Tests (failed first,
+      3): TDLib-shaped entities of five kinds and a caption project and every other shape refuses; through the broker
+      a message with a hashtag and a bold span is retained, read by its selection, retained again to the same token
+      and refused after its entities drift. Still not checked on the real account (the owner session).
+- [x] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix): a styled `prepare_text_send`
       under a policy without `formatted_text_send` answers `error` / `topic draft could not be prepared safely`
       instead of `capability_disabled` with `missing_capabilities`, as the reply tools do.
+      **Fixed in 12f53f6** (26.10.2026; lead decision: the topic option too, since both are the request's options and
+      the reply tools name both). `prepare_text_send` answers `status: capability_disabled`, `missing_capabilities`
+      naming only what is missing in the reply tools' order (`send`, the styles, the topic), the fixed detail `text
+      draft needs capabilities the owner has not enabled: missing_capabilities` and the derived `next_action:
+      enable_capability`, before Telegram is read: at the broker (also for an option revoked while the draft is
+      prepared; `config_stale` and provider failures keep `error`), at the proxy (its own policy check answers the
+      same result and sends nothing on; it answered `draft broker is unavailable` for a disabled topic before) and
+      through the official SDK (the guard still refuses the tool itself without `send`; the listed output schema
+      admits the result). **Listed schema change** `tests/fixtures/schema_changes/0.59-text-send-capabilities.json`
+      (`prepare_text_send` output: the status and the closed `missing_capabilities`); the fingerprint pin in
+      `tests/test_account_registrations.py` and `MATRIX_SCHEMA_FINGERPRINT` move from `6a0b0971…7d` to
+      `85b80a452c7643104688e8d45b282b235785c66217158b5b59e4c6ffd3abb071`. Tests
+      (`tests/test_text_send_capability_results.py`, 14 of 20 cases failed first; two topic tests now expect the
+      typed result); the matrix freezes it in `refusal.text_options` (below). The tool description is unchanged (the
+      description budget had 4 characters left); reference.md says so.
+- [x] **Matrix cells for F6, F9 and F13** (26.10.2026; the audit's agent-side gaps of F6, F9 and F13 and open item 9;
+      spec [`final-consumer-matrix-spec.md`](final-consumer-matrix-spec.md), section 5a). 739468c and 2755559: seven
+      synthetic cells (48 → 55) at frozen counts, all through the installed official SDK under the full policy unless
+      named: `search.boolean` (6: all/any/none over the first chat's three messages, two branches deduplicated, local
+      matching semantics, rehydrated matches), `search.filters` (7: sender, outgoing, incoming, forum topic with
+      membership, topic + own sender + outgoing, the Boolean form in a topic), `documents.xlsx` (6: catalog with a
+      hidden sheet, a range with an inline string, a number, a formula as data with its cached value and an empty
+      cell), `documents.pptx` (5: catalog, a slide with its notes, a hidden slide without), `prepare.styled_caption`
+      (4: a styled caption on a file, shown again by `get_draft`, and on a file reply), `prepare.reply_sources_058`
+      (7: replies to a media caption with a text link (v24), a custom emoji (v25) and a voice note captioned with a
+      media timestamp (v28), each with its payload in the bound evidence; the voice note goes beyond the work item's
+      two sources because the audit's F13 gap names it, lead decision) and `refusal.text_options` (5, restricted).
+      The synthetic account gains a captioned document and a voice note in chat 91002 and a forum supergroup outside
+      the Main list; `searchChatMessages` keeps `sender_id` and `topic_id` as TDLib does; no earlier cell's rows and
+      no agent cell change (the lead runs the agent columns with the whole matrix at the release candidate).
+      `SURFACE_COUNTS` 157 → 183 structured results from all 64 tools. Unit tests for the fixtures failed first
+      against the previous harness (5); the source sessions test passes every cell at its count.
+      **Run** once at 2755559 (the harness after both commits; an earlier run at 739468c was interrupted with SIGTERM
+      during its build, before the voice-note source was added: `interrupted`, exit 143, no temporary directory left)
+      against the 0.58.0rc1 gate wheelhouse and toolhouse (`rc-0.58.0rc1-6d1680d`), Inspector 1.0.2 on Node 22.18.0
+      from the same offline cache (lock sha256 `b7bcccd6fe10b8c9…`), synthetic and Inspector columns only:
+      `consumer matrix passed: 55/55 synthetic cells; Inspector 4/4 cells; Codex unavailable (cli_not_given); Claude
+      Code unavailable (cli_not_given); 7 owner cells pending`. Scratch receipt outside the repository (deleted
+      afterwards, not kept as evidence), sha256 `8a563cc2b41de60638b95851ec9de1b4e7011ed334ce0cd101551dd43625914b`:
+      wheel `605e4efd11848442061ed3601e996f69b7077259ab8d528b610d7575d08221f4` (2,201,391 bytes, 0.59.0.dev0), schema
+      fingerprint `85b80a45…b071`, 64 tools, 183 structured results from all 64 tools, installer tomlkit 0.13.3 from
+      the gate toolhouse, scripted approval. `check --commit 2755559e960c7961f51148f3ba9c8b510429ed80` with the same
+      wheelhouse: `consumer matrix receipt verified: 55/55 synthetic cells; Inspector 4/4 cells; Codex unavailable
+      (cli_not_given); Claude Code unavailable (cli_not_given); 7 owner cells pending (commit 2755559e…, wheel sha256
+      605e4efd…21f4)`. The audit's F6, F9 and F13 rows and open item 9 are for the lead to reconcile.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
