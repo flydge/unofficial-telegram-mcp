@@ -2,7 +2,8 @@
 
 Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
 
-- [ ] Criterion 1: Full isolated-HOME suite green with 0 skipped (suite).
+- [x] Criterion 1: Full isolated-HOME suite green with 0 skipped (suite). **Met** on the final acceptance candidate:
+      the release gate's suite in the archive tree of 629a3ce, `4300 passed, 23429 subtests passed`, 0 skipped.
 - [x] Criterion 2: Every synthetic and agent matrix cell PASS with a bound receipt; a deliberate schema change fails it (harness).
       Extended 26.10.2026 by seven synthetic cells (55) and the listed schema change `0.59-text-send-capabilities`
       (below): the synthetic and Inspector columns pass at 2755559; the agent columns were not re-run, and the receipt
@@ -431,6 +432,15 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       receipt verified: 55/55 synthetic cells; Inspector 4/4 cells; Codex unavailable (cli_not_given); Claude Code
       unavailable (cli_not_given); 7 owner cells pending (commit b0e3d2d5…, wheel sha256 4b508746…8d67)`. The kept
       55-cell receipt with both agent columns is the lead's next run (F6, F9 and F13 depend on it).
+- [x] **Final acceptance candidate 0.59.0rc1** (local annotated tag `v0.59.0rc1` on 629a3ce, not pushed). Release
+      gate `run` and `verify` passed on 629a3ce with the bundle stage (previous tag v0.58.0rc1): full suite in the
+      archive tree `4300 passed, 23429 subtests passed`, 0 skipped; privacy hits 0; `history_findings` 0. Consumer
+      matrix on 629a3ce, run from that exact commit against the gate's wheelhouse and toolhouse, receipt kept beside the
+      gate directories and verified by `check --commit 629a3ce…`: `55/55 synthetic cells; Inspector 4/4 cells; Codex
+      9/9 cells; Claude Code 9/9 cells; 7 owner cells pending` (codex-cli 0.162.0, Claude Code 2.1.304; every agent cell
+      on its first attempt; the Codex credential was not refreshed, so nothing was written back). The earlier candidate
+      commits 7df1e55 (gate refused: two matrix tests assumed a git checkout) and fa8f046 (gate passed; three matrix runs
+      each lost one Codex cell to provider throttling) are superseded; see the stop log.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
