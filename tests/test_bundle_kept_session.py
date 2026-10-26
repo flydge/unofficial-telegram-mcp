@@ -77,12 +77,35 @@ class KeptSessionTests(ChangeHarness, unittest.TestCase):
                 else:
                     self.assertFalse(self.session_root.exists())
 
+    def test_a_line_naming_the_release_in_another_valid_form_changes_nothing(self):
+        """An owner's hand-edited line that TOML and the broker read as this release (trailing spaces, an inline
+        comment) is left as it is: the exact installer form is required only of a line that must move."""
+        for kind, tail in (('trailing_spaces', b'  '), ('inline_comment', b'  # pinned')):
+            with self.subTest(kind=kind):
+                self.setUp()
+                before = self.kept()
+                line = b'expected_package_version = "%s"' % OLD_VERSION.encode()
+                self.assertEqual(before.count(line), 1)
+                text = before.replace(line, b'expected_package_version = "%s"%s' % (NEW.encode(), tail))
+                path = self.session_root / 'runtime.toml'
+                path.write_bytes(text)
+                with mock.patch('telegram_search_mcp.__version__', NEW):
+                    config.load_runtime_policy(path).require_current()  # the broker accepts the file as it is
+                packet = self.build('b', launcher=b'# second release\n')
+                self.assertEqual(self.install(packet)['status'], 'activation_required')
+                self.assertEqual(path.read_bytes(), text)
+                self.assertFalse(set(self.journal(packet)['publications']) & {'policy', 'policy_previous',
+                                                                               'policy_restore'})
+
     def test_a_newer_or_unrewritable_line_refuses_policy_conflict_before_the_transaction(self):
         for kind, text in (('newer', 'config_version = 1\nexpected_package_version = "9.9.9"\n'
                                      'expected_contract_version = 1\nenabled_capabilities = ["read", "artifacts"]\n'),
                            ('two_lines', 'config_version = 1\nexpected_package_version = "%s"\n'
                                          'expected_package_version = "%s"\n' % (OLD_VERSION, OLD_VERSION)),
-                           ('unquoted', 'config_version = 1\nexpected_package_version = 0.52\n')):
+                           ('unquoted', 'config_version = 1\nexpected_package_version = 0.52\n'),
+                           # An older line that must move is rewritten only in the exact installer form.
+                           ('older_with_comment', 'config_version = 1\nexpected_package_version = "%s"  # pinned\n'
+                                                  'expected_contract_version = 1\n' % OLD_VERSION)):
             with self.subTest(kind=kind):
                 self.setUp()
                 self.kept()

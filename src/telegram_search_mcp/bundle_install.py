@@ -1309,15 +1309,25 @@ _PIN = re.compile(rb'expected_package_version = "([0-9A-Za-z.+-]{1,64})"')
 _VALUE = re.compile(r'[0-9A-Za-z.+-]{1,64}\Z')
 
 
+def _parsed_pin(data):
+    """runtime.toml's top-level expected_package_version as TOML reads it, or None."""
+    try:value=tomllib.loads(data.decode()).get('expected_package_version')
+    except (tomllib.TOMLDecodeError,UnicodeError):return None
+    return value if type(value) is str else None
+
+
 def _policy_candidate(data, old, new):
     """runtime.toml with only its expected_package_version line rewritten from `old` (any when None; one of them when
     a frozenset, a named alias's `_release_versions`) to `new`.
 
-    None when the file pins no version. Every other byte, capabilities included, stays identical.
+    None when the file pins no version. Every other byte, capabilities included, stays identical. A single line that
+    TOML already reads as `new` (an owner's trailing spaces or inline comment) is left as it is; only a line that must
+    move needs the exact installer form.
     """
     lines=data.split(b'\n')
     hits=[i for i,line in enumerate(lines) if line.lstrip().startswith(b'expected_package_version')]
     if not hits:return None
+    if len(hits)==1 and _parsed_pin(data)==new:return data
     match=_PIN.fullmatch(lines[hits[0]]) if len(hits)==1 else None
     if match is None:raise InstallError('policy_conflict')
     value=match.group(1).decode()

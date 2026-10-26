@@ -926,8 +926,10 @@ its `runtime.toml` version line onto the installed release, journaled like an up
 without `config_stale` and the next upgrade passes. Only a line naming an equal or older release moves: one
 naming a newer release (a lower version installed after the uninstall) refuses `policy_conflict` before
 anything is created, since a session a newer release served is never handed to an older one; install that
-release again. A line it cannot rewrite exactly refuses `policy_conflict` too. Until the final acceptance a
-first install moved that line only when it adopted a legacy broker. With account aliases the uninstall also stops their
+release again. A line that must move but is not in the installer's exact form refuses `policy_conflict` too;
+a line TOML already reads as the installed release (trailing spaces or an inline comment included) stays as it
+is. Until the final acceptance a first install moved that line only when it adopted a legacy broker. With
+account aliases the uninstall also stops their
 brokers and connect jobs and removes their owned entries; the alias registry stays while an alias exists,
 and with none left it is moved aside, never deleted
 ([with accounts](#upgrade-rollback-and-uninstall-with-accounts)). The Claude Code
