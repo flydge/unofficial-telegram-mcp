@@ -197,8 +197,48 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       - The mounted-DMG run (P2's agent-side gap) is done, below. F15 and F17 move to met with owner remainder on
         the interim F18 cells, as the audit's open item 2 foresaw.
       Counts after the fixes: 10 met, 7 met with owner remainder, 6 partly met, none not applicable or not met.
-      Before the tick: the lead reconciles the rows that cite the interim F18 receipt (P2, F2, F7, F8, F11,
-      F13–F18) with the merged receipt, and the fixes get an independent check.
+      The reconciliation of the rows that cited the interim F18 receipt and an independent check of the fixes
+      followed:
+      **Re-critic ran, 26.10.2026** (independent, two verifiers per finding, over the fixes at ccf938a; report kept
+      outside the public tree): 15 confirmed findings (two high, seven medium, six low), none contested or refuted.
+      All 15 are fixed in ff8fdee (audit) and e1e29d3 (decision sheet):
+      - High: the final notes, changelog and roadmap must be in the build commit (pre-cut conditions; the notes and the
+        roadmap ship in the wheel; the release commit changes only the plugin's pins), so decision 16 and steps 14 and
+        37 carry the lead's model: written in phase A with every owner row pending or deferred, the session's
+        outcomes in the release record or the release text, a second signed build only when the session forces a
+        code change. Every build writes `publication: unreleased`, so the plugin and curl paths refuse after Gpub:
+        new decision 17 in phase A, tied to the legal review (complete the source inventory, or publish only the DMG
+        with those paths refused for this version); P2's code check and open item 12.
+      - History: the 0.53.0rc1 and rc2 findings listed from the gate evidence the tag annotations name (two in
+        9712dc1, replaced by e9dba5c before the rc1 tag; described, never quoted), with the 0.52.0 counts (32 in 11
+        commits); a lead step before decision 2 runs the history and identity report over `v0.51.0`..tip; the
+        acceptance of the itemized findings moves into phase A, with the full cost of a remediation after the build;
+        the build commit's gate and the final G1 run from `v0.51.0`; the remote `main` already holds six post-`v0.51.0`
+        commits with the personal identity, which option B does not reach (decision 2, P3, How to read, Gpub). Found
+        while listing them: the 0.54.0rc1 evidence holds three findings (one synthetic chat id on three lines of
+        cfe5dc3), not one; the audit and the sheet now say three.
+      - Session order: a pre-publication route for the browser-downloaded DMG (a local HTTP server opened in Safari on
+        the clean user) and for the plugin (the kit's `bootstrap.sh --claude-code plugin` and a local marketplace, the
+        plugin cell covering only that route; `bin/install` after Gpub); a second, earlier kit for the real upgrade
+        and rollback (decision 11), or they stay unobserved; the owner-account rows after the migration that installs
+        the final candidate there; phases D and E on the phase-C installation; decision 15 in phase A; the
+        `api-credentials` workaround for the no-identity option; the release commit's gate, the tag and
+        `release-commit --tag`; the mounted-DMG run moved out of P2's owner column into steps 14 and 36.
+      **Reconciliation** (lead, 26.10.2026): every row that cited the interim receipt (P2, F2, F7, F8, F11, F13–F18)
+      checked against the merged harness (receipt v4 at fc3f3c8, merged in 3da4745: 48/48 synthetic, Inspector 4/4,
+      Codex 9/9, Claude Code 9/9, 7 owner cells pending) and the seven final-audit cells (55/55 and Inspector 4/4 at
+      2755559): every cited cell exists with the cited probe and status, and F15, F16 and F17 now cite Claude Code
+      beside Codex. Under the status rules: F6 met (`search.boolean`, `search.filters`); F9 met with owner remainder
+      (`documents.xlsx`, `documents.pptx`); F13 met with owner remainder (`prepare.styled_caption`,
+      `prepare.reply_sources_058`, `refusal.text_options`); F18 met with owner remainder (the merged receipt,
+      verified with both agent columns). The four items of 26.10.2026 are in their rows: 1b604f9 in P2 (open item 1
+      closed), 12f53f6 in F13, 2c87e08 as open item 13; open items 2 and 9 closed; open item 12 added. The audit says
+      that the 2755559 receipt was a scratch receipt and that the whole matrix with both agent columns runs again,
+      with a kept receipt, on the build commit and in the final G1.
+      Counts after the reconciliation: 11 met, 10 met with owner remainder, 2 partly met (P3 and F19: the lead's
+      history report before decision 2, and the final G1, which follows the owner session), none not applicable or
+      not met.
+      Before the tick: the lead's check of this revision.
 - [x] Mounted-DMG and `Install.command --prepare-only` run (final audit, open item 4; agent-side), 25.10.2026, on
       0c9f040 (0.59.0.dev0; the critic fixes after it change only `docs/plans/`). `release_build.py build --dry-run
       --offline` from the commit's `git archive` with no application identity (the index lists no
@@ -220,7 +260,7 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       installation was touched, and the staging, the mount and the build output were removed afterwards. Needs the
       owner, so not done here: the signed build and everything after it, and Gatekeeper and quarantine on a
       browser-downloaded DMG (a locally built DMG carries no quarantine). The final candidate's build commit gets the
-      same run before the owner's build (decision sheet, step 9).
+      same run before the owner's build (decision sheet, step 14 since the re-critic's revision; step 9 before it).
 - [x] Open item for the criterion 5 audit (recorded 24.10.2026 from 0.55; not 0.55's): a first install never moves
       the default's own runtime.toml version line, so an uninstall and a reinstall at another version meets
       config_stale and then policy_conflict (0.53/0.54 behaviour; 0.55 left it unchanged under criterion 2).
@@ -241,7 +281,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       `first_install_over_a_kept_session` (153 kill points, a final check of the moved line), which fails on the old
       installer; the whole kill sweep and the seeded sequences pass (`49 passed, 104 subtests passed`). install.md
       (Uninstall) and reference.md (`policy_conflict`) say so. The audit's open item 1 and the decision sheet's row
-      are for the lead to reconcile.
+      are for the lead to reconcile. Reconciled under criterion 5 (26.10.2026): open item 1 closed, the sheet's row
+      in section 2 asks the owner to confirm the fix.
 - [x] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix; not fixed there):
       `retain_selection` of a message with any entity answers `selection_unavailable` whenever the entity carries
       TDLib's `"@type": "textEntity"` key, as TDLib's JSON writes every object, because
@@ -258,7 +299,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       that omitted the key carry it, so their refusals are for the drift or the UTF-16 boundary. Tests (failed first,
       3): TDLib-shaped entities of five kinds and a caption project and every other shape refuses; through the broker
       a message with a hashtag and a bold span is retained, read by its selection, retained again to the same token
-      and refused after its entities drift. Still not checked on the real account (the owner session).
+      and refused after its entities drift. Still not checked on the real account (the owner session). Reconciled
+      under criterion 5 (26.10.2026): the audit's open item 13; the real check is the decision sheet's step 30.
 - [x] Open item for the criterion 5 audit (recorded 25.10.2026 by the F18 matrix): a styled `prepare_text_send`
       under a policy without `formatted_text_send` answers `error` / `topic draft could not be prepared safely`
       instead of `capability_disabled` with `missing_capabilities`, as the reply tools do.
@@ -306,7 +348,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       the gate toolhouse, scripted approval. `check --commit 2755559e960c7961f51148f3ba9c8b510429ed80` with the same
       wheelhouse: `consumer matrix receipt verified: 55/55 synthetic cells; Inspector 4/4 cells; Codex unavailable
       (cli_not_given); Claude Code unavailable (cli_not_given); 7 owner cells pending (commit 2755559e…, wheel sha256
-      605e4efd…21f4)`. The audit's F6, F9 and F13 rows and open item 9 are for the lead to reconcile.
+      605e4efd…21f4)`. The audit's F6, F9 and F13 rows and open item 9 are for the lead to reconcile. Reconciled
+      under criterion 5 (26.10.2026): F6 met, F9 and F13 met with owner remainder, open item 9 closed.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
