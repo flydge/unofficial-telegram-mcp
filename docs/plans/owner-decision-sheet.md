@@ -12,7 +12,10 @@ after the re-critic of those fixes (26.10.2026): the final notes, changelog and 
 report before the history decision, and the acceptance of the itemized findings in phase A; local, pre-publication
 routes for the browser-downloaded DMG and for the plugin; a second kit for the real upgrade and rollback; the
 owner-account rows after the migration that installs the final candidate there; decision 15 in phase A; the
-no-identity workaround; the release commit's gate and the tag.
+no-identity workaround; the release commit's gate and the tag. Revised in the closing pass (26.10.2026): phase C on a
+separate clean Mac, or the machine bullet disclosed; what not signing or deferring phase C costs; decisions 13 and 17
+and the build method taken together at step 7; history findings of the build commit's gate before the build; option
+B's commit id map; the critic review's range; the closing pass's two code decisions (section 2).
 
 Nothing here is decided by this sheet. Where a line gives a lead recommendation, the owner may take another option.
 The build commit carries everything decided before it: a change to a behaviour, a name, a version, a label or a
@@ -84,13 +87,21 @@ what follows from each; section 5, phase A, orders the ones the build depends on
   the default's session kept by an uninstall moves its version line onto the installed release from an equal or
   older value, journaled, and refuses `policy_conflict` before the transaction for a newer value or a line it cannot
   rewrite exactly; a fresh install, or one over a line that already names the release, is byte-identical
-  ([task record](final-acceptance-spec.tasks.md)). Options: confirm (lead recommendation), or revert it and disclose
-  the old behaviour as a known limit (a commit before the build).
+  ([task record](final-acceptance-spec.tasks.md)). Since the closing pass (733ef5b) a line TOML already reads as the
+  release, an owner's trailing spaces or inline comment included, stays as it is; only a line that must move needs
+  the installer's exact form. Options: confirm (lead recommendation), or revert it and disclose the old behaviour as
+  a known limit (a commit before the build).
 - **A disabled topic option of `prepare_text_send` answers the typed refusal too** (12f53f6, lead decision). A styled
   or topic text send whose option the policy does not enable answers `capability_disabled` with
   `missing_capabilities` and `next_action: enable_capability`, as the reply tools do (a listed schema change); the
   topic option is included because the reply tools name both. Options: confirm, or keep the old `error` for a
   disabled topic (a schema change before the build).
+- **`update_draft` names a disabled style option too** (1a8a39f, closing pass, lead decision). `update_draft` with
+  `outgoing_entities` whose style capability the policy does not enable (`formatted_text_send` for text,
+  `formatted_caption_send` for a caption) answers `capability_disabled` with `missing_capabilities` and `next_action:
+  enable_capability` before the draft is looked up, instead of `unavailable` (a listed schema change of the shared
+  revision result, so `refresh_draft`'s output schema admits it too; a stored draft's own state keeps `unavailable`,
+  as `get_draft` does). Options: confirm, or keep `unavailable` (a schema change before the build).
 - **The history findings** of section 4, to accept or to remediate in phase A (step 3).
 
 ## 3. Lead decisions, owner review pending, by release
@@ -262,12 +273,13 @@ One line per decision group; the source has the detail and the rejected options.
 
 - The matrix columns and rows, the eight-step TDLib procedure, F19 not applicable, the audit with a critic.
 - The 0.59.0 name and the final notes model (decision 16), the criterion 3 reading, `checkDatabaseEncryptionKey`,
-  the build method, the installer guard, the first-install version-line fix and the typed text-send refusal
-  (section 2).
+  the build method, the installer guard, the first-install version-line fix and the typed text-send and
+  draft-revision refusals (section 2).
 - F18 matrix ([spec](final-consumer-matrix-spec.md#9-decisions-and-rejected-options)): Claude Code logs in through
   its default configuration and loads none of it (part 2's judgement that the column was not applicable is
   withdrawn); a private Codex home, the refreshed credential returned only when valid, the Codex home named; a login
-  lost after the first cell fails the column; every attempt kept; interrupts clean up; run outputs outside git work
+  lost after the first cell fails the column; every attempt kept; interrupts clean up, and since the closing pass a
+  signal during any cleanup block, the Codex write-back included, waits for it to finish; run outputs outside git work
   trees; the final-audit cells' synthetic account (a forum outside the Main list, the filters applied as TDLib does)
   and the voice-note source beyond the work item.
 - This sheet's revision after the re-critic: the build commit's gate and the final G1 run from `v0.51.0`; the

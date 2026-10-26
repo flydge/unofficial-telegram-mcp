@@ -238,6 +238,8 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       Counts after the reconciliation: 11 met, 10 met with owner remainder, 2 partly met (P3 and F19: the lead's
       history report before decision 2, and the final G1, which follows the owner session), none not applicable or
       not met.
+      **Closing pass** (26.10.2026, below): the lead's last review round and its check of the F18 fixes, fixed in
+      four code and five docs commits. Counts after it: 10 met, 11 met with owner remainder (F12 joins), 2 partly met.
       Before the tick: the lead's check of this revision.
 - [x] Mounted-DMG and `Install.command --prepare-only` run (final audit, open item 4; agent-side), 25.10.2026, on
       0c9f040 (0.59.0.dev0; the critic fixes after it change only `docs/plans/`). `release_build.py build --dry-run
@@ -350,6 +352,71 @@ Spec: [`final-acceptance-spec.md`](final-acceptance-spec.md).
       (cli_not_given); Claude Code unavailable (cli_not_given); 7 owner cells pending (commit 2755559e…, wheel sha256
       605e4efd…21f4)`. The audit's F6, F9 and F13 rows and open item 9 are for the lead to reconcile. Reconciled
       under criterion 5 (26.10.2026): F6 met, F9 and F13 met with owner remainder, open item 9 closed.
+- [x] **Closing pass** (26.10.2026; the lead's last review round, eleven confirmed findings, two code and nine docs,
+      and its check of the F18 fixes, two code defects; both reports kept outside the public tree). Code fixes have
+      a test that failed first against the commit before them.
+      1. *A kept session's version line already naming the release refused `policy_conflict` when it carried trailing
+         spaces or an inline comment* (low) — 733ef5b. `_policy_candidate` returns the file unchanged when its single
+         version line already reads as the target release under TOML; only a line that must move needs the
+         installer's exact form, for every caller. Test `test_a_line_naming_the_release_in_another_valid_form_changes_nothing`
+         (`tests/test_bundle_kept_session.py`): both subtests failed first with `policy_conflict`; an older line with
+         an inline comment still refuses before the transaction. The kill sweep, upgrade and account-change files
+         pass. install.md and reference.md say so.
+      2. *`update_draft` with styles its policy does not enable answered `draft is unavailable`* (low) — 1a8a39f
+         (lead decision: fixed, since the tool description needs no change and so fits the description budget).
+         The request's own style option, checked before the draft is looked up, answers `capability_disabled` with
+         `missing_capabilities` (`send`, then `formatted_text_send` or `formatted_caption_send`), the fixed detail
+         `draft revision needs capabilities the owner has not enabled: missing_capabilities` and `next_action:
+         enable_capability`; `config_stale` and a stored draft's own state keep `unavailable`, as `get_draft`.
+         **Listed schema change** `tests/fixtures/schema_changes/0.59-draft-revision-capabilities.json`
+         (`update_draft` and `refresh_draft` outputs, one shared model); the fingerprint pin in
+         `tests/test_account_registrations.py` and `MATRIX_SCHEMA_FINGERPRINT` move from `85b80a45…b071` to
+         `8d8fc25c73c336b0ce32a8c965b59f57770b8aee9d971aacb0165d0162e00d28`; no matrix cell changes. Tests
+         (`tests/test_draft_revision_capability_results.py`: 5 failures first, the model, the broker for a known and
+         an unknown draft, the proxy and the official SDK; the unchanged cases passed); the 0.58 caption test that
+         expected `unavailable` expects the typed refusal. reference.md and the matrix spec say so.
+      3. *A first SIGTERM or SIGHUP during a normal matrix cleanup cut it short* (low; F18 fix check) — d4dd634. Every
+         cleanup block runs whole under `deferred_interrupts` (the agent's kill and reap, the cell's broker stop and
+         home removal, the column's write-back and scratch removal, the sessions' driver and broker stops and home
+         removal, `run`'s and `check`'s work directory); a signal meanwhile raises afterwards. Test
+         `test_a_first_signal_during_a_normal_cleanup_never_cuts_it_short`: a real harness process stalled inside the
+         step gets one signal during the cell's broker stop and home removal, the sessions' broker stop and home
+         removal and the Codex write-back; all five subtests failed first (a `tga.` home left twice, the second
+         session broker alive, the `tgcm.` homes left, the spent refresh token kept). The matrix test file passes
+         (`89 passed, 337 subtests passed`). The matrix spec (section 8) says so.
+      4. *The harness docstring said nothing reaches the Keychain or a client configuration and gave the write-back
+         condition incompletely* (low; F18 fix check) — 49ebc1e: Claude Code gets the caller's `HOME` and `USER` for its
+         login through the default configuration location only; the write-back rewrites the caller's Codex
+         `auth.json` only as `returned`, and leaves it on `kept`, `invalid` and `failed`.
+      5. *Phase C's loopback route put the clean user on the build Mac* (medium) — 953a007: a separate clean Mac, the
+         DMG served over the local network or sent by AirDrop (both quarantine it), the marketplace as a `git
+         archive` unpacked with `ditto`, no git there; otherwise the machine bullet stays unmet and disclosed (P2,
+         decisions 8 and 15).
+      6. *F6, F9 and F13 rested on the deleted 2755559 scratch receipt* (medium) — 9cdcbf3: their status depends on the
+         kept 55-cell receipt of the release candidate's matrix run (the lead runs it next, with both agent columns);
+         a failing cell moves a row back to partly met.
+      7. *Decisions 5 and 8 omitted that D and E run on the phase-C installation* (medium) — f37467d. Not signing:
+         C, D and E cannot run, their remainders stay open and decision 11's upgrade route is blocked. Deferring C:
+         D and E and their remainders defer with it; decision 11's upgrade route needs only the signed kit and still
+         runs (stated as such rather than as blocked, since it does not use the phase-C installation), but its Keep
+         option loses the installation steps 34–35 would use.
+      8. *Decision 17's Complete silently included changing the native build method* (medium) — f37467d: Complete
+         needs the source rebuild as the shipped method or a narrower, stated definition of the native-build item;
+         decided with section 2's build method and decision 13.
+      9. *Decision 13 had no step* (low) — f37467d: step 7 takes decisions 13 and 17 and the build method together,
+         before step 14; the stricter reading means waiting for the rebuild spec or shipping with criterion 3 not met
+         and disclosed.
+      10. *Build-commit gate findings deferred to step 38* (low) — c5318ae: accepted, or the phase-A commit replaced,
+          before step 15; step 38 keeps only the final G1's.
+      11. *F12 met with no remainder after its confirmations changed* (low) — 9cdcbf3: F12 names the 057, 057b and 0.58
+          confirmation changes and is met with owner remainder (sheet steps 25, 27 and 29).
+      12. *Option B's consequences omitted the re-keyed evidence chain* (low) — c5318ae: an old-to-new commit id map
+          with the release record; the shipped notes' and the audit's and task records' citations updated in the
+          build commit.
+      13. *Step 14's critic review had no stated range* (low) — c5318ae: `v0.58.0rc1`..build commit, earlier ranges
+          covered by each candidate's review; the release commit's gate reuses it.
+      The audit's and the sheet's status lines, P2, F11, open item 1 and section 2 record the two code decisions
+      (items 1 and 2) in the commit that adds this block. Suite and matrix: below.
 - [ ] **Owner row** — deferred to the owner session (criterion 6): Owner session rows (clean user, dialogs, two accounts, Claude Desktop, migration) and Gpub.
 
 ---
